@@ -1328,7 +1328,8 @@ fn fetch_actions_job_log_via_gh(
 /// into `decision=block` to avoid false positives under partial outages.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, forward, runtime_state, workflow_policy, BlockDecision, HookKind,
+        block_bash_policy, coordination_event, forward, runtime_state, workflow_policy,
+        BlockDecision, HookKind,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -1371,6 +1372,19 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 return Ok(2);
             };
             match runtime_state::handle(event) {
+                Ok(()) => Ok(0),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::CoordinationEvent => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwt hook coordination-event: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match coordination_event::handle(event) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }

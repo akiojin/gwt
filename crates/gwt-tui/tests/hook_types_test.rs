@@ -20,6 +20,10 @@ fn hook_kind_from_name_covers_every_documented_hook() {
         HookKind::from_name("workflow-policy"),
         Some(HookKind::WorkflowPolicy)
     );
+    assert_eq!(
+        HookKind::from_name("coordination-event"),
+        Some(HookKind::CoordinationEvent)
+    );
     assert_eq!(HookKind::from_name("forward"), Some(HookKind::Forward));
 }
 

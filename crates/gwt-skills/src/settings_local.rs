@@ -19,6 +19,7 @@ const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook runtime-state ",
+    " hook coordination-event ",
     " hook workflow-policy",
     " hook block-bash-policy",
     " hook block-git-branch-ops",
@@ -456,7 +457,10 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
     let mut hooks = Map::new();
     hooks.insert(
         "SessionStart".to_string(),
-        Value::Array(vec![runtime_hook("SessionStart", shell)]),
+        Value::Array(vec![
+            runtime_hook("SessionStart", shell),
+            coordination_hook("SessionStart", shell),
+        ]),
     );
     hooks.insert(
         "UserPromptSubmit".to_string(),
@@ -475,7 +479,10 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
     );
     hooks.insert(
         "Stop".to_string(),
-        Value::Array(vec![runtime_hook("Stop", shell)]),
+        Value::Array(vec![
+            runtime_hook("Stop", shell),
+            coordination_hook("Stop", shell),
+        ]),
     );
     hooks
 }
@@ -486,6 +493,18 @@ fn runtime_hook(event: &str, shell: HookShell) -> Value {
         "hooks": [
             {
                 "command": runtime_hook_command(event, shell),
+                "type": CLAUDE_HOOK_COMMAND_TYPE,
+            }
+        ]
+    })
+}
+
+fn coordination_hook(event: &str, shell: HookShell) -> Value {
+    json!({
+        "matcher": "*",
+        "hooks": [
+            {
+                "command": coordination_hook_command(event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -578,6 +597,13 @@ fn runtime_hook_command(event: &str, shell: HookShell) -> String {
     }
 }
 
+fn coordination_hook_command(event: &str, shell: HookShell) -> String {
+    match shell {
+        HookShell::Posix => posix_coordination_hook_command(event),
+        HookShell::PowerShell => powershell_coordination_hook_command(event),
+    }
+}
+
 fn workflow_policy_hook_command(shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_workflow_policy_hook_command(),
@@ -600,6 +626,11 @@ fn posix_workflow_policy_hook_command() -> String {
     format!("{bin} hook workflow-policy")
 }
 
+fn posix_coordination_hook_command(event: &str) -> String {
+    let bin = posix_shell_quote(&gwt_hook_bin_path());
+    format!("{bin} hook coordination-event {event}")
+}
+
 /// Emit the PowerShell form of the runtime-state hook. Windows Claude
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
 /// keep that wrapper, then invoke the gwt binary via `& '...'` call
@@ -612,6 +643,11 @@ fn powershell_runtime_hook_command(event: &str) -> String {
 fn powershell_workflow_policy_hook_command() -> String {
     let bin = powershell_quote(&gwt_hook_bin_path());
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook workflow-policy }}\"")
+}
+
+fn powershell_coordination_hook_command(event: &str) -> String {
+    let bin = powershell_quote(&gwt_hook_bin_path());
+    format!("powershell -NoProfile -Command \"& {{ & {bin} hook coordination-event {event} }}\"")
 }
 
 fn path_is_git_tracked(worktree: &Path, relative_path: &Path) -> io::Result<bool> {
@@ -651,6 +687,19 @@ mod tests {
         assert!(command.contains(" hook runtime-state UserPromptSubmit"));
         assert!(!command.contains("node"));
         assert!(value["hooks"]["SessionStart"].is_array());
+        let session_start_hooks = value["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart hooks");
+        assert!(
+            session_start_hooks.iter().any(|entry| {
+                entry["hooks"][0]["command"]
+                    .as_str()
+                    .is_some_and(|command| {
+                        command.contains(" hook coordination-event SessionStart")
+                    })
+            }),
+            "SessionStart must include a coordination-event hook"
+        );
         assert!(value["hooks"].get("Notification").is_none());
         assert_eq!(
             value["hooks"]["PreToolUse"][1]["matcher"],
@@ -714,6 +763,22 @@ mod tests {
             assert!(
                 !cmd.contains(" gwt hook "),
                 "runtime hook must not use the PATH-dependent literal `gwt`, got: {cmd}"
+            );
+        }
+
+        for event in ["SessionStart", "Stop"] {
+            let hooks = value["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("managed hooks missing for event {event}"));
+            assert!(
+                hooks.iter().any(|entry| {
+                    entry["hooks"][0]["command"]
+                        .as_str()
+                        .is_some_and(|cmd| {
+                            cmd.contains(&format!(" hook coordination-event {event}"))
+                        })
+                }),
+                "coordination hook for {event} must dispatch through `hook coordination-event {event}`"
             );
         }
 

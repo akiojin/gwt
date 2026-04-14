@@ -12,7 +12,6 @@ use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
 use gwt_agent::{PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
-use gwt_core::coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind};
 
 use super::HookError;
 use crate::discussion_resume::load_pending_resume;
@@ -53,19 +52,6 @@ pub fn write_for_event(path: &Path, event: &str) -> Result<(), HookError> {
     });
 
     write_for_event_with_pending_discussion(path, event, pending_discussion)?;
-
-    if let Some(session) = session.as_ref() {
-        if let Err(err) = sync_coordination_for_session(session, event) {
-            tracing::warn!(
-                target: "gwt_tui::cli::hook::runtime_state",
-                session_id = %session.id,
-                branch = %session.branch,
-                hook_event = event,
-                error = %err,
-                "failed to sync coordination snapshot from runtime-state hook"
-            );
-        }
-    }
 
     Ok(())
 }
@@ -111,55 +97,8 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
     Session::load(&path).map(Some)
 }
 
-fn sync_coordination_for_session(session: &Session, event: &str) -> Result<(), HookError> {
-    if let Some((kind, state, body)) = board_entry_body_for_event(session, event) {
-        post_entry(
-            &session.worktree_path,
-            BoardEntry::new(
-                AuthorKind::Agent,
-                session.display_name.clone(),
-                kind,
-                body,
-                state,
-                None,
-                Vec::new(),
-                Vec::new(),
-            ),
-        )
-        .map_err(coordination_as_hook_error)?;
-    }
-
-    Ok(())
-}
-
-fn board_entry_body_for_event(
-    session: &Session,
-    event: &str,
-) -> Option<(BoardEntryKind, Option<String>, String)> {
-    match event {
-        "SessionStart" => Some((
-            BoardEntryKind::Status,
-            Some("waiting_input".into()),
-            format!(
-                "{} started work on {}",
-                session.display_name, session.branch
-            ),
-        )),
-        "Stop" => Some((
-            BoardEntryKind::Status,
-            Some("waiting_input".into()),
-            format!(
-                "{} is waiting for input on {}",
-                session.display_name, session.branch
-            ),
-        )),
-        _ => None,
-    }
-}
-
-fn coordination_as_hook_error(err: gwt_core::GwtError) -> HookError {
-    HookError::Io(io::Error::other(err.to_string()))
-}
+#[cfg(test)]
+fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 
 /// Production entry point. Reads `$GWT_SESSION_RUNTIME_PATH` and delegates
 /// to [`write_for_event`]. An unset env var is a silent no-op so that
@@ -177,7 +116,7 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 mod tests {
     use super::*;
     use gwt_agent::{AgentId, Session};
-    use gwt_core::coordination::{load_snapshot, BoardEntryKind};
+    use gwt_core::coordination::load_snapshot;
 
     #[test]
     fn pending_discussion_for_session_reads_active_discussion_candidate() {
@@ -250,7 +189,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
 
-        sync_coordination_for_session(&session, "PreToolUse").unwrap();
+        sync_coordination_for_session(&session, "PreToolUse");
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert!(snapshot.board.entries.is_empty());
@@ -260,20 +199,33 @@ mod tests {
     }
 
     #[test]
-    fn sync_coordination_for_session_session_start_appends_board_status_entry() {
+    fn sync_coordination_for_session_session_start_does_not_append_board_status_entry() {
         let dir = tempfile::tempdir().unwrap();
         let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
 
-        sync_coordination_for_session(&session, "SessionStart").unwrap();
+        sync_coordination_for_session(&session, "SessionStart");
 
         let snapshot = load_snapshot(dir.path()).unwrap();
-        assert_eq!(snapshot.board.entries.len(), 1);
-        assert_eq!(snapshot.board.entries[0].kind, BoardEntryKind::Status);
-        assert_eq!(snapshot.board.entries[0].author, "Codex");
-        assert!(
-            snapshot.board.entries[0].body.contains("feature/demo"),
-            "board entry should identify the active branch"
-        );
+        assert!(snapshot.board.entries.is_empty());
+
+        let events =
+            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
+        assert_eq!(events.lines().count(), 0);
+    }
+
+    #[test]
+    fn sync_coordination_for_session_stop_does_not_append_board_status_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
+
+        sync_coordination_for_session(&session, "Stop");
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(snapshot.board.entries.is_empty());
+
+        let events =
+            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
+        assert_eq!(events.lines().count(), 0);
     }
 
     #[test]
@@ -281,8 +233,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
 
-        sync_coordination_for_session(&session, "PreToolUse").unwrap();
-        sync_coordination_for_session(&session, "PostToolUse").unwrap();
+        sync_coordination_for_session(&session, "PreToolUse");
+        sync_coordination_for_session(&session, "PostToolUse");
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert!(snapshot.board.entries.is_empty());
