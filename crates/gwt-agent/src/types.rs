@@ -142,6 +142,13 @@ pub enum DockerLifecycleIntent {
     CreateAndStart,
 }
 
+/// Session-level workflow policy bypass for ownerless operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowBypass {
+    Release,
+    Chore,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +236,14 @@ mod tests {
         let json = serde_json::to_string(&color).unwrap();
         let parsed: AgentColor = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, color);
+    }
+
+    #[test]
+    fn workflow_bypass_serde_roundtrip() {
+        for bypass in [WorkflowBypass::Release, WorkflowBypass::Chore] {
+            let json = serde_json::to_string(&bypass).unwrap();
+            let parsed: WorkflowBypass = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, bypass);
+        }
     }
 }
