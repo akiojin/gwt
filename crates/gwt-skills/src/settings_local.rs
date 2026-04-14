@@ -1,6 +1,7 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -261,7 +262,11 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
 fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
     let root = read_existing_settings(path)?;
     let hooks = root.get("hooks");
-    Ok(contains_legacy_runtime_forwarder(hooks)
+    Ok(contains_incomplete_managed_hook_contract(
+        hooks,
+        ManagedHookTarget::Codex,
+        managed_hook_shell(),
+    ) || contains_legacy_runtime_forwarder(hooks)
         || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell())
         || contains_legacy_block_bash_policy(hooks)
         || contains_legacy_node_bash_blockers(hooks)
@@ -270,6 +275,72 @@ fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
         || contains_legacy_runtime_marker(hooks)
         || contains_pathless_gwt_hook_command(hooks)
         || contains_stale_binary_path(hooks))
+}
+
+fn contains_incomplete_managed_hook_contract(
+    existing: Option<&Value>,
+    target: ManagedHookTarget,
+    shell: HookShell,
+) -> bool {
+    if !contains_any_managed_hook(existing) {
+        return false;
+    }
+
+    let expected = managed_hooks(target, shell);
+    MANAGED_EVENT_ORDER.iter().any(|event| {
+        let expected_commands = commands_for_event(expected.get(*event));
+        let existing_commands = commands_for_event_in_existing(existing, event);
+        expected_commands
+            .into_iter()
+            .any(|command| !existing_commands.contains(&command))
+    })
+}
+
+fn contains_any_managed_hook(existing: Option<&Value>) -> bool {
+    existing.and_then(Value::as_object).is_some_and(|events| {
+        events.values().any(|entries| {
+            entries.as_array().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .as_object()
+                        .and_then(|obj| obj.get("hooks"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.as_object()
+                                    .and_then(|obj| obj.get("command"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(is_gwt_managed_command)
+                            })
+                        })
+                })
+            })
+        })
+    })
+}
+
+fn commands_for_event(value: Option<&Value>) -> HashSet<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .flat_map(|entry| {
+            entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flat_map(|hooks| hooks.iter())
+        })
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn commands_for_event_in_existing(existing: Option<&Value>, event: &str) -> HashSet<String> {
+    let value = existing
+        .and_then(Value::as_object)
+        .and_then(|events| events.get(event));
+    commands_for_event(value)
 }
 
 fn contains_legacy_block_bash_policy(existing: Option<&Value>) -> bool {
@@ -605,9 +676,13 @@ fn coordination_hook_command(event: &str, shell: HookShell) -> String {
 }
 
 fn workflow_policy_hook_command(shell: HookShell) -> String {
+    workflow_policy_hook_command_with_bin(&gwt_hook_bin_path(), shell)
+}
+
+fn workflow_policy_hook_command_with_bin(bin: &str, shell: HookShell) -> String {
     match shell {
-        HookShell::Posix => posix_workflow_policy_hook_command(),
-        HookShell::PowerShell => powershell_workflow_policy_hook_command(),
+        HookShell::Posix => posix_workflow_policy_hook_command_with_bin(bin),
+        HookShell::PowerShell => powershell_workflow_policy_hook_command_with_bin(bin),
     }
 }
 
@@ -621,8 +696,8 @@ fn posix_runtime_hook_command(event: &str) -> String {
     format!("{bin} hook runtime-state {event}")
 }
 
-fn posix_workflow_policy_hook_command() -> String {
-    let bin = posix_shell_quote(&gwt_hook_bin_path());
+fn posix_workflow_policy_hook_command_with_bin(bin: &str) -> String {
+    let bin = posix_shell_quote(bin);
     format!("{bin} hook workflow-policy")
 }
 
@@ -640,8 +715,8 @@ fn powershell_runtime_hook_command(event: &str) -> String {
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook runtime-state {event} }}\"")
 }
 
-fn powershell_workflow_policy_hook_command() -> String {
-    let bin = powershell_quote(&gwt_hook_bin_path());
+fn powershell_workflow_policy_hook_command_with_bin(bin: &str) -> String {
+    let bin = powershell_quote(bin);
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook workflow-policy }}\"")
 }
 
@@ -1388,6 +1463,132 @@ mod tests {
         assert_eq!(session_start_command, expected);
     }
 
+    #[test]
+    fn generate_codex_hooks_migrates_tracked_hooks_missing_coordination_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": runtime_hook_command("SessionStart", managed_hook_shell()),
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ],
+                    "UserPromptSubmit": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": runtime_hook_command("UserPromptSubmit", managed_hook_shell()),
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ],
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": runtime_hook_command("PreToolUse", managed_hook_shell()),
+                                    "type": "command"
+                                }
+                            ]
+                        },
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": workflow_policy_hook_command(managed_hook_shell()),
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ],
+                    "PostToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": runtime_hook_command("PostToolUse", managed_hook_shell()),
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": runtime_hook_command("Stop", managed_hook_shell()),
+                                    "type": "command"
+                                },
+                                {
+                                    "command": "my-custom-hook",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .arg("add")
+            .arg(".codex/hooks.json")
+            .status()
+            .unwrap()
+            .success());
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let session_start_commands: Vec<&str> = value["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+        let stop_commands: Vec<&str> = value["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+
+        assert!(session_start_commands
+            .iter()
+            .any(|command| command.contains(" hook coordination-event SessionStart")));
+        assert!(stop_commands
+            .iter()
+            .any(|command| command.contains(" hook coordination-event Stop")));
+        assert!(stop_commands.contains(&"my-custom-hook"));
+    }
+
     // SPEC #1942 T-083: the inline POSIX shell JSON writer has been
     // replaced by a single `gwt hook runtime-state <event>` CLI call.
     // The sidecar-write behaviour is now covered end-to-end by
@@ -1482,16 +1683,14 @@ mod tests {
 
     #[test]
     fn workflow_policy_hook_command_matches_shell_shape() {
-        std::env::set_var(GWT_HOOK_BIN_ENV, "gwt");
         assert_eq!(
-            workflow_policy_hook_command(HookShell::Posix),
+            workflow_policy_hook_command_with_bin("gwt", HookShell::Posix),
             "'gwt' hook workflow-policy"
         );
         assert_eq!(
-            workflow_policy_hook_command(HookShell::PowerShell),
+            workflow_policy_hook_command_with_bin("gwt", HookShell::PowerShell),
             "powershell -NoProfile -Command \"& { & 'gwt' hook workflow-policy }\""
         );
-        std::env::remove_var(GWT_HOOK_BIN_ENV);
     }
 
     #[test]
