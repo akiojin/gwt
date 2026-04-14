@@ -26,6 +26,13 @@ impl WorkspaceState {
         &self.persisted
     }
 
+    pub fn persistable_state(&self) -> PersistedWorkspaceState {
+        let mut persisted = self.persisted.clone();
+        persisted.windows.retain(|window| window.persist);
+        persisted.next_z_index = persisted.windows.len() as u32 + 1;
+        persisted
+    }
+
     pub fn window(&self, id: &str) -> Option<&PersistedWindowState> {
         self.persisted.windows.iter().find(|window| window.id == id)
     }
@@ -76,6 +83,15 @@ impl WorkspaceState {
     }
 
     pub fn add_window(&mut self, preset: WindowPreset) -> PersistedWindowState {
+        self.add_window_with_title(preset, preset.title(), true)
+    }
+
+    pub fn add_window_with_title(
+        &mut self,
+        preset: WindowPreset,
+        title: impl Into<String>,
+        persist: bool,
+    ) -> PersistedWindowState {
         let count = self
             .persisted
             .windows
@@ -86,7 +102,7 @@ impl WorkspaceState {
         let (width, height) = preset.default_size();
         let window = PersistedWindowState {
             id: format!("{}-{count}", preset.id_prefix()),
-            title: preset.title().to_string(),
+            title: title.into(),
             preset,
             geometry: WindowGeometry {
                 x: 120.0 + (self.persisted.windows.len() as f64 * 28.0),
@@ -100,6 +116,7 @@ impl WorkspaceState {
             } else {
                 WindowProcessStatus::Ready
             },
+            persist,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());

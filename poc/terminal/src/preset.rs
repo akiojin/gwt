@@ -7,6 +7,7 @@ pub enum WindowPreset {
     Shell,
     Claude,
     Codex,
+    Agent,
     FileTree,
     Branches,
     Settings,
@@ -49,6 +50,7 @@ impl WindowPreset {
             Self::Shell => "Shell",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Agent => "Agent",
             Self::FileTree => "File Tree",
             Self::Branches => "Branches",
             Self::Settings => "Settings",
@@ -67,8 +69,9 @@ impl WindowPreset {
             Self::Shell => "Open a standard shell terminal",
             Self::Claude => "Start the Claude CLI when available",
             Self::Codex => "Start the Codex CLI when available",
+            Self::Agent => "Start a wizard-launched agent terminal",
             Self::FileTree => "Browse repository files in a read-only tree",
-            Self::Branches => "Browse repository branches in a read-only list",
+            Self::Branches => "Browse repository branches and launch agents",
             Self::Settings => "Placeholder settings surface",
             Self::Memo => "Placeholder notes surface",
             Self::Profile => "Placeholder profile surface",
@@ -85,6 +88,7 @@ impl WindowPreset {
             Self::Shell => "shell",
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Agent => "agent",
             Self::FileTree => "file-tree",
             Self::Branches => "branches",
             Self::Settings => "settings",
@@ -100,7 +104,7 @@ impl WindowPreset {
 
     pub fn surface(self) -> WindowSurface {
         match self {
-            Self::Shell | Self::Claude | Self::Codex => WindowSurface::Terminal,
+            Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::FileTree => WindowSurface::FileTree,
             Self::Branches => WindowSurface::Branches,
             Self::Settings
@@ -132,6 +136,7 @@ impl WindowPreset {
             Self::Shell => None,
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
+            Self::Agent => None,
             Self::FileTree
             | Self::Branches
             | Self::Settings
@@ -253,7 +258,8 @@ where
                 })
             }
         }
-        WindowPreset::FileTree
+        WindowPreset::Agent
+        | WindowPreset::FileTree
         | WindowPreset::Branches
         | WindowPreset::Settings
         | WindowPreset::Memo

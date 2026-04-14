@@ -43,6 +43,8 @@ pub struct PersistedWindowState {
     pub geometry: WindowGeometry,
     pub z_index: u32,
     pub status: WindowProcessStatus,
+    #[serde(default = "default_persist_window")]
+    pub persist: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,6 +75,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 },
                 z_index: 1,
                 status: WindowProcessStatus::Starting,
+                persist: true,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -86,10 +89,15 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 },
                 z_index: 2,
                 status: WindowProcessStatus::Starting,
+                persist: true,
             },
         ],
         next_z_index: 3,
     }
+}
+
+fn default_persist_window() -> bool {
+    true
 }
 
 pub fn workspace_state_path() -> PathBuf {
@@ -164,6 +172,7 @@ mod tests {
                 },
                 z_index: 4,
                 status: WindowProcessStatus::Running,
+                persist: true,
             }],
             next_z_index: 5,
         };

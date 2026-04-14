@@ -408,6 +408,15 @@
         gap: 10px;
         padding: 10px 12px;
         border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        cursor: pointer;
+      }
+
+      .branch-row:hover {
+        background: rgba(59, 130, 246, 0.06);
+      }
+
+      .branch-row.selected {
+        background: rgba(59, 130, 246, 0.12);
       }
 
       .branch-row:last-child {
@@ -600,6 +609,156 @@
         cursor: pointer;
         font-size: 12px;
       }
+
+      .wizard-backdrop {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.18);
+        z-index: 2000;
+      }
+
+      .wizard-backdrop.open {
+        display: flex;
+      }
+
+      .wizard-modal {
+        width: min(640px, calc(100vw - 32px));
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        padding: 16px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.22);
+      }
+
+      .wizard-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .wizard-title {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .wizard-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .wizard-step {
+        margin-bottom: 12px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #334155;
+      }
+
+      .wizard-options {
+        display: grid;
+        gap: 8px;
+      }
+
+      .wizard-option {
+        width: 100%;
+        text-align: left;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: #f8fafc;
+        cursor: pointer;
+      }
+
+      .wizard-option.selected {
+        border-color: rgba(37, 99, 235, 0.45);
+        background: rgba(59, 130, 246, 0.1);
+      }
+
+      .wizard-option-label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .wizard-option-description {
+        display: block;
+        margin-top: 4px;
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .wizard-input-form {
+        display: grid;
+        gap: 10px;
+      }
+
+      .wizard-input-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: #334155;
+      }
+
+      .wizard-input {
+        width: 100%;
+        height: 40px;
+        padding: 0 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        font-size: 13px;
+        color: #0f172a;
+      }
+
+      .wizard-error {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.18);
+        font-size: 12px;
+        color: #b91c1c;
+      }
+
+      .wizard-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .wizard-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .wizard-button {
+        height: 36px;
+        padding: 0 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #f8fafc;
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .wizard-button.primary {
+        background: #0f172a;
+        color: #ffffff;
+        border-color: #0f172a;
+      }
     </style>
   </head>
   <body>
@@ -646,7 +805,7 @@
               </button>
               <button class="preset-button" data-preset="branches">
                 <strong>Branches</strong>
-                <span>Browse repository branches in a read-only list</span>
+                <span>Browse repository branches and launch agents</span>
               </button>
               <button class="preset-button" data-preset="settings">
                 <strong>Settings</strong>
@@ -687,6 +846,26 @@
           </div>
         </div>
       </div>
+      <div class="wizard-backdrop" id="wizard-modal">
+        <div class="wizard-modal">
+          <div class="wizard-header">
+            <div>
+              <h2 class="wizard-title">Launch Agent</h2>
+              <div class="wizard-meta" id="wizard-meta"></div>
+            </div>
+            <button class="wizard-button" id="wizard-close-button">Close</button>
+          </div>
+          <div class="wizard-step" id="wizard-step"></div>
+          <div class="wizard-error" id="wizard-error" hidden></div>
+          <div id="wizard-body"></div>
+          <div class="wizard-footer">
+            <div class="wizard-meta" id="wizard-progress"></div>
+            <div class="wizard-actions">
+              <button class="wizard-button" id="wizard-back-button">Back</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script type="module">
@@ -700,6 +879,14 @@
       const stackButton = document.getElementById("stack-button");
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
+      const wizardModal = document.getElementById("wizard-modal");
+      const wizardMeta = document.getElementById("wizard-meta");
+      const wizardStep = document.getElementById("wizard-step");
+      const wizardBody = document.getElementById("wizard-body");
+      const wizardError = document.getElementById("wizard-error");
+      const wizardProgress = document.getElementById("wizard-progress");
+      const wizardBackButton = document.getElementById("wizard-back-button");
+      const wizardCloseButton = document.getElementById("wizard-close-button");
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
 
@@ -720,9 +907,15 @@
       let panState = null;
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
+      let launchWizard = null;
 
       function presetSurface(preset) {
-        if (preset === "shell" || preset === "claude" || preset === "codex") {
+        if (
+          preset === "shell" ||
+          preset === "claude" ||
+          preset === "codex" ||
+          preset === "agent"
+        ) {
           return "terminal";
         }
         if (preset === "file_tree") {
@@ -1089,6 +1282,7 @@
             entries: [],
             loading: false,
             error: "",
+            selectedBranchName: "",
           });
         }
         return branchListStateMap.get(windowId);
@@ -1117,6 +1311,92 @@
           kind: "load_branches",
           id: windowId,
         });
+      }
+
+      function sendWizardAction(action) {
+        send({
+          kind: "launch_wizard_action",
+          action,
+        });
+      }
+
+      function renderLaunchWizard() {
+        if (!launchWizard) {
+          wizardModal.classList.remove("open");
+          wizardBody.innerHTML = "";
+          return;
+        }
+
+        closeModal();
+        wizardModal.classList.add("open");
+        wizardMeta.textContent = launchWizard.branch_name || "Workspace";
+        wizardStep.textContent = launchWizard.title;
+        wizardProgress.textContent = `${launchWizard.step_index} / ${launchWizard.step_count}`;
+        wizardBackButton.disabled = !launchWizard.can_go_back;
+
+        if (launchWizard.error) {
+          wizardError.hidden = false;
+          wizardError.textContent = launchWizard.error;
+        } else {
+          wizardError.hidden = true;
+          wizardError.textContent = "";
+        }
+
+        wizardBody.innerHTML = "";
+
+        if (launchWizard.input_value !== null) {
+          const form = document.createElement("form");
+          form.className = "wizard-input-form";
+          form.innerHTML = `
+            <label class="wizard-input-label">${launchWizard.input_label || "Input"}</label>
+            <input
+              class="wizard-input"
+              type="text"
+              value="${launchWizard.input_value || ""}"
+              placeholder="${launchWizard.input_placeholder || ""}"
+            />
+            <div class="wizard-actions">
+              <button class="wizard-button primary" type="submit">Continue</button>
+            </div>
+          `;
+          form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            const input = form.querySelector("input");
+            sendWizardAction({
+              kind: "submit_text",
+              value: input.value,
+            });
+          });
+          wizardBody.appendChild(form);
+          requestAnimationFrame(() => {
+            form.querySelector("input")?.focus();
+          });
+          return;
+        }
+
+        const options = document.createElement("div");
+        options.className = "wizard-options";
+        for (const [index, option] of (launchWizard.options || []).entries()) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "wizard-option";
+          if (index === launchWizard.selected) {
+            button.classList.add("selected");
+          }
+          button.innerHTML = `
+            <span class="wizard-option-label">${option.label}</span>
+            ${
+              option.description
+                ? `<span class="wizard-option-description">${option.description}</span>`
+                : ""
+            }
+          `;
+          button.addEventListener("click", () => {
+            sendWizardAction({ kind: "select", index });
+          });
+          options.appendChild(button);
+        }
+        wizardBody.appendChild(options);
       }
 
       function renderFileTree(windowId) {
@@ -1244,6 +1524,9 @@
         for (const entry of state.entries) {
           const row = document.createElement("div");
           row.className = "branch-row";
+          if (state.selectedBranchName === entry.name) {
+            row.classList.add("selected");
+          }
           const summaryParts = [];
           if (entry.ahead || entry.behind) {
             summaryParts.push(`↑${entry.ahead} ↓${entry.behind}`);
@@ -1264,6 +1547,19 @@
               <span class="branch-summary">${summaryParts.join(" · ")}</span>
             </div>
           `;
+          row.addEventListener("click", () => {
+            state.selectedBranchName = entry.name;
+            renderBranches(windowId);
+          });
+          row.addEventListener("dblclick", () => {
+            state.selectedBranchName = entry.name;
+            renderBranches(windowId);
+            send({
+              kind: "open_launch_wizard",
+              id: windowId,
+              branch_name: entry.name,
+            });
+          });
           list.appendChild(row);
         }
       }
@@ -1339,7 +1635,7 @@
           body.innerHTML = `
             <div class="branch-list-root">
               <div class="branch-toolbar">
-                <div class="branch-heading">Repository branches</div>
+                <div class="branch-heading">Repository branches · double-click to launch</div>
                 <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
               </div>
               <div class="branch-scroll">
@@ -1565,6 +1861,10 @@
             renderBranches(event.id);
             break;
           }
+          case "launch_wizard_state":
+            launchWizard = event.wizard;
+            renderLaunchWizard();
+            break;
         }
       }
 
@@ -1680,6 +1980,17 @@
       modal.addEventListener("click", (event) => {
         if (event.target === modal) {
           closeModal();
+        }
+      });
+      wizardBackButton.addEventListener("click", () => {
+        sendWizardAction({ kind: "back" });
+      });
+      wizardCloseButton.addEventListener("click", () => {
+        sendWizardAction({ kind: "cancel" });
+      });
+      wizardModal.addEventListener("click", (event) => {
+        if (event.target === wizardModal) {
+          sendWizardAction({ kind: "cancel" });
         }
       });
 

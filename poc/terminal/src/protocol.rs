@@ -1,5 +1,6 @@
 use crate::branch_list::BranchListEntry;
 use crate::file_tree::FileTreeEntry;
+use crate::launch_wizard::{LaunchWizardAction, LaunchWizardView};
 use crate::persistence::{
     CanvasViewport, PersistedWorkspaceState, WindowGeometry, WindowProcessStatus,
 };
@@ -50,6 +51,13 @@ pub enum FrontendEvent {
     LoadBranches {
         id: String,
     },
+    OpenLaunchWizard {
+        id: String,
+        branch_name: String,
+    },
+    LaunchWizardAction {
+        action: LaunchWizardAction,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,5 +96,8 @@ pub enum BackendEvent {
     BranchError {
         id: String,
         message: String,
+    },
+    LaunchWizardState {
+        wizard: Option<LaunchWizardView>,
     },
 }

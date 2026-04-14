@@ -205,9 +205,11 @@ WebView を開きます。起動すると stderr に `http://127.0.0.1:<port>/` 
 を出力するので、native app の起動中は同じ URL を通常の browser でも開けます。
 
 canvas では `Shell` / `Claude` / `Codex` の terminal window と、read-only の
-`File Tree` window / `Branches` window を扱えます。`Settings` / `Memo` /
-`Profile` / `Logs` / `Issue` / `SPEC` / `Board` / `PR` は mock window として
-追加できます。
+`File Tree` window、そして `Branches` window を扱えます。`Branches` は
+single click で選択、double click で Launch Agent wizard を開き、quick
+start / new branch / agent / model / runtime / permissions を選べます。
+`Settings` / `Memo` / `Profile` / `Logs` / `Issue` / `SPEC` / `Board` / `PR`
+は mock window として追加できます。
 
 `Tile` で表示中の window をグリッド状に整列し、`Stack` で title bar を残した
 まま重ねて表示できます。
