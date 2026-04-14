@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.0.4] - 2026-04-14
+
+### Bug Fixes
+
+- Rename bin/gwt.js to bin/gwt.cjs for CommonJS compatibility
+
 ## [9.0.3] - 2026-04-14
 
 ### Bug Fixes
