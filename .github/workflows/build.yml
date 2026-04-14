@@ -14,3 +14,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build workspace targets
         run: cargo build -p gwt-core -p gwt-tui --all-features
+
+  check-windows:
+    name: Check (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-windows
+      - name: Check Windows compilation
+        run: cargo check -p gwt-core -p gwt-tui
