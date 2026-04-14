@@ -14,7 +14,6 @@ const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/commands/gwt-*",
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
-    ".codex/hooks.json",
 ];
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.
@@ -149,7 +148,7 @@ mod tests {
         assert!(result.contains(END_MARKER));
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
-        assert!(result.contains(".codex/hooks.json"));
+        assert!(!result.contains(".codex/hooks.json"));
         assert!(!result.contains(".codex/hooks/scripts/gwt-*"));
         assert!(!result.contains(".agents/skills/gwt-*"));
     }
@@ -209,7 +208,7 @@ mod tests {
         let exclude_path = git_resolved_exclude_path(&worktree);
         let content = fs::read_to_string(&exclude_path).unwrap();
         assert!(content.contains(BEGIN_MARKER));
-        assert!(content.contains(".codex/hooks.json"));
+        assert!(!content.contains(".codex/hooks.json"));
         assert!(
             !worktree.join(".git/info/exclude").exists(),
             "linked worktree should not create a nested path under the .git file"

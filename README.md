@@ -140,6 +140,12 @@ shell output are not delayed until the next keypress.
   SPECs live as GitHub Issues labeled `gwt-spec` and are cached locally at
   `~/.gwt/cache/issues/<repo-hash>/`; use `gwt issue spec <n>` to read and `gwt issue spec <n> --edit <section> -f <file>` to write.
 
+### Hook file ownership
+
+- gwt regenerates `.claude/settings.local.json` as a local machine file and manages its Git exclusion.
+- gwt creates or merges `.codex/hooks.json`, but does not add it to `.gitignore` or `info/exclude`.
+- Whether `.codex/hooks.json` is version-controlled is a repository decision. When the file already exists, gwt replaces only gwt-managed hook entries and keeps user hooks plus unrelated top-level settings.
+
 ### GitHub Token (PAT) requirements
 
 gwt uses `gh` CLI for GitHub operations. Authenticate with:

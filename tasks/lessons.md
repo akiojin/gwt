@@ -24,6 +24,29 @@ project-scoped coordination storage へ移行済みの前提なのに、legacy w
 3. project-scoped storage への移行では、shared dir の marker 有無だけでなく
    legacy worktree-local 実データを使った初回アクセスも検証する。
 
+## 2026-04-14 — fix: `.codex/hooks.json` の所有権を Git の tracked/untracked 状態に委ねない
+
+### 事象
+
+`.codex/hooks.json` の生成契約を `tracked/untracked` で分岐させたまま
+`info/exclude` にも追加していたため、repo 利用者が version 管理したい設定まで
+gwt がローカル専用ファイルとして扱ってしまった。
+
+### 原因
+
+- `.claude/settings.local.json` の「ローカル生成物」という性質を
+  `.codex/hooks.json` にもそのまま当てはめた。
+- hook 設定の所有権を「ユーザー/リポジトリが決める契約」ではなく、
+  Git の tracked/untracked 状態で近道判定していた。
+
+### 再発防止策
+
+1. `.codex/hooks.json` のように利用者が version 管理可否を選べるファイルは、
+   `info/exclude` や `.gitignore` へ自動追加しない。
+2. 既存設定ファイルの生成契約は tracked/untracked ではなく、
+   「存在しなければ作成、存在すれば managed 部分だけマージ」で統一する。
+3. ローカル専用ファイルとユーザー所有ファイルの境界を変えるときは、
+   README と owner SPEC を同じ変更セットで更新する。
 ## 2026-04-14 — fix: shared coordination storage のスコープ変更では SPEC と保存キーを先に揃える
 
 ### 事象

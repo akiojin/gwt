@@ -136,6 +136,12 @@ idle な 100 ms tick では TUI を再描画しないため、バックグラウ
   キャッシュされます。読み取りは `gwt issue spec <n>`、書き込みは
   `gwt issue spec <n> --edit <section> -f <file>` を使用してください。
 
+### Hook 設定ファイルの扱い
+
+- gwt は `.claude/settings.local.json` をローカル端末向け設定として再生成し、このファイルの Git 除外も管理します。
+- gwt は `.codex/hooks.json` を作成またはマージしますが、`.gitignore` や `info/exclude` には追加しません。
+- `.codex/hooks.json` を version 管理するかどうかは各リポジトリの判断です。既存ファイルがある場合、gwt は gwt 管理 hook だけを置き換え、ユーザー hook と無関係な top-level 設定は保持します。
+
 ### GitHub Token（PAT）要件
 
 gwt は GitHub 操作に `gh` CLI を使用します。以下で認証してください:

@@ -1,12 +1,10 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const GWT_FORWARD_SCRIPT: &str = "gwt-forward-hook.mjs";
 const GWT_BLOCK_SCRIPT_PREFIX: &str = "gwt-block-";
@@ -29,7 +27,6 @@ const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook block-git-dir-override",
     " hook forward",
 ];
-const GWT_MANAGED_RUNTIME_KIND: &str = "runtime-state";
 const CLAUDE_HOOK_COMMAND_TYPE: &str = "command";
 const MANAGED_EVENT_ORDER: &[&str] = &[
     "SessionStart",
@@ -71,17 +68,9 @@ pub fn generate_settings_local(worktree: &Path) -> io::Result<()> {
 
 /// Generate `.codex/hooks.json` in the target worktree.
 ///
-/// Tracked Codex hook files are normally preserved, but tracked files that
-/// still contain gwt's legacy runtime forward-hook commands are migrated to the
-/// current no-Node runtime-hook shape so launched worktrees do not stay pinned
-/// to stale hook behavior forever.
+/// Existing hook files are merged on every refresh: gwt-managed hook entries
+/// are replaced, while user hooks and unrelated top-level settings are kept.
 pub fn generate_codex_hooks(worktree: &Path) -> io::Result<()> {
-    let settings_path = worktree.join(CODEX_HOOKS_PATH);
-    if path_is_git_tracked(worktree, Path::new(CODEX_HOOKS_PATH))?
-        && !tracked_codex_hooks_need_runtime_migration(&settings_path)?
-    {
-        return Ok(());
-    }
     generate_hook_config(worktree, ManagedHookTarget::Codex)
 }
 
@@ -257,271 +246,6 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
     MANAGED_HOOK_SUBCMD_SUFFIXES
         .iter()
         .any(|suffix| command.contains(suffix))
-}
-
-fn tracked_codex_hooks_need_runtime_migration(path: &Path) -> io::Result<bool> {
-    let root = read_existing_settings(path)?;
-    let hooks = root.get("hooks");
-    Ok(contains_incomplete_managed_hook_contract(
-        hooks,
-        ManagedHookTarget::Codex,
-        managed_hook_shell(),
-    ) || contains_legacy_runtime_forwarder(hooks)
-        || contains_managed_runtime_shell_mismatch(hooks, managed_hook_shell())
-        || contains_legacy_block_bash_policy(hooks)
-        || contains_legacy_node_bash_blockers(hooks)
-        || contains_legacy_split_bash_blockers(hooks)
-        || contains_inline_shell_runtime_hook(hooks)
-        || contains_legacy_runtime_marker(hooks)
-        || contains_pathless_gwt_hook_command(hooks)
-        || contains_stale_binary_path(hooks))
-}
-
-fn contains_incomplete_managed_hook_contract(
-    existing: Option<&Value>,
-    target: ManagedHookTarget,
-    shell: HookShell,
-) -> bool {
-    if !contains_any_managed_hook(existing) {
-        return false;
-    }
-
-    let expected = managed_hooks(target, shell);
-    MANAGED_EVENT_ORDER.iter().any(|event| {
-        let expected_commands = commands_for_event(expected.get(*event));
-        let existing_commands = commands_for_event_in_existing(existing, event);
-        expected_commands
-            .into_iter()
-            .any(|command| !existing_commands.contains(&command))
-    })
-}
-
-fn contains_any_managed_hook(existing: Option<&Value>) -> bool {
-    existing.and_then(Value::as_object).is_some_and(|events| {
-        events.values().any(|entries| {
-            entries.as_array().is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .as_object()
-                        .and_then(|obj| obj.get("hooks"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.as_object()
-                                    .and_then(|obj| obj.get("command"))
-                                    .and_then(Value::as_str)
-                                    .is_some_and(is_gwt_managed_command)
-                            })
-                        })
-                })
-            })
-        })
-    })
-}
-
-fn commands_for_event(value: Option<&Value>) -> HashSet<String> {
-    value
-        .and_then(Value::as_array)
-        .into_iter()
-        .flat_map(|entries| entries.iter())
-        .flat_map(|entry| {
-            entry
-                .get("hooks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flat_map(|hooks| hooks.iter())
-        })
-        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect()
-}
-
-fn commands_for_event_in_existing(existing: Option<&Value>, event: &str) -> HashSet<String> {
-    let value = existing
-        .and_then(Value::as_object)
-        .and_then(|events| events.get(event));
-    commands_for_event(value)
-}
-
-fn contains_legacy_block_bash_policy(existing: Option<&Value>) -> bool {
-    any_managed_command(existing, |command| {
-        command.contains(" hook block-bash-policy")
-    })
-}
-
-/// SPEC #1942 amendment: detect tracked hook files where the embedded
-/// binary path does not match the current `gwt_hook_bin_path()`. This
-/// catches the case where a previous regeneration ran from a different
-/// binary (e.g. the `regenerate_hook_settings` example, a dev build
-/// that has since been replaced, or a bun upgrade on Linux).
-fn contains_stale_binary_path(existing: Option<&Value>) -> bool {
-    let current = gwt_hook_bin_path();
-    let quoted = posix_shell_quote(&current);
-    any_managed_command(existing, |command| {
-        // Only check commands that look like our managed hook form.
-        if !MANAGED_HOOK_SUBCMD_SUFFIXES
-            .iter()
-            .any(|s| command.contains(s))
-        {
-            return false;
-        }
-        // The command IS a managed hook, but does it embed the
-        // current binary? If not, it's stale and needs migration.
-        !command.contains(&quoted)
-    })
-}
-
-/// SPEC #1942 amendment: detect tracked hook files that still dispatch
-/// through a bare literal `gwt` (PATH-dependent) rather than the
-/// absolute path form introduced later. These entries must be
-/// migrated so that worktrees without `gwt` on their $PATH keep
-/// working.
-fn contains_pathless_gwt_hook_command(existing: Option<&Value>) -> bool {
-    any_managed_command(existing, |command| {
-        // Strip a leading `GWT_MANAGED_HOOK=runtime-state ` env-var
-        // prefix if present, so the check works for both block and
-        // runtime-state legacy forms.
-        let tail = command
-            .strip_prefix(&format!(
-                "{GWT_MANAGED_RUNTIME_MARKER}={GWT_MANAGED_RUNTIME_KIND} "
-            ))
-            .unwrap_or(command);
-        tail.starts_with("gwt hook ")
-    })
-}
-
-/// SPEC #1942: tracked Codex / Claude hook files that still dispatch
-/// bash blockers through Node scripts (`node .../gwt-block-*.mjs`)
-/// must be migrated to the new `gwt hook block-*` form on the next
-/// regeneration pass. Without this, tracking the file causes the
-/// generator to short-circuit and the migration never completes.
-fn contains_legacy_node_bash_blockers(existing: Option<&Value>) -> bool {
-    any_managed_command(existing, |command| {
-        command.contains(GWT_BLOCK_SCRIPT_PREFIX)
-    })
-}
-
-fn contains_legacy_split_bash_blockers(existing: Option<&Value>) -> bool {
-    any_managed_command(existing, |command| {
-        command.contains(" hook block-git-branch-ops")
-            || command.contains(" hook block-cd-command")
-            || command.contains(" hook block-file-ops")
-            || command.contains(" hook block-git-dir-override")
-    })
-}
-
-/// SPEC #1942: detect tracked hook files that still carry the old
-/// `GWT_MANAGED_HOOK=runtime-state sh -lc '...'` inline-shell runtime
-/// hook form. The new form is
-/// `GWT_MANAGED_HOOK=runtime-state gwt hook runtime-state <event>`, so
-/// we trigger migration whenever a managed runtime command contains
-/// `sh -lc` (POSIX) or `ConvertTo-Json` (PowerShell), both of which
-/// were exclusive to the legacy inline writer.
-fn contains_inline_shell_runtime_hook(existing: Option<&Value>) -> bool {
-    any_managed_command(existing, |command| {
-        command.contains(GWT_MANAGED_RUNTIME_MARKER)
-            && (command.contains("sh -lc") || command.contains("ConvertTo-Json"))
-    })
-}
-
-fn contains_legacy_runtime_marker(existing: Option<&Value>) -> bool {
-    any_managed_command(existing, |command| {
-        command.contains(GWT_MANAGED_RUNTIME_MARKER) && command.contains(" hook runtime-state ")
-    })
-}
-
-/// Iterate every managed hook command under `events` and return true
-/// if any of them satisfies `predicate`. Shared body for the two
-/// detectors above.
-fn any_managed_command(existing: Option<&Value>, predicate: impl Fn(&str) -> bool) -> bool {
-    let Some(Value::Object(events)) = existing else {
-        return false;
-    };
-    events.values().any(|events_value| {
-        events_value.as_array().is_some_and(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .as_object()
-                    .and_then(|obj| obj.get("hooks"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|hooks| {
-                        hooks.iter().any(|hook| {
-                            hook.as_object()
-                                .and_then(|obj| obj.get("command"))
-                                .and_then(Value::as_str)
-                                .is_some_and(&predicate)
-                        })
-                    })
-            })
-        })
-    })
-}
-
-fn contains_legacy_runtime_forwarder(existing: Option<&Value>) -> bool {
-    let Some(Value::Object(events)) = existing else {
-        return false;
-    };
-
-    MANAGED_EVENT_ORDER.iter().any(|event| {
-        events
-            .get(*event)
-            .and_then(Value::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .as_object()
-                        .and_then(|obj| obj.get("hooks"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.as_object()
-                                    .and_then(|obj| obj.get("command"))
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|command| command.contains(GWT_FORWARD_SCRIPT))
-                            })
-                        })
-                })
-            })
-    })
-}
-
-fn contains_managed_runtime_shell_mismatch(existing: Option<&Value>, shell: HookShell) -> bool {
-    let Some(Value::Object(events)) = existing else {
-        return false;
-    };
-
-    MANAGED_EVENT_ORDER.iter().any(|event| {
-        events
-            .get(*event)
-            .and_then(Value::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .as_object()
-                        .and_then(|obj| obj.get("hooks"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.as_object()
-                                    .and_then(|obj| obj.get("command"))
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|command| {
-                                        (command.contains(GWT_MANAGED_RUNTIME_MARKER)
-                                            || command.contains(" hook runtime-state "))
-                                            && command_shell_mismatch(command, shell)
-                                    })
-                            })
-                        })
-                })
-            })
-    })
-}
-
-fn command_shell_mismatch(command: &str, shell: HookShell) -> bool {
-    match shell {
-        HookShell::Posix => command.contains("powershell -NoProfile -Command"),
-        HookShell::PowerShell => command.contains(" sh -lc '"),
-    }
 }
 
 fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Value> {
@@ -725,21 +449,6 @@ fn powershell_coordination_hook_command(event: &str) -> String {
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook coordination-event {event} }}\"")
 }
 
-fn path_is_git_tracked(worktree: &Path, relative_path: &Path) -> io::Result<bool> {
-    match Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .arg("ls-files")
-        .arg("--error-unmatch")
-        .arg(relative_path)
-        .output()
-    {
-        Ok(output) => Ok(output.status.success()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -890,13 +599,12 @@ mod tests {
     //    commands must NOT duplicate them. `is_gwt_managed_command`
     //    has to recognise the new form as managed so the generator
     //    replaces instead of appending.
-    // 2. A tracked `.codex/hooks.json` that still has the legacy
-    //    `node .../gwt-block-*.mjs` entries must get migrated on the
-    //    next regeneration pass — the migration gate has to include
-    //    the node-bash-blocker detector.
-    // 3. A tracked `.codex/hooks.json` with the legacy
+    // 2. An existing `.codex/hooks.json` that still has legacy
+    //    `node .../gwt-block-*.mjs` entries must be merged into the
+    //    new hook CLI form on the next regeneration pass.
+    // 3. An existing `.codex/hooks.json` with the legacy
     //    `GWT_MANAGED_HOOK=runtime-state sh -lc '...'` inline runtime
-    //    hook must also trigger migration.
+    //    hook must also be rewritten into the current managed form.
     #[test]
     fn regenerating_twice_does_not_duplicate_new_form_managed_entries() {
         let dir = tempfile::tempdir().unwrap();
@@ -1278,13 +986,14 @@ mod tests {
     }
 
     #[test]
-    fn generate_codex_hooks_skips_tracked_hooks_json_without_legacy_runtime_entries() {
+    fn generate_codex_hooks_merges_existing_tracked_hooks_json_without_legacy_runtime_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
             serde_json::to_string_pretty(&json!({
+                "custom_setting": true,
                 "hooks": {
                     "SessionStart": [
                         {
@@ -1321,9 +1030,30 @@ mod tests {
         generate_codex_hooks(dir.path()).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("tracked-command"));
-        assert!(!content.contains("hook runtime-state"));
-        assert!(!content.contains("workflow-policy"));
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let session_start_commands: Vec<&str> = value["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+        let pre_tool_commands: Vec<&str> = value["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().unwrap().iter())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect();
+
+        assert!(session_start_commands.contains(&"tracked-command"));
+        assert!(session_start_commands
+            .iter()
+            .any(|command| command.contains(" hook runtime-state SessionStart")));
+        assert!(pre_tool_commands
+            .iter()
+            .any(|command| command.contains(" hook workflow-policy")));
+        assert_eq!(value["custom_setting"], Value::Bool(true));
     }
 
     #[test]

@@ -15113,8 +15113,20 @@ services:
         load_initial_data(&mut model);
 
         assert!(
-            model.git_view.files.is_empty(),
-            "empty repo should not produce file entries"
+            model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == ".codex/"),
+            "empty repo should surface the user-owned Codex hooks directory"
+        );
+        assert!(
+            !model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == ".claude/settings.local.json"),
+            "empty repo should continue to hide local Claude settings"
         );
         assert!(
             model.git_view.commits.is_empty(),
@@ -15522,8 +15534,8 @@ services:
                 path.display()
             );
             assert!(
-                exclude.contains(".codex/hooks.json"),
-                "startup self-heal should exclude managed hooks for {}",
+                !exclude.contains(".codex/hooks.json"),
+                "startup self-heal should not exclude codex hooks for {}",
                 path.display()
             );
         }
@@ -19244,7 +19256,7 @@ services:
         let exclude_path = git_resolved_exclude_path(&worktree);
         let exclude = fs::read_to_string(&exclude_path).expect("read git exclude");
         assert!(exclude.contains("# gwt-managed-begin"));
-        assert!(exclude.contains(".codex/hooks.json"));
+        assert!(!exclude.contains(".codex/hooks.json"));
         assert!(
             !worktree.join(".git/info/exclude").exists(),
             "agent launch should not treat linked worktree .git as a directory"
@@ -22455,14 +22467,43 @@ services:
         let mut model = Model::new(dir.path().to_path_buf());
         model.management_tab = ManagementTab::GitView;
         load_initial_data(&mut model);
-        assert!(model.git_view.files.is_empty());
+        assert!(
+            model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == ".codex/"),
+            "initial Git View should include the non-excluded Codex hooks directory"
+        );
+        assert!(
+            !model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == "tracked.txt"),
+            "tracked file should stay clean before modification"
+        );
 
         fs::write(dir.path().join("tracked.txt"), "one\ntwo\n").expect("modify tracked file");
 
         route_key_to_management(&mut model, key(KeyCode::Char('r'), KeyModifiers::NONE));
 
-        assert_eq!(model.git_view.files.len(), 1);
-        assert_eq!(model.git_view.files[0].path, "tracked.txt");
+        assert!(
+            model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == "tracked.txt"),
+            "refresh should include tracked modifications"
+        );
+        assert!(
+            model
+                .git_view
+                .files
+                .iter()
+                .any(|item| item.path == ".codex/"),
+            "refresh should preserve the user-owned Codex hooks entry"
+        );
     }
 
     #[test]
