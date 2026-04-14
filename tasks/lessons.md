@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-14 — planning: terminal UI の依頼では TUI と GUI を明示的に切り分けて確認する
+
+### 事象
+
+「Rust で terminal を作成し、Claude や Codex を二画面表示したい」という依頼に対して、
+repo 文脈と既存資産に引っ張られ、最初に TUI 前提で設計を進めてしまった。
+
+### 原因
+
+- 「terminal を作る」という依頼を、端末エミュレータ全般ではなく ratatui/crossterm の
+  TUI と短絡的に解釈した。
+- 既存 repo に `gwt-terminal` / `gwt-tui` があることを根拠に、windowed GUI の可能性を
+  十分に切り分ける前に設計を固めた。
+
+### 再発防止策
+
+1. `terminal` / `pane` / `split view` の依頼では、最初に TUI / desktop GUI / browser GUI の
+   どれを指すかを明示的に確認する。
+2. 既存実装資産が強くても、UI modality の前提は repo 都合で固定せず、ユーザーが求める
+   interaction surface を先に固める。
+3. 「Figma のような」「window が浮く」など spatial metaphor が出たら、layout 比較を
+   早めに出して認識合わせを行う。
+
 ## 2026-04-14 — fix: migration 互換パスでは legacy event tag を先に受理してから merge/delete する
 
 ### 事象
