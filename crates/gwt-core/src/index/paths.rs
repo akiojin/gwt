@@ -32,7 +32,7 @@ use crate::worktree_hash::WorktreeHash;
 pub enum Scope {
     /// Worktree-independent: GitHub Issues.
     Issues,
-    /// Worktree-scoped: local SPEC files.
+    /// Worktree-scoped: SPEC Issue search index.
     Specs,
     /// Worktree-scoped: project source code files.
     FilesCode,

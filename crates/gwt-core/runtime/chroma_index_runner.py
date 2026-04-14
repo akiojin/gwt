@@ -792,7 +792,7 @@ def action_search_issues(db_path: str, query: str, n_results: int = 10) -> dict:
 
 
 def action_index_specs(project_root: str, db_path: str) -> dict:
-    """Index local SPEC directories into ChromaDB collection 'specs'."""
+    """Legacy entrypoint: index local SPEC directories into collection 'specs'."""
     import chromadb  # type: ignore
 
     root = Path(project_root).resolve()
@@ -869,7 +869,7 @@ def action_index_specs(project_root: str, db_path: str) -> dict:
 
 
 def action_search_specs(db_path: str, query: str, n_results: int = 10) -> dict:
-    """Search the local SPEC index (legacy entrypoint with v2 fallback)."""
+    """Search the SPEC index (legacy entrypoint with v2 fallback)."""
     import chromadb  # type: ignore
 
     db = Path(db_path).resolve()
@@ -1510,73 +1510,10 @@ def action_index_specs_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
-    """Index local SPEC directories into ChromaDB under the v2 layout."""
-    root = Path(project_root).resolve()
+    """Index cached `gwt-spec` Issues into ChromaDB under the v2 layout."""
     db_path = resolve_db_path(repo_hash, worktree_hash, "specs", db_root=db_root)
-
-    specs_dir = root / "specs"
-    spec_dirs = sorted(specs_dir.glob("SPEC-*")) if specs_dir.is_dir() else []
-
-    new_entries: List[Dict[str, Any]] = []
-    spec_records: List[Dict[str, Any]] = []
-    for spec_path in spec_dirs:
-        metadata_file = spec_path / "metadata.json"
-        if not metadata_file.is_file():
-            continue
-        try:
-            meta = json.loads(metadata_file.read_text(errors="replace"))
-        except (json.JSONDecodeError, ValueError, OSError):
-            continue
-        spec_id = str(meta.get("id", ""))
-        title = meta.get("title", "")
-        status = meta.get("status", "")
-        phase = meta.get("phase", "")
-        dir_name = spec_path.name
-
-        spec_md = spec_path / "spec.md"
-        spec_content = ""
-        if spec_md.is_file():
-            try:
-                spec_content = spec_md.read_text(errors="replace")
-                stat = spec_md.stat()
-                rel = str(spec_md.relative_to(root))
-                new_entries.append(
-                    {"path": rel, "mtime": int(stat.st_mtime), "size": int(stat.st_size)}
-                )
-            except OSError:
-                pass
-
-        # Chunk spec.md by ## sections so large SPECs (like SPEC-10's
-        # 300+ line Phase 8 additions) do not silently drop content past
-        # the first 2000 characters. Each chunk is embedded separately;
-        # duplicate spec_ids in search results are collapsed in
-        # `_format_spec_results`.
-        chunks = _chunk_spec_content(spec_content)
-        if not chunks:
-            chunks = [{"heading": "(empty)", "body": ""}]
-        total_chunks = len(chunks)
-        for idx, chunk in enumerate(chunks):
-            # Prepend title + heading so semantic search picks up both the
-            # SPEC identity and the section context.
-            document = f"{title}\n{chunk['heading']}\n{chunk['body']}"
-            spec_records.append(
-                {
-                    "id": f"spec-{spec_id}:chunk-{idx}",
-                    "document": document,
-                    "metadata": {
-                        "spec_id": spec_id,
-                        "title": title,
-                        "status": status,
-                        "phase": phase,
-                        "dir_name": dir_name,
-                        "chunk_idx": idx,
-                        "total_chunks": total_chunks,
-                        "chunk_heading": chunk["heading"],
-                    },
-                }
-            )
-
-    new_entries.sort(key=lambda e: e["path"])
+    spec_documents, new_entries = _load_cached_spec_documents(repo_hash)
+    new_entries.sort(key=lambda entry: entry["path"])
 
     emit_progress(
         {
@@ -1584,20 +1521,42 @@ def action_index_specs_v2(
             "scope": "specs",
             "mode": mode,
             "done": 0,
-            "total": len(spec_records),
+            "total": len(spec_documents),
         }
     )
 
     with acquire_lock(db_path, exclusive=True):
         client, collection = _make_chroma_collection(db_path, V2_SPECS_COLLECTION)
 
-        if mode == "full":
+        if mode == "incremental":
+            old_entries = read_manifest(db_path, scope="specs")
+            diff = compute_manifest_diff(old_entries, new_entries)
+            changed_spec_ids = set(diff["added"] + diff["changed"])
+            _delete_spec_records(collection, diff["changed"] + diff["removed"])
+            spec_records = _build_spec_records(
+                [
+                    spec
+                    for spec in spec_documents
+                    if spec["spec_id"] in changed_spec_ids
+                ]
+            )
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": "specs",
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
+        else:
             try:
                 existing = collection.get()
                 if existing.get("ids"):
                     collection.delete(ids=existing["ids"])
             except Exception:
                 pass
+            spec_records = _build_spec_records(spec_documents)
 
         if spec_records:
             ids = [r["id"] for r in spec_records]
@@ -1660,6 +1619,40 @@ def _issue_cache_root(repo_hash: str) -> Path:
     return Path.home() / ".gwt" / "cache" / "issues" / repo_hash
 
 
+def _normalize_labels(labels: Any) -> List[str]:
+    if isinstance(labels, str):
+        return [labels]
+    if isinstance(labels, list):
+        return [label for label in labels if isinstance(label, str)]
+    return []
+
+
+def _phase_label(labels: Sequence[str]) -> str:
+    for label in labels:
+        if label.startswith("phase/"):
+            return label
+    return ""
+
+
+def _build_cache_manifest_entry(name: str, paths: Sequence[Path]) -> Optional[Dict[str, Any]]:
+    mtimes: List[int] = []
+    total_size = 0
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        mtimes.append(int(stat.st_mtime))
+        total_size += int(stat.st_size)
+    if not mtimes:
+        return None
+    return {
+        "path": name,
+        "mtime": max(mtimes),
+        "size": total_size,
+    }
+
+
 def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     root = _issue_cache_root(repo_hash)
     if not root.is_dir():
@@ -1698,6 +1691,117 @@ def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
             }
         )
     return issues
+
+
+def _load_cached_spec_documents(
+    repo_hash: str,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    root = _issue_cache_root(repo_hash)
+    if not root.is_dir():
+        return [], []
+
+    specs: List[Dict[str, Any]] = []
+    manifest_entries: List[Dict[str, Any]] = []
+    for entry in sorted(root.iterdir(), key=lambda item: item.name):
+        if not entry.is_dir():
+            continue
+        try:
+            number = int(entry.name)
+        except ValueError:
+            continue
+        meta_path = entry / "meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, OSError, ValueError):
+            continue
+
+        labels = _normalize_labels(meta.get("labels", []))
+        if "gwt-spec" not in labels:
+            continue
+
+        spec_path = entry / "sections" / "spec.md"
+        body_path = entry / "body.md"
+        source_path = spec_path if spec_path.is_file() else body_path
+        try:
+            content = source_path.read_text() if source_path.is_file() else ""
+        except OSError:
+            content = ""
+
+        manifest_entry = _build_cache_manifest_entry(
+            str(number),
+            [meta_path, source_path],
+        )
+        if manifest_entry is not None:
+            manifest_entries.append(manifest_entry)
+
+        specs.append(
+            {
+                "spec_id": str(meta.get("number", number)),
+                "title": meta.get("title", ""),
+                "status": meta.get("state", ""),
+                "phase": _phase_label(labels),
+                "dir_name": f"#{number}",
+                "content": content,
+            }
+        )
+
+    return specs, manifest_entries
+
+
+def _build_spec_records(specs: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for spec in specs:
+        chunks = _chunk_spec_content(spec.get("content", ""))
+        if not chunks:
+            chunks = [{"heading": "(empty)", "body": ""}]
+        total_chunks = len(chunks)
+        for idx, chunk in enumerate(chunks):
+            document = f"{spec.get('title', '')}\n{chunk['heading']}\n{chunk['body']}"
+            records.append(
+                {
+                    "id": f"spec-{spec.get('spec_id', '')}:chunk-{idx}",
+                    "document": document,
+                    "metadata": {
+                        "spec_id": spec.get("spec_id", ""),
+                        "title": spec.get("title", ""),
+                        "status": spec.get("status", ""),
+                        "phase": spec.get("phase", ""),
+                        "dir_name": spec.get("dir_name", ""),
+                        "chunk_idx": idx,
+                        "total_chunks": total_chunks,
+                        "chunk_heading": chunk["heading"],
+                    },
+                }
+            )
+    return records
+
+
+def _delete_spec_records(collection, spec_ids: Sequence[str]) -> None:
+    if not spec_ids:
+        return
+    targets = {str(spec_id) for spec_id in spec_ids}
+    try:
+        existing = collection.get()
+    except Exception:
+        return
+
+    ids = existing.get("ids") or []
+    metadatas = existing.get("metadatas") or []
+    to_delete: List[str] = []
+    for idx, record_id in enumerate(ids):
+        meta = metadatas[idx] if idx < len(metadatas) else {}
+        spec_id = str((meta or {}).get("spec_id", ""))
+        if not spec_id and record_id.startswith("spec-"):
+            spec_id = record_id[5:].split(":chunk-", 1)[0]
+        if spec_id in targets:
+            to_delete.append(record_id)
+    if to_delete:
+        try:
+            collection.delete(ids=to_delete)
+        except Exception:
+            pass
 
 
 def action_index_issues_v2(
@@ -1914,8 +2018,11 @@ def action_search_v2(
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     chroma_sqlite = db_path / "chroma.sqlite3"
 
-    if not chroma_sqlite.exists():
-        if no_auto_build:
+    needs_build = not chroma_sqlite.exists()
+    needs_spec_refresh = scope == "specs" and chroma_sqlite.exists() and not no_auto_build
+
+    if needs_build or needs_spec_refresh:
+        if no_auto_build and needs_build:
             return {
                 "ok": False,
                 "error_code": "INDEX_MISSING",
@@ -1940,7 +2047,7 @@ def action_search_v2(
                 project_root=project_root,
                 repo_hash=repo_hash,
                 worktree_hash=worktree_hash or "",
-                mode="full",
+                mode="full" if needs_build else "incremental",
                 db_root=db_root,
             )
         else:
