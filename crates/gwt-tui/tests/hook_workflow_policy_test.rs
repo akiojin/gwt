@@ -255,14 +255,45 @@ fn allows_verification_bash_even_without_owner() {
 }
 
 #[test]
-fn blocks_mutating_bash_even_without_owner() {
+fn allows_worktree_touch_bash_without_owner() {
     let event = event(
         "Bash",
         json!({ "command": "touch /tmp/gwt-test-worktree/src/lib.rs" }),
     );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "worktree-local file ops should bypass the owner gate"
+    );
+}
+
+#[test]
+fn allows_worktree_rm_bash_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "rm -f /tmp/gwt-test-worktree/.gwt/memory/constitution.md" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "worktree-local file ops should bypass the owner gate"
+    );
+}
+
+#[test]
+fn blocks_non_file_op_mutating_bash_even_without_owner() {
+    let event = event("Bash", json!({ "command": "cargo fmt" }));
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("mutating bash command must block");
+        .expect("non-file-op mutating bash command must block");
     assert!(decision.reason.contains("owner"));
+}
+
+#[test]
+fn worktree_external_file_op_is_blocked_before_owner_gate() {
+    let event = event("Bash", json!({ "command": "rm -rf /tmp/outside" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("out-of-worktree file ops must be blocked");
+    assert!(decision.reason.contains("outside worktree"));
 }
 
 #[test]
