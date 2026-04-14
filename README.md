@@ -175,7 +175,7 @@ For browse-only usage (no PR creation or branch management):
 
 ### Logging and profiling
 
-Normal logs are stored as JSON Lines under `~/.gwt/logs/`. Performance profiling can be enabled in **Settings > Profiling**.
+Normal logs are stored per project as JSON Lines under `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`. Performance profiling can be enabled in **Settings > Profiling**.
 See [#1758](https://github.com/akiojin/gwt/issues/1758) for the logging specification.
 
 ## Development

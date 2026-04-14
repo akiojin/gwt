@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::repo_hash::{detect_repo_hash, RepoHash};
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {
@@ -29,6 +30,31 @@ pub fn gwt_cache_dir() -> PathBuf {
 /// Return the logs directory (`~/.gwt/logs/`).
 pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
+}
+
+/// Return the coordination root (`~/.gwt/coordination/`).
+pub fn gwt_coordination_root() -> PathBuf {
+    gwt_home().join("coordination")
+}
+
+/// Return the coordination directory for a repository hash.
+pub fn gwt_coordination_dir(repo_hash: &RepoHash) -> PathBuf {
+    gwt_coordination_root().join(repo_hash.as_str())
+}
+
+/// Return the coordination directory for a repository path, if `origin` exists.
+pub fn gwt_coordination_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
+    detect_repo_hash(repo_path).map(|repo_hash| gwt_coordination_dir(&repo_hash))
+}
+
+/// Return the structured-log directory for a repository hash.
+pub fn gwt_project_logs_dir(repo_hash: &RepoHash) -> PathBuf {
+    gwt_logs_dir().join(repo_hash.as_str())
+}
+
+/// Return the structured-log directory for a repository path, if `origin` exists.
+pub fn gwt_project_logs_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
+    detect_repo_hash(repo_path).map(|repo_hash| gwt_project_logs_dir(&repo_hash))
 }
 
 /// Return the shared runtime directory (`~/.gwt/runtime/`).
@@ -68,6 +94,7 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo_hash::compute_repo_hash;
 
     #[test]
     fn gwt_home_ends_with_dot_gwt() {
@@ -101,6 +128,22 @@ mod tests {
         let p = gwt_logs_dir();
         assert!(p.starts_with(gwt_home()));
         assert!(p.ends_with("logs"));
+    }
+
+    #[test]
+    fn gwt_project_logs_dir_scopes_by_repo_hash() {
+        let repo_hash = compute_repo_hash("https://github.com/example/project.git");
+        let p = gwt_project_logs_dir(&repo_hash);
+        assert!(p.starts_with(gwt_logs_dir()));
+        assert!(p.ends_with(format!("logs/{}", repo_hash.as_str())));
+    }
+
+    #[test]
+    fn gwt_coordination_dir_scopes_by_repo_hash() {
+        let repo_hash = compute_repo_hash("https://github.com/example/project.git");
+        let p = gwt_coordination_dir(&repo_hash);
+        assert!(p.starts_with(gwt_home()));
+        assert!(p.ends_with(format!("coordination/{}", repo_hash.as_str())));
     }
 
     #[test]

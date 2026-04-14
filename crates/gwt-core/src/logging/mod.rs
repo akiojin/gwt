@@ -4,8 +4,9 @@
 //! `tracing-subscriber` Registry with:
 //!
 //! 1. A reloadable `EnvFilter` (level control via `reload::Handle`)
-//! 2. A JSONL formatting layer writing to `~/.gwt/logs/gwt.log` via a
-//!    non-blocking, daily-rolling appender (`tracing_appender`)
+//! 2. A JSONL formatting layer writing to
+//!    `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD` via a non-blocking,
+//!    daily-rolling appender (`tracing_appender`)
 //! 3. A UI forwarder layer that sends `LogEvent`s to an
 //!    `UnboundedSender<LogEvent>` so that TUI surfaces (toasts, error
 //!    modal) can react to `Info`/`Warn`/`Error` events without

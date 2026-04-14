@@ -9,11 +9,13 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::paths::gwt_coordination_dir_for_repo_path;
 use crate::{GwtError, Result};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
 pub const BOARD_PROJECTION_FILE_NAME: &str = "board.latest.json";
+const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -239,7 +241,8 @@ pub struct CoordinationSnapshot {
 }
 
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
-    worktree_root.join(COORDINATION_RELATIVE_DIR)
+    gwt_coordination_dir_for_repo_path(worktree_root)
+        .unwrap_or_else(|| legacy_coordination_dir(worktree_root))
 }
 
 pub fn coordination_events_path(worktree_root: &Path) -> PathBuf {
@@ -255,6 +258,11 @@ fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
 }
 
 pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
+    if let Some(project_dir) = gwt_coordination_dir_for_repo_path(worktree_root) {
+        let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
+        migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+    }
+
     let dir = coordination_dir(worktree_root);
     std::fs::create_dir_all(&dir)?;
 
@@ -471,6 +479,132 @@ where
     serde_json::from_str(&raw).map_err(json_error)
 }
 
+fn legacy_coordination_dir(worktree_root: &Path) -> PathBuf {
+    worktree_root.join(COORDINATION_RELATIVE_DIR)
+}
+
+fn coordination_migration_marker_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(MIGRATION_MARKER_FILE_NAME)
+}
+
+fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(worktree_root)
+        .output();
+    let mut dirs = match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(PathBuf::from)
+                .map(|path| legacy_coordination_dir(&path))
+                .collect::<Vec<_>>()
+        }
+        _ => vec![legacy_coordination_dir(worktree_root)],
+    };
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf]) -> Result<()> {
+    if coordination_migration_marker_path(project_dir).exists() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(project_dir)?;
+    let event_path = project_dir.join(EVENTS_FILE_NAME);
+    let mut events = if event_path.exists() {
+        load_events_from_path(&event_path)?
+    } else {
+        Vec::new()
+    };
+    let mut consumed_dirs = Vec::new();
+
+    for legacy_dir in legacy_dirs {
+        if legacy_dir == project_dir || !legacy_dir.exists() {
+            continue;
+        }
+        let legacy_event_path = legacy_dir.join(EVENTS_FILE_NAME);
+        if !legacy_event_path.exists() {
+            continue;
+        }
+        events.extend(load_events_from_path(&legacy_event_path)?);
+        consumed_dirs.push(legacy_dir.clone());
+    }
+
+    if !events.is_empty() {
+        events.sort_by_key(coordination_event_timestamp);
+        write_events_to_path(&event_path, &events)?;
+        let snapshot = rebuild_snapshot_from_events(&event_path)?;
+        write_atomic_json(
+            &project_dir.join(BOARD_PROJECTION_FILE_NAME),
+            &snapshot.board,
+        )?;
+    }
+
+    for legacy_dir in consumed_dirs {
+        std::fs::remove_dir_all(legacy_dir)?;
+    }
+    std::fs::write(coordination_migration_marker_path(project_dir), b"complete")?;
+    Ok(())
+}
+
+fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = OpenOptions::new().read(true).open(path)?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        events.push(serde_json::from_str(trimmed).map_err(json_error)?);
+    }
+    Ok(events)
+}
+
+fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| GwtError::Other(format!("path has no parent: {}", path.display())))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp_path = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(EVENTS_FILE_NAME),
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    {
+        let mut file = File::create(&tmp_path)?;
+        for event in events {
+            serde_json::to_writer(&mut file, event).map_err(json_error)?;
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+    }
+    if cfg!(windows) && path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
+    match event {
+        CoordinationEvent::MessageAppended { entry } => entry.created_at,
+        CoordinationEvent::AgentCardUpsert { card } => card.updated_at,
+    }
+}
+
 fn write_atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(json_error)?;
     write_atomic(path, &bytes)
@@ -509,6 +643,7 @@ fn json_error(err: serde_json::Error) -> GwtError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use std::sync::Arc;
     use std::thread;
 
@@ -669,5 +804,82 @@ mod tests {
                 "events.jsonl".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn migrate_legacy_coordination_dirs_merges_events_and_deletes_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("home/.gwt/coordination/repo-hash");
+        let legacy_one = dir.path().join("repo/.gwt/coordination");
+        let legacy_two = dir.path().join("wt/.gwt/coordination");
+
+        std::fs::create_dir_all(&legacy_one).unwrap();
+        std::fs::create_dir_all(&legacy_two).unwrap();
+
+        let mut first = BoardEntry::new(
+            AuthorKind::User,
+            "user",
+            BoardEntryKind::Request,
+            "first",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        first.created_at = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        first.updated_at = first.created_at;
+
+        let mut second = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "second",
+            Some("running".into()),
+            None,
+            vec![],
+            vec![],
+        );
+        second.created_at = Utc.with_ymd_and_hms(2026, 4, 14, 0, 1, 0).unwrap();
+        second.updated_at = second.created_at;
+
+        write_events(
+            legacy_one.join(EVENTS_FILE_NAME).as_path(),
+            &[CoordinationEvent::MessageAppended {
+                entry: second.clone(),
+            }],
+        );
+        write_events(
+            legacy_two.join(EVENTS_FILE_NAME).as_path(),
+            &[CoordinationEvent::MessageAppended {
+                entry: first.clone(),
+            }],
+        );
+
+        migrate_legacy_coordination_dirs(&project_dir, &[legacy_one.clone(), legacy_two.clone()])
+            .unwrap();
+
+        let snapshot = rebuild_snapshot_from_events(&project_dir.join(EVENTS_FILE_NAME)).unwrap();
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert!(!legacy_one.exists());
+        assert!(!legacy_two.exists());
+        assert!(coordination_migration_marker_path(&project_dir).exists());
+    }
+
+    fn write_events(path: &std::path::Path, events: &[CoordinationEvent]) {
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        for event in events {
+            serde_json::to_writer(&mut file, event).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
     }
 }

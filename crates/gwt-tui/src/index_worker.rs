@@ -94,9 +94,9 @@ pub fn init_notification_bus(bus: NotificationBus) {
 /// SPEC-6 Phase 5: this used to write to a dedicated `~/.gwt/logs/index.log`
 /// file and push to the notification bus. Both have been replaced by a
 /// `tracing::debug!(target: "gwt_tui::index", ...)` call so the event lands
-/// in the unified `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL file alongside
-/// every other tracing event. The Logs tab picks it up via the file
-/// watcher.
+/// in the active project's `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`
+/// JSONL file alongside every other tracing event. The Logs tab picks
+/// it up via the file watcher.
 ///
 /// The legacy `~/.gwt/logs/index.log` writer is preserved as a best-effort
 /// secondary sink for shell-friendly tail-ability; it can be removed once

@@ -5,6 +5,7 @@
 //! resolves to the same `RepoHash`.
 
 use std::fmt;
+use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
@@ -96,9 +97,27 @@ pub fn compute_repo_hash(origin_url: &str) -> RepoHash {
     RepoHash(hex_full[..HASH_HEX_LEN].to_string())
 }
 
+/// Detect a `RepoHash` from the `origin` remote configured for `repo_root`.
+pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() {
+        return None;
+    }
+    Some(compute_repo_hash(&url))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn normalizes_https_https_form() {
@@ -139,5 +158,107 @@ mod tests {
             .as_str()
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn detect_repo_hash_reads_origin_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        add_origin(&repo, "git@github.com:example/project.git");
+
+        let actual = detect_repo_hash(&repo).expect("repo hash");
+
+        assert_eq!(
+            actual.as_str(),
+            compute_repo_hash("https://github.com/example/project.git").as_str()
+        );
+    }
+
+    #[test]
+    fn detect_repo_hash_returns_same_hash_for_linked_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let wt = dir.path().join("wt-feature");
+        init_git_repo(&repo);
+        add_origin(&repo, "https://github.com/example/project.git");
+        commit_file(&repo, "README.md", "# repo\n");
+
+        let output = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/shared",
+                wt.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+        let wt_hash = detect_repo_hash(&wt).expect("worktree hash");
+        assert_eq!(repo_hash.as_str(), wt_hash.as_str());
+    }
+
+    fn init_git_repo(path: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", path.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
+
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .output()
+            .expect("git config user.email");
+        assert!(email.status.success(), "git config user.email failed");
+
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .output()
+            .expect("git config user.name");
+        assert!(name.status.success(), "git config user.name failed");
+    }
+
+    fn add_origin(path: &Path, url: &str) {
+        let output = std::process::Command::new("git")
+            .args(["remote", "add", "origin", url])
+            .current_dir(path)
+            .output()
+            .expect("git remote add origin");
+        assert!(
+            output.status.success(),
+            "git remote add origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_file(path: &Path, name: &str, body: &str) {
+        std::fs::write(path.join(name), body).unwrap();
+        let add = std::process::Command::new("git")
+            .args(["add", name])
+            .current_dir(path)
+            .output()
+            .expect("git add");
+        assert!(add.status.success(), "git add failed");
+
+        let commit = std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .output()
+            .expect("git commit");
+        assert!(
+            commit.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
     }
 }
