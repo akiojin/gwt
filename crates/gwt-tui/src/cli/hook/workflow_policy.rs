@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
+use gwt_agent::types::WorkflowBypass;
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
@@ -30,6 +31,7 @@ pub struct WorkflowContext {
     pub owner: WorkflowOwner,
     pub has_plan: bool,
     pub has_tasks: bool,
+    pub bypass: Option<WorkflowBypass>,
 }
 
 impl WorkflowContext {
@@ -38,6 +40,7 @@ impl WorkflowContext {
             owner: WorkflowOwner::Unknown,
             has_plan: false,
             has_tasks: false,
+            bypass: None,
         }
     }
 
@@ -46,6 +49,7 @@ impl WorkflowContext {
             owner: WorkflowOwner::Issue(issue_number),
             has_plan: false,
             has_tasks: false,
+            bypass: None,
         }
     }
 
@@ -54,6 +58,16 @@ impl WorkflowContext {
             owner: WorkflowOwner::Spec(issue_number),
             has_plan,
             has_tasks,
+            bypass: None,
+        }
+    }
+
+    pub fn with_bypass(bypass: WorkflowBypass) -> Self {
+        Self {
+            owner: WorkflowOwner::Unknown,
+            has_plan: false,
+            has_tasks: false,
+            bypass: Some(bypass),
         }
     }
 }
@@ -68,14 +82,27 @@ pub fn evaluate_with_context(
     worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<Option<BlockDecision>, HookError> {
+    // 1. Legacy safety (gh issue CLI, branch ops, worktree-external file ops)
     if let Some(decision) = block_bash_policy::evaluate(event, worktree_root)? {
         return Ok(Some(decision));
     }
 
+    // 2. Docs/chore path exemption + non-mutating tools
     if is_exempt_chore_change(event) || !is_mutating_tool_call(event, worktree_root) {
         return Ok(None);
     }
 
+    // 3. Worktree-internal operations are allowed without owner
+    if is_worktree_internal_operation(event, worktree_root) {
+        return Ok(None);
+    }
+
+    // 4. Session-level bypass (release/chore workflows)
+    if context.bypass.is_some() {
+        return Ok(None);
+    }
+
+    // 5. Owner gate (only reached for external operations like git push)
     match context.owner {
         WorkflowOwner::Unknown => Ok(Some(missing_owner_decision())),
         WorkflowOwner::Issue(_) => Ok(None),
@@ -104,20 +131,28 @@ pub fn handle() -> Result<Option<BlockDecision>, HookError> {
 
 fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
     let session = load_session_from_env();
+    let bypass = session.as_ref().and_then(|s| s.workflow_bypass);
+
     let Some(issue_number) = session
         .as_ref()
         .and_then(|session| session.linked_issue_number)
         .or_else(|| resolve_issue_from_linkage_store(worktree_root, session.as_ref()))
     else {
-        return WorkflowContext::unknown();
+        let mut ctx = WorkflowContext::unknown();
+        ctx.bypass = bypass;
+        return ctx;
     };
 
     let Some(cache_root) = crate::issue_cache::issue_cache_root_for_repo_path(worktree_root) else {
-        return WorkflowContext::plain_issue(issue_number);
+        let mut ctx = WorkflowContext::plain_issue(issue_number);
+        ctx.bypass = bypass;
+        return ctx;
     };
     let cache = Cache::new(cache_root);
     let Some(entry) = cache.load_entry(IssueNumber(issue_number)) else {
-        return WorkflowContext::plain_issue(issue_number);
+        let mut ctx = WorkflowContext::plain_issue(issue_number);
+        ctx.bypass = bypass;
+        return ctx;
     };
     if !entry
         .snapshot
@@ -125,14 +160,18 @@ fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
         .iter()
         .any(|label| label == "gwt-spec")
     {
-        return WorkflowContext::plain_issue(issue_number);
+        let mut ctx = WorkflowContext::plain_issue(issue_number);
+        ctx.bypass = bypass;
+        return ctx;
     }
 
-    WorkflowContext::spec_issue(
+    let mut ctx = WorkflowContext::spec_issue(
         issue_number,
         has_nonempty_section(&entry.spec_body, "plan"),
         has_nonempty_section(&entry.spec_body, "tasks"),
-    )
+    );
+    ctx.bypass = bypass;
+    ctx
 }
 
 fn load_session_from_env() -> Option<Session> {
@@ -174,6 +213,57 @@ fn has_nonempty_section(spec_body: &SpecBody, name: &str) -> bool {
         .sections
         .get(&SectionName(name.to_string()))
         .is_some_and(|content| !content.trim().is_empty())
+}
+
+fn is_worktree_internal_operation(event: &HookEvent, worktree_root: &Path) -> bool {
+    match event.tool_name.as_deref() {
+        Some("Edit" | "Write" | "MultiEdit") => extract_target_path(event)
+            .is_some_and(|path| is_path_within_worktree(&path, worktree_root)),
+        Some("Bash") => event
+            .command()
+            .is_some_and(|cmd| !has_external_side_effects(cmd)),
+        _ => true,
+    }
+}
+
+fn has_external_side_effects(command: &str) -> bool {
+    for segment in super::segments::split_command_segments(command) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        if tokens.first().copied() == Some("git") && tokens.get(1).copied() == Some("push") {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalize_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        use std::path::Component::*;
+        match comp {
+            ParentDir => {
+                out.pop();
+            }
+            CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn is_path_within_worktree(path: &Path, worktree_root: &Path) -> bool {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        worktree_root.join(path)
+    };
+    let abs = normalize_path(&abs);
+    let root = normalize_path(worktree_root);
+    abs == root || abs.starts_with(&root)
 }
 
 fn is_mutating_tool_call(event: &HookEvent, worktree_root: &Path) -> bool {

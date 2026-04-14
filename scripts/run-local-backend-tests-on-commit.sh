@@ -8,8 +8,8 @@ echo "Running commit-time backend tests..."
 
 (
   cd "$ROOT_DIR"
-  cargo test -p gwt-tauri commands::branches::tests:: -- --nocapture
-  cargo test -p gwt-tauri commands::project::tests:: -- --nocapture
+  cargo test -p gwt-tui commands::branches::tests:: -- --nocapture
+  cargo test -p gwt-tui commands::project::tests:: -- --nocapture
 )
 
 echo "Commit-time backend tests passed."

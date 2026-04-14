@@ -22,6 +22,6 @@ pub use session::{
 };
 pub use types::{
     AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget,
-    SessionMode,
+    SessionMode, WorkflowBypass,
 };
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

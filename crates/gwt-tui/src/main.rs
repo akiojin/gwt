@@ -573,10 +573,11 @@ fn run_app(
         }
     }
 
-    // Register SIGHUP handler to detect terminal closure.
+    // Register SIGHUP handler to detect terminal closure (unix only).
     // Defence-in-depth: even if tcgetattr pre-check misses the condition,
     // the signal flag will catch it on the next outer-loop iteration.
     let sighup_flag = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
     let _ = signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&sighup_flag));
 
     let mut keybinds = KeybindRegistry::new();
