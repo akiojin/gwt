@@ -49,7 +49,7 @@ If you launch outside the TUI, recompute them:
 GWT_PROJECT_ROOT="$(pwd)"
 GWT_REPO_HASH=$(git remote get-url origin 2>/dev/null \
   | sed -E 's#^git@([^:]+):#https://\1/#; s#\.git$##; s#^https?://##' \
-  | tr 'A-Z' 'a-z' | sha256sum | cut -c1-16)
+  | tr 'A-Z' 'a-z' | tr -d '\n' | sha256sum | cut -c1-16)
 GWT_WORKTREE_HASH=$(printf '%s' "$(cd "$GWT_PROJECT_ROOT" && pwd -P)" | sha256sum | cut -c1-16)
 ```
 
