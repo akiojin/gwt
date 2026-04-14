@@ -34,10 +34,13 @@ pub struct IssuesState {
 
 impl IssuesState {
     /// Return issues filtered by the current search query.
+    /// SPEC issues (labelled `gwt-spec`) are always excluded — they
+    /// belong to the dedicated Specs tab.
     pub fn filtered_issues(&self) -> Vec<&IssueItem> {
         let query_lower = self.search_query.to_lowercase();
         self.issues
             .iter()
+            .filter(|i| !i.labels.iter().any(|l| l == "gwt-spec"))
             .filter(|i| {
                 query_lower.is_empty()
                     || i.title.to_lowercase().contains(&query_lower)
@@ -160,8 +163,13 @@ fn render_header(state: &IssuesState, frame: &mut Frame, area: Rect) {
         " Press '/' to search".to_string()
     };
 
-    let count = state.filtered_issues().len();
-    let total = state.issues.len();
+    let filtered = state.filtered_issues();
+    let count = filtered.len();
+    let total = state
+        .issues
+        .iter()
+        .filter(|i| !i.labels.iter().any(|l| l == "gwt-spec"))
+        .count();
     let header_text = format!(" Issues ({}/{})  |{}", count, total, search_display);
 
     let block = Block::default().title("Issues");
@@ -590,6 +598,40 @@ mod tests {
         // "read" matches "Update README"
         let filtered = state.filtered_issues();
         assert!(state.selected < filtered.len().max(1));
+    }
+
+    #[test]
+    fn filtered_issues_excludes_gwt_spec() {
+        let mut state = IssuesState::default();
+        state.issues = vec![
+            IssueItem {
+                number: 5,
+                title: "A spec issue".to_string(),
+                state: "open".to_string(),
+                labels: vec!["gwt-spec".to_string()],
+                body: String::new(),
+                linked_branches: vec![],
+            },
+            IssueItem {
+                number: 6,
+                title: "A normal issue".to_string(),
+                state: "open".to_string(),
+                labels: vec!["bug".to_string()],
+                body: String::new(),
+                linked_branches: vec![],
+            },
+            IssueItem {
+                number: 7,
+                title: "Spec with extra labels".to_string(),
+                state: "open".to_string(),
+                labels: vec!["enhancement".to_string(), "gwt-spec".to_string()],
+                body: String::new(),
+                linked_branches: vec![],
+            },
+        ];
+        let filtered = state.filtered_issues();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].number, 6);
     }
 
     #[test]
