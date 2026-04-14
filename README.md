@@ -213,6 +213,9 @@ The canvas supports floating `Shell`, `Claude`, `Codex`, a read-only
 `Profile`, `Logs`, `Issue`, `SPEC`, `Board`, and `PR` are also available as
 mock workspace windows.
 
+Use `Tile` to align the visible windows into a grid. Use `Stack` to overlap
+them in a cascade while keeping each title bar accessible.
+
 The frontend still loads `xterm.js` from a CDN at runtime, so network access is
 required the first time you open it.
 

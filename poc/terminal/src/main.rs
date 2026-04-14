@@ -155,6 +155,28 @@ impl AppRuntime {
                     workspace: self.workspace.persisted().clone(),
                 })]
             }
+            FrontendEvent::ArrangeWindows { mode, bounds } => {
+                if !self.workspace.arrange_windows(mode, bounds) {
+                    return Vec::new();
+                }
+
+                for window in self.workspace.persisted().windows.iter() {
+                    if !window.preset.requires_process() {
+                        continue;
+                    }
+                    if let Some(runtime) = self.runtimes.get(&window.id) {
+                        if let Ok(mut pane) = runtime.pane.lock() {
+                            let (cols, rows) = geometry_to_pty_size(&window.geometry);
+                            let _ = pane.resize(cols.max(20), rows.max(6));
+                        }
+                    }
+                }
+
+                let _ = self.persist();
+                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
+                    workspace: self.workspace.persisted().clone(),
+                })]
+            }
             FrontendEvent::UpdateWindowGeometry {
                 id,
                 geometry,

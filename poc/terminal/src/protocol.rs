@@ -6,6 +6,13 @@ use crate::persistence::{
 use crate::preset::WindowPreset;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArrangeMode {
+    Tile,
+    Stack,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -18,6 +25,10 @@ pub enum FrontendEvent {
     },
     UpdateViewport {
         viewport: CanvasViewport,
+    },
+    ArrangeWindows {
+        mode: ArrangeMode,
+        bounds: WindowGeometry,
     },
     UpdateWindowGeometry {
         id: String,

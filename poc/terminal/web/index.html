@@ -85,10 +85,33 @@
         background: #22c55e;
       }
 
-      .add-button {
+      .floating-actions {
         position: absolute;
         right: 18px;
         bottom: 18px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .arrange-button {
+        height: 38px;
+        padding: 0 12px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.96);
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12);
+      }
+
+      .arrange-button:hover {
+        background: #f8fafc;
+      }
+
+      .add-button {
         width: 46px;
         height: 46px;
         border: none;
@@ -589,7 +612,11 @@
       <div class="canvas" id="canvas">
         <div class="canvas-stage" id="canvas-stage"></div>
       </div>
-      <button class="add-button" id="add-button" aria-label="Add window">+</button>
+      <div class="floating-actions">
+        <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
+        <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
+        <button class="add-button" id="add-button" aria-label="Add window">+</button>
+      </div>
       <div class="modal-backdrop" id="preset-modal">
         <div class="modal">
           <h2>Add window</h2>
@@ -669,6 +696,8 @@
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
       const addButton = document.getElementById("add-button");
+      const tileButton = document.getElementById("tile-button");
+      const stackButton = document.getElementById("stack-button");
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
       const connectionDot = document.getElementById("connection-dot");
@@ -783,6 +812,23 @@
         send({
           kind: "update_viewport",
           viewport,
+        });
+      }
+
+      function visibleBounds() {
+        return {
+          x: -viewport.x / viewport.zoom,
+          y: -viewport.y / viewport.zoom,
+          width: canvas.clientWidth / viewport.zoom,
+          height: canvas.clientHeight / viewport.zoom,
+        };
+      }
+
+      function arrangeWindows(mode) {
+        send({
+          kind: "arrange_windows",
+          mode,
+          bounds: visibleBounds(),
         });
       }
 
@@ -1431,6 +1477,9 @@
         element.style.height = `${windowData.geometry.height}px`;
         element.style.zIndex = String(windowData.z_index);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        if (presetSurface(windowData.preset) === "terminal") {
+          requestAnimationFrame(() => fitTerminal(windowData.id, false));
+        }
       }
 
       function renderWorkspace(workspace) {
@@ -1625,6 +1674,8 @@
       );
 
       addButton.addEventListener("click", openModal);
+      tileButton.addEventListener("click", () => arrangeWindows("tile"));
+      stackButton.addEventListener("click", () => arrangeWindows("stack"));
       closeModalButton.addEventListener("click", closeModal);
       modal.addEventListener("click", (event) => {
         if (event.target === modal) {

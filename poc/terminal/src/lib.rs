@@ -16,5 +16,5 @@ pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
     WindowPreset, WindowSurface,
 };
-pub use protocol::{BackendEvent, FrontendEvent};
+pub use protocol::{ArrangeMode, BackendEvent, FrontendEvent};
 pub use workspace::WorkspaceState;

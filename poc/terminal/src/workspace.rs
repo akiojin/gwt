@@ -3,6 +3,14 @@ use crate::persistence::{
     WindowProcessStatus,
 };
 use crate::preset::WindowPreset;
+use crate::protocol::ArrangeMode;
+
+const ARRANGE_PADDING: f64 = 24.0;
+const STACK_OFFSET_X: f64 = 28.0;
+const STACK_OFFSET_Y: f64 = 24.0;
+const STACK_START_INSET: f64 = 48.0;
+const MIN_WINDOW_WIDTH: f64 = 360.0;
+const MIN_WINDOW_HEIGHT: f64 = 260.0;
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceState {
@@ -37,6 +45,20 @@ impl WorkspaceState {
 
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
+    }
+
+    pub fn arrange_windows(&mut self, mode: ArrangeMode, bounds: WindowGeometry) -> bool {
+        if self.persisted.windows.is_empty() {
+            return false;
+        }
+
+        self.persisted.windows.sort_by_key(|window| window.z_index);
+        match mode {
+            ArrangeMode::Tile => self.arrange_tile(bounds),
+            ArrangeMode::Stack => self.arrange_stack(bounds),
+        }
+        self.reassign_z_indexes();
+        true
     }
 
     pub fn focus_window(&mut self, id: &str) -> bool {
@@ -102,12 +124,77 @@ impl WorkspaceState {
         self.persisted.windows.retain(|window| window.id != id);
         self.persisted.windows.len() != initial_len
     }
+
+    fn arrange_tile(&mut self, bounds: WindowGeometry) {
+        let count = self.persisted.windows.len();
+        let columns = (count as f64).sqrt().ceil() as usize;
+        let rows = count.div_ceil(columns);
+        let available_width = (bounds.width
+            - ARRANGE_PADDING * 2.0
+            - ARRANGE_PADDING * (columns.saturating_sub(1)) as f64)
+            / columns as f64;
+        let available_height = (bounds.height
+            - ARRANGE_PADDING * 2.0
+            - ARRANGE_PADDING * (rows.saturating_sub(1)) as f64)
+            / rows as f64;
+        let width = available_width.max(MIN_WINDOW_WIDTH);
+        let height = available_height.max(MIN_WINDOW_HEIGHT);
+
+        for (index, window) in self.persisted.windows.iter_mut().enumerate() {
+            let column = index % columns;
+            let row = index / columns;
+            window.geometry = WindowGeometry {
+                x: bounds.x + ARRANGE_PADDING + column as f64 * (width + ARRANGE_PADDING),
+                y: bounds.y + ARRANGE_PADDING + row as f64 * (height + ARRANGE_PADDING),
+                width,
+                height,
+            };
+        }
+    }
+
+    fn arrange_stack(&mut self, bounds: WindowGeometry) {
+        let available_width = (bounds.width - STACK_START_INSET * 2.0).max(MIN_WINDOW_WIDTH);
+        let available_height = (bounds.height - STACK_START_INSET * 2.0).max(MIN_WINDOW_HEIGHT);
+
+        for (index, window) in self.persisted.windows.iter_mut().enumerate() {
+            window.geometry = WindowGeometry {
+                x: bounds.x + STACK_START_INSET + index as f64 * STACK_OFFSET_X,
+                y: bounds.y + STACK_START_INSET + index as f64 * STACK_OFFSET_Y,
+                width: window
+                    .geometry
+                    .width
+                    .min(available_width)
+                    .max(MIN_WINDOW_WIDTH),
+                height: window
+                    .geometry
+                    .height
+                    .min(available_height)
+                    .max(MIN_WINDOW_HEIGHT),
+            };
+        }
+    }
+
+    fn reassign_z_indexes(&mut self) {
+        for (index, window) in self.persisted.windows.iter_mut().enumerate() {
+            window.z_index = (index as u32) + 1;
+        }
+        self.persisted.next_z_index = self.persisted.windows.len() as u32 + 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::persistence::{default_workspace_state, WindowProcessStatus};
+
+    fn arrange_bounds() -> WindowGeometry {
+        WindowGeometry {
+            x: 100.0,
+            y: 40.0,
+            width: 1000.0,
+            height: 760.0,
+        }
+    }
 
     #[test]
     fn focusing_window_brings_it_to_front() {
@@ -204,5 +291,52 @@ mod tests {
                 zoom: 1.35
             }
         );
+    }
+
+    #[test]
+    fn tile_arrangement_places_windows_on_a_grid() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::FileTree);
+        workspace.add_window(WindowPreset::Branches);
+
+        assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+        let branches = workspace.window("branches-1").expect("branches");
+
+        assert_eq!(claude.geometry.x, 124.0);
+        assert_eq!(claude.geometry.y, 64.0);
+        assert_eq!(codex.geometry.x, 612.0);
+        assert_eq!(codex.geometry.y, 64.0);
+        assert_eq!(file_tree.geometry.x, 124.0);
+        assert_eq!(file_tree.geometry.y, 432.0);
+        assert_eq!(branches.geometry.x, 612.0);
+        assert_eq!(branches.geometry.y, 432.0);
+        assert_eq!(branches.z_index, 4);
+        assert_eq!(workspace.persisted().next_z_index, 5);
+    }
+
+    #[test]
+    fn stack_arrangement_overlaps_windows_with_offsets() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::FileTree);
+
+        assert!(workspace.arrange_windows(ArrangeMode::Stack, arrange_bounds()));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+
+        assert_eq!(claude.geometry.x, 148.0);
+        assert_eq!(claude.geometry.y, 88.0);
+        assert_eq!(codex.geometry.x, 176.0);
+        assert_eq!(codex.geometry.y, 112.0);
+        assert_eq!(file_tree.geometry.x, 204.0);
+        assert_eq!(file_tree.geometry.y, 136.0);
+        assert!(codex.geometry.x < claude.geometry.x + claude.geometry.width);
+        assert!(codex.geometry.y < claude.geometry.y + claude.geometry.height);
+        assert_eq!(workspace.persisted().next_z_index, 4);
     }
 }
