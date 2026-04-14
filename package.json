@@ -1,10 +1,10 @@
 {
   "name": "@akiojin/gwt",
-  "version": "9.0.2",
+  "version": "9.0.3",
   "description": "TUI for Git worktree management and coding agent launch",
   "type": "module",
   "bin": {
-    "gwt": "bin/gwt-tui"
+    "gwt": "bin/gwt.js"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
