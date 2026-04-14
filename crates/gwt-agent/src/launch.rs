@@ -144,7 +144,6 @@ pub enum PermissionMode {
     Default,
     AcceptEdits,
     Plan,
-    Auto,
     DontAsk,
     BypassPermissions,
 }
@@ -345,7 +344,7 @@ impl AgentLaunchBuilder {
         let skip_permissions = self.skip_permissions
             || matches!(
                 self.permission_mode,
-                Some(PermissionMode::Auto | PermissionMode::BypassPermissions)
+                Some(PermissionMode::BypassPermissions)
             );
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
@@ -383,10 +382,6 @@ impl AgentLaunchBuilder {
         env_vars.insert("DISABLE_ERROR_REPORTING".into(), "1".into());
         env_vars.insert("DISABLE_FEEDBACK_COMMAND".into(), "1".into());
         env_vars.insert("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY".into(), "1".into());
-        env_vars.insert(
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
-            "1".into(),
-        );
 
         // Permission mode
         if let Some(ref mode) = self.permission_mode {
@@ -396,7 +391,6 @@ impl AgentLaunchBuilder {
                     PermissionMode::Default => "default",
                     PermissionMode::AcceptEdits => "acceptEdits",
                     PermissionMode::Plan => "plan",
-                    PermissionMode::Auto => "auto",
                     PermissionMode::DontAsk => "dontAsk",
                     PermissionMode::BypassPermissions => "bypassPermissions",
                 }
@@ -909,22 +903,6 @@ mod tests {
             config.env_vars.get("CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"),
             Some(&"1".to_string())
         );
-        assert_eq!(
-            config
-                .env_vars
-                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-            Some(&"1".to_string())
-        );
-    }
-
-    #[test]
-    fn build_claude_auto_permission_mode() {
-        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .permission_mode(PermissionMode::Auto)
-            .build();
-
-        assert!(config.args.contains(&"--permission-mode".to_string()));
-        assert!(config.args.contains(&"auto".to_string()));
     }
 
     #[test]

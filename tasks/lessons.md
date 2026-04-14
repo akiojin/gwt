@@ -1,5 +1,48 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: terminal copy UX は host shortcut 前提より既存 selection 契約を優先する
+
+### 事象
+
+terminal copy を `Cmd+C` 中心に寄せた結果、host terminal / crossterm の実イベント差で
+実機では copy できず、さらに途中のクリック処理変更で Claude の範囲選択まで壊した。
+
+### 原因
+
+- 「platform shortcut に統一したい」という意図を優先し、既に成立していた
+  `drag selection -> copy` の user-facing 契約を軽く扱った。
+- shortcut 自体の実機観測が不十分な段階で、selection と click routing まで同じ変更で動かした。
+
+### 再発防止策
+
+1. host terminal が奪う可能性のある shortcut 変更では、まず既存の selection / copy 契約を
+   温存したまま追加実装で検証する。
+2. click focus、drag selection、copy trigger は別々に変更し、1 回の修正で束ねない。
+3. terminal UX の変更は unit test だけでなく、実機で「クリック」「ドラッグ」「コピー」を
+   連続確認してから完了扱いにする。
+
+## 2026-04-14 — fix: terminal selection copy は visible screen の実サイズに clamp してから vt100 へ渡す
+
+### 事象
+
+snapshot history を見ている状態で terminal viewport を広げたあと、広がった幅のまま複数行選択すると
+`vt100::Screen::contents_between()` が `attempt to subtract with overflow` で panic した。
+
+### 原因
+
+- selection の row/col は現在の TUI viewport 基準で保持していたが、コピー時に参照する visible screen は
+  過去 snapshot のままで、幅・高さが現在 viewport より小さい場合があった。
+- `selected_text()` が selection 座標を clamp せず、そのまま `contents_between()` に渡していたため、
+  `start_col > screen.cols()` となり `cols - start_col` が underflow した。
+
+### 再発防止策
+
+1. terminal selection を外部 crate (`vt100`) の row/col API に渡す前に、必ず visible screen の実サイズへ clamp する。
+2. snapshot/history と resize が絡む選択コピーでは、「現在 viewport より狭い snapshot に対する複数行選択」を
+   回帰テストで固定する。
+3. mouse 座標や selection state を保持する変更では、render surface と copy surface が同一サイズとは限らない前提で
+   境界条件を確認する。
+
 ## 2026-04-13 — tui: 常設入力欄では plain 文字ショートカットを残さない
 
 ### 事象

@@ -527,6 +527,15 @@ fn snapshot_toggle_to_main_layer() {
 }
 
 #[test]
+fn snapshot_zero_sessions_show_welcome() {
+    let mut model = test_model();
+    app::update(&mut model, Message::ToggleLayer);
+    app::update(&mut model, Message::CloseSession);
+    let output = render_to_string(&model, 80, 24);
+    insta::assert_snapshot!("main_layer_welcome_zero_sessions", output);
+}
+
+#[test]
 fn snapshot_tab_grid_toggle() {
     let mut model = test_model();
     // Switch to main layer first

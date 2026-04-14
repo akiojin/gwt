@@ -60,7 +60,8 @@ gwt
 
 ## キーバインド
 
-TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用します。
+TUI の主要なキーバインドは `Ctrl+G` プレフィックスを使用します。terminal
+text はドラッグ範囲選択した時点で copy されます。
 
 | キーバインド | 操作 |
 |---|---|
@@ -74,6 +75,12 @@ TUI のキーバインドは全て `Ctrl+G` プレフィックスを使用しま
 | `Ctrl+G`, `s` | 設定 |
 | `Ctrl+G`, `?` | ヘルプ / キーバインド一覧 |
 | `Ctrl+G`, `q` | 終了 |
+
+terminal text はドラッグで copy できます。ホスト terminal が shortcut を
+転送する環境では、次も使えます。
+
+- macOS: `Cmd+C`
+- Linux / Windows: `Ctrl+Shift+C`
 
 シェルやエージェント端末で日本語 IME の候補選択を調査する場合は、
 `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl` を付けて gwt を起動してください。
@@ -93,7 +100,8 @@ direct `crossterm` で周期再描画し、`ratatui` は同じ surface を同じ
 `--tick-ms <N>` で変更できます。
 
 また gwt は起動時に minimal な kitty keyboard enhancement
-(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_ALL_KEYS_AS_ESCAPE_CODES |
+REPORT_ALTERNATE_KEYS | REPORT_EVENT_TYPES`) を要求し、終了時に pop します。
 非対応端末では fail-open で従来挙動を維持します。互換端末で発生する
 繰り返しキーイベントも通常の key press と同じ入力経路に残るため、IME の
 候補ページ送り時にイベントが途中で消えにくくなります。さらに terminal pane

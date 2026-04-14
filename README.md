@@ -64,7 +64,8 @@ gwt
 
 ## Key bindings
 
-All TUI key bindings use the `Ctrl+G` prefix.
+Most TUI key bindings use the `Ctrl+G` prefix. Dragging terminal text copies
+the selection immediately.
 
 | Key binding | Action |
 |---|---|
@@ -78,6 +79,12 @@ All TUI key bindings use the `Ctrl+G` prefix.
 | `Ctrl+G`, `s` | Settings |
 | `Ctrl+G`, `?` | Help / key binding reference |
 | `Ctrl+G`, `q` | Quit |
+
+Drag across terminal text to copy it. When the host terminal forwards the
+shortcut, the platform copy shortcut also works:
+
+- macOS: `Cmd+C`
+- Linux / Windows: `Ctrl+Shift+C`
 
 To investigate Japanese IME candidate selection in a shell or agent terminal,
 launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL
@@ -97,7 +104,8 @@ uses the same surface through ratatui on the same tick. Use `--tick-ms <N>` to
 change the redraw interval when comparing modes.
 
 gwt also requests minimal kitty keyboard enhancements during terminal startup
-(`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES`) and pops them on shutdown.
+(`DISAMBIGUATE_ESCAPE_CODES | REPORT_ALL_KEYS_AS_ESCAPE_CODES |
+REPORT_ALTERNATE_KEYS | REPORT_EVENT_TYPES`) and pops them on shutdown.
 Unsupported terminals fail open and continue with existing behavior. Repeated
 key events from compatible terminals now stay on the same input path as normal
 key presses, which matters when IME candidate navigation advances to another

@@ -140,6 +140,11 @@ impl KeybindRegistry {
                 category: KeybindingCategory::Input,
             },
             Keybinding {
+                keys: "Cmd+C / Ctrl+Shift+C".into(),
+                description: "Copy selected terminal text".into(),
+                category: KeybindingCategory::Input,
+            },
+            Keybinding {
                 keys: "Ctrl+G, a".into(),
                 description: "Convert active agent session".into(),
                 category: KeybindingCategory::Sessions,

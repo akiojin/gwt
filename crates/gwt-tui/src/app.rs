@@ -47,12 +47,14 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::{
     custom_agents::load_custom_agents,
     discussion_resume::{build_resume_prompt, park_pending_resume},
-    input::voice::VoiceInputMessage,
+    input::{keybind::KeybindRegistry, voice::VoiceInputMessage},
     input_trace,
     message::{GridSessionDirection, Message},
     model::{
@@ -1006,17 +1008,11 @@ pub fn update(model: &mut Model, msg: Message) {
             };
         }
         Message::NewShell => {
-            let idx = model.sessions.len();
-            let session = crate::model::SessionTab {
-                id: format!("shell-{idx}"),
-                name: format!("Shell {}", idx + 1),
-                tab_type: SessionTabType::Shell,
-                vt: crate::model::VtState::new(24, 80),
-                created_at: std::time::Instant::now(),
-            };
+            let shell_index = next_shell_index(model);
+            let session = crate::model::shell_session(shell_index);
             let session_id = session.id.clone();
             model.sessions.push(session);
-            model.active_session = idx;
+            model.active_session = model.sessions.len().saturating_sub(1);
 
             // Use actual pane content area for PTY size.
             let (cols, rows) = session_content_size(model);
@@ -1136,7 +1132,20 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
-            if route_overlay_key(model, key) {
+            let copy_shortcut_consumed =
+                match handle_terminal_copy_shortcut_with(model, key, |text| {
+                    gwt_clipboard::ClipboardText::set_text(text).map_err(|err| err.to_string())
+                }) {
+                    Ok(consumed) => consumed,
+                    Err(err) => {
+                        model.error_queue.push_back(
+                            Notification::new(Severity::Error, "terminal", "Copy shortcut failed")
+                                .with_detail(err),
+                        );
+                        false
+                    }
+                };
+            if route_overlay_key(model, key) || copy_shortcut_consumed {
             } else if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
@@ -3242,9 +3251,8 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     KeyCode::Up => Some(SettingsMessage::MoveUp),
                     KeyCode::Enter => Some(SettingsMessage::StartEdit),
                     KeyCode::Char(' ') => Some(SettingsMessage::ToggleBool),
-                    KeyCode::Char('S') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        Some(SettingsMessage::Save)
-                    }
+                    KeyCode::Char('[') => Some(SettingsMessage::PrevCategory),
+                    KeyCode::Char(']') => Some(SettingsMessage::NextCategory),
                     KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         Some(SettingsMessage::PrevCategory)
                     }
@@ -5715,7 +5723,7 @@ where
 }
 
 fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
-    if model.sessions.len() <= 1 {
+    if model.sessions.is_empty() {
         return;
     }
 
@@ -5732,10 +5740,28 @@ fn close_active_session_with(model: &mut Model, sessions_dir: &Path) {
     }
     clear_discussion_resume_state_for_session(model, &id);
     model.sessions.remove(model.active_session);
-    if model.active_session >= model.sessions.len() {
+    if model.sessions.is_empty() {
+        model.active_session = 0;
+    } else if model.active_session >= model.sessions.len() {
         model.active_session = model.sessions.len() - 1;
     }
     refresh_branch_live_session_summaries_with(model, sessions_dir);
+}
+
+fn next_shell_index(model: &Model) -> usize {
+    model
+        .sessions
+        .iter()
+        .filter_map(|session| match session.tab_type {
+            SessionTabType::Shell => session
+                .id
+                .strip_prefix("shell-")
+                .and_then(|suffix| suffix.parse::<usize>().ok()),
+            SessionTabType::Agent { .. } => None,
+        })
+        .max()
+        .map(|index| index + 1)
+        .unwrap_or(0)
 }
 
 fn resolve_launch_worktree(repo_path: &Path, config: &mut LaunchConfig) -> Result<(), String> {
@@ -8269,6 +8295,7 @@ where
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         && (handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse))
     {
+        clear_all_session_selections(model);
         return Ok(true);
     }
 
@@ -8396,6 +8423,9 @@ where
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if should_forward_click_to_pty(model, mouse) {
+                if let Some(session) = model.active_session_tab_mut() {
+                    session.vt.clear_selection();
+                }
                 return Ok(queue_session_mouse_click(
                     model,
                     model.active_session,
@@ -8439,14 +8469,13 @@ where
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
-            let selection_text = if let Some(session) = model.active_session_tab_mut() {
+            if let Some(session) = model.active_session_tab_mut() {
                 session.vt.update_selection(cell);
-                selected_text(session)
-            } else {
-                None
-            };
-            if let Some(text) = selection_text.filter(|text| !text.is_empty()) {
-                clipboard_writer(&text)?;
+                if session.vt.selection().is_some_and(selection_is_single_cell) {
+                    session.vt.clear_selection();
+                } else if let Some(text) = selected_text(session) {
+                    clipboard_writer(&text)?;
+                }
                 return Ok(true);
             }
             Ok(false)
@@ -8745,13 +8774,105 @@ fn sgr_modifier_bits(modifiers: KeyModifiers) -> u16 {
     bits
 }
 
+fn clear_all_session_selections(model: &mut Model) {
+    for session in &mut model.sessions {
+        session.vt.clear_selection();
+    }
+}
+
+fn selection_is_single_cell(selection: crate::model::TerminalSelection) -> bool {
+    selection.anchor == selection.focus
+}
+
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
-    let (start, end) = normalize_selection(selection);
     session.vt.with_visible_screen(|screen| {
-        let end_col = end.col.saturating_add(1).min(screen.size().1);
+        let (start, end, end_col) = clamp_selection_to_screen(selection, screen)?;
         Some(screen.contents_between(start.row, start.col, end.row, end_col))
     })
+}
+
+fn is_selection_copy_shortcut(key: crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c' | 'C'))
+        && ((key.modifiers.contains(KeyModifiers::SUPER)
+            || key.modifiers.contains(KeyModifiers::META))
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::SHIFT)))
+}
+
+fn is_terminal_copy_modifier_key(key: crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Modifier(ModifierKeyCode::LeftSuper)
+            | KeyCode::Modifier(ModifierKeyCode::RightSuper)
+            | KeyCode::Modifier(ModifierKeyCode::LeftMeta)
+            | KeyCode::Modifier(ModifierKeyCode::RightMeta)
+    )
+}
+
+fn handle_terminal_copy_shortcut_with<G>(
+    model: &mut Model,
+    key: crossterm::event::KeyEvent,
+    mut clipboard_writer: G,
+) -> Result<bool, String>
+where
+    G: FnMut(&str) -> Result<(), String>,
+{
+    if model.active_focus != FocusPane::Terminal {
+        model.terminal_pending_copy_modifier = false;
+        return Ok(false);
+    }
+
+    if is_terminal_copy_modifier_key(key) {
+        model.terminal_pending_copy_modifier = true;
+        return Ok(true);
+    }
+
+    let shortcut_pressed = is_selection_copy_shortcut(key)
+        || (model.terminal_pending_copy_modifier
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.is_empty());
+    model.terminal_pending_copy_modifier = false;
+
+    if !shortcut_pressed {
+        return Ok(false);
+    }
+
+    let Some(text) = model
+        .active_session_tab()
+        .and_then(selected_text)
+        .filter(|text| !text.is_empty())
+    else {
+        return Ok(true);
+    };
+
+    clipboard_writer(&text)?;
+    Ok(true)
+}
+
+fn clamp_selection_to_screen(
+    selection: TerminalSelection,
+    screen: &vt100::Screen,
+) -> Option<(TerminalCell, TerminalCell, u16)> {
+    let (rows, cols) = screen.size();
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let max_row = rows.saturating_sub(1);
+    let max_col = cols.saturating_sub(1);
+    let clamp_cell = |mut cell: TerminalCell| {
+        cell.row = cell.row.min(max_row);
+        cell.col = cell.col.min(max_col);
+        cell
+    };
+    let clamped = TerminalSelection {
+        anchor: clamp_cell(selection.anchor),
+        focus: clamp_cell(selection.focus),
+    };
+    let (start, end) = normalize_selection(clamped);
+    let end_col = end.col.saturating_add(1).min(cols);
+    Some((start, end, end_col))
 }
 
 fn scroll_session_by_rows(model: &mut Model, session_idx: usize, delta_rows: i16) -> bool {
@@ -9429,6 +9550,11 @@ fn render_management_tab_content(model: &Model, frame: &mut Frame, area: Rect) {
 
 /// Render the session pane (right side, or full screen).
 fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
+    if model.sessions.is_empty() {
+        render_welcome_session_pane(model, frame, area);
+        return;
+    }
+
     let terminal_focused = model.active_focus == FocusPane::Terminal;
     match model.session_layout {
         SessionLayout::Tab => {
@@ -9443,6 +9569,151 @@ fn render_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
         SessionLayout::Grid => {
             render_grid_sessions(model, frame, area);
         }
+    }
+}
+
+fn render_welcome_session_pane(model: &Model, frame: &mut Frame, area: Rect) {
+    let pane_focused =
+        model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal;
+    let block = pane_block(Line::from(" Welcome "), pane_focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let intro_lines = welcome_session_intro_lines();
+    let command_lines = welcome_session_command_lines();
+    let content_height = (intro_lines.len() as u16)
+        .saturating_add(welcome_session_command_box_height(&command_lines))
+        .min(inner.height);
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(content_height),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    let content = vertical[1];
+
+    if content.width == 0 || content.height == 0 {
+        return;
+    }
+
+    let intro_height = (intro_lines.len() as u16).min(content.height);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(intro_height), Constraint::Min(0)])
+        .split(content);
+
+    if sections[0].width > 0 && sections[0].height > 0 {
+        let intro = Paragraph::new(intro_lines).alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(intro, sections[0]);
+    }
+
+    let command_box_area = welcome_session_command_box_area(sections[1], &command_lines);
+    if command_box_area.width > 0 && command_box_area.height > 0 {
+        let command_block = welcome_session_command_block();
+        let commands = welcome_session_command_content_area(command_block.inner(command_box_area));
+        frame.render_widget(command_block, command_box_area);
+
+        if commands.width == 0 || commands.height == 0 {
+            return;
+        }
+
+        let paragraph = Paragraph::new(command_lines);
+        frame.render_widget(paragraph, commands);
+    }
+}
+
+fn welcome_session_intro_lines() -> Vec<Line<'static>> {
+    let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
+
+    vec![
+        Line::from(Span::styled("Welcome", theme::style::header())),
+        Line::from(Span::styled("No terminal windows are open.", body_style)),
+    ]
+}
+
+fn welcome_session_command_lines() -> Vec<Line<'static>> {
+    const WELCOME_KEY_WIDTH: usize = 24;
+    let command_style = Style::default()
+        .fg(theme::color::ACTIVE)
+        .add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
+    let mut lines = Vec::new();
+
+    for binding in welcome_session_bindings() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<WELCOME_KEY_WIDTH$}", binding.keys),
+                command_style,
+            ),
+            Span::styled(binding.description.clone(), body_style),
+        ]));
+    }
+
+    lines
+}
+
+fn welcome_session_bindings() -> Vec<crate::input::keybind::Keybinding> {
+    KeybindRegistry::new()
+        .all_bindings()
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.category,
+                crate::input::keybind::KeybindingCategory::Global
+                    | crate::input::keybind::KeybindingCategory::Management
+            ) || binding.keys == "Ctrl+G, c"
+        })
+        .cloned()
+        .collect()
+}
+
+fn welcome_session_command_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(theme::border::default())
+        .border_style(Style::default().fg(theme::color::BORDER_UNFOCUSED))
+        .title(Line::from(Span::styled(
+            " Commands ",
+            theme::style::header(),
+        )))
+}
+
+fn welcome_session_command_box_height(lines: &[Line<'_>]) -> u16 {
+    (lines.len() as u16).saturating_add(2)
+}
+
+fn welcome_session_command_box_area(area: Rect, lines: &[Line<'_>]) -> Rect {
+    let content_width = lines.iter().map(title_line_width).max().unwrap_or(0);
+    let desired_width = content_width.saturating_add(4).min(area.width as usize) as u16;
+    let height = welcome_session_command_box_height(lines).min(area.height);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(desired_width) / 2);
+
+    Rect {
+        x,
+        y: area.y,
+        width: desired_width,
+        height,
+    }
+}
+
+fn welcome_session_command_content_area(inner: Rect) -> Rect {
+    let horizontal_padding = if inner.width > 2 { 1 } else { 0 };
+
+    Rect {
+        x: inner.x.saturating_add(horizontal_padding),
+        y: inner.y,
+        width: inner
+            .width
+            .saturating_sub(horizontal_padding.saturating_mul(2)),
+        height: inner.height,
     }
 }
 
@@ -9562,16 +9833,22 @@ fn should_compact_session_title(width: u16, entries: &[(String, Style, &'static 
 /// The status bar keeps session context visible and appends the relevant hints.
 fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
     let compact = area.width <= 80;
-    let hints = match model.active_focus {
-        FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
-            branches_list_hint_text_with_selection(
-                compact,
-                model.branches.cleanup_selection_count(),
-            )
+    let hints = if model.sessions.is_empty()
+        && (model.active_layer == ActiveLayer::Main || model.active_focus == FocusPane::Terminal)
+    {
+        welcome_hint_text(compact)
+    } else {
+        match model.active_focus {
+            FocusPane::TabContent if model.management_tab == ManagementTab::Branches => {
+                branches_list_hint_text_with_selection(
+                    compact,
+                    model.branches.cleanup_selection_count(),
+                )
+            }
+            FocusPane::TabContent => management_hint_text(model, compact),
+            FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
+            FocusPane::Terminal => terminal_hint_text(),
         }
-        FocusPane::TabContent => management_hint_text(model, compact),
-        FocusPane::BranchDetail => branch_detail_hint_text(model, compact),
-        FocusPane::Terminal => terminal_hint_text(),
     };
 
     crate::widgets::status_bar::render_with_notification_and_hints(
@@ -9585,6 +9862,14 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
 
 fn terminal_hint_text() -> String {
     "Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2".to_string()
+}
+
+fn welcome_hint_text(compact: bool) -> String {
+    if compact {
+        "C-g,c shell  C-g,g manage  ?:help".to_string()
+    } else {
+        "Ctrl+G, c:new shell  Ctrl+G, g:management  ?:help".to_string()
+    }
 }
 
 fn branches_list_hint_text_with_selection(compact: bool, selection_count: usize) -> String {
@@ -9697,17 +9982,18 @@ fn generic_management_hint_text(
 
 fn settings_list_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ sel  ↵ edit  Sp tog  C-←→ sub  S save  C-g Tab  Esc term  ?".to_string()
+        "↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  ?".to_string()
     } else {
-        "↑↓:select  Enter:edit  Space:toggle  Ctrl+←→:sub-tab  Shift+S:save  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:apply  Space:toggle  []:sub-tab  Ctrl+G, Tab:focus  Esc:term  ?:help"
+            .to_string()
     }
 }
 
 fn settings_edit_hint_text(compact: bool) -> String {
     if compact {
-        "↵ save  ⌫ del  Esc cancel  ?".to_string()
+        "↵ apply  ⌫ del  Esc cancel  ?".to_string()
     } else {
-        "Enter:save  Backspace:delete  Esc:cancel  ?:help".to_string()
+        "Enter:apply  Backspace:delete  Esc:cancel  ?:help".to_string()
     }
 }
 
@@ -11739,6 +12025,68 @@ services:
     }
 
     #[test]
+    fn selected_text_clamps_selection_to_snapshot_width_after_resize() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(12, 8));
+
+        let initial_area = active_session_text_area(&model).expect("initial session text area");
+        let snapshot_cols = initial_area.width;
+        assert!(
+            snapshot_cols > 0,
+            "precondition: snapshot width must be non-zero"
+        );
+
+        let line_a = "A".repeat(snapshot_cols as usize);
+        let line_b = "B".repeat(snapshot_cols as usize);
+        let line_c = "C".repeat(snapshot_cols as usize);
+        let line_d = "D".repeat(snapshot_cols as usize);
+        let line_e = "E".repeat(snapshot_cols as usize);
+        enter_alt_screen_with_lines(
+            &mut model,
+            "shell-0",
+            &[&line_a, &line_b, &line_c, &line_d, &line_e],
+        );
+
+        let line_f = "F".repeat(snapshot_cols as usize);
+        let line_g = "G".repeat(snapshot_cols as usize);
+        let line_h = "H".repeat(snapshot_cols as usize);
+        let line_i = "I".repeat(snapshot_cols as usize);
+        let line_j = "J".repeat(snapshot_cols as usize);
+        replace_alt_screen_lines(
+            &mut model,
+            "shell-0",
+            &[&line_f, &line_g, &line_h, &line_i, &line_j],
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        assert!(session.vt.scroll_snapshot_up(1));
+
+        update(&mut model, Message::Resize(40, 8));
+        let resized_area = active_session_text_area(&model).expect("resized session text area");
+        assert!(
+            resized_area.width > snapshot_cols,
+            "precondition: resized viewport should be wider than the frozen snapshot"
+        );
+
+        let out_of_bounds_col = snapshot_cols.saturating_add(2);
+        let session = model.active_session_tab_mut().expect("active session");
+        session.vt.begin_selection(crate::model::TerminalCell {
+            row: 0,
+            col: out_of_bounds_col,
+        });
+        session.vt.update_selection(crate::model::TerminalCell {
+            row: 1,
+            col: out_of_bounds_col,
+        });
+
+        let copied = selected_text(model.active_session_tab().expect("active session"));
+        let expected = format!("A\n{line_b}");
+        assert_eq!(copied.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
     fn snapshot_scrollback_stays_frozen_until_it_returns_to_live() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Main;
@@ -12092,6 +12440,11 @@ services:
     fn agent_left_click_down_forwards_sgr_press_to_pty() {
         let mut model = model_with_agent_mouse_reporting_enabled();
         let area = active_session_text_area(&model).expect("active session text area");
+        model
+            .active_session_tab_mut()
+            .expect("active session")
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
 
         let handled = handle_mouse_input_with(
             &mut model,
@@ -12119,7 +12472,7 @@ services:
                 .vt
                 .selection()
                 .is_none(),
-            "PTY-forwarded clicks must not also start a local text selection",
+            "PTY-forwarded clicks must clear any existing local text selection",
         );
     }
 
@@ -12295,6 +12648,263 @@ services:
                 .is_some(),
             "local-mode left click must begin a text selection as before",
         );
+    }
+
+    #[test]
+    fn codex_plain_left_click_does_not_leave_selection_or_copy() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let mut copied = None::<String>;
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left down should succeed");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left up should succeed");
+
+        assert_eq!(copied, None);
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "plain click should only focus the Codex pane and must not leave a text selection",
+        );
+    }
+
+    #[test]
+    fn codex_drag_selection_copies_on_release() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let mut copied = None::<String>;
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left down should succeed");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x.saturating_add(4),
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left drag should succeed");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x.saturating_add(4),
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left up should succeed");
+
+        assert_eq!(copied.as_deref(), Some("hello"));
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "dragging should still leave the explicit selection visible after auto-copy",
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn meta_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::META),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn standalone_super_modifier_then_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let armed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(
+                KeyCode::Modifier(ModifierKeyCode::LeftSuper),
+                KeyModifiers::SUPER,
+            ),
+            |_| Ok(()),
+        )
+        .expect("modifier arm should succeed");
+        assert!(armed);
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::NONE),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
     }
 
     #[test]
@@ -13026,7 +13636,7 @@ services:
 
         let rendered = render_model_text(&model, 220, 24);
 
-        assert!(rendered.contains("Ctrl+←→:sub-tab"));
+        assert!(rendered.contains("[]:sub-tab"));
     }
 
     #[test]
@@ -13776,6 +14386,50 @@ services:
     }
 
     #[test]
+    fn render_model_text_zero_sessions_shows_welcome_actions() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("Welcome"));
+        assert!(rendered.contains("No terminal windows are open."));
+        assert!(rendered.contains("Ctrl+G, c"));
+        assert!(rendered.contains("Ctrl+G, g"));
+    }
+
+    #[test]
+    fn render_model_text_zero_sessions_centers_intro_and_command_box() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 80, 24);
+
+        assert!(rendered.contains("║                                    Welcome"));
+        assert!(rendered.contains("║                         No terminal windows are open."));
+        assert!(rendered.contains("╭ Commands"));
+        assert!(rendered.contains("│ Ctrl+G, g"));
+        assert!(rendered.contains("│ Ctrl+G, c"));
+    }
+
+    #[test]
+    fn render_model_text_management_with_zero_sessions_shows_welcome_pane() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::Terminal;
+
+        let rendered = render_model_text(&model, 120, 24);
+
+        assert!(rendered.contains("Welcome"));
+        assert!(rendered.contains("No terminal windows are open."));
+    }
+
+    #[test]
     fn render_model_text_branches_list_hints_remain_visible_at_standard_width() {
         let mut model = test_model();
         model.active_layer = ActiveLayer::Management;
@@ -14371,12 +15025,27 @@ services:
     }
 
     #[test]
-    fn update_close_session_wont_remove_last() {
+    fn update_close_session_removes_last() {
         let mut model = test_model();
         assert_eq!(model.session_count(), 1);
 
         update(&mut model, Message::CloseSession);
+        assert_eq!(model.session_count(), 0);
+        assert_eq!(model.active_session, 0);
+    }
+
+    #[test]
+    fn update_new_shell_recreates_primary_shell_after_zero_sessions() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_session = 0;
+
+        update(&mut model, Message::NewShell);
+
         assert_eq!(model.session_count(), 1);
+        assert_eq!(model.active_session, 0);
+        assert_eq!(model.sessions[0].id, "shell-0");
+        assert_eq!(model.sessions[0].name, "Shell");
     }
 
     #[test]
@@ -19368,7 +20037,7 @@ services:
         )
         .expect("spawn short-lived PTY");
 
-        for _ in 0..50 {
+        for _ in 0..200 {
             let exited = model
                 .pty_handles
                 .get(&persisted.id)
@@ -19377,7 +20046,7 @@ services:
             if exited {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         check_pty_exits_with(&mut model, dir.path());
@@ -21348,6 +22017,46 @@ services:
     }
 
     #[test]
+    fn route_key_to_management_settings_brackets_cycle_categories() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Settings;
+        model.active_focus = FocusPane::TabContent;
+
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::General
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::Worktree
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(
+            model.settings.category,
+            screens::settings::SettingsCategory::General
+        );
+    }
+
+    #[test]
+    fn route_key_to_management_settings_shift_s_is_noop() {
+        with_temp_home(|_home| {
+            let mut model = test_model();
+            model.management_tab = ManagementTab::Settings;
+            model.active_focus = FocusPane::TabContent;
+            model.settings.category = screens::settings::SettingsCategory::Voice;
+            model.settings.load_category_fields();
+            model.settings.fields[0].value = "/nonexistent/model".to_string();
+
+            route_key_to_management(&mut model, key(KeyCode::Char('S'), KeyModifiers::SHIFT));
+
+            assert!(model.settings.save_error.is_none());
+        });
+    }
+
+    #[test]
     fn route_key_to_management_profiles_add_env_var_persists_and_renders_preview() {
         with_temp_home(|home| {
             let config_dir = home.join(".gwt");
@@ -21987,6 +22696,33 @@ exit 1
             assert!(
                 text.contains(&binding.description),
                 "expected help overlay to contain description {}",
+                binding.description
+            );
+        }
+    }
+
+    #[test]
+    fn render_welcome_session_lists_registered_welcome_keybindings() {
+        let mut model = test_model();
+        model.sessions.clear();
+        model.active_session = 0;
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+
+        let text = render_model_text(&model, 80, 24);
+        let bindings = welcome_session_bindings();
+
+        assert!(text.contains("Welcome"));
+        assert!(text.contains("No terminal windows are open."));
+        for binding in bindings {
+            assert!(
+                text.contains(&binding.keys),
+                "expected welcome screen to contain binding {}",
+                binding.keys
+            );
+            assert!(
+                text.contains(&binding.description),
+                "expected welcome screen to contain description {}",
                 binding.description
             );
         }
