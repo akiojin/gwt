@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: ローカル永続 state の schema 追加では既存ファイルを `serde(default)` で先に受ける
+
+### 事象
+
+`workspace.json` に `viewport` を追加したあと、既存の PoC state を読もうとして
+`missing field \`viewport\`` で GUI 起動時に panic した。
+
+### 原因
+
+- 既に保存済みの local state が存在する前提で migration / backward compatibility を見ていなかった。
+- 新 field を必須扱いで deserialize し、旧 schema を default 埋めせずに読み始めた。
+
+### 再発防止策
+
+1. ローカル永続 JSON/TOML の schema を拡張するときは、新 field に `serde(default)` を付けてから
+   読み込み側の変更を入れる。
+2. persistence 変更では、旧 schema を手書き fixture で読み込む回帰テストを追加する。
+3. GUI / TUI の startup path に関わる state 追加では、`cargo run` で既存 state がある環境を
+   実際に一度起動確認する。
+
 ## 2026-04-14 — planning: terminal UI の依頼では TUI と GUI を明示的に切り分けて確認する
 
 ### 事象

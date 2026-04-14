@@ -1,5 +1,6 @@
 use crate::persistence::{
-    PersistedWindowState, PersistedWorkspaceState, WindowGeometry, WindowProcessStatus,
+    CanvasViewport, PersistedWindowState, PersistedWorkspaceState, WindowGeometry,
+    WindowProcessStatus,
 };
 use crate::preset::WindowPreset;
 
@@ -28,6 +29,10 @@ impl WorkspaceState {
         };
         window.status = status;
         true
+    }
+
+    pub fn update_viewport(&mut self, viewport: CanvasViewport) {
+        self.persisted.viewport = viewport;
     }
 
     pub fn focus_window(&mut self, id: &str) -> bool {
@@ -159,5 +164,23 @@ mod tests {
             .windows
             .iter()
             .all(|window| window.id != "codex-1"));
+    }
+
+    #[test]
+    fn updating_viewport_replaces_canvas_transform_state() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.update_viewport(CanvasViewport {
+            x: 180.0,
+            y: -90.0,
+            zoom: 1.35,
+        });
+        assert_eq!(
+            workspace.persisted().viewport,
+            CanvasViewport {
+                x: 180.0,
+                y: -90.0,
+                zoom: 1.35
+            }
+        );
     }
 }

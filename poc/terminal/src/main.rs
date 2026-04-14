@@ -9,7 +9,7 @@ use std::{
 use base64::Engine;
 use poc_terminal::{
     detect_shell_program, load_workspace_state, resolve_launch_spec, save_workspace_state,
-    workspace_state_path, PersistedWorkspaceState, WindowGeometry, WindowPreset,
+    workspace_state_path, CanvasViewport, PersistedWorkspaceState, WindowGeometry, WindowPreset,
     WindowProcessStatus, WorkspaceState,
 };
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,9 @@ enum FrontendEvent {
     },
     FocusWindow {
         id: String,
+    },
+    UpdateViewport {
+        viewport: CanvasViewport,
     },
     UpdateWindowGeometry {
         id: String,
@@ -144,6 +147,13 @@ impl AppRuntime {
                 if !self.workspace.focus_window(&id) {
                     return Vec::new();
                 }
+                let _ = self.persist();
+                vec![BackendEvent::WorkspaceState {
+                    workspace: self.workspace.persisted().clone(),
+                }]
+            }
+            FrontendEvent::UpdateViewport { viewport } => {
+                self.workspace.update_viewport(viewport);
                 let _ = self.persist();
                 vec![BackendEvent::WorkspaceState {
                     workspace: self.workspace.persisted().clone(),

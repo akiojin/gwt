@@ -31,10 +31,7 @@
       }
 
       body {
-        background-image:
-          linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
-        background-size: 24px 24px;
+        background: #edf1f6;
       }
 
       #app {
@@ -46,6 +43,23 @@
       .canvas {
         position: absolute;
         inset: 0;
+        overflow: hidden;
+        cursor: grab;
+      }
+
+      .canvas.panning {
+        cursor: grabbing;
+      }
+
+      .canvas-stage {
+        position: absolute;
+        inset: 0;
+        transform-origin: 0 0;
+        will-change: transform;
+        background-image:
+          linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+        background-size: 24px 24px;
       }
 
       .hint {
@@ -295,8 +309,10 @@
   </head>
   <body>
     <div id="app">
-      <div class="hint">Drag, resize, add terminals</div>
-      <div class="canvas" id="canvas"></div>
+      <div class="hint">Drag windows | Drag empty canvas to pan | Ctrl/Cmd + wheel to zoom</div>
+      <div class="canvas" id="canvas">
+        <div class="canvas-stage" id="canvas-stage"></div>
+      </div>
       <button class="add-button" id="add-button" aria-label="Add terminal">+</button>
       <div class="modal-backdrop" id="preset-modal">
         <div class="modal">
@@ -327,6 +343,7 @@
       import { FitAddon } from "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm";
 
       const canvas = document.getElementById("canvas");
+      const stage = document.getElementById("canvas-stage");
       const addButton = document.getElementById("add-button");
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
@@ -338,7 +355,9 @@
 
       let focusedId = null;
       let dragState = null;
+      let panState = null;
       let resizeState = null;
+      let viewport = { x: 0, y: 0, zoom: 1 };
 
       function send(message) {
         window.ipc.postMessage(JSON.stringify(message));
@@ -356,8 +375,23 @@
         return Math.max(min, value);
       }
 
+      function clampRange(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+      }
+
       function parseNumber(value) {
         return Number.parseFloat(value || "0");
+      }
+
+      function applyViewport() {
+        stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+      }
+
+      function persistViewport() {
+        send({
+          kind: "update_viewport",
+          viewport,
+        });
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -513,7 +547,7 @@
             </div>
             <div class="resize-handle"></div>
           `;
-          canvas.appendChild(element);
+          stage.appendChild(element);
           windowMap.set(windowData.id, element);
 
           const titlebar = element.querySelector(".titlebar");
@@ -580,6 +614,13 @@
       }
 
       function renderWorkspace(workspace) {
+        viewport = {
+          x: workspace.viewport.x,
+          y: workspace.viewport.y,
+          zoom: workspace.viewport.zoom,
+        };
+        applyViewport();
+
         const ids = new Set(workspace.windows.map((windowData) => windowData.id));
         for (const [windowId, element] of windowMap.entries()) {
           if (ids.has(windowId)) {
@@ -606,13 +647,20 @@
       }
 
       window.addEventListener("pointermove", (event) => {
+        if (panState && panState.pointerId === event.pointerId) {
+          viewport.x = panState.x + event.clientX - panState.startX;
+          viewport.y = panState.y + event.clientY - panState.startY;
+          applyViewport();
+          return;
+        }
+
         if (dragState && dragState.pointerId === event.pointerId) {
           const element = windowMap.get(dragState.id);
           if (!element) {
             return;
           }
-          element.style.left = `${dragState.left + event.clientX - dragState.startX}px`;
-          element.style.top = `${dragState.top + event.clientY - dragState.startY}px`;
+          element.style.left = `${dragState.left + (event.clientX - dragState.startX) / viewport.zoom}px`;
+          element.style.top = `${dragState.top + (event.clientY - dragState.startY) / viewport.zoom}px`;
           return;
         }
 
@@ -622,11 +670,11 @@
             return;
           }
           element.style.width = `${clamp(
-            resizeState.width + event.clientX - resizeState.startX,
+            resizeState.width + (event.clientX - resizeState.startX) / viewport.zoom,
             420,
           )}px`;
           element.style.height = `${clamp(
-            resizeState.height + event.clientY - resizeState.startY,
+            resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
             260,
           )}px`;
           fitTerminal(resizeState.id, false);
@@ -634,6 +682,15 @@
       });
 
       window.addEventListener("pointerup", (event) => {
+        if (panState && panState.pointerId === event.pointerId) {
+          canvas.classList.remove("panning");
+          send({
+            kind: "update_viewport",
+            viewport,
+          });
+          panState = null;
+        }
+
         if (dragState && dragState.pointerId === event.pointerId) {
           const runtime = terminalMap.get(dragState.id);
           sendGeometry(
@@ -655,6 +712,44 @@
           resizeState = null;
         }
       });
+
+      canvas.addEventListener("pointerdown", (event) => {
+        if (event.target !== canvas && event.target !== stage) {
+          return;
+        }
+        panState = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          x: viewport.x,
+          y: viewport.y,
+        };
+        canvas.classList.add("panning");
+        canvas.setPointerCapture(event.pointerId);
+      });
+
+      canvas.addEventListener(
+        "wheel",
+        (event) => {
+          if (!event.ctrlKey && !event.metaKey) {
+            return;
+          }
+          event.preventDefault();
+          const rect = canvas.getBoundingClientRect();
+          const anchorX = event.clientX - rect.left;
+          const anchorY = event.clientY - rect.top;
+          const worldX = (anchorX - viewport.x) / viewport.zoom;
+          const worldY = (anchorY - viewport.y) / viewport.zoom;
+          const factor = event.deltaY < 0 ? 1.1 : 0.9;
+          const nextZoom = clampRange(viewport.zoom * factor, 0.6, 2.4);
+          viewport.x = anchorX - worldX * nextZoom;
+          viewport.y = anchorY - worldY * nextZoom;
+          viewport.zoom = nextZoom;
+          applyViewport();
+          persistViewport();
+        },
+        { passive: false },
+      );
 
       addButton.addEventListener("click", openModal);
       closeModalButton.addEventListener("click", closeModal);
@@ -687,6 +782,7 @@
         },
       };
 
+      applyViewport();
       send({ kind: "frontend_ready" });
     </script>
   </body>
