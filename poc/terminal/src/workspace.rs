@@ -3,7 +3,7 @@ use crate::persistence::{
     WindowProcessStatus,
 };
 use crate::preset::WindowPreset;
-use crate::protocol::ArrangeMode;
+use crate::protocol::{ArrangeMode, FocusCycleDirection};
 
 const ARRANGE_PADDING: f64 = 24.0;
 const STACK_OFFSET_X: f64 = 28.0;
@@ -80,6 +80,29 @@ impl WorkspaceState {
         window.z_index = self.persisted.next_z_index;
         self.persisted.next_z_index += 1;
         true
+    }
+
+    pub fn cycle_focus(
+        &mut self,
+        direction: FocusCycleDirection,
+        bounds: WindowGeometry,
+    ) -> Option<String> {
+        let focus_order = self.focus_order_ids();
+        let current_id = focus_order.first()?.clone();
+
+        if focus_order.len() == 1 {
+            self.center_window(&current_id, bounds);
+            return Some(current_id);
+        }
+
+        let next_index = match direction {
+            FocusCycleDirection::Forward => 1,
+            FocusCycleDirection::Backward => focus_order.len() - 1,
+        };
+        let next_id = focus_order.get(next_index)?.clone();
+        let _ = self.focus_window(&next_id);
+        self.center_window(&next_id, bounds);
+        Some(next_id)
     }
 
     pub fn add_window(&mut self, preset: WindowPreset) -> PersistedWindowState {
@@ -197,12 +220,35 @@ impl WorkspaceState {
         }
         self.persisted.next_z_index = self.persisted.windows.len() as u32 + 1;
     }
+
+    fn focus_order_ids(&self) -> Vec<String> {
+        let mut windows = self.persisted.windows.iter().collect::<Vec<_>>();
+        windows.sort_by(|left, right| right.z_index.cmp(&left.z_index));
+        windows
+            .into_iter()
+            .map(|window| window.id.clone())
+            .collect::<Vec<_>>()
+    }
+
+    fn center_window(&mut self, id: &str, bounds: WindowGeometry) -> bool {
+        let Some(window) = self.persisted.windows.iter().find(|window| window.id == id) else {
+            return false;
+        };
+
+        let zoom = self.persisted.viewport.zoom;
+        let window_center_x = window.geometry.x + window.geometry.width / 2.0;
+        let window_center_y = window.geometry.y + window.geometry.height / 2.0;
+        self.persisted.viewport.x = bounds.width * zoom / 2.0 - window_center_x * zoom;
+        self.persisted.viewport.y = bounds.height * zoom / 2.0 - window_center_y * zoom;
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::persistence::{default_workspace_state, WindowProcessStatus};
+    use crate::protocol::FocusCycleDirection;
 
     fn arrange_bounds() -> WindowGeometry {
         WindowGeometry {
@@ -355,5 +401,70 @@ mod tests {
         assert!(codex.geometry.x < claude.geometry.x + claude.geometry.width);
         assert!(codex.geometry.y < claude.geometry.y + claude.geometry.height);
         assert_eq!(workspace.persisted().next_z_index, 4);
+    }
+
+    #[test]
+    fn cycling_focus_forward_brings_next_window_to_front_and_centers_it() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::Shell);
+
+        let focused = workspace
+            .cycle_focus(
+                FocusCycleDirection::Forward,
+                WindowGeometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1200.0,
+                    height: 800.0,
+                },
+            )
+            .expect("focused window");
+
+        assert_eq!(focused, "codex-1");
+        assert_eq!(workspace.window("codex-1").expect("codex").z_index, 4);
+        assert_eq!(workspace.persisted().next_z_index, 5);
+        assert_eq!(
+            workspace.persisted().viewport,
+            CanvasViewport {
+                x: -220.0,
+                y: 50.0,
+                zoom: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn cycling_focus_backward_wraps_and_preserves_zoom_when_centering() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::Shell);
+        workspace.update_viewport(CanvasViewport {
+            x: 12.0,
+            y: -8.0,
+            zoom: 1.25,
+        });
+
+        let focused = workspace
+            .cycle_focus(
+                FocusCycleDirection::Backward,
+                WindowGeometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1000.0,
+                    height: 800.0,
+                },
+            )
+            .expect("focused window");
+
+        assert_eq!(focused, "claude-1");
+        assert_eq!(workspace.window("claude-1").expect("claude").z_index, 4);
+        assert_eq!(workspace.persisted().next_z_index, 5);
+        assert_eq!(
+            workspace.persisted().viewport,
+            CanvasViewport {
+                x: 75.0,
+                y: 157.5,
+                zoom: 1.25,
+            }
+        );
     }
 }

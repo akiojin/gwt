@@ -213,6 +213,8 @@ start / new branch / agent / model / runtime / permissions を選べます。
 
 `Tile` で表示中の window をグリッド状に整列し、`Stack` で title bar を残した
 まま重ねて表示できます。
+`Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で focus window を順送り /
+逆送りでき、keyboard で切り替えた window は canvas の中央に寄ります。
 
 terminal 描画は runtime 時に CDN から `xterm.js` を読み込むため、初回起動時は
 ネットワーク接続が必要です。

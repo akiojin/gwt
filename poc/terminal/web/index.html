@@ -1052,6 +1052,45 @@
         };
       }
 
+      function topmostWindowId(workspace) {
+        if (!workspace.windows || workspace.windows.length === 0) {
+          return null;
+        }
+        return workspace.windows.reduce((topmost, candidate) => {
+          if (!topmost || candidate.z_index > topmost.z_index) {
+            return candidate;
+          }
+          return topmost;
+        }, null)?.id;
+      }
+
+      function cycleFocus(direction) {
+        if (windowMap.size === 0) {
+          return;
+        }
+        send({
+          kind: "cycle_focus",
+          direction,
+          bounds: visibleBounds(),
+        });
+      }
+
+      function shouldHandleFocusShortcut(event) {
+        if (event.repeat) {
+          return false;
+        }
+        if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) {
+          return false;
+        }
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") {
+          return false;
+        }
+        if (modal.classList.contains("open") || wizardModal.classList.contains("open")) {
+          return false;
+        }
+        return true;
+      }
+
       function arrangeWindows(mode) {
         send({
           kind: "arrange_windows",
@@ -1842,13 +1881,11 @@
           ensureWindow(windowData);
         }
 
-        if (!focusedId && workspace.windows.length > 0) {
-          focusedId = workspace.windows[workspace.windows.length - 1].id;
-        }
-        if (focusedId && ids.has(focusedId)) {
-          focusWindowLocally(focusedId);
-        } else if (workspace.windows.length > 0) {
-          focusWindowLocally(workspace.windows[workspace.windows.length - 1].id);
+        const topmostId = topmostWindowId(workspace);
+        if (topmostId && ids.has(topmostId)) {
+          focusWindowLocally(topmostId);
+        } else {
+          focusedId = null;
         }
       }
 
@@ -1999,6 +2036,18 @@
           zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
         },
         { passive: false },
+      );
+
+      window.addEventListener(
+        "keydown",
+        (event) => {
+          if (!shouldHandleFocusShortcut(event)) {
+            return;
+          }
+          event.preventDefault();
+          cycleFocus(event.key === "ArrowRight" ? "forward" : "backward");
+        },
+        true,
       );
 
       addButton.addEventListener("click", openModal);

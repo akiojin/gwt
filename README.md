@@ -217,6 +217,8 @@ mock workspace windows.
 
 Use `Tile` to align the visible windows into a grid. Use `Stack` to overlap
 them in a cascade while keeping each title bar accessible.
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle the focused
+window; keyboard cycling recenters the selected window in the canvas.
 
 The frontend still loads `xterm.js` from a CDN at runtime, so network access is
 required the first time you open it.

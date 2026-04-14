@@ -180,6 +180,15 @@ impl AppRuntime {
                     workspace: self.workspace.persisted().clone(),
                 })]
             }
+            FrontendEvent::CycleFocus { direction, bounds } => {
+                if self.workspace.cycle_focus(direction, bounds).is_none() {
+                    return Vec::new();
+                }
+                let _ = self.persist();
+                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
+                    workspace: self.workspace.persisted().clone(),
+                })]
+            }
             FrontendEvent::UpdateViewport { viewport } => {
                 self.workspace.update_viewport(viewport);
                 let _ = self.persist();

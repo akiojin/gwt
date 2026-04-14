@@ -14,6 +14,13 @@ pub enum ArrangeMode {
     Stack,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusCycleDirection {
+    Forward,
+    Backward,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -23,6 +30,10 @@ pub enum FrontendEvent {
     },
     FocusWindow {
         id: String,
+    },
+    CycleFocus {
+        direction: FocusCycleDirection,
+        bounds: WindowGeometry,
     },
     UpdateViewport {
         viewport: CanvasViewport,
