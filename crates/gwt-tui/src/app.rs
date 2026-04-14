@@ -14894,11 +14894,7 @@ services:
         model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
         model.pending_quit = true;
 
-        handle_confirm_message_with(
-            &mut model,
-            screens::confirm::ConfirmMessage::Accept,
-            vec![],
-        );
+        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Accept, vec![]);
 
         assert!(model.quit);
         assert!(!model.pending_quit);
@@ -14910,11 +14906,7 @@ services:
         model.confirm = screens::confirm::ConfirmState::with_message("Quit?");
         model.pending_quit = true;
 
-        handle_confirm_message_with(
-            &mut model,
-            screens::confirm::ConfirmMessage::Cancel,
-            vec![],
-        );
+        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Cancel, vec![]);
 
         assert!(!model.quit);
         assert!(!model.pending_quit);
