@@ -2806,6 +2806,7 @@ dependencies = [
  "dunce",
  "futures-util",
  "gwt-core",
+ "gwt-git",
  "gwt-terminal",
  "ignore",
  "reqwest",

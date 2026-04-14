@@ -208,9 +208,10 @@ The PoC starts a local HTTP/WebSocket server, opens a desktop WebView window,
 and prints a browser URL such as `http://127.0.0.1:<port>/` to stderr. You can
 open the same URL in a regular browser while the native app is running.
 
-The canvas supports floating `Shell`, `Claude`, `Codex`, and a read-only
-`File Tree` window. `Settings`, `Memo`, `Profile`, `Logs`, `Issue`, `SPEC`,
-`Board`, and `PR` are also available as mock workspace windows.
+The canvas supports floating `Shell`, `Claude`, `Codex`, a read-only
+`File Tree` window, and a read-only `Branches` window. `Settings`, `Memo`,
+`Profile`, `Logs`, `Issue`, `SPEC`, `Board`, and `PR` are also available as
+mock workspace windows.
 
 The frontend still loads `xterm.js` from a CDN at runtime, so network access is
 required the first time you open it.

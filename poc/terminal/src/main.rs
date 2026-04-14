@@ -19,9 +19,9 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt_terminal::{Pane, PaneStatus};
 use poc_terminal::{
-    detect_shell_program, list_directory_entries, load_workspace_state, resolve_launch_spec,
-    save_workspace_state, workspace_state_path, BackendEvent, FrontendEvent, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WorkspaceState,
+    detect_shell_program, list_branch_entries, list_directory_entries, load_workspace_state,
+    resolve_launch_spec, save_workspace_state, workspace_state_path, BackendEvent, FrontendEvent,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
 };
 use tao::{
     event::{Event, WindowEvent},
@@ -212,6 +212,10 @@ impl AppRuntime {
                 let event = self.load_file_tree_event(&id, &path);
                 vec![OutboundEvent::reply(client_id, event)]
             }
+            FrontendEvent::LoadBranches { id } => {
+                let event = self.load_branches_event(&id);
+                vec![OutboundEvent::reply(client_id, event)]
+            }
         }
     }
 
@@ -290,6 +294,33 @@ impl AppRuntime {
             Err(error) => BackendEvent::FileTreeError {
                 id: id.to_string(),
                 path: path.to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn load_branches_event(&self, id: &str) -> BackendEvent {
+        let Some(window) = self.workspace.window(id) else {
+            return BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            };
+        };
+
+        if window.preset != WindowPreset::Branches {
+            return BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window is not a branches list".to_string(),
+            };
+        }
+
+        match list_branch_entries(&self.workdir) {
+            Ok(entries) => BackendEvent::BranchEntries {
+                id: id.to_string(),
+                entries,
+            },
+            Err(error) => BackendEvent::BranchError {
+                id: id.to_string(),
                 message: error.to_string(),
             },
         }

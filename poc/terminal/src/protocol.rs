@@ -1,3 +1,4 @@
+use crate::branch_list::BranchListEntry;
 use crate::file_tree::FileTreeEntry;
 use crate::persistence::{
     CanvasViewport, PersistedWorkspaceState, WindowGeometry, WindowProcessStatus,
@@ -35,6 +36,9 @@ pub enum FrontendEvent {
         id: String,
         path: Option<String>,
     },
+    LoadBranches {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +68,14 @@ pub enum BackendEvent {
     FileTreeError {
         id: String,
         path: String,
+        message: String,
+    },
+    BranchEntries {
+        id: String,
+        entries: Vec<BranchListEntry>,
+    },
+    BranchError {
+        id: String,
         message: String,
     },
 }

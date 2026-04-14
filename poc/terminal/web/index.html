@@ -127,6 +127,7 @@
       }
 
       .workspace-window.surface-file-tree,
+      .workspace-window.surface-branches,
       .workspace-window.surface-mock {
         background: rgba(255, 255, 255, 0.98);
       }
@@ -148,6 +149,7 @@
       }
 
       .surface-file-tree .titlebar,
+      .surface-branches .titlebar,
       .surface-mock .titlebar {
         background: rgba(248, 250, 252, 0.98);
         color: #0f172a;
@@ -185,6 +187,7 @@
       }
 
       .surface-file-tree .status-chip,
+      .surface-branches .status-chip,
       .surface-mock .status-chip {
         color: #334155;
       }
@@ -232,6 +235,7 @@
       }
 
       .surface-file-tree .icon-button,
+      .surface-branches .icon-button,
       .surface-mock .icon-button {
         color: #334155;
       }
@@ -253,6 +257,7 @@
       }
 
       .surface-file-tree .window-body,
+      .surface-branches .window-body,
       .surface-mock .window-body {
         background: #ffffff;
       }
@@ -283,6 +288,7 @@
       }
 
       .file-tree-root,
+      .branch-list-root,
       .mock-root {
         position: absolute;
         inset: 0;
@@ -291,6 +297,7 @@
       }
 
       .file-tree-toolbar,
+      .branch-toolbar,
       .mock-toolbar {
         display: flex;
         align-items: center;
@@ -301,6 +308,7 @@
       }
 
       .file-tree-path,
+      .branch-heading,
       .mock-heading {
         min-width: 0;
         font-size: 12px;
@@ -312,12 +320,14 @@
       }
 
       .file-tree-scroll,
+      .branch-scroll,
       .mock-scroll {
         flex: 1;
         overflow: auto;
       }
 
-      .file-tree-list {
+      .file-tree-list,
+      .branch-list {
         padding: 8px 0;
       }
 
@@ -369,7 +379,77 @@
         color: #475569;
       }
 
+      .branch-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .branch-row:last-child {
+        border-bottom: none;
+      }
+
+      .branch-main {
+        min-width: 0;
+      }
+
+      .branch-name {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        margin-bottom: 4px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .branch-name-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .branch-head {
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(16, 185, 129, 0.12);
+        color: #047857;
+        font-size: 10px;
+      }
+
+      .branch-upstream,
+      .branch-date {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .branch-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .branch-scope {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+        font-size: 11px;
+      }
+
+      .branch-summary {
+        font-size: 11px;
+        color: #475569;
+      }
+
       .file-tree-empty,
+      .branch-empty,
       .mock-empty {
         padding: 16px 12px;
         font-size: 12px;
@@ -537,6 +617,10 @@
                 <strong>File Tree</strong>
                 <span>Browse repository files in a read-only tree</span>
               </button>
+              <button class="preset-button" data-preset="branches">
+                <strong>Branches</strong>
+                <span>Browse repository branches in a read-only list</span>
+              </button>
               <button class="preset-button" data-preset="settings">
                 <strong>Settings</strong>
                 <span>Open the settings surface</span>
@@ -597,6 +681,7 @@
       const terminalMap = new Map();
       const windowMap = new Map();
       const fileTreeStateMap = new Map();
+      const branchListStateMap = new Map();
       const pendingMessages = [];
 
       let socket = null;
@@ -613,6 +698,9 @@
         }
         if (preset === "file_tree") {
           return "file-tree";
+        }
+        if (preset === "branches") {
+          return "branches";
         }
         return "mock";
       }
@@ -949,6 +1037,17 @@
         return fileTreeStateMap.get(windowId);
       }
 
+      function ensureBranchListState(windowId) {
+        if (!branchListStateMap.has(windowId)) {
+          branchListStateMap.set(windowId, {
+            entries: [],
+            loading: false,
+            error: "",
+          });
+        }
+        return branchListStateMap.get(windowId);
+      }
+
       function requestFileTree(windowId, path = "") {
         const state = ensureFileTreeState(windowId);
         if (state.loading.has(path)) {
@@ -959,6 +1058,18 @@
           kind: "load_file_tree",
           id: windowId,
           path: path || null,
+        });
+      }
+
+      function requestBranches(windowId) {
+        const state = ensureBranchListState(windowId);
+        if (state.loading) {
+          return;
+        }
+        state.loading = true;
+        send({
+          kind: "load_branches",
+          id: windowId,
         });
       }
 
@@ -1048,11 +1159,79 @@
         }
       }
 
+      function renderBranches(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const state = ensureBranchListState(windowId);
+        const list = element.querySelector(".branch-list");
+        if (!list) {
+          return;
+        }
+        list.innerHTML = "";
+
+        if (state.error) {
+          const errorRow = document.createElement("div");
+          errorRow.className = "branch-empty";
+          errorRow.textContent = state.error;
+          list.appendChild(errorRow);
+          return;
+        }
+
+        if (state.loading && state.entries.length === 0) {
+          const loadingRow = document.createElement("div");
+          loadingRow.className = "branch-empty";
+          loadingRow.textContent = "Loading branches";
+          list.appendChild(loadingRow);
+          return;
+        }
+
+        if (state.entries.length === 0) {
+          const emptyRow = document.createElement("div");
+          emptyRow.className = "branch-empty";
+          emptyRow.textContent = "No branches";
+          list.appendChild(emptyRow);
+          return;
+        }
+
+        for (const entry of state.entries) {
+          const row = document.createElement("div");
+          row.className = "branch-row";
+          const summaryParts = [];
+          if (entry.ahead || entry.behind) {
+            summaryParts.push(`↑${entry.ahead} ↓${entry.behind}`);
+          } else {
+            summaryParts.push("synced");
+          }
+          row.innerHTML = `
+            <div class="branch-main">
+              <div class="branch-name">
+                <span class="branch-name-text">${entry.name}</span>
+                ${entry.is_head ? '<span class="branch-head">HEAD</span>' : ""}
+              </div>
+              <div class="branch-upstream">${entry.upstream || "No upstream"}</div>
+              <div class="branch-date">${entry.last_commit_date || "No commit date"}</div>
+            </div>
+            <div class="branch-meta">
+              <span class="branch-scope">${entry.scope}</span>
+              <span class="branch-summary">${summaryParts.join(" · ")}</span>
+            </div>
+          `;
+          list.appendChild(row);
+        }
+      }
+
       function mountWindowBody(windowData, element) {
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
         const surface = presetSurface(windowData.preset);
-        element.classList.remove("surface-terminal", "surface-file-tree", "surface-mock");
+        element.classList.remove(
+          "surface-terminal",
+          "surface-file-tree",
+          "surface-branches",
+          "surface-mock",
+        );
         element.classList.add(`surface-${surface}`);
 
         if (surface === "terminal") {
@@ -1107,6 +1286,41 @@
             requestFileTree(windowData.id, "");
           }
           renderFileTree(windowData.id);
+          return;
+        }
+
+        if (surface === "branches") {
+          body.innerHTML = `
+            <div class="branch-list-root">
+              <div class="branch-toolbar">
+                <div class="branch-heading">Repository branches</div>
+                <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
+              </div>
+              <div class="branch-scroll">
+                <div class="branch-list"></div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='refresh-branches']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = ensureBranchListState(windowData.id);
+              state.entries = [];
+              state.loading = false;
+              state.error = "";
+              requestBranches(windowData.id);
+              renderBranches(windowData.id);
+            });
+          const state = ensureBranchListState(windowData.id);
+          if (state.entries.length === 0 && !state.loading && !state.error) {
+            requestBranches(windowData.id);
+          }
+          renderBranches(windowData.id);
           return;
         }
 
@@ -1239,6 +1453,7 @@
           pendingOutputMap.delete(windowId);
           pendingSnapshotMap.delete(windowId);
           fileTreeStateMap.delete(windowId);
+          branchListStateMap.delete(windowId);
           element.remove();
           windowMap.delete(windowId);
         }
@@ -1284,6 +1499,21 @@
             state.loading.delete(event.path);
             state.error = event.message;
             renderFileTree(event.id);
+            break;
+          }
+          case "branch_entries": {
+            const state = ensureBranchListState(event.id);
+            state.entries = event.entries;
+            state.loading = false;
+            state.error = "";
+            renderBranches(event.id);
+            break;
+          }
+          case "branch_error": {
+            const state = ensureBranchListState(event.id);
+            state.loading = false;
+            state.error = event.message;
+            renderBranches(event.id);
             break;
           }
         }

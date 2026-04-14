@@ -8,6 +8,7 @@ pub enum WindowPreset {
     Claude,
     Codex,
     FileTree,
+    Branches,
     Settings,
     Memo,
     Profile,
@@ -22,15 +23,17 @@ pub enum WindowPreset {
 pub enum WindowSurface {
     Terminal,
     FileTree,
+    Branches,
     Mock,
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 12] = [
+    pub const ALL: [WindowPreset; 13] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
         WindowPreset::FileTree,
+        WindowPreset::Branches,
         WindowPreset::Settings,
         WindowPreset::Memo,
         WindowPreset::Profile,
@@ -47,6 +50,7 @@ impl WindowPreset {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::FileTree => "File Tree",
+            Self::Branches => "Branches",
             Self::Settings => "Settings",
             Self::Memo => "Memo",
             Self::Profile => "Profile",
@@ -64,6 +68,7 @@ impl WindowPreset {
             Self::Claude => "Start the Claude CLI when available",
             Self::Codex => "Start the Codex CLI when available",
             Self::FileTree => "Browse repository files in a read-only tree",
+            Self::Branches => "Browse repository branches in a read-only list",
             Self::Settings => "Placeholder settings surface",
             Self::Memo => "Placeholder notes surface",
             Self::Profile => "Placeholder profile surface",
@@ -81,6 +86,7 @@ impl WindowPreset {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::FileTree => "file-tree",
+            Self::Branches => "branches",
             Self::Settings => "settings",
             Self::Memo => "memo",
             Self::Profile => "profile",
@@ -96,6 +102,7 @@ impl WindowPreset {
         match self {
             Self::Shell | Self::Claude | Self::Codex => WindowSurface::Terminal,
             Self::FileTree => WindowSurface::FileTree,
+            Self::Branches => WindowSurface::Branches,
             Self::Settings
             | Self::Memo
             | Self::Profile
@@ -115,6 +122,7 @@ impl WindowPreset {
         match self.surface() {
             WindowSurface::Terminal => (720.0, 420.0),
             WindowSurface::FileTree => (420.0, 520.0),
+            WindowSurface::Branches => (520.0, 420.0),
             WindowSurface::Mock => (420.0, 300.0),
         }
     }
@@ -125,6 +133,7 @@ impl WindowPreset {
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
             Self::FileTree
+            | Self::Branches
             | Self::Settings
             | Self::Memo
             | Self::Profile
@@ -245,6 +254,7 @@ where
             }
         }
         WindowPreset::FileTree
+        | WindowPreset::Branches
         | WindowPreset::Settings
         | WindowPreset::Memo
         | WindowPreset::Profile
@@ -273,6 +283,13 @@ mod tests {
         assert_eq!(WindowPreset::FileTree.surface(), WindowSurface::FileTree);
         assert!(!WindowPreset::FileTree.requires_process());
         assert_eq!(WindowPreset::FileTree.title(), "File Tree");
+    }
+
+    #[test]
+    fn branches_preset_is_non_process_branch_surface() {
+        assert_eq!(WindowPreset::Branches.surface(), WindowSurface::Branches);
+        assert!(!WindowPreset::Branches.requires_process());
+        assert_eq!(WindowPreset::Branches.title(), "Branches");
     }
 
     #[test]

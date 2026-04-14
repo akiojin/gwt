@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 gwt-core.workspace = true
+gwt-git.workspace = true
 gwt-terminal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

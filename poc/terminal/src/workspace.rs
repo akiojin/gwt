@@ -145,6 +145,15 @@ mod tests {
     }
 
     #[test]
+    fn adding_branches_window_marks_it_ready_without_process() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let window = workspace.add_window(WindowPreset::Branches);
+        assert_eq!(window.title, "Branches");
+        assert_eq!(window.preset, WindowPreset::Branches);
+        assert_eq!(window.status, WindowProcessStatus::Ready);
+    }
+
+    #[test]
     fn updating_geometry_replaces_window_geometry() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         let updated = workspace.update_geometry(

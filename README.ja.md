@@ -205,8 +205,9 @@ WebView を開きます。起動すると stderr に `http://127.0.0.1:<port>/` 
 を出力するので、native app の起動中は同じ URL を通常の browser でも開けます。
 
 canvas では `Shell` / `Claude` / `Codex` の terminal window と、read-only の
-`File Tree` window を扱えます。`Settings` / `Memo` / `Profile` / `Logs` /
-`Issue` / `SPEC` / `Board` / `PR` は mock window として追加できます。
+`File Tree` window / `Branches` window を扱えます。`Settings` / `Memo` /
+`Profile` / `Logs` / `Issue` / `SPEC` / `Board` / `PR` は mock window として
+追加できます。
 
 terminal 描画は runtime 時に CDN から `xterm.js` を読み込むため、初回起動時は
 ネットワーク接続が必要です。
