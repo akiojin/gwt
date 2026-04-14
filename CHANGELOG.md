@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.0.3] - 2026-04-14
+
+### Bug Fixes
+
+- Add JS wrapper for npx/bunx binary execution
+
 ## [9.0.2] - 2026-04-14
 
 ### Bug Fixes
