@@ -1198,13 +1198,47 @@ pub fn update(model: &mut Model, msg: Message) {
         }
         Message::Wizard(msg) => {
             let (launch_config, focus_session_id) = if let Some(ref mut wizard) = model.wizard {
+                let msg_label = format!("{msg:?}");
+                let dispatch_started = std::time::Instant::now();
+                let wizard_before = wizard.clone();
                 screens::wizard::update(wizard, msg);
+                input_trace::trace_dispatch_timing(
+                    "wizard_update",
+                    &msg_label,
+                    dispatch_started.elapsed(),
+                    None,
+                );
                 let project_root = wizard
                     .worktree_path
                     .clone()
                     .unwrap_or_else(|| model.repo_path.clone());
-                sync_wizard_docker_status(wizard, &project_root);
+                let docker_sync_detail =
+                    if wizard_docker_status_sync_required(&wizard_before, wizard) {
+                        let docker_sync_started = std::time::Instant::now();
+                        sync_wizard_docker_status(wizard, &project_root);
+                        input_trace::trace_dispatch_timing(
+                            "wizard_docker_sync",
+                            &msg_label,
+                            docker_sync_started.elapsed(),
+                            Some("performed"),
+                        );
+                        "docker_sync=performed"
+                    } else {
+                        input_trace::trace_dispatch_timing(
+                            "wizard_docker_sync",
+                            &msg_label,
+                            Duration::ZERO,
+                            Some("skipped"),
+                        );
+                        "docker_sync=skipped"
+                    };
                 maybe_start_wizard_branch_suggestions(wizard);
+                input_trace::trace_dispatch_timing(
+                    "wizard_dispatch",
+                    &msg_label,
+                    dispatch_started.elapsed(),
+                    Some(docker_sync_detail),
+                );
                 let completed = wizard.completed;
                 let focus_session_id = if completed {
                     wizard.focus_session_id.clone()
@@ -7267,6 +7301,13 @@ fn sync_wizard_docker_status(wizard: &mut screens::wizard::WizardState, project_
     if !wizard_docker_lifecycle_supported(status, wizard.docker_lifecycle_intent) {
         wizard.docker_lifecycle_intent = default_docker_lifecycle_intent(status);
     }
+}
+
+fn wizard_docker_status_sync_required(
+    before: &screens::wizard::WizardState,
+    after: &screens::wizard::WizardState,
+) -> bool {
+    before.runtime_target != after.runtime_target || before.docker_service != after.docker_service
 }
 
 fn detect_wizard_docker_service_status(
@@ -21168,6 +21209,92 @@ services:
     }
 
     #[test]
+    fn update_wizard_move_down_does_not_resync_docker_status_for_unrelated_steps() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        write_docker_launch_compose_fixture(dir.path());
+        let call_count_path = dir.path().join("docker-call-count");
+        let fake_docker = format!(
+            "#!/bin/sh\ncount_file=\"{}\"\ncount=0\nif [ -f \"$count_file\" ]; then count=$(cat \"$count_file\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\nprintf 'gwt\\trunning\\n'\n",
+            call_count_path.display()
+        );
+
+        with_fake_docker(&fake_docker, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+            model.wizard = Some(screens::wizard::WizardState {
+                step: screens::wizard::WizardStep::BranchAction,
+                runtime_target: LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_context: Some(screens::wizard::DockerWizardContext {
+                    services: vec!["gwt".to_string()],
+                    suggested_service: Some("gwt".to_string()),
+                }),
+                ..Default::default()
+            });
+
+            update(
+                &mut model,
+                Message::Wizard(screens::wizard::WizardMessage::MoveDown),
+            );
+
+            let call_count = fs::read_to_string(&call_count_path)
+                .ok()
+                .and_then(|text| text.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            assert_eq!(
+                call_count, 0,
+                "MoveDown on a non-Docker step should not re-check docker compose status"
+            );
+        });
+    }
+
+    #[test]
+    fn update_wizard_select_resyncs_docker_status_when_runtime_target_changes() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        init_git_repo(dir.path());
+        write_docker_launch_compose_fixture(dir.path());
+        let call_count_path = dir.path().join("docker-call-count");
+        let fake_docker = format!(
+            "#!/bin/sh\ncount_file=\"{}\"\ncount=0\nif [ -f \"$count_file\" ]; then count=$(cat \"$count_file\"); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$count_file\"\nprintf 'gwt\\trunning\\n'\n",
+            call_count_path.display()
+        );
+
+        with_fake_docker(&fake_docker, || {
+            let mut model = Model::new(dir.path().to_path_buf());
+            model.wizard = Some(screens::wizard::WizardState {
+                step: screens::wizard::WizardStep::RuntimeTarget,
+                selected: 1,
+                runtime_target: LaunchRuntimeTarget::Host,
+                docker_context: Some(screens::wizard::DockerWizardContext {
+                    services: vec!["gwt".to_string()],
+                    suggested_service: Some("gwt".to_string()),
+                }),
+                ..Default::default()
+            });
+
+            update(
+                &mut model,
+                Message::Wizard(screens::wizard::WizardMessage::Select),
+            );
+
+            let call_count = fs::read_to_string(&call_count_path)
+                .ok()
+                .and_then(|text| text.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let wizard = model.wizard.as_ref().expect("wizard remains open");
+            assert_eq!(
+                call_count, 1,
+                "changing runtime target should refresh docker status"
+            );
+            assert_eq!(wizard.runtime_target, LaunchRuntimeTarget::Docker);
+            assert_eq!(
+                wizard.docker_service_status,
+                gwt_docker::ComposeServiceStatus::Running
+            );
+        });
+    }
+
+    #[test]
     fn wizard_branch_suggestion_context_includes_spec_and_branch_seed() {
         let mut wizard = screens::wizard::WizardState::default();
         wizard.branch_name = "feature/spec-7-voice".into();
@@ -24018,6 +24145,42 @@ exit 1
         assert!(text.contains("\"stage\":\"pty_forward\""));
         assert!(text.contains("\"session_id\":\"shell-0\""));
         assert!(text.contains("\"bytes_hex\":\"0d\""));
+    }
+
+    #[test]
+    fn update_wizard_appends_opt_in_dispatch_trace_record() {
+        let _guard = INPUT_TRACE_ENV_TEST_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input-trace.jsonl");
+        let previous = std::env::var_os(crate::input_trace::INPUT_TRACE_PATH_ENV);
+        std::env::set_var(crate::input_trace::INPUT_TRACE_PATH_ENV, &path);
+
+        let mut model = test_model();
+        model.wizard = Some(screens::wizard::WizardState {
+            step: screens::wizard::WizardStep::BranchAction,
+            runtime_target: LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_context: Some(screens::wizard::DockerWizardContext {
+                services: vec!["gwt".to_string()],
+                suggested_service: Some("gwt".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        update(
+            &mut model,
+            Message::Wizard(screens::wizard::WizardMessage::MoveDown),
+        );
+
+        match previous {
+            Some(value) => std::env::set_var(crate::input_trace::INPUT_TRACE_PATH_ENV, value),
+            None => std::env::remove_var(crate::input_trace::INPUT_TRACE_PATH_ENV),
+        }
+
+        let text = std::fs::read_to_string(&path).expect("read trace file");
+        assert!(text.contains("\"stage\":\"wizard_dispatch\""));
+        assert!(text.contains("\"message\":\"MoveDown\""));
+        assert!(text.contains("\"detail\":\"docker_sync=skipped\""));
     }
 
     #[test]
