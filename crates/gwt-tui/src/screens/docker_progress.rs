@@ -4,9 +4,10 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, Paragraph},
+    widgets::{Gauge, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
@@ -145,12 +146,31 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
     }
 
     let width = 50_u16.min(area.width);
-    let height = 12_u16.min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog = Rect::new(x, y, width, height);
+    let inner_width = width.saturating_sub(2).max(1) as usize;
 
-    frame.render_widget(Clear, dialog);
+    // Calculate dynamic height: status(1) + error_or_message(wrapped) + empty(1)
+    //   + stages(5) + gauge(1) + borders(2)
+    let variable_text = if let Some(ref err) = state.error {
+        format!("Error: {err}")
+    } else if !state.message.is_empty() {
+        format!("Message: {}", state.message)
+    } else {
+        String::new()
+    };
+    let variable_lines: u16 = if variable_text.is_empty() {
+        0
+    } else {
+        let w = UnicodeWidthStr::width(variable_text.as_str());
+        if w == 0 {
+            1
+        } else {
+            w.div_ceil(inner_width) as u16
+        }
+    };
+    // status(1) + variable + empty(1) + stages(5) + gauge(1) + borders(2)
+    let height = (1 + variable_lines + 1 + 5 + 1 + 2)
+        .max(10)
+        .min(area.height);
 
     let border_color = if state.stage == DockerStage::Failed {
         theme::color::ERROR
@@ -160,14 +180,7 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
         theme::color::FOCUS
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(theme::border::modal())
-        .title("Docker")
-        .border_style(Style::default().fg(border_color));
-
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
+    let inner = super::render_modal_frame(frame, area, "Docker", border_color, width, height);
 
     if inner.height < 3 || inner.width < 4 {
         return;
@@ -233,7 +246,7 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
         inner.height.saturating_sub(2),
     );
 
-    let paragraph = Paragraph::new(lines);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, text_area);
 
     let gauge = Gauge::default()
@@ -458,6 +471,23 @@ mod tests {
         let state = DockerProgressState::default();
         let full_text = render_text(&state);
         assert!(!full_text.contains("Docker"));
+    }
+
+    #[test]
+    fn render_long_error_wraps_without_truncation() {
+        let long_err = "E".repeat(120);
+        let state = DockerProgressState {
+            visible: true,
+            stage: DockerStage::Failed,
+            error: Some(long_err.clone()),
+            ..DockerProgressState::default()
+        };
+        let text = render_text(&state);
+        let e_count = text.chars().filter(|ch| *ch == 'E').count();
+        assert!(
+            e_count >= 120,
+            "Expected at least 120 'E' chars in buffer, found {e_count}"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -113,20 +113,15 @@ pub fn render(state: &CleanupConfirmState, frame: &mut Frame, area: Rect) {
         .saturating_add(if state.has_risky_rows() { 9 } else { 8 })
         .min(area.height);
     let height = body_height.max(9);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog = Rect::new(x, y, width, height);
 
-    frame.render_widget(Clear, dialog);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(theme::border::modal())
-        .title(" Confirm Cleanup ")
-        .border_style(Style::default().fg(theme::color::WARNING));
-
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
+    let inner = super::render_modal_frame(
+        frame,
+        area,
+        " Confirm Cleanup ",
+        theme::color::WARNING,
+        width,
+        height,
+    );
 
     if inner.height < 4 || inner.width < 8 {
         return;

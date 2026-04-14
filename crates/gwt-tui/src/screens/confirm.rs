@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
@@ -85,16 +85,7 @@ pub fn render(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Centered dialog — fixed size
-    let dialog = super::centered_rect(40, 7, area);
-
-    frame.render_widget(Clear, dialog);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(theme::border::modal())
-        .title("Confirm")
-        .border_style(Style::default().fg(theme::color::ACTIVE));
+    let inner = super::render_modal_frame(frame, area, "Confirm", theme::color::ACTIVE, 40, 7);
 
     let yes_style = if state.selected == ConfirmChoice::Yes {
         Style::default()
@@ -124,10 +115,8 @@ pub fn render(state: &ConfirmState, frame: &mut Frame, area: Rect) {
         ]),
     ];
 
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme::color::TEXT_PRIMARY));
-    frame.render_widget(paragraph, dialog);
+    let paragraph = Paragraph::new(text).style(Style::default().fg(theme::color::TEXT_PRIMARY));
+    frame.render_widget(paragraph, inner);
 }
 
 #[cfg(test)]

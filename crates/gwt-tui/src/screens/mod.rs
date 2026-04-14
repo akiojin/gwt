@@ -74,6 +74,27 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Render a modal dialog frame (Clear + bordered Block) and return the inner Rect.
+pub fn render_modal_frame(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    border_color: Color,
+    width: u16,
+    height: u16,
+) -> Rect {
+    let dialog = centered_rect(width, height, area);
+    frame.render_widget(Clear, dialog);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_type(theme::border::modal())
+        .border_style(Style::default().fg(border_color));
+    let inner = block.inner(dialog);
+    frame.render_widget(block, dialog);
+    inner
+}
+
 /// Build a tab title line for embedding in a Block title.
 ///
 /// Active tab is yellow/bold, inactive tabs are gray, separated by │.
