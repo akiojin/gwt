@@ -766,7 +766,7 @@
       <div class="hint">
         <span class="connection-dot" id="connection-dot"></span>
         <span id="connection-label">Connecting</span>
-        <span>Drag windows | Drag empty canvas to pan | Ctrl/Cmd + wheel to zoom</span>
+        <span>Drag windows | Drag empty canvas to pan | Use +/- buttons or Ctrl/Cmd + wheel to zoom</span>
       </div>
       <div class="canvas" id="canvas">
         <div class="canvas-stage" id="canvas-stage"></div>
@@ -774,6 +774,9 @@
       <div class="floating-actions">
         <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
         <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
+        <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
+        <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
+        <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
         <button class="add-button" id="add-button" aria-label="Add window">+</button>
       </div>
       <div class="modal-backdrop" id="preset-modal">
@@ -877,6 +880,9 @@
       const addButton = document.getElementById("add-button");
       const tileButton = document.getElementById("tile-button");
       const stackButton = document.getElementById("stack-button");
+      const zoomOutButton = document.getElementById("zoom-out-button");
+      const zoomResetButton = document.getElementById("zoom-reset-button");
+      const zoomInButton = document.getElementById("zoom-in-button");
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
       const wizardModal = document.getElementById("wizard-modal");
@@ -1006,6 +1012,35 @@
           kind: "update_viewport",
           viewport,
         });
+      }
+
+      function canvasCenterAnchor() {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: rect.width / 2,
+          y: rect.height / 2,
+        };
+      }
+
+      function zoomCanvasAt(anchorX, anchorY, nextZoom) {
+        const clampedZoom = clampRange(nextZoom, 0.6, 2.4);
+        const worldX = (anchorX - viewport.x) / viewport.zoom;
+        const worldY = (anchorY - viewport.y) / viewport.zoom;
+        viewport.x = anchorX - worldX * clampedZoom;
+        viewport.y = anchorY - worldY * clampedZoom;
+        viewport.zoom = clampedZoom;
+        applyViewport();
+        persistViewport();
+      }
+
+      function zoomCanvasByFactor(factor) {
+        const anchor = canvasCenterAnchor();
+        zoomCanvasAt(anchor.x, anchor.y, viewport.zoom * factor);
+      }
+
+      function resetCanvasZoom() {
+        const anchor = canvasCenterAnchor();
+        zoomCanvasAt(anchor.x, anchor.y, 1);
       }
 
       function visibleBounds() {
@@ -1960,15 +1995,8 @@
           const rect = canvas.getBoundingClientRect();
           const anchorX = event.clientX - rect.left;
           const anchorY = event.clientY - rect.top;
-          const worldX = (anchorX - viewport.x) / viewport.zoom;
-          const worldY = (anchorY - viewport.y) / viewport.zoom;
           const factor = event.deltaY < 0 ? 1.1 : 0.9;
-          const nextZoom = clampRange(viewport.zoom * factor, 0.6, 2.4);
-          viewport.x = anchorX - worldX * nextZoom;
-          viewport.y = anchorY - worldY * nextZoom;
-          viewport.zoom = nextZoom;
-          applyViewport();
-          persistViewport();
+          zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
         },
         { passive: false },
       );
@@ -1976,6 +2004,9 @@
       addButton.addEventListener("click", openModal);
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
+      zoomOutButton.addEventListener("click", () => zoomCanvasByFactor(0.9));
+      zoomResetButton.addEventListener("click", resetCanvasZoom);
+      zoomInButton.addEventListener("click", () => zoomCanvasByFactor(1.1));
       closeModalButton.addEventListener("click", closeModal);
       modal.addEventListener("click", (event) => {
         if (event.target === modal) {
