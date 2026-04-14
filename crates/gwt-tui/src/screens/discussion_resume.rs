@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{List, ListItem, Paragraph},
     Frame,
 };
 
@@ -103,16 +103,14 @@ pub fn render(state: &DiscussionResumeState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let dialog = crate::screens::centered_rect(72, 12, area);
-    frame.render_widget(Clear, dialog);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Resume Discussion ")
-        .border_type(theme::border::modal())
-        .border_style(Style::default().fg(theme::color::ACTIVE));
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
+    let inner = super::render_modal_frame(
+        frame,
+        area,
+        " Resume Discussion ",
+        theme::color::ACTIVE,
+        72,
+        12,
+    );
 
     let layout = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
