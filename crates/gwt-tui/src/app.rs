@@ -5604,6 +5604,7 @@ fn persist_and_spawn_launch(
     sessions_dir: &std::path::Path,
     mut config: LaunchConfig,
 ) -> Result<(), String> {
+    gwt_agent::normalize_launch_args(&config.agent_id, &config.command, &mut config.args);
     let worktree = config
         .working_dir
         .clone()
@@ -8654,11 +8655,26 @@ enum ScrollInputRouting {
     PtyMouse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollInputSource {
+    PtyMouse,
+    PtyRowScrollback,
+    LocalFallback,
+}
+
 fn active_session_scroll_routing(model: &Model) -> ScrollInputRouting {
     let Some(session) = model.active_session_tab() else {
         return ScrollInputRouting::LocalViewport;
     };
     session_scroll_routing(session)
+}
+
+#[cfg(test)]
+fn active_session_scroll_source(model: &Model) -> ScrollInputSource {
+    let Some(session) = model.active_session_tab() else {
+        return ScrollInputSource::PtyRowScrollback;
+    };
+    session_scroll_source(session)
 }
 
 fn session_scroll_routing_for_index(model: &Model, session_idx: usize) -> ScrollInputRouting {
@@ -8669,15 +8685,26 @@ fn session_scroll_routing_for_index(model: &Model, session_idx: usize) -> Scroll
 }
 
 fn session_scroll_routing(session: &crate::model::SessionTab) -> ScrollInputRouting {
-    if !matches!(session.tab_type, SessionTabType::Agent { .. }) {
-        return ScrollInputRouting::LocalViewport;
+    match session_scroll_source(session) {
+        ScrollInputSource::PtyMouse => ScrollInputRouting::PtyMouse,
+        ScrollInputSource::PtyRowScrollback | ScrollInputSource::LocalFallback => {
+            ScrollInputRouting::LocalViewport
+        }
+    }
+}
+
+fn session_scroll_source(session: &crate::model::SessionTab) -> ScrollInputSource {
+    if matches!(session.tab_type, SessionTabType::Agent { .. })
+        && session.vt.accepts_mouse_scroll_input()
+    {
+        return ScrollInputSource::PtyMouse;
     }
 
-    if session.vt.accepts_mouse_scroll_input() {
-        return ScrollInputRouting::PtyMouse;
+    if session.vt.uses_snapshot_scrollback() {
+        return ScrollInputSource::LocalFallback;
     }
 
-    ScrollInputRouting::LocalViewport
+    ScrollInputSource::PtyRowScrollback
 }
 
 fn log_session_scroll_routing(
@@ -8690,13 +8717,15 @@ fn log_session_scroll_routing(
     let Some(session) = model.sessions.get(session_idx) else {
         return;
     };
+    let scroll_source = session_scroll_source(session);
     crate::scroll_debug::log_lazy(|| {
         format!(
-        "event=scroll_route session={} source={} delta_rows={} routing={:?} alternate_screen={} uses_snapshot_scrollback={} max_scrollback={} snapshot_count={} mouse_reporting={} follow_live={}",
+        "event=scroll_route session={} source={} delta_rows={} routing={:?} scroll_source={:?} alternate_screen={} uses_snapshot_scrollback={} max_scrollback={} snapshot_count={} mouse_reporting={} follow_live={}",
         session.id,
         source,
         delta_rows,
         routing,
+        scroll_source,
         session.vt.screen().alternate_screen(),
         session.vt.uses_snapshot_scrollback(),
         session.vt.max_scrollback(),
@@ -12262,6 +12291,10 @@ services:
                 .viewing_history(),
             "full-screen redraw agents should still enter history view when they truly need snapshot fallback"
         );
+        assert_eq!(
+            active_session_scroll_source(&model),
+            ScrollInputSource::LocalFallback
+        );
     }
 
     #[test]
@@ -12463,6 +12496,10 @@ services:
                 .vt
                 .follow_live(),
             "PTY-driven agent scrolling should keep the local viewport pinned to live output"
+        );
+        assert_eq!(
+            active_session_scroll_source(&model),
+            ScrollInputSource::PtyMouse
         );
     }
 
@@ -13066,6 +13103,10 @@ services:
             session.vt.viewing_history(),
             "wheel input should move alternate-screen agents into local history when no PTY mouse capability was negotiated"
         );
+        assert_eq!(
+            active_session_scroll_source(&model),
+            ScrollInputSource::PtyRowScrollback
+        );
     }
 
     #[test]
@@ -13120,6 +13161,10 @@ services:
         assert!(
             session.vt.viewing_history(),
             "wheel input should move non alternate-screen panes into local history"
+        );
+        assert_eq!(
+            active_session_scroll_source(&model),
+            ScrollInputSource::PtyRowScrollback
         );
     }
 
@@ -19313,6 +19358,61 @@ services:
         assert!(command.contains(" hook runtime-state SessionStart"));
         assert!(!command.contains("GWT_MANAGED_HOOK"));
         assert!(!command.contains("node"));
+    }
+
+    #[test]
+    fn materialize_pending_launch_with_normalizes_legacy_codex_args_before_persisting() {
+        let dir = tempfile::tempdir().expect("temp sessions dir");
+        let worktree = dir.path().join("wt-feature-spec-42");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let missing_codex = dir.path().join("missing-runner").join("codex");
+
+        let mut model = test_model();
+        model.pending_launch_config = Some(LaunchConfig {
+            agent_id: AgentId::Codex,
+            command: missing_codex.to_string_lossy().into_owned(),
+            args: vec![
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ],
+            env_vars: HashMap::new(),
+            working_dir: Some(worktree),
+            branch: Some("feature/spec-42".to_string()),
+            base_branch: None,
+            display_name: "Codex".to_string(),
+            color: AgentId::Codex.default_color(),
+            model: Some("gpt-5.4".to_string()),
+            tool_version: None,
+            reasoning_level: None,
+            session_mode: SessionMode::Resume,
+            resume_session_id: Some("sess-legacy".to_string()),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            linked_issue_number: None,
+        });
+
+        materialize_pending_launch_with(&mut model, dir.path()).expect("materialize launch");
+
+        let persisted_path = fs::read_dir(dir.path())
+            .expect("read sessions dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .expect("persisted session");
+        let persisted = AgentSession::load(&persisted_path).expect("load persisted session");
+        assert_eq!(
+            persisted.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ],
+            "materialization should canonicalize old Codex configs before persisting them"
+        );
     }
 
     #[test]

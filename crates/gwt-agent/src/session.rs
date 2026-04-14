@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::launch::normalize_launch_args;
 use crate::types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget};
 
 /// Idle duration (in seconds) after which a session is considered stopped.
@@ -143,8 +144,14 @@ impl Session {
     /// Load a session from a TOML file.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        toml::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+        let mut session: Self = toml::from_str(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        normalize_launch_args(
+            &session.agent_id,
+            &session.launch_command,
+            &mut session.launch_args,
+        );
+        Ok(session)
     }
 }
 
@@ -437,6 +444,76 @@ mod tests {
         );
         assert!(loaded.launch_command.is_empty());
         assert!(loaded.launch_args.is_empty());
+    }
+
+    #[test]
+    fn load_legacy_codex_toml_injects_no_alt_screen_into_launch_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-codex.toml");
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let mut legacy = toml::map::Map::new();
+        legacy.insert("id".into(), toml::Value::String(session.id.clone()));
+        legacy.insert(
+            "worktree_path".into(),
+            toml::Value::String(session.worktree_path.display().to_string()),
+        );
+        legacy.insert("branch".into(), toml::Value::String(session.branch.clone()));
+        legacy.insert(
+            "agent_id".into(),
+            toml::Value::try_from(session.agent_id.clone()).unwrap(),
+        );
+        legacy.insert(
+            "status".into(),
+            toml::Value::try_from(session.status).unwrap(),
+        );
+        legacy.insert(
+            "launch_command".into(),
+            toml::Value::String("codex".to_string()),
+        );
+        legacy.insert(
+            "launch_args".into(),
+            toml::Value::Array(vec![
+                toml::Value::String("--model=gpt-5.4".to_string()),
+                toml::Value::String("resume".to_string()),
+                toml::Value::String("sess-legacy".to_string()),
+            ]),
+        );
+        legacy.insert(
+            "created_at".into(),
+            toml::Value::try_from(session.created_at).unwrap(),
+        );
+        legacy.insert(
+            "updated_at".into(),
+            toml::Value::try_from(session.updated_at).unwrap(),
+        );
+        legacy.insert(
+            "last_activity_at".into(),
+            toml::Value::try_from(session.last_activity_at).unwrap(),
+        );
+        legacy.insert(
+            "display_name".into(),
+            toml::Value::String(session.display_name.clone()),
+        );
+
+        std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
+
+        let loaded = Session::load(&path).unwrap();
+        assert!(
+            loaded
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--no-alt-screen"),
+            "legacy Codex sessions should be normalized to preserve inline scrollback"
+        );
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ]
+        );
     }
 
     #[test]
