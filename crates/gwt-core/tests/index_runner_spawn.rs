@@ -100,23 +100,32 @@ fn search_specs_e2e_with_real_e5_auto_builds() {
 
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
-    let spec_dir = repo_root.join("specs/SPEC-1");
-    fs::create_dir_all(&spec_dir).unwrap();
-    fs::write(
-        spec_dir.join("spec.md"),
-        "# Watcher SPEC\nFilesystem watcher debounce semantics for indexing.\n",
-    )
-    .unwrap();
-    fs::write(
-        spec_dir.join("metadata.json"),
-        r#"{"id":"1","title":"Watcher SPEC","status":"open","phase":"draft"}"#,
-    )
-    .unwrap();
+    fs::create_dir_all(&repo_root).unwrap();
 
     let repo = compute_repo_hash("https://github.com/example/test.git");
     let wt = compute_worktree_hash(&repo_root).unwrap();
     let fake_home = tmp.path().join("fake_home");
     fs::create_dir_all(&fake_home).unwrap();
+    let cache_dir = fake_home
+        .join(".gwt/cache/issues")
+        .join(repo.as_str())
+        .join("1939");
+    fs::create_dir_all(cache_dir.join("sections")).unwrap();
+    fs::write(
+        cache_dir.join("meta.json"),
+        r#"{"number":1939,"title":"gwt-spec: Watcher SPEC","labels":["gwt-spec","phase/review"],"state":"open","updated_at":"2026-04-14T00:00:00Z","comment_ids":[]}"#,
+    )
+    .unwrap();
+    fs::write(
+        cache_dir.join("body.md"),
+        "<!-- gwt-spec id=1939 version=1 -->\nWatcher SPEC\n",
+    )
+    .unwrap();
+    fs::write(
+        cache_dir.join("sections/spec.md"),
+        "# Watcher SPEC\nFilesystem watcher debounce semantics for indexing.\n",
+    )
+    .unwrap();
 
     let output = Command::new(runner_python())
         .arg(runner_script())
@@ -139,5 +148,5 @@ fn search_specs_e2e_with_real_e5_auto_builds() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Watcher SPEC") || stdout.contains("SPEC-1"));
+    assert!(stdout.contains("Watcher SPEC") || stdout.contains("1939"));
 }

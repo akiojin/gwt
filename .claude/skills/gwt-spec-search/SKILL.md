@@ -43,7 +43,7 @@ When the gwt TUI launches an agent pane, the following env vars are exported aut
   --n-results 10
 ```
 
-If the SPEC index does not yet exist, the runner builds it inline (full mode) and emits NDJSON progress on stderr before returning the search result.
+If the SPEC index does not yet exist, the runner builds it inline (full mode) from the repo-scoped Issue cache and emits NDJSON progress on stderr before returning the search result.
 
 To force a full re-index (normally handled by the watcher / auto-build):
 
@@ -60,7 +60,7 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ```json
 {"ok": true, "specResults": [
-  {"spec_id": "10", "title": "Project workspace", "status": "in-progress", "phase": "Implementation", "dir_name": "SPEC-10", "distance": 0.08}
+  {"spec_id": "1939", "title": "gwt-spec: Semantic search platform", "status": "open", "phase": "phase/review", "dir_name": "#1939", "distance": 0.08}
 ]}
 ```
 
@@ -73,7 +73,7 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ## Notes
 
-- SPEC index is maintained by the TUI watcher; non-TUI sessions get an mtime+size diff per call
+- `search-specs` refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache before non-TUI searches
 - The runner auto-builds the index when missing (use `--no-auto-build` to suppress)
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance

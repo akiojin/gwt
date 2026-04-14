@@ -1,12 +1,12 @@
 ---
-description: Semantic search over local SPEC files using the gwt-spec-search skill
+description: Semantic search over cached SPEC Issues using the gwt-spec-search skill
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
 
 # GWT SPEC Search Command
 
-Use this command to run semantic search against the local SPEC index.
+Use this command to run semantic search against the cached SPEC Issue index.
 
 ## Usage
 
