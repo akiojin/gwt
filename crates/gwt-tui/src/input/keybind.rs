@@ -68,12 +68,7 @@ pub struct Keybinding {
 pub struct KeybindRegistry {
     pub prefix_state: PrefixState,
     bindings: Vec<Keybinding>,
-    /// Track last Ctrl+C time for double-tap quit.
-    last_ctrl_c: Option<Instant>,
 }
-
-/// Window for double-tap Ctrl+C detection.
-const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
 
 impl Default for KeybindRegistry {
     fn default() -> Self {
@@ -169,17 +164,11 @@ impl KeybindRegistry {
                 description: "Switch to Issues tab".into(),
                 category: KeybindingCategory::Management,
             },
-            Keybinding {
-                keys: "Ctrl+C, Ctrl+C".into(),
-                description: "Quit".into(),
-                category: KeybindingCategory::Global,
-            },
         ];
 
         Self {
             prefix_state: PrefixState::Idle,
             bindings,
-            last_ctrl_c: None,
         }
     }
 
@@ -191,40 +180,26 @@ impl KeybindRegistry {
     /// Process a key event through the prefix state machine.
     /// Returns `Some(Message)` if the key was consumed, `None` if it should be forwarded.
     ///
-    /// When `terminal_focused` is true, Ctrl+C double-tap quit is disabled so
-    /// that every Ctrl+C reaches the PTY as SIGINT.  Use `Ctrl+G, q` to quit.
+    /// `Ctrl+C` is always forwarded so the PTY keeps ownership of SIGINT.
+    /// Use `Ctrl+G, q` to quit.
     pub fn process_key(&mut self, key: KeyEvent) -> Option<Message> {
         self.process_key_with_focus(key, false)
     }
 
-    /// Process a key event, optionally suppressing double-tap Ctrl+C quit
-    /// when a terminal session has focus.
+    /// Process a key event.
     pub fn process_key_with_focus(
         &mut self,
         key: KeyEvent,
-        terminal_focused: bool,
+        _terminal_focused: bool,
     ) -> Option<Message> {
         // Check for timeout
         if self.prefix_state.is_expired() {
             self.prefix_state = PrefixState::Idle;
         }
 
-        // Ctrl+C double-tap quit — disabled when terminal has focus so that
-        // every Ctrl+C reaches the PTY as SIGINT.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if !terminal_focused {
-                if let Some(last) = self.last_ctrl_c {
-                    if last.elapsed() < DOUBLE_TAP_WINDOW {
-                        self.last_ctrl_c = None;
-                        return Some(Message::Quit);
-                    }
-                }
-                self.last_ctrl_c = Some(Instant::now());
-            }
-            return None; // Forward to PTY (or non-terminal handler)
+            return None;
         }
-        // Any non-Ctrl+C key resets the double-tap tracker
-        self.last_ctrl_c = None;
 
         match &self.prefix_state {
             PrefixState::Idle => {
@@ -511,6 +486,16 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_never_quits_without_leader() {
+        let mut reg = KeybindRegistry::new();
+        let first = reg.process_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let second = reg.process_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+        assert!(first.is_none());
+        assert!(second.is_none());
+    }
+
+    #[test]
     fn all_bindings_include_registered_shortcuts() {
         let reg = KeybindRegistry::new();
         let registered: Vec<&str> = reg
@@ -525,7 +510,7 @@ mod tests {
             "Ctrl+G, ?",
             "Ctrl+G, 1-9",
             "Ctrl+G, arrows",
-            "Ctrl+C, Ctrl+C",
+            "Ctrl+G, q",
         ] {
             assert!(
                 registered.contains(&expected),
@@ -544,5 +529,6 @@ mod tests {
             .collect();
         assert!(!registered.contains(&"Ctrl+G, y"));
         assert!(!registered.contains(&"Ctrl+G, p"));
+        assert!(!registered.contains(&"Ctrl+C, Ctrl+C"));
     }
 }

@@ -25,4 +25,4 @@ expression: output
 ║No tag selected                       ║│                                      │
 ║                                      ║│                                      │
 ╚══════════════════════════════════════╝╰──────────────────────────────────────╯
- ⎇n/a  │  P:default  │  ↑↓ mv  r rfsh  C-g Tab  Esc term  ?
+ ⎇n/a  │  P:default  │  ↑↓ mv  r rfsh  C-g Tab  Esc term  C-g ?

@@ -3001,10 +3001,6 @@ fn route_key_to_branch_detail(model: &mut Model, key: crossterm::event::KeyEvent
             model.active_focus = FocusPane::TabContent;
             None
         }
-        KeyCode::Char('?') | KeyCode::Char('h') => {
-            update(model, Message::ToggleHelp);
-            None
-        }
         KeyCode::Esc => {
             model.active_focus = FocusPane::TabContent;
             return;
@@ -3124,10 +3120,6 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
                     return;
                 }
                 KeyCode::Char('f') | KeyCode::Char('/') => Some(BranchesMessage::SearchStart),
-                KeyCode::Char('?') | KeyCode::Char('h') => {
-                    update(model, Message::ToggleHelp);
-                    return;
-                }
                 KeyCode::Char('r') => {
                     refresh_branches(model);
                     return;
@@ -9861,14 +9853,14 @@ fn render_keybind_hints(model: &Model, frame: &mut Frame, area: Rect) {
 }
 
 fn terminal_hint_text() -> String {
-    "Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  ^C×2".to_string()
+    "Ctrl+G:b/i/s g c []/1-9 z ?  C-g Tab:focus  C-g q:quit".to_string()
 }
 
 fn welcome_hint_text(compact: bool) -> String {
     if compact {
-        "C-g,c shell  C-g,g manage  ?:help".to_string()
+        "C-g,c shell  C-g,g manage  C-g,? help".to_string()
     } else {
-        "Ctrl+G, c:new shell  Ctrl+G, g:management  ?:help".to_string()
+        "Ctrl+G, c:new shell  Ctrl+G, g:management  Ctrl+G, ?:help".to_string()
     }
 }
 
@@ -9877,14 +9869,14 @@ fn branches_list_hint_text_with_selection(compact: bool, selection_count: usize)
         if selection_count > 0 {
             format!("↑↓  ↵ wiz  Sp sel({selection_count})  ⇧C clean  a all  Esc clr")
         } else {
-            "↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp sel  ⇧C clean  a all  mvf?  Esc→T".to_string()
+            "↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp sel  ⇧C clean  a all  mvf  C-g?  Esc→T".to_string()
         }
     } else if selection_count > 0 {
         format!(
             "↑↓:move  Enter:wizard  Space:select({selection_count})  Shift+C:cleanup  a:all  Esc:clear"
         )
     } else {
-        "↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+C:cleanup  a:all  m:view  v:git  f:search  Esc:term  ?:help".to_string()
+        "↑↓:move  ←→:tab  Enter:wizard  Space:select  Shift+C:cleanup  a:all  m:view  v:git  f:search  Esc:term  Ctrl+G, ?:help".to_string()
     }
 }
 
@@ -9921,14 +9913,15 @@ fn management_hint_text(model: &Model, compact: bool) -> String {
 fn issues_hint_text(model: &Model, compact: bool) -> String {
     if model.issues.detail_view {
         if compact {
-            "↑↓ mv  ↵ close  r rfsh  C-g Tab  Esc back  ?".to_string()
+            "↑↓ mv  ↵ close  r rfsh  C-g Tab  Esc back  C-g ?".to_string()
         } else {
-            "↑↓:move  Enter:close  r:refresh  Ctrl+G, Tab:focus  Esc:back  ?:help".to_string()
+            "↑↓:move  Enter:close  r:refresh  Ctrl+G, Tab:focus  Esc:back  Ctrl+G, ?:help"
+                .to_string()
         }
     } else if compact {
-        "↑↓ sel  ↵ dtl  / srch  r rfsh  C-g Tab  Esc term  ?".to_string()
+        "↑↓ sel  ↵ dtl  / srch  r rfsh  C-g Tab  Esc term  C-g ?".to_string()
     } else {
-        "↑↓:select  Enter:detail  /:search  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help"
+        "↑↓:select  Enter:detail  /:search  r:refresh  Ctrl+G, Tab:focus  Esc:term  Ctrl+G, ?:help"
             .to_string()
     }
 }
@@ -9972,28 +9965,27 @@ fn generic_management_hint_text(
     };
 
     if compact {
-        format!("↑↓ sel  ←→ tab{compact_sub_tab}  ↵ act  C-g Tab  Esc {escape_action}  ?")
+        format!("↑↓ sel  ←→ tab{compact_sub_tab}  ↵ act  C-g Tab  Esc {escape_action}  C-g ?")
     } else {
         format!(
-            "↑↓:select  ←→:tab{full_sub_tab}  Enter:action  Ctrl+G, Tab:focus  Esc:{escape_action}  ?:help"
+            "↑↓:select  ←→:tab{full_sub_tab}  Enter:action  Ctrl+G, Tab:focus  Esc:{escape_action}  Ctrl+G, ?:help"
         )
     }
 }
 
 fn settings_list_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  ?".to_string()
+        "↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  C-g ?".to_string()
     } else {
-        "↑↓:select  Enter:apply  Space:toggle  []:sub-tab  Ctrl+G, Tab:focus  Esc:term  ?:help"
-            .to_string()
+        "↑↓:select  Enter:apply  Space:toggle  []:sub-tab  Ctrl+G, Tab:focus  Esc:term  Ctrl+G, ?:help".to_string()
     }
 }
 
 fn settings_edit_hint_text(compact: bool) -> String {
     if compact {
-        "↵ apply  ⌫ del  Esc cancel  ?".to_string()
+        "↵ apply  ⌫ del  Esc cancel  C-g ?".to_string()
     } else {
-        "Enter:apply  Backspace:delete  Esc:cancel  ?:help".to_string()
+        "Enter:apply  Backspace:delete  Esc:cancel  Ctrl+G, ?:help".to_string()
     }
 }
 
@@ -10016,14 +10008,16 @@ fn logs_hint_text(model: &Model, compact: bool) -> String {
 fn pr_dashboard_hint_text(model: &Model, compact: bool) -> String {
     if model.pr_dashboard.detail_view {
         if compact {
-            "↑↓ mv  ↵ close  r rfsh  C-g Tab  Esc back  ?".to_string()
+            "↑↓ mv  ↵ close  r rfsh  C-g Tab  Esc back  C-g ?".to_string()
         } else {
-            "↑↓:move  Enter:close  r:refresh  Ctrl+G, Tab:focus  Esc:back  ?:help".to_string()
+            "↑↓:move  Enter:close  r:refresh  Ctrl+G, Tab:focus  Esc:back  Ctrl+G, ?:help"
+                .to_string()
         }
     } else if compact {
-        "↑↓ sel  ↵ dtl  r rfsh  C-g Tab  Esc term  ?".to_string()
+        "↑↓ sel  ↵ dtl  r rfsh  C-g Tab  Esc term  C-g ?".to_string()
     } else {
-        "↑↓:select  Enter:detail  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:select  Enter:detail  r:refresh  Ctrl+G, Tab:focus  Esc:term  Ctrl+G, ?:help"
+            .to_string()
     }
 }
 
@@ -10056,17 +10050,17 @@ fn profiles_hint_text(model: &Model, compact: bool) -> String {
 
 fn git_view_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ mv  ↵ exp  r rfsh  C-g Tab  Esc term  ?".to_string()
+        "↑↓ mv  ↵ exp  r rfsh  C-g Tab  Esc term  C-g ?".to_string()
     } else {
-        "↑↓:move  Enter:expand  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:move  Enter:expand  r:refresh  Ctrl+G, Tab:focus  Esc:term  Ctrl+G, ?:help".to_string()
     }
 }
 
 fn versions_hint_text(compact: bool) -> String {
     if compact {
-        "↑↓ mv  r rfsh  C-g Tab  Esc term  ?".to_string()
+        "↑↓ mv  r rfsh  C-g Tab  Esc term  C-g ?".to_string()
     } else {
-        "↑↓:move  r:refresh  Ctrl+G, Tab:focus  Esc:term  ?:help".to_string()
+        "↑↓:move  r:refresh  Ctrl+G, Tab:focus  Esc:term  Ctrl+G, ?:help".to_string()
     }
 }
 
@@ -10076,7 +10070,7 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
     } else {
         ""
     };
-    let local_mnemonics = "  m:view  v:git  f:search  ?:help";
+    let local_mnemonics = "  m:view  v:git  f:search";
     if compact {
         let direct_action_hints = if selected_branch_has_worktree(model) {
             "  S↵ sh"
@@ -10096,10 +10090,10 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
             .unwrap_or("");
         return match model.branches.detail_section {
             0 => format!(
-                "←→ sec  ↵ act{direct_action_hints}{docker_hints}  Sp sel  mvf?  C-g↔P  Esc←"
+                "←→ sec  ↵ act{direct_action_hints}{docker_hints}  Sp sel  mvf  C-g?  C-g↔P  Esc←"
             ),
-            2 => "↑↓ ses  ←→ sec  ↵ focus  Sp sel  mvf?  C-g↔P  Esc←".to_string(),
-            _ => format!("←→ sec  ↵ act{direct_action_hints}  Sp sel  mvf?  C-g↔P  Esc←"),
+            2 => "↑↓ ses  ←→ sec  ↵ focus  Sp sel  mvf  C-g?  C-g↔P  Esc←".to_string(),
+            _ => format!("←→ sec  ↵ act{direct_action_hints}  Sp sel  mvf  C-g?  C-g↔P  Esc←"),
         };
     }
     match model.branches.detail_section {
@@ -10118,14 +10112,14 @@ fn branch_detail_hint_text(model: &Model, compact: bool) -> String {
                 })
                 .unwrap_or("");
             format!(
-                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+                "←→:section  Enter:launch{direct_action_hints}{docker_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Ctrl+G, ?:help  Esc:back"
             )
         }
         2 => format!(
-            "↑↓:session  ←→:section  Enter:focus  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "↑↓:session  ←→:section  Enter:focus  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Ctrl+G, ?:help  Esc:back"
         ),
         _ => format!(
-            "←→:section  Enter:launch{direct_action_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Esc:back"
+            "←→:section  Enter:launch{direct_action_hints}  Space:select{local_mnemonics}  Ctrl+G, Tab:focus  Ctrl+G, ?:help  Esc:back"
         ),
     }
 }
@@ -14362,7 +14356,8 @@ services:
         let rendered = render_model_text(&model, 220, 24);
 
         assert!(rendered.contains("C-g Tab:focus"));
-        assert!(rendered.contains("^C×2"));
+        assert!(rendered.contains("C-g q"));
+        assert!(!rendered.contains("^C×2"));
     }
 
     #[test]
@@ -14382,7 +14377,8 @@ services:
 
         assert!(rendered.contains("Ctrl+G:b/i/s g c []/1-9 z ?"));
         assert!(rendered.contains("C-g Tab:focus"));
-        assert!(rendered.contains("^C×2"));
+        assert!(rendered.contains("C-g q"));
+        assert!(!rendered.contains("^C×2"));
     }
 
     #[test]
@@ -14398,6 +14394,8 @@ services:
         assert!(rendered.contains("No terminal windows are open."));
         assert!(rendered.contains("Ctrl+G, c"));
         assert!(rendered.contains("Ctrl+G, g"));
+        assert!(rendered.contains("Ctrl+G, ?"));
+        assert!(!rendered.contains("Ctrl+C, Ctrl+C"));
     }
 
     #[test]
@@ -14414,6 +14412,8 @@ services:
         assert!(rendered.contains("╭ Commands"));
         assert!(rendered.contains("│ Ctrl+G, g"));
         assert!(rendered.contains("│ Ctrl+G, c"));
+        assert!(rendered.contains("│ Ctrl+G, ?"));
+        assert!(!rendered.contains("│ Ctrl+C, Ctrl+C"));
     }
 
     #[test]
@@ -14441,6 +14441,7 @@ services:
         // Compact hints at 80-col width
         assert!(rendered.contains("↑↓ mv"));
         assert!(rendered.contains("←→ tab"));
+        assert!(!rendered.contains("?:help"));
     }
 
     #[test]
@@ -14463,7 +14464,7 @@ services:
         let rendered = render_model_text(&model, 80, 24);
 
         assert!(rendered.contains("←→ sec  ↵ act  S↵ sh"));
-        assert!(rendered.contains("mvf?"));
+        assert!(rendered.contains("mvf  C-g?"));
         assert!(rendered.contains("C-g↔P  Esc←"));
     }
 
@@ -14479,6 +14480,7 @@ services:
         assert!(rendered.contains("↑↓ sel  ↵ dtl  / srch  r rfsh"));
         assert!(rendered.contains("C-g Tab"));
         assert!(rendered.contains("Esc term"));
+        assert!(rendered.contains("C-g ?"));
     }
 
     #[test]
@@ -23325,14 +23327,14 @@ exit 1
     }
 
     #[test]
-    fn route_key_to_branch_detail_h_toggles_help_overlay() {
+    fn route_key_to_branch_detail_h_does_not_toggle_help_overlay() {
         let mut model = test_model();
         model.management_tab = ManagementTab::Branches;
         model.active_focus = FocusPane::BranchDetail;
 
         route_key_to_branch_detail(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
 
-        assert!(model.help_visible);
+        assert!(!model.help_visible);
     }
 
     #[test]
@@ -23396,17 +23398,27 @@ exit 1
         assert!(rendered.contains("m:view"));
         assert!(rendered.contains("v:git"));
         assert!(rendered.contains("f:search"));
-        assert!(rendered.contains("?:help"));
+        assert!(rendered.contains("Ctrl+G, ?:help"));
     }
 
     #[test]
-    fn route_key_to_management_branches_h_toggles_help_overlay() {
+    fn route_key_to_management_branches_h_does_not_toggle_help_overlay() {
         let mut model = test_model();
         model.management_tab = ManagementTab::Branches;
         model.active_focus = FocusPane::TabContent;
 
         route_key_to_management(&mut model, key(KeyCode::Char('h'), KeyModifiers::NONE));
-        assert!(model.help_visible);
+        assert!(!model.help_visible);
+    }
+
+    #[test]
+    fn route_key_to_management_branches_question_does_not_toggle_help_overlay() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Branches;
+        model.active_focus = FocusPane::TabContent;
+
+        route_key_to_management(&mut model, key(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(!model.help_visible);
     }
 
     #[test]

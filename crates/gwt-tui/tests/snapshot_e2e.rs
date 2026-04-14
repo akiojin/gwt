@@ -705,7 +705,7 @@ fn e2e_ctrl_g_z_toggles_layout() {
 }
 
 #[test]
-fn e2e_ctrl_c_double_tap_quits() {
+fn e2e_ctrl_c_double_tap_does_not_quit() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
     model.active_layer = ActiveLayer::Main;
@@ -713,11 +713,11 @@ fn e2e_ctrl_c_double_tap_quits() {
 
     let first = send_key(&mut model, &mut kb, ctrl('c'));
     assert!(matches!(first, DispatchStatus::Forwarded));
-    assert!(!model.quit); // single tap: no quit
+    assert!(!model.quit);
 
     let second = send_key(&mut model, &mut kb, ctrl('c'));
-    assert!(matches!(second, DispatchStatus::Consumed(Message::Quit)));
-    assert!(model.quit); // double tap: quit
+    assert!(matches!(second, DispatchStatus::Forwarded));
+    assert!(!model.quit);
 }
 
 #[test]
@@ -827,15 +827,32 @@ fn e2e_branches_f_starts_search() {
 }
 
 #[test]
-fn e2e_branches_question_mark_opens_help_overlay() {
+fn e2e_branches_question_mark_does_not_open_help_overlay() {
     let mut model = test_model();
     let mut kb = KeybindRegistry::new();
 
-    send_key(&mut model, &mut kb, press(KeyCode::Char('?')));
+    let result = send_key(&mut model, &mut kb, press(KeyCode::Char('?')));
+    assert!(matches!(result, DispatchStatus::Forwarded));
+
+    let output = render_to_string(&model, 80, 24);
+    assert!(!output.contains("Help"));
+}
+
+#[test]
+fn e2e_ctrl_g_question_mark_opens_help_overlay() {
+    let mut model = test_model();
+    let mut kb = KeybindRegistry::new();
+
+    send_key(&mut model, &mut kb, ctrl('g'));
+    let result = send_key(&mut model, &mut kb, press(KeyCode::Char('?')));
+    assert!(matches!(
+        result,
+        DispatchStatus::Consumed(Message::ToggleHelp)
+    ));
 
     let output = render_to_string(&model, 80, 24);
     assert!(output.contains("Help"));
-    assert!(output.contains("Ctrl+G, g"));
+    assert!(output.contains("Ctrl+G, ?"));
 }
 
 #[test]

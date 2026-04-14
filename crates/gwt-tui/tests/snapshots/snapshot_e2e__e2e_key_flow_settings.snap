@@ -1,6 +1,5 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 883
 expression: output
 ---
 ╔...│ Versions │ Settings │ Logs ══════╗╭ › Shell ─────────────────────────────╮
@@ -26,4 +25,4 @@ expression: output
 ║                                      ║│                                      │
 ║                                      ║│                                      │
 ╚══════════════════════════════════════╝╰──────────────────────────────────────╯
- ⎇n/a  │  P:default  │  ↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  ?
+ ⎇n/a  │  P:default  │  ↑↓ sel  ↵ apply  Sp tog  [] cat  C-g Tab  Esc t  C-g ?

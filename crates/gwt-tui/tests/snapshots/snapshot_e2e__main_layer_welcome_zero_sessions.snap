@@ -1,9 +1,9 @@
 ---
 source: crates/gwt-tui/tests/snapshot_e2e.rs
-assertion_line: 535
 expression: output
 ---
 ╔ Welcome ═════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
@@ -19,11 +19,10 @@ expression: output
 ║             │ Ctrl+G, b               Switch to Branches tab  │              ║
 ║             │ Ctrl+G, s               Switch to Settings tab  │              ║
 ║             │ Ctrl+G, i               Switch to Issues tab    │              ║
-║             │ Ctrl+C, Ctrl+C          Quit                    │              ║
 ║             ╰─────────────────────────────────────────────────╯              ║
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
- ⎇n/a  │  P:default  │  C-g,c shell  C-g,g manage  ?:help
+ ⎇n/a  │  P:default  │  C-g,c shell  C-g,g manage  C-g,? help
