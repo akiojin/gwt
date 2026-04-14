@@ -161,3 +161,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release edit "${{ needs.create-tag.outputs.tag_name }}" --draft=false
+
+  publish-npm:
+    name: Publish to npm
+    needs: [create-tag, upload-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

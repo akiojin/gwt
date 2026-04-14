@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.0.1] - 2026-04-14
+
+### Bug Fixes
+
+- Workflow-policy フックのワークツリー内操作の過剰ブロックを緩和
+- Gate Unix-specific APIs with #[cfg(unix)] for Windows compilation by @akiojin
+- **ci:** Use windows-latest runner for Windows compilation check by @akiojin
+- Gate SIGHUP handler with #[cfg(unix)] for Windows compilation by @akiojin
+- Restore npm publish in release workflow
+
 ## [9.0.0] - 2026-04-14
 
 ### Bug Fixes
