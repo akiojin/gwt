@@ -4,6 +4,7 @@ use std::{
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use crossterm::event::{Event, KeyEvent};
@@ -39,6 +40,15 @@ struct ProbeTraceRecord {
     paste_text: Option<String>,
     columns: Option<u16>,
     rows: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+struct DispatchTraceRecord {
+    timestamp: String,
+    stage: &'static str,
+    message: String,
+    elapsed_us: u128,
+    detail: Option<String>,
 }
 
 impl InputTraceRecord {
@@ -130,6 +140,21 @@ pub fn trace_pty_forward(key: KeyEvent, session_id: &str, bytes: &[u8]) {
     let _ = append_if_configured(&InputTraceRecord::from_pty_forward(key, session_id, bytes));
 }
 
+pub fn trace_dispatch_timing(
+    stage: &'static str,
+    message: &str,
+    elapsed: Duration,
+    detail: Option<&str>,
+) {
+    let _ = append_dispatch_if_configured(&DispatchTraceRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        stage,
+        message: message.to_string(),
+        elapsed_us: elapsed.as_micros(),
+        detail: detail.map(str::to_string),
+    });
+}
+
 pub fn append_probe_event_with_path(path: &Path, event: &Event) -> std::io::Result<()> {
     append_probe_record_with_path(path, &ProbeTraceRecord::from_event(event))
 }
@@ -139,6 +164,13 @@ fn append_if_configured(record: &InputTraceRecord) -> std::io::Result<()> {
         return Ok(());
     };
     append_record_with_path(&path, record)
+}
+
+fn append_dispatch_if_configured(record: &DispatchTraceRecord) -> std::io::Result<()> {
+    let Some(path) = configured_path() else {
+        return Ok(());
+    };
+    append_dispatch_record_with_path(&path, record)
 }
 
 fn configured_path() -> Option<PathBuf> {
@@ -166,6 +198,21 @@ fn append_probe_record_with_path(path: &Path, record: &ProbeTraceRecord) -> std:
 
     let json = serde_json::to_string(record)
         .map_err(|err| std::io::Error::other(format!("serialize probe trace: {err}")))?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{json}")?;
+    Ok(())
+}
+
+fn append_dispatch_record_with_path(
+    path: &Path,
+    record: &DispatchTraceRecord,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string(record)
+        .map_err(|err| std::io::Error::other(format!("serialize dispatch trace: {err}")))?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{json}")?;
     Ok(())
@@ -267,6 +314,27 @@ mod tests {
         assert!(text.contains("\"stage\":\"pty_forward\""));
         assert!(text.contains("\"session_id\":\"shell-0\""));
         assert!(text.contains("\"bytes_hex\":\"1b5b41\""));
+    }
+
+    #[test]
+    fn append_dispatch_record_with_path_writes_dispatch_timing_jsonl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("input-trace.jsonl");
+        let record = DispatchTraceRecord {
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            stage: "wizard_dispatch",
+            message: "MoveDown".to_string(),
+            elapsed_us: 123,
+            detail: Some("docker_sync=skipped".to_string()),
+        };
+
+        append_dispatch_record_with_path(&path, &record).expect("append dispatch trace");
+
+        let text = std::fs::read_to_string(&path).expect("read trace");
+        assert!(text.contains("\"stage\":\"wizard_dispatch\""));
+        assert!(text.contains("\"message\":\"MoveDown\""));
+        assert!(text.contains("\"elapsed_us\":123"));
+        assert!(text.contains("\"detail\":\"docker_sync=skipped\""));
     }
 
     #[test]
