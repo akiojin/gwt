@@ -1917,6 +1917,8 @@ pub struct Model {
     pub(crate) merge_state_events: Option<MergeStateChannel>,
     /// Pending session conversion awaiting confirmation.
     pub(crate) pending_session_conversion: Option<PendingSessionConversion>,
+    /// Whether a quit confirmation is pending (active sessions exist).
+    pub(crate) pending_quit: bool,
     /// Per-session state machine for unfinished discussion resume prompts.
     pub(crate) discussion_resume_sessions: HashMap<String, ResumePromptSessionState>,
     /// Launch config built from completed wizard, ready for PTY spawn.
@@ -2046,6 +2048,7 @@ impl Model {
             cleanup_events: None,
             merge_state_events: None,
             pending_session_conversion: None,
+            pending_quit: false,
             discussion_resume_sessions: HashMap::new(),
             pending_launch_config: None,
             voice: VoiceInputState::default(),
