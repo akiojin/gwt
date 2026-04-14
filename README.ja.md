@@ -171,7 +171,7 @@ gh auth login
 
 ### ログとプロファイリング
 
-通常ログは `~/.gwt/logs/` 配下に JSON Lines 形式で保存されます。パフォーマンスプロファイリングは **Settings > Profiling** で有効化できます。
+通常ログはプロジェクトごとに `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD` へ JSON Lines 形式で保存されます。パフォーマンスプロファイリングは **Settings > Profiling** で有効化できます。
 ログ仕様の詳細は [#1758](https://github.com/akiojin/gwt/issues/1758) を参照してください。
 
 ## 開発

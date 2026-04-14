@@ -1,7 +1,8 @@
 //! Logs tab file watcher (SPEC-6 Phase 5).
 //!
-//! Tails `~/.gwt/logs/gwt.log.YYYY-MM-DD`, parses each appended JSONL
-//! line into a `LogEvent`, and dispatches batches to the main TUI
+//! Tails the active project's
+//! `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`, parses each appended
+//! JSONL line into a `LogEvent`, and dispatches batches to the main TUI
 //! loop over a `std::sync::mpsc::Sender<LogsWatcherPacket>`.
 //!
 //! The file is the single source of truth for the Logs tab; the

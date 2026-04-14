@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: shared coordination storage のスコープ変更では SPEC と保存キーを先に揃える
+
+### 事象
+
+Board を複数 worktree 間で共有したいのに、実装と SPEC の一部が `repo-local` /
+worktree 配下前提のまま残っており、`~/.gwt/` 配下の project-scoped storage へ
+寄せる判断と文面が食い違っていた。
+
+### 原因
+
+- 「同じ repo で共有したい」という要件に対して、保存キーを worktree path と
+  project identity のどちらに置くかを最初に固定していなかった。
+- path helper だけ直せばよいと見て、関連 SPEC と README の user-facing path を
+  同じ変更セットで更新する前提が弱かった。
+
+### 再発防止策
+
+1. shared Board / logs / cache の保存スコープを変えるときは、まず project key
+   (`RepoHash` など) を明示してから path helper を実装する。
+2. worktree-local から project-scoped へ移す変更では、legacy merge/delete 方針を
+   SPEC と data model に先に書き戻す。
+3. user-facing path が変わる変更では、README と Issue SPEC の更新をコード変更と
+   同じ変更セットに含める。
+
 ## 2026-04-14 — fix: terminal copy UX は host shortcut 前提より既存 selection 契約を優先する
 
 ### 事象

@@ -21,7 +21,7 @@ use gwt_agent::reset_runtime_state_dir_for_pid;
 use gwt_core::logging::{
     init as init_logging, LogEvent as Notification, LogLevel as Severity, LoggingConfig,
 };
-use gwt_core::paths::gwt_logs_dir;
+use gwt_core::paths::{gwt_logs_dir, gwt_project_logs_dir_for_repo_path};
 use gwt_git::RepoType;
 use gwt_terminal::runtime;
 use gwt_tui::{
@@ -207,6 +207,10 @@ fn tick_deadline_after_message(current_deadline: Instant, now: Instant, msg: &Me
     }
 }
 
+fn logging_dir_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_project_logs_dir_for_repo_path(repo_path).unwrap_or_else(gwt_logs_dir)
+}
+
 #[cfg(test)]
 fn should_render_after_tick(model: &Model) -> bool {
     app::tick_redraw_required(model)
@@ -227,7 +231,11 @@ fn main() -> io::Result<()> {
     // JSONL file writer rolling daily, plus a UI forwarder layer. The
     // returned handles MUST be kept alive for the lifetime of main so
     // that the background writer thread stays up.
-    let logging_config = LoggingConfig::new(gwt_logs_dir());
+    let repo_path = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let logging_config = LoggingConfig::new(logging_dir_for_repo_path(&repo_path));
     let mut logging_handles = match init_logging(logging_config) {
         Ok(h) => Some(h),
         Err(err) => {
@@ -269,12 +277,6 @@ fn main() -> io::Result<()> {
     // Clone the reload handle so the Logs tab can cycle the global
     // log level live (SPEC-6 FR-011).
     let logging_reload_handle = logging_handles.as_ref().map(|h| h.reload_handle.clone());
-
-    // Parse CLI args: optional repo path
-    let repo_path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     // Initialize terminal
     runtime::enter_raw_mode()?;
@@ -434,12 +436,13 @@ fn run_app(
     };
     app::refresh_active_profile_state(&mut model);
     // SPEC-6 Phase 5: spawn the Logs-tab file watcher so the
-    // `~/.gwt/logs/gwt.log.YYYY-MM-DD` JSONL stream flows into
-    // `LogsState.entries`. Keeping the handle alive for the lifetime
-    // of run_app is enough — the watcher owns its own thread.
+    // The active project's `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`
+    // JSONL stream flows into `LogsState.entries`. Keeping the handle
+    // alive for the lifetime of run_app is enough — the watcher owns
+    // its own thread.
     let (logs_tx, logs_rx) = std::sync::mpsc::channel();
     let _logs_watcher_handle =
-        gwt_tui::logs_watcher::spawn(gwt_core::paths::gwt_logs_dir(), logs_tx);
+        gwt_tui::logs_watcher::spawn(logging_dir_for_repo_path(model.repo_path()), logs_tx);
     model.set_logs_watcher_rx(logs_rx);
     let _board_watcher_handle = if model.active_layer == ActiveLayer::Initialization {
         None
@@ -724,6 +727,7 @@ mod tests {
         },
         Command,
     };
+    use gwt_core::repo_hash::compute_repo_hash;
     use gwt_tui::app;
     use gwt_tui::message::Message;
     use gwt_tui::model::{FocusPane, ManagementTab, SessionLayout};
@@ -792,6 +796,19 @@ mod tests {
     }
 
     #[test]
+    fn logging_dir_for_repo_path_uses_repo_hash_subdirectory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        add_origin(&repo, "https://github.com/example/project.git");
+
+        let actual = logging_dir_for_repo_path(&repo);
+        let expected_hash = compute_repo_hash("https://github.com/example/project.git");
+
+        assert!(actual.ends_with(format!("logs/{}", expected_hash.as_str())));
+    }
+
+    #[test]
     fn restore_startup_session_state_with_zero_sessions_skips_default_shell_spawn() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.toml");
@@ -852,6 +869,41 @@ session_count = 3
         assert_eq!(model.session_count(), 0);
         assert!(model.active_session_tab().is_none());
         assert!(!should_spawn_default_shell(&model));
+    }
+
+    fn init_git_repo(path: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["init", path.to_str().unwrap()])
+            .output()
+            .expect("git init");
+        assert!(output.status.success(), "git init failed");
+
+        let email = std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(path)
+            .output()
+            .expect("git config user.email");
+        assert!(email.status.success(), "git config user.email failed");
+
+        let name = std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(path)
+            .output()
+            .expect("git config user.name");
+        assert!(name.status.success(), "git config user.name failed");
+    }
+
+    fn add_origin(path: &Path, url: &str) {
+        let output = std::process::Command::new("git")
+            .args(["remote", "add", "origin", url])
+            .current_dir(path)
+            .output()
+            .expect("git remote add origin");
+        assert!(
+            output.status.success(),
+            "git remote add origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

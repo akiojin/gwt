@@ -38,9 +38,10 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 /// In-memory buffer of log events surfaced in the Logs tab.
 ///
 /// Replaces the old `gwt_notification::StructuredLog` ring buffer. The
-/// file on disk (`~/.gwt/logs/gwt.log.YYYY-MM-DD`) is the authoritative
-/// record; this in-memory copy only feeds the UI filter/render pipeline
-/// so that the Logs tab can display events without parsing the file.
+/// file on disk (`~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`) is the
+/// authoritative record; this in-memory copy only feeds the UI
+/// filter/render pipeline so that the Logs tab can display events
+/// without parsing the file.
 #[derive(Debug, Default, Clone)]
 pub struct NotificationLog {
     entries: Vec<Notification>,
