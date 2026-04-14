@@ -194,8 +194,11 @@ fn coordination_as_hook_error(err: gwt_core::GwtError) -> HookError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use gwt_agent::{AgentId, Session};
-    use gwt_core::coordination::{load_snapshot, BoardEntryKind};
+    use gwt_core::coordination::{
+        coordination_events_path, load_snapshot, BoardEntry, BoardEntryKind,
+    };
     use gwt_github::{CommentSnapshot, IssueSnapshot, IssueState, UpdatedAt};
 
     fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSnapshot {
@@ -308,5 +311,106 @@ mod tests {
 
         let snapshot = load_snapshot(dir.path()).unwrap();
         assert!(snapshot.board.entries.is_empty());
+    }
+
+    #[test]
+    fn sync_coordination_for_session_accepts_legacy_board_post_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let cache = Cache::new(cache_root.clone());
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                1989,
+                "Legacy coordination migration",
+                vec![],
+            ))
+            .unwrap();
+
+        let mut legacy_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "legacy waiting",
+            Some("waiting_input".into()),
+            None,
+            vec![],
+            vec![],
+        );
+        legacy_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        legacy_entry.updated_at = legacy_entry.created_at;
+        std::fs::create_dir_all(dir.path().join(".gwt/coordination")).unwrap();
+        std::fs::write(
+            coordination_events_path(dir.path()),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "board_post",
+                    "entry": legacy_entry,
+                })
+            ),
+        )
+        .unwrap();
+
+        let mut session = Session::new(dir.path(), "bugfix/issue-1989", AgentId::Codex);
+        session.linked_issue_number = Some(1989);
+
+        sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
+            .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 2);
+        assert_eq!(snapshot.board.entries[0].body, "legacy waiting");
+        assert!(snapshot.board.entries[1].body.contains("Issue #1989"));
+    }
+
+    #[test]
+    fn sync_coordination_for_stop_accepts_legacy_board_post_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_root = dir.path().join("issue-cache");
+        let cache = Cache::new(cache_root.clone());
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                1989,
+                "Legacy coordination migration",
+                vec![],
+            ))
+            .unwrap();
+
+        let mut legacy_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "legacy waiting",
+            Some("waiting_input".into()),
+            None,
+            vec![],
+            vec![],
+        );
+        legacy_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        legacy_entry.updated_at = legacy_entry.created_at;
+        std::fs::create_dir_all(dir.path().join(".gwt/coordination")).unwrap();
+        std::fs::write(
+            coordination_events_path(dir.path()),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "board_post",
+                    "entry": legacy_entry,
+                })
+            ),
+        )
+        .unwrap();
+
+        let mut session = Session::new(dir.path(), "bugfix/issue-1989", AgentId::Codex);
+        session.linked_issue_number = Some(1989);
+
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 2);
+        assert_eq!(snapshot.board.entries[0].body, "legacy waiting");
+        assert_eq!(snapshot.board.entries[1].state.as_deref(), Some("ready"));
+        assert!(snapshot.board.entries[1].body.contains("Issue #1989"));
+        assert!(snapshot.board.entries[1].body.contains("next instruction"));
     }
 }

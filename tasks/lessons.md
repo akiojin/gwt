@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: migration 互換パスでは legacy event tag を先に受理してから merge/delete する
+
+### 事象
+
+project-scoped coordination storage へ移行済みの前提なのに、legacy worktree-local
+`events.jsonl` に旧 tag `board_post` が残っている repo で `SessionStart` hook が
+`unknown variant \`board_post\`` で code 1 失敗した。
+
+### 原因
+
+- migration と snapshot rebuild が現行 `CoordinationEvent` へ直接 deserialize しており、
+  legacy tag を読む前に落ちていた。
+- 「storage path を shared に寄せた」ことと「旧 event schema を読める」ことを
+  別問題として扱い、互換経路の受理条件を最後まで確認していなかった。
+
+### 再発防止策
+
+1. migration / compatibility path では、legacy enum tag や field 名を先に受理してから
+   merge / delete / marker 書き込みへ進む。
+2. schema rename を伴うイベントログ変更では、「旧ログを読める」「書き戻しで現行形式へ正規化される」を
+   別々の回帰テストで固定する。
+3. project-scoped storage への移行では、shared dir の marker 有無だけでなく
+   legacy worktree-local 実データを使った初回アクセスも検証する。
+
 ## 2026-04-14 — fix: shared coordination storage のスコープ変更では SPEC と保存キーを先に揃える
 
 ### 事象

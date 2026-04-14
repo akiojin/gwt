@@ -16,7 +16,7 @@ use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
-use super::{block_bash_policy, BlockDecision, HookError, HookEvent};
+use super::{block_bash_policy, block_file_ops, BlockDecision, HookError, HookEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -72,7 +72,7 @@ pub fn evaluate_with_context(
         return Ok(Some(decision));
     }
 
-    if is_exempt_chore_change(event) || !is_mutating_tool_call(event) {
+    if is_exempt_chore_change(event) || !is_mutating_tool_call(event, worktree_root) {
         return Ok(None);
     }
 
@@ -176,10 +176,12 @@ fn has_nonempty_section(spec_body: &SpecBody, name: &str) -> bool {
         .is_some_and(|content| !content.trim().is_empty())
 }
 
-fn is_mutating_tool_call(event: &HookEvent) -> bool {
+fn is_mutating_tool_call(event: &HookEvent, worktree_root: &Path) -> bool {
     match event.tool_name.as_deref() {
         Some("Edit" | "Write" | "MultiEdit") => true,
-        Some("Bash") => event.command().is_some_and(is_mutating_bash_command),
+        Some("Bash") => event
+            .command()
+            .is_some_and(|command| is_mutating_bash_command(command, worktree_root)),
         _ => false,
     }
 }
@@ -218,7 +220,7 @@ fn is_docs_or_chore_path(path: PathBuf) -> bool {
         || path_text.starts_with(".github/")
 }
 
-fn is_mutating_bash_command(command: &str) -> bool {
+fn is_mutating_bash_command(command: &str, worktree_root: &Path) -> bool {
     for segment in super::segments::split_command_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
@@ -234,6 +236,10 @@ fn is_mutating_bash_command(command: &str) -> bool {
             continue;
         };
         let subcommand = tokens.get(1).copied().unwrap_or_default();
+
+        if is_worktree_local_file_op(command_name, trimmed, worktree_root) {
+            continue;
+        }
 
         match command_name {
             "touch" | "mkdir" | "rm" | "mv" | "cp" | "install" | "tee" | "truncate" => {
@@ -262,6 +268,13 @@ fn is_mutating_bash_command(command: &str) -> bool {
         }
     }
     false
+}
+
+fn is_worktree_local_file_op(command_name: &str, segment: &str, worktree_root: &Path) -> bool {
+    matches!(
+        command_name,
+        "mkdir" | "rmdir" | "rm" | "touch" | "cp" | "mv"
+    ) && block_file_ops::evaluate_bash_command(segment, worktree_root).is_none()
 }
 
 fn contains_shell_write_operator(command: &str) -> bool {
