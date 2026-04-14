@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.0.2] - 2026-04-14
+
+### Bug Fixes
+
+- Normalize codex scrollback launch contract
+- エラーダイアログで長いメッセージが折り返されない問題を修正
+- Dockerダイアログで長いメッセージが折り返されない問題を修正
+- エラーダイアログの動的高さ変更に伴うスナップショット更新
+- Align release asset names with v6.30.3 convention for npm postinstall
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into bugfix/scroll
+
+### Refactor
+
+- モーダルダイアログの共通フレーム描画を render_modal_frame() に集約
+
 ## [9.0.1] - 2026-04-14
 
 ### Bug Fixes

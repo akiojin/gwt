@@ -91,27 +91,27 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: gwt-tui
-            artifact_name: gwt-tui-linux-x86_64
+            release_name: gwt-linux-x86_64
           - platform: linux-aarch64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: gwt-tui
-            artifact_name: gwt-tui-linux-aarch64
+            release_name: gwt-linux-aarch64
           - platform: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
             binary: gwt-tui
-            artifact_name: gwt-tui-macos-x86_64
+            release_name: gwt-macos-x86_64
           - platform: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
             binary: gwt-tui
-            artifact_name: gwt-tui-macos-aarch64
+            release_name: gwt-macos-aarch64
           - platform: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: gwt-tui.exe
-            artifact_name: gwt-tui-windows-x86_64
+            release_name: gwt-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -133,12 +133,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.binary }}
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.release_name }}
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.binary }}
+          name: ${{ matrix.release_name }}
+          path: dist/${{ matrix.release_name }}
 
   upload-release:
     name: Upload to GitHub Release

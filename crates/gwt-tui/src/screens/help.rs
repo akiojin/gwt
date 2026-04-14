@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Wrap},
     Frame,
 };
 
@@ -14,16 +14,7 @@ use ratatui::{
 pub fn render(bindings: &[Keybinding], frame: &mut Frame, area: Rect) {
     let width = (area.width * 70 / 100).max(52);
     let height = (area.height * 75 / 100).max(12);
-    let overlay = super::centered_rect(width, height, area);
-    frame.render_widget(Clear, overlay);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Help")
-        .border_type(theme::border::modal())
-        .border_style(Style::default().fg(theme::color::FOCUS));
-    let inner = block.inner(overlay);
-    frame.render_widget(block, overlay);
+    let inner = super::render_modal_frame(frame, area, "Help", theme::color::FOCUS, width, height);
 
     let category_order = [
         KeybindingCategory::Global,
