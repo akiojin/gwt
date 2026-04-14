@@ -47,7 +47,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::Value;
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::{
     custom_agents::load_custom_agents,
@@ -1130,7 +1132,20 @@ pub fn update(model: &mut Model, msg: Message) {
             }
         }
         Message::KeyInput(key) => {
-            if route_overlay_key(model, key) {
+            let copy_shortcut_consumed =
+                match handle_terminal_copy_shortcut_with(model, key, |text| {
+                    gwt_clipboard::ClipboardText::set_text(text).map_err(|err| err.to_string())
+                }) {
+                    Ok(consumed) => consumed,
+                    Err(err) => {
+                        model.error_queue.push_back(
+                            Notification::new(Severity::Error, "terminal", "Copy shortcut failed")
+                                .with_detail(err),
+                        );
+                        false
+                    }
+                };
+            if route_overlay_key(model, key) || copy_shortcut_consumed {
             } else if model.active_layer == ActiveLayer::Initialization {
                 route_key_to_initialization(model, key);
             } else if model.active_layer == ActiveLayer::Management {
@@ -8274,6 +8289,7 @@ where
     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         && (handle_management_mouse_focus(model, mouse) || handle_session_mouse_focus(model, mouse))
     {
+        clear_all_session_selections(model);
         return Ok(true);
     }
 
@@ -8401,6 +8417,9 @@ where
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if should_forward_click_to_pty(model, mouse) {
+                if let Some(session) = model.active_session_tab_mut() {
+                    session.vt.clear_selection();
+                }
                 return Ok(queue_session_mouse_click(
                     model,
                     model.active_session,
@@ -8444,14 +8463,13 @@ where
             let Some(cell) = mouse_terminal_cell(model, mouse) else {
                 return Ok(false);
             };
-            let selection_text = if let Some(session) = model.active_session_tab_mut() {
+            if let Some(session) = model.active_session_tab_mut() {
                 session.vt.update_selection(cell);
-                selected_text(session)
-            } else {
-                None
-            };
-            if let Some(text) = selection_text.filter(|text| !text.is_empty()) {
-                clipboard_writer(&text)?;
+                if session.vt.selection().is_some_and(selection_is_single_cell) {
+                    session.vt.clear_selection();
+                } else if let Some(text) = selected_text(session) {
+                    clipboard_writer(&text)?;
+                }
                 return Ok(true);
             }
             Ok(false)
@@ -8750,12 +8768,80 @@ fn sgr_modifier_bits(modifiers: KeyModifiers) -> u16 {
     bits
 }
 
+fn clear_all_session_selections(model: &mut Model) {
+    for session in &mut model.sessions {
+        session.vt.clear_selection();
+    }
+}
+
+fn selection_is_single_cell(selection: crate::model::TerminalSelection) -> bool {
+    selection.anchor == selection.focus
+}
+
 fn selected_text(session: &crate::model::SessionTab) -> Option<String> {
     let selection = session.vt.selection()?;
     session.vt.with_visible_screen(|screen| {
         let (start, end, end_col) = clamp_selection_to_screen(selection, screen)?;
         Some(screen.contents_between(start.row, start.col, end.row, end_col))
     })
+}
+
+fn is_selection_copy_shortcut(key: crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c' | 'C'))
+        && ((key.modifiers.contains(KeyModifiers::SUPER)
+            || key.modifiers.contains(KeyModifiers::META))
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.modifiers.contains(KeyModifiers::SHIFT)))
+}
+
+fn is_terminal_copy_modifier_key(key: crossterm::event::KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Modifier(ModifierKeyCode::LeftSuper)
+            | KeyCode::Modifier(ModifierKeyCode::RightSuper)
+            | KeyCode::Modifier(ModifierKeyCode::LeftMeta)
+            | KeyCode::Modifier(ModifierKeyCode::RightMeta)
+    )
+}
+
+fn handle_terminal_copy_shortcut_with<G>(
+    model: &mut Model,
+    key: crossterm::event::KeyEvent,
+    mut clipboard_writer: G,
+) -> Result<bool, String>
+where
+    G: FnMut(&str) -> Result<(), String>,
+{
+    if model.active_focus != FocusPane::Terminal {
+        model.terminal_pending_copy_modifier = false;
+        return Ok(false);
+    }
+
+    if is_terminal_copy_modifier_key(key) {
+        model.terminal_pending_copy_modifier = true;
+        return Ok(true);
+    }
+
+    let shortcut_pressed = is_selection_copy_shortcut(key)
+        || (model.terminal_pending_copy_modifier
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.is_empty());
+    model.terminal_pending_copy_modifier = false;
+
+    if !shortcut_pressed {
+        return Ok(false);
+    }
+
+    let Some(text) = model
+        .active_session_tab()
+        .and_then(selected_text)
+        .filter(|text| !text.is_empty())
+    else {
+        return Ok(true);
+    };
+
+    clipboard_writer(&text)?;
+    Ok(true)
 }
 
 fn clamp_selection_to_screen(
@@ -9553,7 +9639,7 @@ fn welcome_session_command_lines() -> Vec<Line<'static>> {
     let body_style = Style::default().fg(theme::color::TEXT_SECONDARY);
     let mut lines = Vec::new();
 
-    for binding in KeybindRegistry::new().all_bindings() {
+    for binding in welcome_session_bindings() {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<WELCOME_KEY_WIDTH$}", binding.keys),
@@ -9564,6 +9650,21 @@ fn welcome_session_command_lines() -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn welcome_session_bindings() -> Vec<crate::input::keybind::Keybinding> {
+    KeybindRegistry::new()
+        .all_bindings()
+        .iter()
+        .filter(|binding| {
+            matches!(
+                binding.category,
+                crate::input::keybind::KeybindingCategory::Global
+                    | crate::input::keybind::KeybindingCategory::Management
+            ) || binding.keys == "Ctrl+G, c"
+        })
+        .cloned()
+        .collect()
 }
 
 fn welcome_session_command_block() -> Block<'static> {
@@ -12325,6 +12426,11 @@ services:
     fn agent_left_click_down_forwards_sgr_press_to_pty() {
         let mut model = model_with_agent_mouse_reporting_enabled();
         let area = active_session_text_area(&model).expect("active session text area");
+        model
+            .active_session_tab_mut()
+            .expect("active session")
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
 
         let handled = handle_mouse_input_with(
             &mut model,
@@ -12352,7 +12458,7 @@ services:
                 .vt
                 .selection()
                 .is_none(),
-            "PTY-forwarded clicks must not also start a local text selection",
+            "PTY-forwarded clicks must clear any existing local text selection",
         );
     }
 
@@ -12528,6 +12634,263 @@ services:
                 .is_some(),
             "local-mode left click must begin a text selection as before",
         );
+    }
+
+    #[test]
+    fn codex_plain_left_click_does_not_leave_selection_or_copy() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let mut copied = None::<String>;
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left down should succeed");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left up should succeed");
+
+        assert_eq!(copied, None);
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_none(),
+            "plain click should only focus the Codex pane and must not leave a text selection",
+        );
+    }
+
+    #[test]
+    fn codex_drag_selection_copies_on_release() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        model.sessions = vec![agent_session_tab(
+            "Codex",
+            "codex",
+            crate::model::AgentColor::Cyan,
+        )];
+        model.active_session = 0;
+
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("agent-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let area = active_session_text_area(&model).expect("active session text area");
+        let mut copied = None::<String>;
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left down should succeed");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.x.saturating_add(4),
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left drag should succeed");
+        handle_mouse_input_with_tools(
+            &mut model,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.x.saturating_add(4),
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            |_| Ok(()),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("left up should succeed");
+
+        assert_eq!(copied.as_deref(), Some("hello"));
+        assert!(
+            model
+                .active_session_tab()
+                .expect("active session")
+                .vt
+                .selection()
+                .is_some(),
+            "dragging should still leave the explicit selection visible after auto-copy",
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn meta_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::META),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn standalone_super_modifier_then_c_copies_selected_terminal_text() {
+        let mut model = test_model();
+        model.active_layer = ActiveLayer::Main;
+        model.active_focus = FocusPane::Terminal;
+        update(&mut model, Message::Resize(24, 8));
+        update(
+            &mut model,
+            Message::PtyOutput("shell-0".to_string(), b"hello world".to_vec()),
+        );
+
+        let session = model.active_session_tab_mut().expect("active session");
+        session
+            .vt
+            .begin_selection(crate::model::TerminalCell { row: 0, col: 0 });
+        session
+            .vt
+            .update_selection(crate::model::TerminalCell { row: 0, col: 4 });
+
+        let armed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(
+                KeyCode::Modifier(ModifierKeyCode::LeftSuper),
+                KeyModifiers::SUPER,
+            ),
+            |_| Ok(()),
+        )
+        .expect("modifier arm should succeed");
+        assert!(armed);
+
+        let mut copied = None::<String>;
+        let consumed = handle_terminal_copy_shortcut_with(
+            &mut model,
+            key(KeyCode::Char('c'), KeyModifiers::NONE),
+            |text| {
+                copied = Some(text.to_string());
+                Ok(())
+            },
+        )
+        .expect("copy shortcut should succeed");
+
+        assert!(consumed);
+        assert_eq!(copied.as_deref(), Some("hello"));
     }
 
     #[test]
@@ -14034,9 +14397,9 @@ services:
 
         assert!(rendered.contains("║                                    Welcome"));
         assert!(rendered.contains("║                         No terminal windows are open."));
-        assert!(rendered.contains("║           ╭ Commands"));
-        assert!(rendered.contains("║           │ Ctrl+G, g"));
-        assert!(rendered.contains("║           │ Ctrl+G, c"));
+        assert!(rendered.contains("╭ Commands"));
+        assert!(rendered.contains("│ Ctrl+G, g"));
+        assert!(rendered.contains("│ Ctrl+G, c"));
     }
 
     #[test]
@@ -22229,7 +22592,7 @@ exit 1
     }
 
     #[test]
-    fn render_welcome_session_lists_all_registered_keybindings() {
+    fn render_welcome_session_lists_registered_welcome_keybindings() {
         let mut model = test_model();
         model.sessions.clear();
         model.active_session = 0;
@@ -22237,11 +22600,11 @@ exit 1
         model.active_focus = FocusPane::Terminal;
 
         let text = render_model_text(&model, 80, 24);
-        let registry = crate::input::keybind::KeybindRegistry::new();
+        let bindings = welcome_session_bindings();
 
         assert!(text.contains("Welcome"));
         assert!(text.contains("No terminal windows are open."));
-        for binding in registry.all_bindings() {
+        for binding in bindings {
             assert!(
                 text.contains(&binding.keys),
                 "expected welcome screen to contain binding {}",

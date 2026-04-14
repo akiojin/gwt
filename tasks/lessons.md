@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-14 — fix: terminal copy UX は host shortcut 前提より既存 selection 契約を優先する
+
+### 事象
+
+terminal copy を `Cmd+C` 中心に寄せた結果、host terminal / crossterm の実イベント差で
+実機では copy できず、さらに途中のクリック処理変更で Claude の範囲選択まで壊した。
+
+### 原因
+
+- 「platform shortcut に統一したい」という意図を優先し、既に成立していた
+  `drag selection -> copy` の user-facing 契約を軽く扱った。
+- shortcut 自体の実機観測が不十分な段階で、selection と click routing まで同じ変更で動かした。
+
+### 再発防止策
+
+1. host terminal が奪う可能性のある shortcut 変更では、まず既存の selection / copy 契約を
+   温存したまま追加実装で検証する。
+2. click focus、drag selection、copy trigger は別々に変更し、1 回の修正で束ねない。
+3. terminal UX の変更は unit test だけでなく、実機で「クリック」「ドラッグ」「コピー」を
+   連続確認してから完了扱いにする。
+
 ## 2026-04-14 — fix: terminal selection copy は visible screen の実サイズに clamp してから vt100 へ渡す
 
 ### 事象
