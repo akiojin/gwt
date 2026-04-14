@@ -62,7 +62,7 @@
 
 ## Step 8: Build PR body from template
 
-- Template path: `.codex/skills/gwt-manage-pr/references/pr-body-template.md`
+- Template path: `.claude/skills/gwt-manage-pr/references/pr-body-template.md`
 - Fill all required placeholders.
 - If a conditional section does not apply, remove the entire section.
 - Remove any `<!-- GUIDE: ... -->` comments from the final output.
@@ -116,7 +116,7 @@
 ```bash
 head=$(git rev-parse --abbrev-ref HEAD)
 base=develop
-PR_BODY_TEMPLATE=".codex/skills/gwt-manage-pr/references/pr-body-template.md"
+PR_BODY_TEMPLATE=".claude/skills/gwt-manage-pr/references/pr-body-template.md"
 
 base_compare_has_diff() {
   git diff --quiet "origin/$base...HEAD" -- 2>/dev/null
