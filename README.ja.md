@@ -194,6 +194,16 @@ cargo build -p gwt-tui
 cargo run -p gwt-tui
 ```
 
+### Canvas terminal PoC の実行
+
+```bash
+cargo run -p poc-terminal
+```
+
+この PoC は、`Claude` / `Codex` の terminal window が浮く desktop WebView を開きます。
+現状の terminal 描画は runtime 時に CDN から `xterm.js` を読み込むため、初回起動時は
+ネットワーク接続が必要です。
+
 ### テスト
 
 ```bash
@@ -220,6 +230,8 @@ cargo fmt
 │   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
 │   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
 │   └── gwt-tui/        # ratatui TUI フロントエンド + CLI (`gwt issue spec ...`)
+├── poc/
+│   └── terminal/       # canvas 風 floating terminal GUI PoC
 └── package.json        # 開発用スクリプト
 ```
 

@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>gwt terminal poc</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #edf1f6;
+        color: #0f172a;
+      }
+
+      body {
+        background-image:
+          linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+        background-size: 24px 24px;
+      }
+
+      #app {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      .canvas {
+        position: absolute;
+        inset: 0;
+      }
+
+      .hint {
+        position: absolute;
+        left: 18px;
+        top: 16px;
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        color: #334155;
+        backdrop-filter: blur(12px);
+      }
+
+      .add-button {
+        position: absolute;
+        right: 18px;
+        bottom: 18px;
+        width: 46px;
+        height: 46px;
+        border: none;
+        border-radius: 6px;
+        background: #0f172a;
+        color: white;
+        font-size: 26px;
+        cursor: pointer;
+        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.25);
+      }
+
+      .add-button:hover {
+        background: #111f37;
+      }
+
+      .terminal-window {
+        position: absolute;
+        min-width: 420px;
+        min-height: 260px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #0b1220;
+        border: 1px solid rgba(15, 23, 42, 0.24);
+        box-shadow:
+          0 18px 42px rgba(15, 23, 42, 0.2),
+          0 2px 6px rgba(15, 23, 42, 0.1);
+      }
+
+      .terminal-window.focused {
+        box-shadow:
+          0 22px 54px rgba(15, 23, 42, 0.28),
+          0 0 0 1px rgba(37, 99, 235, 0.24);
+      }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        height: 38px;
+        padding: 0 12px;
+        background: rgba(15, 23, 42, 0.98);
+        color: #e2e8f0;
+        user-select: none;
+        cursor: grab;
+      }
+
+      .titlebar:active {
+        cursor: grabbing;
+      }
+
+      .title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .title-text {
+        font-size: 13px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.16);
+        font-size: 11px;
+        color: #cbd5e1;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #f59e0b;
+      }
+
+      .status-chip.running .status-dot {
+        background: #22c55e;
+      }
+
+      .status-chip.error .status-dot {
+        background: #ef4444;
+      }
+
+      .status-chip.exited .status-dot {
+        background: #94a3b8;
+      }
+
+      .window-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .icon-button {
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: 4px;
+        background: rgba(148, 163, 184, 0.16);
+        color: #cbd5e1;
+        cursor: pointer;
+      }
+
+      .icon-button:hover {
+        background: rgba(148, 163, 184, 0.28);
+      }
+
+      .window-body {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 38px;
+        bottom: 0;
+        background: #020617;
+      }
+
+      .terminal-root {
+        position: absolute;
+        inset: 0;
+        padding: 8px 10px 10px;
+      }
+
+      .terminal-overlay {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.82);
+        color: #dbeafe;
+        font-size: 12px;
+        border: 1px solid rgba(59, 130, 246, 0.18);
+        pointer-events: none;
+        display: none;
+      }
+
+      .terminal-overlay.visible {
+        display: block;
+      }
+
+      .resize-handle {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 18px;
+        height: 18px;
+        cursor: nwse-resize;
+        background:
+          linear-gradient(135deg, transparent 0 50%, rgba(148, 163, 184, 0.5) 50% 60%, transparent 60% 70%, rgba(148, 163, 184, 0.5) 70% 80%, transparent 80%);
+      }
+
+      .modal-backdrop {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.12);
+      }
+
+      .modal-backdrop.open {
+        display: flex;
+      }
+
+      .modal {
+        width: 320px;
+        padding: 14px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
+      }
+
+      .modal h2 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      .preset-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .preset-button {
+        width: 100%;
+        text-align: left;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #f8fafc;
+        cursor: pointer;
+      }
+
+      .preset-button strong {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 3px;
+      }
+
+      .preset-button span {
+        display: block;
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .modal-footer {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 10px;
+      }
+
+      .text-button {
+        border: none;
+        background: transparent;
+        color: #334155;
+        cursor: pointer;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="hint">Drag, resize, add terminals</div>
+      <div class="canvas" id="canvas"></div>
+      <button class="add-button" id="add-button" aria-label="Add terminal">+</button>
+      <div class="modal-backdrop" id="preset-modal">
+        <div class="modal">
+          <h2>Add terminal</h2>
+          <div class="preset-list">
+            <button class="preset-button" data-preset="shell">
+              <strong>Shell</strong>
+              <span>Open a standard shell terminal</span>
+            </button>
+            <button class="preset-button" data-preset="claude">
+              <strong>Claude</strong>
+              <span>Auto-start the Claude CLI when available</span>
+            </button>
+            <button class="preset-button" data-preset="codex">
+              <strong>Codex</strong>
+              <span>Auto-start the Codex CLI when available</span>
+            </button>
+          </div>
+          <div class="modal-footer">
+            <button class="text-button" id="close-modal">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { Terminal } from "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm";
+      import { FitAddon } from "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm";
+
+      const canvas = document.getElementById("canvas");
+      const addButton = document.getElementById("add-button");
+      const modal = document.getElementById("preset-modal");
+      const closeModalButton = document.getElementById("close-modal");
+      const decoderMap = new Map();
+      const pendingOutputMap = new Map();
+      const detailMap = new Map();
+      const terminalMap = new Map();
+      const windowMap = new Map();
+
+      let focusedId = null;
+      let dragState = null;
+      let resizeState = null;
+
+      function send(message) {
+        window.ipc.postMessage(JSON.stringify(message));
+      }
+
+      function openModal() {
+        modal.classList.add("open");
+      }
+
+      function closeModal() {
+        modal.classList.remove("open");
+      }
+
+      function clamp(value, min) {
+        return Math.max(min, value);
+      }
+
+      function parseNumber(value) {
+        return Number.parseFloat(value || "0");
+      }
+
+      function fitTerminal(windowId, persist = false) {
+        const runtime = terminalMap.get(windowId);
+        const element = windowMap.get(windowId);
+        if (!runtime || !element) {
+          return;
+        }
+        runtime.fitAddon.fit();
+        if (!persist) {
+          return;
+        }
+        sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+      }
+
+      function sendGeometry(windowId, cols, rows) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        send({
+          kind: "update_window_geometry",
+          id: windowId,
+          geometry: {
+            x: parseNumber(element.style.left),
+            y: parseNumber(element.style.top),
+            width: parseNumber(element.style.width),
+            height: parseNumber(element.style.height),
+          },
+          cols,
+          rows,
+        });
+      }
+
+      function applyStatus(windowId, status, detail) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const chip = element.querySelector(".status-chip");
+        const label = element.querySelector(".status-label");
+        const overlay = element.querySelector(".terminal-overlay");
+        chip.classList.remove("starting", "running", "exited", "error");
+        chip.classList.add(status);
+        label.textContent = status;
+        if (detail) {
+          detailMap.set(windowId, detail);
+        }
+        const effectiveDetail = detailMap.get(windowId);
+        overlay.textContent = effectiveDetail || "";
+        overlay.classList.toggle(
+          "visible",
+          status === "error" || status === "exited",
+        );
+      }
+
+      function focusWindowLocally(windowId) {
+        focusedId = windowId;
+        for (const [id, element] of windowMap.entries()) {
+          element.classList.toggle("focused", id === windowId);
+        }
+      }
+
+      function createTerminalRuntime(windowId, terminalContainer) {
+        if (terminalMap.has(windowId)) {
+          return terminalMap.get(windowId);
+        }
+        const terminal = new Terminal({
+          cursorBlink: true,
+          convertEol: true,
+          theme: {
+            background: "#020617",
+            foreground: "#e2e8f0",
+            cursor: "#f8fafc",
+            black: "#0f172a",
+            red: "#ef4444",
+            green: "#22c55e",
+            yellow: "#f59e0b",
+            blue: "#3b82f6",
+            magenta: "#a855f7",
+            cyan: "#06b6d4",
+            white: "#cbd5e1",
+            brightBlack: "#334155",
+            brightRed: "#f87171",
+            brightGreen: "#4ade80",
+            brightYellow: "#fbbf24",
+            brightBlue: "#60a5fa",
+            brightMagenta: "#c084fc",
+            brightCyan: "#22d3ee",
+            brightWhite: "#f8fafc",
+          },
+          fontFamily:
+            "ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Consolas, monospace",
+          fontSize: 13,
+          lineHeight: 1.2,
+          scrollback: 5000,
+        });
+        const fitAddon = new FitAddon();
+        terminal.loadAddon(fitAddon);
+        terminal.open(terminalContainer);
+        terminal.onData((data) => {
+          send({ kind: "terminal_input", id: windowId, data });
+        });
+        terminalMap.set(windowId, { terminal, fitAddon });
+        decoderMap.set(windowId, new TextDecoder());
+        requestAnimationFrame(() => fitTerminal(windowId, true));
+
+        const pending = pendingOutputMap.get(windowId);
+        if (pending?.length) {
+          for (const chunk of pending) {
+            writeOutput(windowId, chunk);
+          }
+          pendingOutputMap.delete(windowId);
+        }
+        return { terminal, fitAddon };
+      }
+
+      function writeOutput(windowId, base64) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          const queue = pendingOutputMap.get(windowId) || [];
+          queue.push(base64);
+          pendingOutputMap.set(windowId, queue);
+          return;
+        }
+        const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+        const decoder = decoderMap.get(windowId);
+        runtime.terminal.write(decoder.decode(bytes, { stream: true }));
+      }
+
+      function ensureWindow(windowData) {
+        let element = windowMap.get(windowData.id);
+        if (!element) {
+          element = document.createElement("div");
+          element.className = "terminal-window";
+          element.dataset.id = windowData.id;
+          element.innerHTML = `
+            <div class="titlebar">
+              <div class="title">
+                <span class="title-text"></span>
+                <span class="status-chip starting">
+                  <span class="status-dot"></span>
+                  <span class="status-label">starting</span>
+                </span>
+              </div>
+              <div class="window-actions">
+                <button class="icon-button" data-action="close" aria-label="Close terminal">×</button>
+              </div>
+            </div>
+            <div class="window-body">
+              <div class="terminal-root"></div>
+              <div class="terminal-overlay"></div>
+            </div>
+            <div class="resize-handle"></div>
+          `;
+          canvas.appendChild(element);
+          windowMap.set(windowData.id, element);
+
+          const titlebar = element.querySelector(".titlebar");
+          const terminalRoot = element.querySelector(".terminal-root");
+          const closeButton = element.querySelector("[data-action='close']");
+          const resizeHandle = element.querySelector(".resize-handle");
+
+          closeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_window", id: windowData.id });
+          });
+
+          titlebar.addEventListener("pointerdown", (event) => {
+            if (event.target.closest("button")) {
+              return;
+            }
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+            dragState = {
+              id: windowData.id,
+              pointerId: event.pointerId,
+              startX: event.clientX,
+              startY: event.clientY,
+              left: parseNumber(element.style.left),
+              top: parseNumber(element.style.top),
+            };
+            titlebar.setPointerCapture(event.pointerId);
+          });
+
+          resizeHandle.addEventListener("pointerdown", (event) => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+            resizeState = {
+              id: windowData.id,
+              pointerId: event.pointerId,
+              startX: event.clientX,
+              startY: event.clientY,
+              width: parseNumber(element.style.width),
+              height: parseNumber(element.style.height),
+            };
+            resizeHandle.setPointerCapture(event.pointerId);
+          });
+
+          terminalRoot.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+
+          terminalRoot.addEventListener("click", () => {
+            const runtime = terminalMap.get(windowData.id);
+            runtime?.terminal.focus();
+          });
+
+          createTerminalRuntime(windowData.id, terminalRoot);
+        }
+
+        element.querySelector(".title-text").textContent = windowData.title;
+        element.style.left = `${windowData.geometry.x}px`;
+        element.style.top = `${windowData.geometry.y}px`;
+        element.style.width = `${windowData.geometry.width}px`;
+        element.style.height = `${windowData.geometry.height}px`;
+        element.style.zIndex = String(windowData.z_index);
+        applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+      }
+
+      function renderWorkspace(workspace) {
+        const ids = new Set(workspace.windows.map((windowData) => windowData.id));
+        for (const [windowId, element] of windowMap.entries()) {
+          if (ids.has(windowId)) {
+            continue;
+          }
+          terminalMap.get(windowId)?.terminal.dispose();
+          terminalMap.delete(windowId);
+          decoderMap.delete(windowId);
+          detailMap.delete(windowId);
+          element.remove();
+          windowMap.delete(windowId);
+        }
+
+        for (const windowData of workspace.windows) {
+          ensureWindow(windowData);
+        }
+
+        if (!focusedId && workspace.windows.length > 0) {
+          focusedId = workspace.windows[workspace.windows.length - 1].id;
+        }
+        if (focusedId) {
+          focusWindowLocally(focusedId);
+        }
+      }
+
+      window.addEventListener("pointermove", (event) => {
+        if (dragState && dragState.pointerId === event.pointerId) {
+          const element = windowMap.get(dragState.id);
+          if (!element) {
+            return;
+          }
+          element.style.left = `${dragState.left + event.clientX - dragState.startX}px`;
+          element.style.top = `${dragState.top + event.clientY - dragState.startY}px`;
+          return;
+        }
+
+        if (resizeState && resizeState.pointerId === event.pointerId) {
+          const element = windowMap.get(resizeState.id);
+          if (!element) {
+            return;
+          }
+          element.style.width = `${clamp(
+            resizeState.width + event.clientX - resizeState.startX,
+            420,
+          )}px`;
+          element.style.height = `${clamp(
+            resizeState.height + event.clientY - resizeState.startY,
+            260,
+          )}px`;
+          fitTerminal(resizeState.id, false);
+        }
+      });
+
+      window.addEventListener("pointerup", (event) => {
+        if (dragState && dragState.pointerId === event.pointerId) {
+          const runtime = terminalMap.get(dragState.id);
+          sendGeometry(
+            dragState.id,
+            runtime?.terminal.cols || 80,
+            runtime?.terminal.rows || 24,
+          );
+          dragState = null;
+        }
+
+        if (resizeState && resizeState.pointerId === event.pointerId) {
+          const runtime = terminalMap.get(resizeState.id);
+          fitTerminal(resizeState.id, false);
+          sendGeometry(
+            resizeState.id,
+            runtime?.terminal.cols || 80,
+            runtime?.terminal.rows || 24,
+          );
+          resizeState = null;
+        }
+      });
+
+      addButton.addEventListener("click", openModal);
+      closeModalButton.addEventListener("click", closeModal);
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) {
+          closeModal();
+        }
+      });
+
+      for (const button of modal.querySelectorAll("[data-preset]")) {
+        button.addEventListener("click", () => {
+          send({ kind: "create_window", preset: button.dataset.preset });
+          closeModal();
+        });
+      }
+
+      window.__POC__ = {
+        receive(event) {
+          if (event.kind === "workspace_state") {
+            renderWorkspace(event.workspace);
+            return;
+          }
+          if (event.kind === "terminal_output") {
+            writeOutput(event.id, event.data_base64);
+            return;
+          }
+          if (event.kind === "terminal_status") {
+            applyStatus(event.id, event.status, event.detail || null);
+          }
+        },
+      };
+
+      send({ kind: "frontend_ready" });
+    </script>
+  </body>
+</html>

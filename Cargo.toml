@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "poc/terminal",
     "crates/gwt-agent",
     "crates/gwt-ai",
     "crates/gwt-clipboard",

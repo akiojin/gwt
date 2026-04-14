@@ -1,0 +1,28 @@
+[package]
+name = "poc-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Canvas-based floating terminal GUI PoC"
+publish = false
+default-run = "poc-terminal"
+
+[[bin]]
+name = "poc-terminal"
+path = "src/main.rs"
+
+[dependencies]
+gwt-core.workspace = true
+gwt-terminal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+wry = "0.55"
+tao = "0.35"
+base64.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
