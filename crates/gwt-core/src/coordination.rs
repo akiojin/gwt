@@ -198,8 +198,13 @@ pub struct AgentCardContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinationEvent {
-    MessageAppended { entry: BoardEntry },
-    AgentCardUpsert { card: AgentCard },
+    #[serde(alias = "board_post")]
+    MessageAppended {
+        entry: BoardEntry,
+    },
+    AgentCardUpsert {
+        card: AgentCard,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -873,6 +878,42 @@ mod tests {
         assert!(coordination_migration_marker_path(&project_dir).exists());
     }
 
+    #[test]
+    fn migrate_legacy_coordination_dirs_normalizes_legacy_board_post_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("home/.gwt/coordination/repo-hash");
+        let legacy_dir = dir.path().join("repo/.gwt/coordination");
+
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "legacy board post",
+            Some("waiting_input".into()),
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = Utc.with_ymd_and_hms(2026, 4, 14, 1, 0, 0).unwrap();
+        entry.updated_at = entry.created_at;
+
+        write_legacy_board_post(&legacy_dir.join(EVENTS_FILE_NAME), &entry);
+
+        migrate_legacy_coordination_dirs(&project_dir, std::slice::from_ref(&legacy_dir)).unwrap();
+
+        let raw = std::fs::read_to_string(project_dir.join(EVENTS_FILE_NAME)).unwrap();
+        assert!(raw.contains("\"type\":\"message_appended\""));
+        assert!(!raw.contains("\"type\":\"board_post\""));
+
+        let snapshot = rebuild_snapshot_from_events(&project_dir.join(EVENTS_FILE_NAME)).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].body, "legacy board post");
+        assert!(!legacy_dir.exists());
+        assert!(coordination_migration_marker_path(&project_dir).exists());
+    }
+
     fn write_events(path: &std::path::Path, events: &[CoordinationEvent]) {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
@@ -881,5 +922,20 @@ mod tests {
             serde_json::to_writer(&mut file, event).unwrap();
             file.write_all(b"\n").unwrap();
         }
+    }
+
+    fn write_legacy_board_post(path: &std::path::Path, entry: &BoardEntry) {
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let mut file = std::fs::File::create(path).unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &serde_json::json!({
+                "type": "board_post",
+                "entry": entry,
+            }),
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
     }
 }
