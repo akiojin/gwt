@@ -1,7 +1,6 @@
 //! Git repository discovery and inspection
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -199,9 +198,13 @@ pub fn install_develop_protection(repo_path: &Path) -> Result<()> {
 
     fs::write(&hook_path, new_content).map_err(GwtError::Io)?;
 
-    // Set executable permission
-    let perms = fs::Permissions::from_mode(0o755);
-    fs::set_permissions(&hook_path, perms).map_err(GwtError::Io)?;
+    // Set executable permission (unix only; no-op on Windows)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&hook_path, perms).map_err(GwtError::Io)?;
+    }
 
     Ok(())
 }
@@ -462,9 +465,13 @@ mod tests {
         assert!(content.starts_with("#!/bin/sh"));
         assert!(!content.contains("\"$branch\" = \"develop\""));
 
-        // Check executable permission
-        let perms = std::fs::metadata(&hook_path).unwrap().permissions();
-        assert!(perms.mode() & 0o111 != 0);
+        // Check executable permission (unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&hook_path).unwrap().permissions();
+            assert!(perms.mode() & 0o111 != 0);
+        }
     }
 
     #[test]

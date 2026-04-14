@@ -142,11 +142,22 @@ pub fn is_tty_alive() -> bool {
         return true;
     }
 
+    is_tty_alive_platform()
+}
+
+#[cfg(unix)]
+fn is_tty_alive_platform() -> bool {
     use std::os::unix::io::AsRawFd;
 
     let fd = std::io::stdin().as_raw_fd();
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_tty_alive_platform() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 pub fn next_tick_deadline() -> Instant {
