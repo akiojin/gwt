@@ -18,6 +18,7 @@ gwt-agent.workspace = true
 gwt-core.workspace = true
 gwt-docker.workspace = true
 gwt-git.workspace = true
+gwt-skills.workspace = true
 gwt-terminal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

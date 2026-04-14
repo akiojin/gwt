@@ -2810,6 +2810,7 @@ dependencies = [
  "gwt-core",
  "gwt-docker",
  "gwt-git",
+ "gwt-skills",
  "gwt-terminal",
  "ignore",
  "reqwest",

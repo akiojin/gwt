@@ -21,10 +21,11 @@ use futures_util::{SinkExt, StreamExt};
 use gwt_terminal::{Pane, PaneStatus};
 use poc_terminal::{
     default_wizard_version_cache_path, detect_shell_program, list_branch_entries,
-    list_directory_entries, load_workspace_state, resolve_launch_spec, save_workspace_state,
-    workspace_state_path, BackendEvent, DockerWizardContext, FrontendEvent, LaunchWizardCompletion,
-    LaunchWizardContext, LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState,
+    list_directory_entries, load_workspace_state, refresh_managed_gwt_assets_for_worktree,
+    resolve_launch_spec, save_workspace_state, workspace_state_path, BackendEvent,
+    DockerWizardContext, FrontendEvent, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState,
 };
 use tao::{
     event::{Event, WindowEvent},
@@ -682,6 +683,8 @@ impl AppRuntime {
             .working_dir
             .clone()
             .unwrap_or_else(|| self.workdir.clone());
+        refresh_managed_gwt_assets_for_worktree(&worktree_path)
+            .map_err(|error| error.to_string())?;
         let branch_name = config
             .branch
             .clone()
