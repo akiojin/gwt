@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap},
+    widgets::{Gauge, Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -172,12 +172,6 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
         .max(10)
         .min(area.height);
 
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let dialog = Rect::new(x, y, width, height);
-
-    frame.render_widget(Clear, dialog);
-
     let border_color = if state.stage == DockerStage::Failed {
         theme::color::ERROR
     } else if state.stage == DockerStage::Ready {
@@ -186,14 +180,7 @@ pub fn render(state: &DockerProgressState, frame: &mut Frame, area: Rect) {
         theme::color::FOCUS
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(theme::border::modal())
-        .title("Docker")
-        .border_style(Style::default().fg(border_color));
-
-    let inner = block.inner(dialog);
-    frame.render_widget(block, dialog);
+    let inner = super::render_modal_frame(frame, area, "Docker", border_color, width, height);
 
     if inner.height < 3 || inner.width < 4 {
         return;

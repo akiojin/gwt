@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -67,26 +67,18 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
     // +2 for the empty line and dismiss hint, +2 for top/bottom borders.
     let height = (content_lines + 2 + 2).min(area.height * 60 / 100).max(5);
 
-    let overlay = super::centered_rect(width, height, area);
-    frame.render_widget(Clear, overlay);
-
     let title = if queue_count > 1 {
         format!("Error (1 of {})", queue_count)
     } else {
         "Error".to_string()
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_type(theme::border::modal())
-        .border_style(Style::default().fg(theme::color::ERROR));
+    let inner = super::render_modal_frame(frame, area, &title, theme::color::ERROR, width, height);
 
     let paragraph = Paragraph::new(text)
-        .block(block)
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(theme::color::ERROR));
-    frame.render_widget(paragraph, overlay);
+    frame.render_widget(paragraph, inner);
 }
 
 /// Calculate how many display lines a string occupies when wrapped to `max_width`.
