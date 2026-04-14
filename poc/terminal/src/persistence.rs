@@ -30,6 +30,7 @@ pub fn default_canvas_viewport() -> CanvasViewport {
 pub enum WindowProcessStatus {
     Starting,
     Running,
+    Ready,
     Exited,
     Error,
 }

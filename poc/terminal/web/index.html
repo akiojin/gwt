@@ -30,10 +30,6 @@
         color: #0f172a;
       }
 
-      body {
-        background: #edf1f6;
-      }
-
       #app {
         position: relative;
         width: 100vw;
@@ -66,13 +62,27 @@
         position: absolute;
         left: 18px;
         top: 16px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
         font-size: 12px;
-        padding: 6px 10px;
+        padding: 8px 12px;
         border-radius: 6px;
         background: rgba(255, 255, 255, 0.9);
         border: 1px solid rgba(148, 163, 184, 0.45);
         color: #334155;
         backdrop-filter: blur(12px);
+      }
+
+      .connection-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #f59e0b;
+      }
+
+      .connection-dot.connected {
+        background: #22c55e;
       }
 
       .add-button {
@@ -94,23 +104,31 @@
         background: #111f37;
       }
 
-      .terminal-window {
+      .workspace-window {
         position: absolute;
         min-width: 420px;
         min-height: 260px;
         border-radius: 6px;
         overflow: hidden;
-        background: #0b1220;
         border: 1px solid rgba(15, 23, 42, 0.24);
         box-shadow:
           0 18px 42px rgba(15, 23, 42, 0.2),
           0 2px 6px rgba(15, 23, 42, 0.1);
       }
 
-      .terminal-window.focused {
+      .workspace-window.focused {
         box-shadow:
           0 22px 54px rgba(15, 23, 42, 0.28),
           0 0 0 1px rgba(37, 99, 235, 0.24);
+      }
+
+      .workspace-window.surface-terminal {
+        background: #0b1220;
+      }
+
+      .workspace-window.surface-file-tree,
+      .workspace-window.surface-mock {
+        background: rgba(255, 255, 255, 0.98);
       }
 
       .titlebar {
@@ -120,10 +138,19 @@
         gap: 12px;
         height: 38px;
         padding: 0 12px;
-        background: rgba(15, 23, 42, 0.98);
-        color: #e2e8f0;
         user-select: none;
         cursor: grab;
+      }
+
+      .surface-terminal .titlebar {
+        background: rgba(15, 23, 42, 0.98);
+        color: #e2e8f0;
+      }
+
+      .surface-file-tree .titlebar,
+      .surface-mock .titlebar {
+        background: rgba(248, 250, 252, 0.98);
+        color: #0f172a;
       }
 
       .titlebar:active {
@@ -151,7 +178,15 @@
         border-radius: 999px;
         background: rgba(148, 163, 184, 0.16);
         font-size: 11px;
+      }
+
+      .surface-terminal .status-chip {
         color: #cbd5e1;
+      }
+
+      .surface-file-tree .status-chip,
+      .surface-mock .status-chip {
+        color: #334155;
       }
 
       .status-dot {
@@ -163,6 +198,10 @@
 
       .status-chip.running .status-dot {
         background: #22c55e;
+      }
+
+      .status-chip.ready .status-dot {
+        background: #3b82f6;
       }
 
       .status-chip.error .status-dot {
@@ -185,8 +224,16 @@
         border: none;
         border-radius: 4px;
         background: rgba(148, 163, 184, 0.16);
-        color: #cbd5e1;
         cursor: pointer;
+      }
+
+      .surface-terminal .icon-button {
+        color: #cbd5e1;
+      }
+
+      .surface-file-tree .icon-button,
+      .surface-mock .icon-button {
+        color: #334155;
       }
 
       .icon-button:hover {
@@ -199,7 +246,15 @@
         right: 0;
         top: 38px;
         bottom: 0;
+      }
+
+      .surface-terminal .window-body {
         background: #020617;
+      }
+
+      .surface-file-tree .window-body,
+      .surface-mock .window-body {
+        background: #ffffff;
       }
 
       .terminal-root {
@@ -227,6 +282,130 @@
         display: block;
       }
 
+      .file-tree-root,
+      .mock-root {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .file-tree-toolbar,
+      .mock-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      }
+
+      .file-tree-path,
+      .mock-heading {
+        min-width: 0;
+        font-size: 12px;
+        font-weight: 600;
+        color: #334155;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .file-tree-scroll,
+      .mock-scroll {
+        flex: 1;
+        overflow: auto;
+      }
+
+      .file-tree-list {
+        padding: 8px 0;
+      }
+
+      .file-tree-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 30px;
+        padding: 0 12px;
+        font-size: 13px;
+        color: #0f172a;
+        cursor: pointer;
+      }
+
+      .file-tree-row:hover {
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .file-tree-row.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .tree-caret {
+        width: 12px;
+        color: #64748b;
+        text-align: center;
+      }
+
+      .tree-icon {
+        width: 16px;
+        color: #2563eb;
+      }
+
+      .tree-icon.file {
+        color: #64748b;
+      }
+
+      .tree-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .file-tree-footer {
+        padding: 10px 12px;
+        border-top: 1px solid rgba(148, 163, 184, 0.25);
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .file-tree-empty,
+      .mock-empty {
+        padding: 16px 12px;
+        font-size: 12px;
+        color: #64748b;
+      }
+
+      .mock-section {
+        padding: 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .mock-label {
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
+      }
+
+      .mock-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 32px;
+        font-size: 13px;
+        color: #0f172a;
+      }
+
+      .mock-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+        font-size: 11px;
+      }
+
       .resize-handle {
         position: absolute;
         right: 0;
@@ -252,7 +431,9 @@
       }
 
       .modal {
-        width: 320px;
+        width: min(520px, calc(100vw - 32px));
+        max-height: calc(100vh - 48px);
+        overflow: auto;
         padding: 14px;
         border-radius: 6px;
         background: rgba(255, 255, 255, 0.98);
@@ -263,6 +444,17 @@
       .modal h2 {
         margin: 0 0 10px;
         font-size: 16px;
+      }
+
+      .preset-section + .preset-section {
+        margin-top: 12px;
+      }
+
+      .preset-section-label {
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
       }
 
       .preset-list {
@@ -309,27 +501,75 @@
   </head>
   <body>
     <div id="app">
-      <div class="hint">Drag windows | Drag empty canvas to pan | Ctrl/Cmd + wheel to zoom</div>
+      <div class="hint">
+        <span class="connection-dot" id="connection-dot"></span>
+        <span id="connection-label">Connecting</span>
+        <span>Drag windows | Drag empty canvas to pan | Ctrl/Cmd + wheel to zoom</span>
+      </div>
       <div class="canvas" id="canvas">
         <div class="canvas-stage" id="canvas-stage"></div>
       </div>
-      <button class="add-button" id="add-button" aria-label="Add terminal">+</button>
+      <button class="add-button" id="add-button" aria-label="Add window">+</button>
       <div class="modal-backdrop" id="preset-modal">
         <div class="modal">
-          <h2>Add terminal</h2>
-          <div class="preset-list">
-            <button class="preset-button" data-preset="shell">
-              <strong>Shell</strong>
-              <span>Open a standard shell terminal</span>
-            </button>
-            <button class="preset-button" data-preset="claude">
-              <strong>Claude</strong>
-              <span>Auto-start the Claude CLI when available</span>
-            </button>
-            <button class="preset-button" data-preset="codex">
-              <strong>Codex</strong>
-              <span>Auto-start the Codex CLI when available</span>
-            </button>
+          <h2>Add window</h2>
+          <div class="preset-section">
+            <div class="preset-section-label">Terminal</div>
+            <div class="preset-list">
+              <button class="preset-button" data-preset="shell">
+                <strong>Shell</strong>
+                <span>Open a standard shell terminal</span>
+              </button>
+              <button class="preset-button" data-preset="claude">
+                <strong>Claude</strong>
+                <span>Start the Claude CLI when available</span>
+              </button>
+              <button class="preset-button" data-preset="codex">
+                <strong>Codex</strong>
+                <span>Start the Codex CLI when available</span>
+              </button>
+            </div>
+          </div>
+          <div class="preset-section">
+            <div class="preset-section-label">Workspace</div>
+            <div class="preset-list">
+              <button class="preset-button" data-preset="file_tree">
+                <strong>File Tree</strong>
+                <span>Browse repository files in a read-only tree</span>
+              </button>
+              <button class="preset-button" data-preset="settings">
+                <strong>Settings</strong>
+                <span>Open the settings surface</span>
+              </button>
+              <button class="preset-button" data-preset="memo">
+                <strong>Memo</strong>
+                <span>Open a notes surface</span>
+              </button>
+              <button class="preset-button" data-preset="profile">
+                <strong>Profile</strong>
+                <span>Open the active profile surface</span>
+              </button>
+              <button class="preset-button" data-preset="logs">
+                <strong>Logs</strong>
+                <span>Open the logs surface</span>
+              </button>
+              <button class="preset-button" data-preset="issue">
+                <strong>Issue</strong>
+                <span>Open the issue surface</span>
+              </button>
+              <button class="preset-button" data-preset="spec">
+                <strong>SPEC</strong>
+                <span>Open the SPEC surface</span>
+              </button>
+              <button class="preset-button" data-preset="board">
+                <strong>Board</strong>
+                <span>Open the board surface</span>
+              </button>
+              <button class="preset-button" data-preset="pr">
+                <strong>PR</strong>
+                <span>Open the PR surface</span>
+              </button>
+            </div>
           </div>
           <div class="modal-footer">
             <button class="text-button" id="close-modal">Cancel</button>
@@ -347,20 +587,84 @@
       const addButton = document.getElementById("add-button");
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
+      const connectionDot = document.getElementById("connection-dot");
+      const connectionLabel = document.getElementById("connection-label");
+
       const decoderMap = new Map();
       const pendingOutputMap = new Map();
+      const pendingSnapshotMap = new Map();
       const detailMap = new Map();
       const terminalMap = new Map();
       const windowMap = new Map();
+      const fileTreeStateMap = new Map();
+      const pendingMessages = [];
 
+      let socket = null;
+      let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
       let panState = null;
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
 
+      function presetSurface(preset) {
+        if (preset === "shell" || preset === "claude" || preset === "codex") {
+          return "terminal";
+        }
+        if (preset === "file_tree") {
+          return "file-tree";
+        }
+        return "mock";
+      }
+
       function send(message) {
-        window.ipc.postMessage(JSON.stringify(message));
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(message));
+          return;
+        }
+        pendingMessages.push(message);
+      }
+
+      function setConnectionState(connected) {
+        connectionDot.classList.toggle("connected", connected);
+        connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
+      }
+
+      function websocketUrl() {
+        const url = new URL(window.location.href);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        url.pathname = "/ws";
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      }
+
+      function connectSocket() {
+        if (socket && socket.readyState <= WebSocket.OPEN) {
+          return;
+        }
+        socket = new WebSocket(websocketUrl());
+        setConnectionState(false);
+
+        socket.addEventListener("open", () => {
+          setConnectionState(true);
+          send({ kind: "frontend_ready" });
+          while (pendingMessages.length > 0) {
+            socket.send(JSON.stringify(pendingMessages.shift()));
+          }
+        });
+
+        socket.addEventListener("message", (event) => {
+          receive(JSON.parse(event.data));
+        });
+
+        socket.addEventListener("close", () => {
+          setConnectionState(false);
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+          }
+          reconnectTimer = window.setTimeout(connectSocket, 1000);
+        });
       }
 
       function openModal() {
@@ -434,18 +738,22 @@
         const chip = element.querySelector(".status-chip");
         const label = element.querySelector(".status-label");
         const overlay = element.querySelector(".terminal-overlay");
-        chip.classList.remove("starting", "running", "exited", "error");
+        chip.classList.remove("starting", "running", "ready", "exited", "error");
         chip.classList.add(status);
         label.textContent = status;
         if (detail) {
           detailMap.set(windowId, detail);
+        } else if (status === "running" || status === "ready") {
+          detailMap.delete(windowId);
         }
         const effectiveDetail = detailMap.get(windowId);
-        overlay.textContent = effectiveDetail || "";
-        overlay.classList.toggle(
-          "visible",
-          status === "error" || status === "exited",
-        );
+        if (overlay) {
+          overlay.textContent = effectiveDetail || "";
+          overlay.classList.toggle(
+            "visible",
+            status === "error" || status === "exited",
+          );
+        }
       }
 
       function focusWindowLocally(windowId) {
@@ -453,6 +761,10 @@
         for (const [id, element] of windowMap.entries()) {
           element.classList.toggle("focused", id === windowId);
         }
+      }
+
+      function decodeBase64(base64) {
+        return Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
       }
 
       function createTerminalRuntime(windowId, terminalContainer) {
@@ -484,7 +796,7 @@
             brightWhite: "#f8fafc",
           },
           fontFamily:
-            "ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Consolas, monospace",
+            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 13,
           lineHeight: 1.2,
           scrollback: 5000,
@@ -498,6 +810,12 @@
         terminalMap.set(windowId, { terminal, fitAddon });
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
+
+        const snapshot = pendingSnapshotMap.get(windowId);
+        if (snapshot) {
+          replaceTerminalSnapshot(windowId, snapshot);
+          pendingSnapshotMap.delete(windowId);
+        }
 
         const pending = pendingOutputMap.get(windowId);
         if (pending?.length) {
@@ -517,16 +835,315 @@
           pendingOutputMap.set(windowId, queue);
           return;
         }
-        const bytes = Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
         const decoder = decoderMap.get(windowId);
-        runtime.terminal.write(decoder.decode(bytes, { stream: true }));
+        runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }));
+      }
+
+      function replaceTerminalSnapshot(windowId, base64) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          pendingSnapshotMap.set(windowId, base64);
+          return;
+        }
+        const decoder = decoderMap.get(windowId);
+        runtime.terminal.reset();
+        runtime.terminal.write(decoder.decode(decodeBase64(base64)));
+      }
+
+      function mockContentForPreset(preset) {
+        switch (preset) {
+          case "settings":
+            return {
+              heading: "Environment",
+              rows: [
+                ["Theme", "Canvas"],
+                ["Agents", "Claude / Codex"],
+                ["Transport", "Local server"],
+              ],
+            };
+          case "memo":
+            return {
+              heading: "Daily Notes",
+              rows: [
+                ["Workspace", "Floating windows"],
+                ["Pinned", "2 notes"],
+                ["Draft", "Canvas review"],
+              ],
+            };
+          case "profile":
+            return {
+              heading: "Active Profile",
+              rows: [
+                ["Profile", "default"],
+                ["Model", "Mixed"],
+                ["Shell", "Interactive"],
+              ],
+            };
+          case "logs":
+            return {
+              heading: "Recent Events",
+              rows: [
+                ["Workspace", "synced"],
+                ["Transport", "connected"],
+                ["Canvas", "ready"],
+              ],
+            };
+          case "issue":
+            return {
+              heading: "Assigned Issues",
+              rows: [
+                ["#1784", "GUI rewrite"],
+                ["#1930", "SPEC cache"],
+                ["#1974", "Shared board"],
+              ],
+            };
+          case "spec":
+            return {
+              heading: "Open Specs",
+              rows: [
+                ["SPEC", "Issue-backed"],
+                ["Plan", "In progress"],
+                ["Tasks", "Tracked"],
+              ],
+            };
+          case "board":
+            return {
+              heading: "Coordination",
+              rows: [
+                ["Backlog", "4 cards"],
+                ["Doing", "2 cards"],
+                ["Blocked", "0 cards"],
+              ],
+            };
+          case "pr":
+            return {
+              heading: "Review Queue",
+              rows: [
+                ["Draft", "1 PR"],
+                ["Review", "2 PRs"],
+                ["Merge", "0 PRs"],
+              ],
+            };
+          default:
+            return {
+              heading: "Workspace",
+              rows: [
+                ["Canvas", "ready"],
+                ["Windows", "floating"],
+                ["Transport", "shared"],
+              ],
+            };
+        }
+      }
+
+      function ensureFileTreeState(windowId) {
+        if (!fileTreeStateMap.has(windowId)) {
+          fileTreeStateMap.set(windowId, {
+            loaded: new Map(),
+            expanded: new Set(),
+            loading: new Set(),
+            selectedPath: "",
+            error: "",
+          });
+        }
+        return fileTreeStateMap.get(windowId);
+      }
+
+      function requestFileTree(windowId, path = "") {
+        const state = ensureFileTreeState(windowId);
+        if (state.loading.has(path)) {
+          return;
+        }
+        state.loading.add(path);
+        send({
+          kind: "load_file_tree",
+          id: windowId,
+          path: path || null,
+        });
+      }
+
+      function renderFileTree(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const state = ensureFileTreeState(windowId);
+        const list = element.querySelector(".file-tree-list");
+        const footer = element.querySelector(".file-tree-footer");
+        if (!list || !footer) {
+          return;
+        }
+        list.innerHTML = "";
+        footer.textContent = state.selectedPath || ".";
+
+        if (state.error) {
+          const errorRow = document.createElement("div");
+          errorRow.className = "file-tree-empty";
+          errorRow.textContent = state.error;
+          list.appendChild(errorRow);
+        }
+
+        if (!state.loaded.has("")) {
+          const loadingRow = document.createElement("div");
+          loadingRow.className = "file-tree-empty";
+          loadingRow.textContent = "Loading repository";
+          list.appendChild(loadingRow);
+          return;
+        }
+
+        function appendRows(parentPath, depth) {
+          const entries = state.loaded.get(parentPath) || [];
+          for (const entry of entries) {
+            const row = document.createElement("div");
+            row.className = "file-tree-row";
+            if (state.selectedPath === entry.path) {
+              row.classList.add("selected");
+            }
+            row.style.paddingLeft = `${12 + depth * 18}px`;
+
+            const expanded = state.expanded.has(entry.path);
+            const isDirectory = entry.kind === "directory";
+            row.innerHTML = `
+              <span class="tree-caret">${isDirectory ? (expanded ? "▾" : "▸") : ""}</span>
+              <span class="tree-icon ${isDirectory ? "dir" : "file"}">${isDirectory ? "▣" : "•"}</span>
+              <span class="tree-name">${entry.name}</span>
+            `;
+            row.addEventListener("click", () => {
+              state.selectedPath = entry.path;
+              if (isDirectory) {
+                if (state.expanded.has(entry.path)) {
+                  state.expanded.delete(entry.path);
+                } else {
+                  state.expanded.add(entry.path);
+                  if (!state.loaded.has(entry.path)) {
+                    requestFileTree(windowId, entry.path);
+                  }
+                }
+              }
+              renderFileTree(windowId);
+            });
+            list.appendChild(row);
+
+            if (isDirectory && state.expanded.has(entry.path)) {
+              if (state.loaded.has(entry.path)) {
+                appendRows(entry.path, depth + 1);
+              } else {
+                const loadingRow = document.createElement("div");
+                loadingRow.className = "file-tree-empty";
+                loadingRow.style.paddingLeft = `${30 + depth * 18}px`;
+                loadingRow.textContent = "Loading";
+                list.appendChild(loadingRow);
+              }
+            }
+          }
+        }
+
+        appendRows("", 0);
+
+        if (list.childElementCount === 0) {
+          const emptyRow = document.createElement("div");
+          emptyRow.className = "file-tree-empty";
+          emptyRow.textContent = "No visible files";
+          list.appendChild(emptyRow);
+        }
+      }
+
+      function mountWindowBody(windowData, element) {
+        const body = element.querySelector(".window-body");
+        body.innerHTML = "";
+        const surface = presetSurface(windowData.preset);
+        element.classList.remove("surface-terminal", "surface-file-tree", "surface-mock");
+        element.classList.add(`surface-${surface}`);
+
+        if (surface === "terminal") {
+          body.innerHTML = `
+            <div class="terminal-root"></div>
+            <div class="terminal-overlay"></div>
+          `;
+          const terminalRoot = body.querySelector(".terminal-root");
+          terminalRoot.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          terminalRoot.addEventListener("click", () => {
+            const runtime = terminalMap.get(windowData.id);
+            runtime?.terminal.focus();
+          });
+          createTerminalRuntime(windowData.id, terminalRoot);
+          return;
+        }
+
+        if (surface === "file-tree") {
+          body.innerHTML = `
+            <div class="file-tree-root">
+              <div class="file-tree-toolbar">
+                <div class="file-tree-path">Repository</div>
+                <button class="icon-button" data-action="refresh-tree" aria-label="Refresh tree">↻</button>
+              </div>
+              <div class="file-tree-scroll">
+                <div class="file-tree-list"></div>
+              </div>
+              <div class="file-tree-footer">.</div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='refresh-tree']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = ensureFileTreeState(windowData.id);
+              state.loaded.clear();
+              state.expanded.clear();
+              state.loading.clear();
+              state.error = "";
+              requestFileTree(windowData.id, "");
+              renderFileTree(windowData.id);
+            });
+          const state = ensureFileTreeState(windowData.id);
+          if (!state.loaded.has("")) {
+            requestFileTree(windowData.id, "");
+          }
+          renderFileTree(windowData.id);
+          return;
+        }
+
+        const mock = mockContentForPreset(windowData.preset);
+        body.innerHTML = `
+          <div class="mock-root">
+            <div class="mock-toolbar">
+              <div class="mock-heading">${mock.heading}</div>
+              <span class="mock-chip">${windowData.title}</span>
+            </div>
+            <div class="mock-scroll"></div>
+          </div>
+        `;
+        const scroll = body.querySelector(".mock-scroll");
+        body.addEventListener("mousedown", () => {
+          focusWindowLocally(windowData.id);
+          send({ kind: "focus_window", id: windowData.id });
+        });
+        for (const [label, value] of mock.rows) {
+          const section = document.createElement("div");
+          section.className = "mock-section";
+          section.innerHTML = `
+            <div class="mock-label">${label}</div>
+            <div class="mock-row">
+              <span>${value}</span>
+              <span class="mock-chip">ready</span>
+            </div>
+          `;
+          scroll.appendChild(section);
+        }
       }
 
       function ensureWindow(windowData) {
         let element = windowMap.get(windowData.id);
         if (!element) {
           element = document.createElement("div");
-          element.className = "terminal-window";
+          element.className = "workspace-window";
           element.dataset.id = windowData.id;
           element.innerHTML = `
             <div class="titlebar">
@@ -538,20 +1155,16 @@
                 </span>
               </div>
               <div class="window-actions">
-                <button class="icon-button" data-action="close" aria-label="Close terminal">×</button>
+                <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
-            <div class="window-body">
-              <div class="terminal-root"></div>
-              <div class="terminal-overlay"></div>
-            </div>
+            <div class="window-body"></div>
             <div class="resize-handle"></div>
           `;
           stage.appendChild(element);
           windowMap.set(windowData.id, element);
 
           const titlebar = element.querySelector(".titlebar");
-          const terminalRoot = element.querySelector(".terminal-root");
           const closeButton = element.querySelector("[data-action='close']");
           const resizeHandle = element.querySelector(".resize-handle");
 
@@ -590,18 +1203,11 @@
             };
             resizeHandle.setPointerCapture(event.pointerId);
           });
+        }
 
-          terminalRoot.addEventListener("mousedown", () => {
-            focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
-          });
-
-          terminalRoot.addEventListener("click", () => {
-            const runtime = terminalMap.get(windowData.id);
-            runtime?.terminal.focus();
-          });
-
-          createTerminalRuntime(windowData.id, terminalRoot);
+        if (!element.dataset.preset || element.dataset.preset !== windowData.preset) {
+          element.dataset.preset = windowData.preset;
+          mountWindowBody(windowData, element);
         }
 
         element.querySelector(".title-text").textContent = windowData.title;
@@ -630,6 +1236,9 @@
           terminalMap.delete(windowId);
           decoderMap.delete(windowId);
           detailMap.delete(windowId);
+          pendingOutputMap.delete(windowId);
+          pendingSnapshotMap.delete(windowId);
+          fileTreeStateMap.delete(windowId);
           element.remove();
           windowMap.delete(windowId);
         }
@@ -641,8 +1250,42 @@
         if (!focusedId && workspace.windows.length > 0) {
           focusedId = workspace.windows[workspace.windows.length - 1].id;
         }
-        if (focusedId) {
+        if (focusedId && ids.has(focusedId)) {
           focusWindowLocally(focusedId);
+        } else if (workspace.windows.length > 0) {
+          focusWindowLocally(workspace.windows[workspace.windows.length - 1].id);
+        }
+      }
+
+      function receive(event) {
+        switch (event.kind) {
+          case "workspace_state":
+            renderWorkspace(event.workspace);
+            break;
+          case "terminal_output":
+            writeOutput(event.id, event.data_base64);
+            break;
+          case "terminal_snapshot":
+            replaceTerminalSnapshot(event.id, event.data_base64);
+            break;
+          case "terminal_status":
+            applyStatus(event.id, event.status, event.detail);
+            break;
+          case "file_tree_entries": {
+            const state = ensureFileTreeState(event.id);
+            state.loaded.set(event.path, event.entries);
+            state.loading.delete(event.path);
+            state.error = "";
+            renderFileTree(event.id);
+            break;
+          }
+          case "file_tree_error": {
+            const state = ensureFileTreeState(event.id);
+            state.loading.delete(event.path);
+            state.error = event.message;
+            renderFileTree(event.id);
+            break;
+          }
         }
       }
 
@@ -766,24 +1409,9 @@
         });
       }
 
-      window.__POC__ = {
-        receive(event) {
-          if (event.kind === "workspace_state") {
-            renderWorkspace(event.workspace);
-            return;
-          }
-          if (event.kind === "terminal_output") {
-            writeOutput(event.id, event.data_base64);
-            return;
-          }
-          if (event.kind === "terminal_status") {
-            applyStatus(event.id, event.status, event.detail || null);
-          }
-        },
-      };
+      window.__POC__ = { receive };
 
-      applyViewport();
-      send({ kind: "frontend_ready" });
+      connectSocket();
     </script>
   </body>
 </html>

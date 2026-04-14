@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-14 — feat: WebView-only GUI PoC でも browser access の可能性があるなら transport を最初から外出しする
+
+### 事象
+
+native window の内部だけで `window.ipc` を使う WebView PoC を進めたあと、
+実行時に local server を起動して同じ UI を browser からも開ける要件が追加された。
+
+### 原因
+
+- frontend transport を WebView 専用 API に寄せたため、browser reuse の余地がなかった。
+- 「native shell の中の WebView」という見え方に引っ張られ、UI host と frontend transport を
+  別問題として切り分けていなかった。
+
+### 再発防止策
+
+1. WebView を使う GUI PoC では、後から browser 共有が起こりうるかを最初に確認する。
+2. browser reuse の可能性が少しでもある場合、frontend transport は `window.ipc` ではなく
+   local HTTP/WebSocket など host 非依存の経路にする。
+3. native app と browser が同じ frontend を読む構成では、初期 state sync と live update を
+   最初から分けて設計する。
+
 ## 2026-04-14 — fix: ローカル永続 state の schema 追加では既存ファイルを `serde(default)` で先に受ける
 
 ### 事象

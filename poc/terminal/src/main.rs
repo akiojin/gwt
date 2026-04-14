@@ -1,75 +1,49 @@
 use std::{
     collections::HashMap,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
 };
 
-use base64::Engine;
-use poc_terminal::{
-    detect_shell_program, load_workspace_state, resolve_launch_spec, save_workspace_state,
-    workspace_state_path, CanvasViewport, PersistedWorkspaceState, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState,
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
+    response::{Html, IntoResponse},
+    routing::get,
+    Router,
 };
-use serde::{Deserialize, Serialize};
+use base64::Engine;
+use futures_util::{SinkExt, StreamExt};
+use gwt_terminal::{Pane, PaneStatus};
+use poc_terminal::{
+    detect_shell_program, list_directory_entries, load_workspace_state, resolve_launch_spec,
+    save_workspace_state, workspace_state_path, BackendEvent, FrontendEvent, WindowGeometry,
+    WindowPreset, WindowProcessStatus, WorkspaceState,
+};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
+use tokio::{
+    net::TcpListener,
+    runtime::Runtime,
+    sync::{mpsc, oneshot},
+};
+use uuid::Uuid;
 use wry::WebViewBuilder;
 
-use gwt_terminal::{Pane, PaneStatus};
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum FrontendEvent {
-    FrontendReady,
-    CreateWindow {
-        preset: WindowPreset,
-    },
-    FocusWindow {
-        id: String,
-    },
-    UpdateViewport {
-        viewport: CanvasViewport,
-    },
-    UpdateWindowGeometry {
-        id: String,
-        geometry: WindowGeometry,
-        cols: u16,
-        rows: u16,
-    },
-    CloseWindow {
-        id: String,
-    },
-    TerminalInput {
-        id: String,
-        data: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum BackendEvent {
-    WorkspaceState {
-        workspace: PersistedWorkspaceState,
-    },
-    TerminalOutput {
-        id: String,
-        data_base64: String,
-    },
-    TerminalStatus {
-        id: String,
-        status: WindowProcessStatus,
-        detail: Option<String>,
-    },
-}
+type ClientId = String;
 
 #[derive(Debug, Clone)]
 enum UserEvent {
-    Frontend(FrontendEvent),
+    Frontend {
+        client_id: ClientId,
+        event: FrontendEvent,
+    },
     RuntimeOutput {
         id: String,
         data: Vec<u8>,
@@ -85,61 +59,83 @@ struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
 }
 
+#[derive(Debug, Clone)]
+enum DispatchTarget {
+    Broadcast,
+    Client(ClientId),
+}
+
+#[derive(Debug, Clone)]
+struct OutboundEvent {
+    target: DispatchTarget,
+    event: BackendEvent,
+}
+
+impl OutboundEvent {
+    fn broadcast(event: BackendEvent) -> Self {
+        Self {
+            target: DispatchTarget::Broadcast,
+            event,
+        }
+    }
+
+    fn reply(client_id: impl Into<ClientId>, event: BackendEvent) -> Self {
+        Self {
+            target: DispatchTarget::Client(client_id.into()),
+            event,
+        }
+    }
+}
+
 struct AppRuntime {
     workspace: WorkspaceState,
     runtimes: HashMap<String, WindowRuntime>,
-    pending_events: Vec<BackendEvent>,
+    window_details: HashMap<String, String>,
     state_path: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
-    frontend_ready: bool,
+    workdir: PathBuf,
 }
 
 impl AppRuntime {
     fn new(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<Self> {
         let state_path = workspace_state_path();
         let workspace = WorkspaceState::from_persisted(load_workspace_state(&state_path)?);
+        let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Ok(Self {
             workspace,
             runtimes: HashMap::new(),
-            pending_events: Vec::new(),
+            window_details: HashMap::new(),
             state_path,
             proxy,
-            frontend_ready: false,
+            workdir,
         })
     }
 
     fn bootstrap(&mut self) {
         let windows = self.workspace.persisted().windows.clone();
         for window in windows {
-            if let Some(event) =
-                self.start_window(&window.id, window.preset, window.geometry.clone())
-            {
-                self.pending_events.push(event);
-            }
+            let _ = self.start_window(&window.id, window.preset, window.geometry.clone());
         }
         let _ = self.persist();
     }
 
-    fn handle_frontend_event(&mut self, event: FrontendEvent) -> Vec<BackendEvent> {
+    fn handle_frontend_event(
+        &mut self,
+        client_id: ClientId,
+        event: FrontendEvent,
+    ) -> Vec<OutboundEvent> {
         match event {
-            FrontendEvent::FrontendReady => {
-                self.frontend_ready = true;
-                let mut events = vec![BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                }];
-                events.append(&mut self.pending_events);
-                events
-            }
+            FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
             FrontendEvent::CreateWindow { preset } => {
                 let window = self.workspace.add_window(preset);
                 let runtime_event =
                     self.start_window(&window.id, window.preset, window.geometry.clone());
                 let _ = self.persist();
-                let mut events = vec![BackendEvent::WorkspaceState {
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
                     workspace: self.workspace.persisted().clone(),
-                }];
+                })];
                 if let Some(event) = runtime_event {
-                    events.push(event);
+                    events.push(OutboundEvent::broadcast(event));
                 }
                 events
             }
@@ -148,16 +144,16 @@ impl AppRuntime {
                     return Vec::new();
                 }
                 let _ = self.persist();
-                vec![BackendEvent::WorkspaceState {
+                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
                     workspace: self.workspace.persisted().clone(),
-                }]
+                })]
             }
             FrontendEvent::UpdateViewport { viewport } => {
                 self.workspace.update_viewport(viewport);
                 let _ = self.persist();
-                vec![BackendEvent::WorkspaceState {
+                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
                     workspace: self.workspace.persisted().clone(),
-                }]
+                })]
             }
             FrontendEvent::UpdateWindowGeometry {
                 id,
@@ -174,9 +170,9 @@ impl AppRuntime {
                     }
                 }
                 let _ = self.persist();
-                vec![BackendEvent::WorkspaceState {
+                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
                     workspace: self.workspace.persisted().clone(),
-                }]
+                })]
             }
             FrontendEvent::CloseWindow { id } => {
                 if let Some(runtime) = self.runtimes.remove(&id) {
@@ -184,13 +180,14 @@ impl AppRuntime {
                         let _ = pane.kill();
                     }
                 }
+                self.window_details.remove(&id);
                 if !self.workspace.close_window(&id) {
                     return Vec::new();
                 }
                 let _ = self.persist();
-                vec![BackendEvent::WorkspaceState {
+                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
                     workspace: self.workspace.persisted().clone(),
-                }]
+                })]
             }
             FrontendEvent::TerminalInput { id, data } => {
                 let Some(runtime) = self.runtimes.get(&id) else {
@@ -210,14 +207,102 @@ impl AppRuntime {
                     }
                 }
             }
+            FrontendEvent::LoadFileTree { id, path } => {
+                let path = path.unwrap_or_default();
+                let event = self.load_file_tree_event(&id, &path);
+                vec![OutboundEvent::reply(client_id, event)]
+            }
         }
     }
 
-    fn handle_runtime_output(&mut self, id: String, data: Vec<u8>) -> Vec<BackendEvent> {
-        vec![BackendEvent::TerminalOutput {
+    fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+        let mut events = vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::WorkspaceState {
+                workspace: self.workspace.persisted().clone(),
+            },
+        )];
+
+        for (id, detail) in &self.window_details {
+            let Some(window) = self.workspace.window(id) else {
+                continue;
+            };
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::TerminalStatus {
+                    id: id.clone(),
+                    status: window.status.clone(),
+                    detail: Some(detail.clone()),
+                },
+            ));
+        }
+
+        for (id, runtime) in &self.runtimes {
+            let snapshot = runtime
+                .pane
+                .lock()
+                .map(|pane| pane.screen().contents().into_bytes())
+                .unwrap_or_default();
+            if snapshot.is_empty() {
+                continue;
+            }
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::TerminalSnapshot {
+                    id: id.clone(),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                },
+            ));
+        }
+
+        events
+    }
+
+    fn load_file_tree_event(&self, id: &str, path: &str) -> BackendEvent {
+        let Some(window) = self.workspace.window(id) else {
+            return BackendEvent::FileTreeError {
+                id: id.to_string(),
+                path: path.to_string(),
+                message: "Window not found".to_string(),
+            };
+        };
+
+        if window.preset != WindowPreset::FileTree {
+            return BackendEvent::FileTreeError {
+                id: id.to_string(),
+                path: path.to_string(),
+                message: "Window is not a file tree".to_string(),
+            };
+        }
+
+        let relative_path = if path.is_empty() {
+            None
+        } else {
+            Some(Path::new(path))
+        };
+
+        match list_directory_entries(&self.workdir, relative_path) {
+            Ok(entries) => BackendEvent::FileTreeEntries {
+                id: id.to_string(),
+                path: path.to_string(),
+                entries,
+            },
+            Err(error) => BackendEvent::FileTreeError {
+                id: id.to_string(),
+                path: path.to_string(),
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn handle_runtime_output(&mut self, id: String, data: Vec<u8>) -> Vec<OutboundEvent> {
+        if self.workspace.window(&id).is_none() {
+            return Vec::new();
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
             id,
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-        }]
+        })]
     }
 
     fn handle_runtime_status(
@@ -225,8 +310,22 @@ impl AppRuntime {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
-    ) -> Vec<BackendEvent> {
+    ) -> Vec<OutboundEvent> {
+        if self.workspace.window(&id).is_none() {
+            self.runtimes.remove(&id);
+            self.window_details.remove(&id);
+            return Vec::new();
+        }
+
         self.workspace.set_status(&id, status.clone());
+        match detail.as_ref() {
+            Some(detail) if !detail.is_empty() => {
+                self.window_details.insert(id.clone(), detail.clone());
+            }
+            _ => {
+                self.window_details.remove(&id);
+            }
+        }
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Exited
@@ -236,10 +335,10 @@ impl AppRuntime {
         let _ = self.persist();
 
         vec![
-            BackendEvent::WorkspaceState {
+            OutboundEvent::broadcast(BackendEvent::WorkspaceState {
                 workspace: self.workspace.persisted().clone(),
-            },
-            BackendEvent::TerminalStatus { id, status, detail },
+            }),
+            OutboundEvent::broadcast(BackendEvent::TerminalStatus { id, status, detail }),
         ]
     }
 
@@ -249,10 +348,17 @@ impl AppRuntime {
         preset: WindowPreset,
         geometry: WindowGeometry,
     ) -> Option<BackendEvent> {
+        if !preset.requires_process() {
+            self.workspace.set_status(id, WindowProcessStatus::Ready);
+            return None;
+        }
+
         let shell = match detect_shell_program() {
             Ok(shell) => shell,
             Err(error) => {
                 self.workspace.set_status(id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(id.to_string(), error.to_string());
                 return Some(BackendEvent::TerminalStatus {
                     id: id.to_string(),
                     status: WindowProcessStatus::Error,
@@ -265,6 +371,8 @@ impl AppRuntime {
             Ok(launch) => launch,
             Err(error) => {
                 self.workspace.set_status(id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(id.to_string(), error.to_string());
                 return Some(BackendEvent::TerminalStatus {
                     id: id.to_string(),
                     status: WindowProcessStatus::Error,
@@ -281,11 +389,13 @@ impl AppRuntime {
             cols,
             rows,
             spawn_env(),
-            std::env::current_dir().ok(),
+            Some(self.workdir.clone()),
         ) {
             Ok(pane) => Arc::new(Mutex::new(pane)),
             Err(error) => {
                 self.workspace.set_status(id, WindowProcessStatus::Error);
+                self.window_details
+                    .insert(id.to_string(), error.to_string());
                 return Some(BackendEvent::TerminalStatus {
                     id: id.to_string(),
                     status: WindowProcessStatus::Error,
@@ -296,6 +406,7 @@ impl AppRuntime {
 
         self.spawn_output_thread(id.to_string(), pane.clone());
         self.workspace.set_status(id, WindowProcessStatus::Running);
+        self.window_details.remove(id);
         self.runtimes.insert(id.to_string(), WindowRuntime { pane });
         Some(BackendEvent::TerminalStatus {
             id: id.to_string(),
@@ -389,6 +500,160 @@ impl AppRuntime {
     }
 }
 
+#[derive(Clone, Default)]
+struct ClientHub {
+    clients: Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<String>>>>,
+}
+
+impl ClientHub {
+    fn register(&self, client_id: ClientId) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.clients
+            .lock()
+            .expect("client hub lock")
+            .insert(client_id, tx);
+        rx
+    }
+
+    fn unregister(&self, client_id: &str) {
+        self.clients
+            .lock()
+            .expect("client hub lock")
+            .remove(client_id);
+    }
+
+    fn dispatch(&self, events: Vec<OutboundEvent>) {
+        let clients = self.clients.lock().expect("client hub lock");
+        for outbound in events {
+            let payload = serde_json::to_string(&outbound.event).expect("backend event json");
+            match outbound.target {
+                DispatchTarget::Broadcast => {
+                    for sender in clients.values() {
+                        let _ = sender.send(payload.clone());
+                    }
+                }
+                DispatchTarget::Client(client_id) => {
+                    if let Some(sender) = clients.get(&client_id) {
+                        let _ = sender.send(payload);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ServerState {
+    proxy: EventLoopProxy<UserEvent>,
+    clients: ClientHub,
+}
+
+struct EmbeddedServer {
+    url: String,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+impl EmbeddedServer {
+    fn start(
+        runtime: &Runtime,
+        proxy: EventLoopProxy<UserEvent>,
+        clients: ClientHub,
+    ) -> std::io::Result<Self> {
+        let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0)))?;
+        let addr = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let app = Router::new()
+            .route("/", get(index_handler))
+            .route("/healthz", get(health_handler))
+            .route("/ws", get(websocket_handler))
+            .with_state(ServerState { proxy, clients });
+
+        runtime.spawn(async move {
+            let server = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            });
+            if let Err(error) = server.await {
+                eprintln!("embedded server error: {error}");
+            }
+        });
+
+        Ok(Self {
+            url: format!("http://127.0.0.1:{}/", addr.port()),
+            shutdown_tx: Some(shutdown_tx),
+        })
+    }
+
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn index_handler() -> Html<&'static str> {
+    Html(include_str!("../web/index.html"))
+}
+
+async fn health_handler() -> &'static str {
+    "ok"
+}
+
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<ServerState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| client_session(socket, state))
+}
+
+async fn client_session(socket: WebSocket, state: ServerState) {
+    let client_id = Uuid::new_v4().to_string();
+    let mut outbound = state.clients.register(client_id.clone());
+    let (mut sender, mut receiver) = socket.split();
+
+    loop {
+        tokio::select! {
+            maybe_payload = outbound.recv() => {
+                let Some(payload) = maybe_payload else {
+                    break;
+                };
+                if sender.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            maybe_message = receiver.next() => {
+                match maybe_message {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
+                            Ok(event) => {
+                                let _ = state.proxy.send_event(UserEvent::Frontend {
+                                    client_id: client_id.clone(),
+                                    event,
+                                });
+                            }
+                            Err(error) => {
+                                eprintln!("invalid frontend message: {error}");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        eprintln!("websocket error: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    state.clients.unregister(&client_id);
+}
+
 fn resolve_launch_spec_with_fallback(
     preset: WindowPreset,
     shell: &poc_terminal::ShellProgram,
@@ -410,26 +675,17 @@ fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
     (cols.max(20), rows.max(6))
 }
 
-fn flush_events(webview: &wry::WebView, app: &mut AppRuntime, events: Vec<BackendEvent>) {
-    if app.frontend_ready {
-        for event in events {
-            let _ = dispatch_event(webview, &event);
-        }
-    } else {
-        app.pending_events.extend(events);
-    }
-}
-
-fn dispatch_event(webview: &wry::WebView, event: &BackendEvent) -> wry::Result<()> {
-    let payload = serde_json::to_string(event).expect("backend event json");
-    webview.evaluate_script(&format!("window.__POC__?.receive({payload});"))
-}
-
 fn main() -> wry::Result<()> {
+    let runtime = Runtime::new().expect("tokio runtime");
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
-    let mut app = AppRuntime::new(proxy).expect("app runtime");
+    let clients = ClientHub::default();
+    let mut app = AppRuntime::new(proxy.clone()).expect("app runtime");
     app.bootstrap();
+
+    let mut server =
+        EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
+    eprintln!("poc-terminal browser URL: {}", server.url());
 
     let window = WindowBuilder::new()
         .with_title("gwt terminal poc")
@@ -437,21 +693,7 @@ fn main() -> wry::Result<()> {
         .build(&event_loop)
         .expect("window");
 
-    let builder = WebViewBuilder::new()
-        .with_html(include_str!("../web/index.html"))
-        .with_ipc_handler({
-            let proxy = app.proxy.clone();
-            move |request: wry::http::Request<String>| match serde_json::from_str::<FrontendEvent>(
-                request.body(),
-            ) {
-                Ok(event) => {
-                    let _ = proxy.send_event(UserEvent::Frontend(event));
-                }
-                Err(error) => {
-                    eprintln!("invalid frontend message: {error}");
-                }
-            }
-        });
+    let builder = WebViewBuilder::new().with_url(server.url());
 
     #[cfg(any(
         target_os = "windows",
@@ -475,25 +717,28 @@ fn main() -> wry::Result<()> {
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
+        let _ = &webview;
+        let _ = &runtime;
 
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
-            Event::UserEvent(UserEvent::Frontend(event)) => {
-                let events = app.handle_frontend_event(event);
-                flush_events(&webview, &mut app, events);
+            Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+                let events = app.handle_frontend_event(client_id, event);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);
-                flush_events(&webview, &mut app, events);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
-                flush_events(&webview, &mut app, events);
+                clients.dispatch(events);
             }
             _ => {}
         }

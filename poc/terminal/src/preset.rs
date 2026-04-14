@@ -2,19 +2,120 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum WindowPreset {
     Shell,
     Claude,
     Codex,
+    FileTree,
+    Settings,
+    Memo,
+    Profile,
+    Logs,
+    Issue,
+    Spec,
+    Board,
+    Pr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSurface {
+    Terminal,
+    FileTree,
+    Mock,
 }
 
 impl WindowPreset {
+    pub const ALL: [WindowPreset; 12] = [
+        WindowPreset::Shell,
+        WindowPreset::Claude,
+        WindowPreset::Codex,
+        WindowPreset::FileTree,
+        WindowPreset::Settings,
+        WindowPreset::Memo,
+        WindowPreset::Profile,
+        WindowPreset::Logs,
+        WindowPreset::Issue,
+        WindowPreset::Spec,
+        WindowPreset::Board,
+        WindowPreset::Pr,
+    ];
+
     pub fn title(self) -> &'static str {
         match self {
             Self::Shell => "Shell",
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::FileTree => "File Tree",
+            Self::Settings => "Settings",
+            Self::Memo => "Memo",
+            Self::Profile => "Profile",
+            Self::Logs => "Logs",
+            Self::Issue => "Issue",
+            Self::Spec => "SPEC",
+            Self::Board => "Board",
+            Self::Pr => "PR",
+        }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            Self::Shell => "Open a standard shell terminal",
+            Self::Claude => "Start the Claude CLI when available",
+            Self::Codex => "Start the Codex CLI when available",
+            Self::FileTree => "Browse repository files in a read-only tree",
+            Self::Settings => "Placeholder settings surface",
+            Self::Memo => "Placeholder notes surface",
+            Self::Profile => "Placeholder profile surface",
+            Self::Logs => "Placeholder logs surface",
+            Self::Issue => "Placeholder issue surface",
+            Self::Spec => "Placeholder SPEC surface",
+            Self::Board => "Placeholder board surface",
+            Self::Pr => "Placeholder PR surface",
+        }
+    }
+
+    pub fn id_prefix(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::FileTree => "file-tree",
+            Self::Settings => "settings",
+            Self::Memo => "memo",
+            Self::Profile => "profile",
+            Self::Logs => "logs",
+            Self::Issue => "issue",
+            Self::Spec => "spec",
+            Self::Board => "board",
+            Self::Pr => "pr",
+        }
+    }
+
+    pub fn surface(self) -> WindowSurface {
+        match self {
+            Self::Shell | Self::Claude | Self::Codex => WindowSurface::Terminal,
+            Self::FileTree => WindowSurface::FileTree,
+            Self::Settings
+            | Self::Memo
+            | Self::Profile
+            | Self::Logs
+            | Self::Issue
+            | Self::Spec
+            | Self::Board
+            | Self::Pr => WindowSurface::Mock,
+        }
+    }
+
+    pub fn requires_process(self) -> bool {
+        matches!(self.surface(), WindowSurface::Terminal)
+    }
+
+    pub fn default_size(self) -> (f64, f64) {
+        match self.surface() {
+            WindowSurface::Terminal => (720.0, 420.0),
+            WindowSurface::FileTree => (420.0, 520.0),
+            WindowSurface::Mock => (420.0, 300.0),
         }
     }
 
@@ -23,6 +124,15 @@ impl WindowPreset {
             Self::Shell => None,
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
+            Self::FileTree
+            | Self::Settings
+            | Self::Memo
+            | Self::Profile
+            | Self::Logs
+            | Self::Issue
+            | Self::Spec
+            | Self::Board
+            | Self::Pr => None,
         }
     }
 }
@@ -46,6 +156,8 @@ pub enum PresetResolveError {
     ShellNotFound,
     #[error("required command is not available: {command}")]
     CommandNotFound { command: String },
+    #[error("preset is not launchable as a process: {preset}")]
+    NotLaunchable { preset: String },
 }
 
 pub fn detect_shell_program() -> Result<ShellProgram, PresetResolveError> {
@@ -106,6 +218,12 @@ pub fn resolve_launch_spec_with<F>(
 where
     F: Fn(&str) -> bool,
 {
+    if !preset.requires_process() {
+        return Err(PresetResolveError::NotLaunchable {
+            preset: preset.title().to_string(),
+        });
+    }
+
     match preset {
         WindowPreset::Shell => Ok(LaunchSpec {
             title: WindowPreset::Shell.title().to_string(),
@@ -126,6 +244,15 @@ where
                 })
             }
         }
+        WindowPreset::FileTree
+        | WindowPreset::Settings
+        | WindowPreset::Memo
+        | WindowPreset::Profile
+        | WindowPreset::Logs
+        | WindowPreset::Issue
+        | WindowPreset::Spec
+        | WindowPreset::Board
+        | WindowPreset::Pr => unreachable!("non-process presets are rejected above"),
     }
 }
 
@@ -140,6 +267,19 @@ fn runtime_command_exists(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_tree_preset_is_non_process_file_tree_surface() {
+        assert_eq!(WindowPreset::FileTree.surface(), WindowSurface::FileTree);
+        assert!(!WindowPreset::FileTree.requires_process());
+        assert_eq!(WindowPreset::FileTree.title(), "File Tree");
+    }
+
+    #[test]
+    fn settings_preset_is_mock_surface() {
+        assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
+        assert!(!WindowPreset::Settings.requires_process());
+    }
 
     #[test]
     fn resolve_shell_preset_uses_supplied_shell_program() {

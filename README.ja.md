@@ -200,8 +200,15 @@ cargo run -p gwt-tui
 cargo run -p poc-terminal
 ```
 
-この PoC は、`Claude` / `Codex` の terminal window が浮く desktop WebView を開きます。
-現状の terminal 描画は runtime 時に CDN から `xterm.js` を読み込むため、初回起動時は
+この PoC はローカル HTTP/WebSocket server を起動し、その URL を読み込む desktop
+WebView を開きます。起動すると stderr に `http://127.0.0.1:<port>/` のような browser URL
+を出力するので、native app の起動中は同じ URL を通常の browser でも開けます。
+
+canvas では `Shell` / `Claude` / `Codex` の terminal window と、read-only の
+`File Tree` window を扱えます。`Settings` / `Memo` / `Profile` / `Logs` /
+`Issue` / `SPEC` / `Board` / `PR` は mock window として追加できます。
+
+terminal 描画は runtime 時に CDN から `xterm.js` を読み込むため、初回起動時は
 ネットワーク接続が必要です。
 
 ### テスト

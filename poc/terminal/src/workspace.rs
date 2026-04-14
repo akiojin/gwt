@@ -18,6 +18,10 @@ impl WorkspaceState {
         &self.persisted
     }
 
+    pub fn window(&self, id: &str) -> Option<&PersistedWindowState> {
+        self.persisted.windows.iter().find(|window| window.id == id)
+    }
+
     pub fn set_status(&mut self, id: &str, status: WindowProcessStatus) -> bool {
         let Some(window) = self
             .persisted
@@ -57,23 +61,23 @@ impl WorkspaceState {
             .filter(|window| window.preset == preset)
             .count()
             + 1;
-        let id_prefix = match preset {
-            WindowPreset::Shell => "shell",
-            WindowPreset::Claude => "claude",
-            WindowPreset::Codex => "codex",
-        };
+        let (width, height) = preset.default_size();
         let window = PersistedWindowState {
-            id: format!("{id_prefix}-{count}"),
+            id: format!("{}-{count}", preset.id_prefix()),
             title: preset.title().to_string(),
             preset,
             geometry: WindowGeometry {
                 x: 120.0 + (self.persisted.windows.len() as f64 * 28.0),
                 y: 96.0 + (self.persisted.windows.len() as f64 * 24.0),
-                width: 720.0,
-                height: 420.0,
+                width,
+                height,
             },
             z_index: self.persisted.next_z_index,
-            status: WindowProcessStatus::Starting,
+            status: if preset.requires_process() {
+                WindowProcessStatus::Starting
+            } else {
+                WindowProcessStatus::Ready
+            },
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -129,6 +133,15 @@ mod tests {
         assert_eq!(workspace.persisted().windows.len(), 3);
         assert_eq!(workspace.persisted().next_z_index, 4);
         assert_eq!(window.status, WindowProcessStatus::Starting);
+    }
+
+    #[test]
+    fn adding_file_tree_window_marks_it_ready_without_process() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let window = workspace.add_window(WindowPreset::FileTree);
+        assert_eq!(window.title, "File Tree");
+        assert_eq!(window.preset, WindowPreset::FileTree);
+        assert_eq!(window.status, WindowProcessStatus::Ready);
     }
 
     #[test]
