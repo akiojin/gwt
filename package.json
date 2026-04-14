@@ -4,7 +4,7 @@
   "description": "TUI for Git worktree management and coding agent launch",
   "type": "module",
   "bin": {
-    "gwt": "bin/gwt-tui"
+    "gwt": "bin/gwt.js"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
