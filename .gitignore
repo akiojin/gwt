@@ -1,4 +1,5 @@
 .claude/settings.local.json
+.codex/hooks.json
 .docker/bash_history
 PLANS.md
 *.local.*
