@@ -36,6 +36,18 @@ wry = "0.55"
 tao = "0.35"
 base64.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.17"
+
 [dev-dependencies]
 tempfile.workspace = true
 reqwest.workspace = true
+
+[package.metadata.bundle]
+name = "GWT Terminal PoC"
+identifier = "io.github.akiojin.gwt.pocterminal"
+category = "Developer Tool"
+short_description = "Canvas-based floating terminal GUI PoC"
+long_description = """
+Canvas-based floating terminal GUI PoC for launching shells and coding agents.
+"""

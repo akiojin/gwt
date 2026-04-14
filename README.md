@@ -221,6 +221,24 @@ them in a cascade while keeping each title bar accessible.
 The frontend still loads `xterm.js` from a CDN at runtime, so network access is
 required the first time you open it.
 
+### Build a macOS app bundle for the PoC
+
+Install `cargo-bundle` once:
+
+```bash
+cargo install cargo-bundle
+```
+
+Then build the local `.app` bundle:
+
+```bash
+cargo bundle -p poc-terminal --format osx
+```
+
+The generated app bundle is placed under `target/debug/bundle/osx/` by default.
+You can open that `.app` from Finder. The PoC currently uses the generic app
+icon until a dedicated asset is provided.
+
 ### Test
 
 ```bash

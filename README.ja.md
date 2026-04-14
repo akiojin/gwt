@@ -217,6 +217,24 @@ start / new branch / agent / model / runtime / permissions を選べます。
 terminal 描画は runtime 時に CDN から `xterm.js` を読み込むため、初回起動時は
 ネットワーク接続が必要です。
 
+### macOS 向け PoC `.app` bundle の生成
+
+まず一度だけ `cargo-bundle` を install します。
+
+```bash
+cargo install cargo-bundle
+```
+
+その後、ローカル用の `.app` bundle を生成します。
+
+```bash
+cargo bundle -p poc-terminal --format osx
+```
+
+生成された `.app` は既定で `target/debug/bundle/osx/` に出力されます。Finder
+からその `.app` を開けます。PoC の icon は専用 asset が未提供のため、現時点では
+汎用 app icon です。
+
 ### テスト
 
 ```bash

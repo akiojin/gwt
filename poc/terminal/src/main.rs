@@ -24,8 +24,8 @@ use poc_terminal::{
     list_directory_entries, load_workspace_state, refresh_managed_gwt_assets_for_worktree,
     resolve_launch_spec, save_workspace_state, workspace_state_path, BackendEvent,
     DockerWizardContext, FrontendEvent, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState,
+    LaunchWizardState, LiveSessionEntry, NativeMenuCommand, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use tao::{
     event::{Event, WindowEvent},
@@ -58,6 +58,8 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    #[cfg(target_os = "macos")]
+    MenuEvent(muda::MenuEvent),
 }
 
 struct WindowRuntime {
@@ -1731,6 +1733,15 @@ fn main() -> wry::Result<()> {
     let runtime = Runtime::new().expect("tokio runtime");
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
+    let menu_proxy = proxy.clone();
+    #[cfg(target_os = "macos")]
+    muda::MenuEvent::set_event_handler(Some(move |event| {
+        let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
+    }));
+    #[cfg(not(target_os = "macos"))]
+    let clients = ClientHub::default();
+    #[cfg(target_os = "macos")]
     let clients = ClientHub::default();
     let mut app = AppRuntime::new(proxy.clone()).expect("app runtime");
     app.bootstrap();
@@ -1740,10 +1751,16 @@ fn main() -> wry::Result<()> {
     eprintln!("poc-terminal browser URL: {}", server.url());
 
     let window = WindowBuilder::new()
-        .with_title("gwt terminal poc")
+        .with_title(APP_NAME)
         .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
         .build(&event_loop)
         .expect("window");
+    #[cfg(target_os = "macos")]
+    let native_menu = {
+        let native_menu = poc_terminal::MacosNativeMenu::new();
+        native_menu.init_for_app();
+        native_menu
+    };
 
     let builder = WebViewBuilder::new().with_url(server.url());
 
@@ -1771,6 +1788,8 @@ fn main() -> wry::Result<()> {
         *control_flow = ControlFlow::Wait;
         let _ = &webview;
         let _ = &runtime;
+        #[cfg(target_os = "macos")]
+        let _ = &native_menu;
 
         match event {
             Event::WindowEvent {
@@ -1791,6 +1810,21 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
                 clients.dispatch(events);
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::MenuEvent(event)) => {
+                if let Some(command) = poc_terminal::native_menu_command_for_id(event.id.as_ref()) {
+                    match command {
+                        NativeMenuCommand::ReloadWebView => {
+                            if let Err(error) = webview.reload() {
+                                eprintln!("webview reload failed: {error}");
+                            }
+                        }
+                    }
+                }
+            }
+            Event::LoopDestroyed => {
+                server.shutdown();
             }
             _ => {}
         }
