@@ -945,7 +945,15 @@ pub fn update(model: &mut Model, msg: Message) {
 
     match msg {
         Message::Quit => {
-            model.quit = true;
+            if model.pty_handles.is_empty() {
+                model.quit = true;
+            } else {
+                let count = model.pty_handles.len();
+                model.confirm = screens::confirm::ConfirmState::with_message(format!(
+                    "{count} active session(s) will be terminated. Quit?"
+                ));
+                model.pending_quit = true;
+            }
         }
         Message::TerminalLost => {
             tracing::warn!("Controlling terminal lost — shutting down gracefully");
@@ -7143,7 +7151,17 @@ fn handle_confirm_message_with(
         && model.pending_session_conversion.is_some();
     let dismisses_session_conversion = matches!(msg, screens::confirm::ConfirmMessage::Cancel)
         || (matches!(msg, screens::confirm::ConfirmMessage::Accept) && !model.confirm.accepted());
+
+    let should_quit = matches!(msg, screens::confirm::ConfirmMessage::Accept)
+        && model.confirm.accepted()
+        && model.pending_quit;
+    let dismisses_quit = model.pending_quit
+        && (matches!(msg, screens::confirm::ConfirmMessage::Cancel)
+            || (matches!(msg, screens::confirm::ConfirmMessage::Accept)
+                && !model.confirm.accepted()));
+
     screens::confirm::update(&mut model.confirm, msg);
+
     if should_apply_session_conversion {
         if let Some(pending) = model.pending_session_conversion.take() {
             let target_display_name = pending.target_display_name.clone();
@@ -7163,6 +7181,13 @@ fn handle_confirm_message_with(
         }
     } else if dismisses_session_conversion {
         model.pending_session_conversion = None;
+    }
+
+    if should_quit {
+        model.quit = true;
+        model.pending_quit = false;
+    } else if dismisses_quit {
+        model.pending_quit = false;
     }
 }
 
@@ -14872,10 +14897,60 @@ services:
         );
     }
     #[test]
-    fn update_quit_sets_flag() {
+    fn update_quit_without_sessions_quits_immediately() {
         let mut model = test_model();
+        assert!(model.pty_handles.is_empty());
         update(&mut model, Message::Quit);
         assert!(model.quit);
+        assert!(!model.pending_quit);
+    }
+
+    #[test]
+    fn update_quit_with_active_sessions_shows_confirm() {
+        let mut model = test_model();
+        let pty = gwt_terminal::PtyHandle::spawn(gwt_terminal::pty::SpawnConfig {
+            command: "cat".into(),
+            args: vec![],
+            rows: 24,
+            cols: 80,
+            env: Default::default(),
+            remove_env: vec![],
+            cwd: None,
+        })
+        .unwrap();
+        model.pty_handles.insert("shell-0".into(), pty);
+
+        update(&mut model, Message::Quit);
+
+        assert!(!model.quit);
+        assert!(model.pending_quit);
+        assert!(model.confirm.visible);
+        assert!(model.confirm.message.contains("1 active session(s)"));
+    }
+
+    #[test]
+    fn confirm_accept_yes_with_pending_quit_sets_quit() {
+        let mut model = test_model();
+        model.confirm = screens::confirm::ConfirmState::with_message("Quit?");
+        model.confirm.selected = screens::confirm::ConfirmChoice::Yes;
+        model.pending_quit = true;
+
+        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Accept, vec![]);
+
+        assert!(model.quit);
+        assert!(!model.pending_quit);
+    }
+
+    #[test]
+    fn confirm_cancel_with_pending_quit_clears_pending() {
+        let mut model = test_model();
+        model.confirm = screens::confirm::ConfirmState::with_message("Quit?");
+        model.pending_quit = true;
+
+        handle_confirm_message_with(&mut model, screens::confirm::ConfirmMessage::Cancel, vec![]);
+
+        assert!(!model.quit);
+        assert!(!model.pending_quit);
     }
 
     #[test]
