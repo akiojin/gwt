@@ -17,14 +17,12 @@ jobs:
 
   check-windows:
     name: Check (Windows)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
           key: check-windows
       - name: Check Windows compilation
-        run: cargo check -p gwt-core -p gwt-tui --target x86_64-pc-windows-msvc
+        run: cargo check -p gwt-core -p gwt-tui
