@@ -1,11 +1,7 @@
 use std::io;
-use std::path::Path;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
-use gwt_core::coordination::{
-    apply_agent_card_patch, load_snapshot, post_entry, AgentCardContext, AgentCardPatch,
-    AuthorKind, BoardEntry,
-};
+use gwt_core::coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry};
 use gwt_core::paths::gwt_sessions_dir;
 use gwt_github::SpecOpsError;
 
@@ -25,7 +21,6 @@ pub(crate) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
             Ok(CliCommand::BoardShow { json })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
-        Some("card") => parse_card_args(it.collect::<Vec<_>>().as_slice()),
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
         None => Err(CliParseError::Usage),
     }
@@ -84,64 +79,6 @@ pub(super) fn run<E: CliEnv>(
                 "board entries: {}\n",
                 snapshot.board.entries.len()
             ));
-            0
-        }
-        CliCommand::BoardCardSet {
-            status,
-            role,
-            responsibility,
-            current_focus,
-            next_action,
-            blocked_reason,
-            topics,
-            owners,
-            working_scope,
-            handoff_target,
-            agent_id,
-            session_id,
-            branch,
-        } => {
-            let inferred =
-                current_agent_context_from_env(env.repo_path()).map_err(io_as_spec_ops_error)?;
-            let agent_id = agent_id
-                .or_else(|| inferred.as_ref().map(|context| context.agent_id.clone()))
-                .ok_or_else(|| {
-                    io_as_spec_ops_error(io::Error::other(
-                        "board card set requires --agent-id or an active gwt agent session",
-                    ))
-                })?;
-            let branch = branch
-                .or_else(|| inferred.as_ref().map(|context| context.branch.clone()))
-                .unwrap_or_default();
-            if branch.trim().is_empty() {
-                return Err(io_as_spec_ops_error(io::Error::other(
-                    "board card set requires --branch or an active gwt agent session with branch context",
-                )));
-            }
-            let session_id = session_id.or_else(|| inferred.and_then(|context| context.session_id));
-
-            let snapshot = apply_agent_card_patch(
-                env.repo_path(),
-                AgentCardContext {
-                    agent_id,
-                    session_id,
-                    branch,
-                },
-                AgentCardPatch {
-                    role,
-                    responsibility,
-                    status: Some(status),
-                    current_focus,
-                    next_action,
-                    blocked_reason,
-                    related_topics: (!topics.is_empty()).then_some(topics),
-                    related_owners: (!owners.is_empty()).then_some(owners),
-                    working_scope,
-                    handoff_target,
-                },
-            )
-            .map_err(gwt_error_to_spec_ops_error)?;
-            out.push_str(&format!("agent cards: {}\n", snapshot.cards.cards.len()));
             0
         }
         _ => unreachable!("board::run called with non-board command"),
@@ -217,126 +154,9 @@ fn parse_post_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
     })
 }
 
-fn parse_card_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
-    if args.first().map(|arg| arg.as_str()) != Some("set") {
-        return Err(CliParseError::Usage);
-    }
-
-    let mut status: Option<String> = None;
-    let mut role: Option<String> = None;
-    let mut responsibility: Option<String> = None;
-    let mut current_focus: Option<String> = None;
-    let mut next_action: Option<String> = None;
-    let mut blocked_reason: Option<String> = None;
-    let mut topics = Vec::new();
-    let mut owners = Vec::new();
-    let mut working_scope: Option<String> = None;
-    let mut handoff_target: Option<String> = None;
-    let mut agent_id: Option<String> = None;
-    let mut session_id: Option<String> = None;
-    let mut branch: Option<String> = None;
-    let mut i = 1;
-
-    while i < args.len() {
-        match args[i].as_str() {
-            "--status" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CliParseError::MissingFlag("--status"));
-                }
-                status = Some(args[i].clone());
-            }
-            "--role" => assign_arg(args, &mut i, "--role", &mut role)?,
-            "--responsibility" => {
-                assign_arg(args, &mut i, "--responsibility", &mut responsibility)?
-            }
-            "--current-focus" => assign_arg(args, &mut i, "--current-focus", &mut current_focus)?,
-            "--next-action" => assign_arg(args, &mut i, "--next-action", &mut next_action)?,
-            "--blocked-reason" => {
-                assign_arg(args, &mut i, "--blocked-reason", &mut blocked_reason)?
-            }
-            "--working-scope" => assign_arg(args, &mut i, "--working-scope", &mut working_scope)?,
-            "--handoff-target" => {
-                assign_arg(args, &mut i, "--handoff-target", &mut handoff_target)?
-            }
-            "--agent-id" => assign_arg(args, &mut i, "--agent-id", &mut agent_id)?,
-            "--session-id" => assign_arg(args, &mut i, "--session-id", &mut session_id)?,
-            "--branch" => assign_arg(args, &mut i, "--branch", &mut branch)?,
-            "--topic" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CliParseError::MissingFlag("--topic"));
-                }
-                topics.push(args[i].clone());
-            }
-            "--owner" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(CliParseError::MissingFlag("--owner"));
-                }
-                owners.push(args[i].clone());
-            }
-            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
-        }
-        i += 1;
-    }
-
-    Ok(CliCommand::BoardCardSet {
-        status: status.ok_or(CliParseError::MissingFlag("--status"))?,
-        role,
-        responsibility,
-        current_focus,
-        next_action,
-        blocked_reason,
-        topics,
-        owners,
-        working_scope,
-        handoff_target,
-        agent_id,
-        session_id,
-        branch,
-    })
-}
-
-fn assign_arg(
-    args: &[&String],
-    index: &mut usize,
-    flag: &'static str,
-    slot: &mut Option<String>,
-) -> Result<(), CliParseError> {
-    *index += 1;
-    if *index >= args.len() {
-        return Err(CliParseError::MissingFlag(flag));
-    }
-    *slot = Some(args[*index].clone());
-    Ok(())
-}
-
 fn current_author_from_env() -> Option<(AuthorKind, String)> {
     let session = current_session_from_env().ok().flatten()?;
     Some((AuthorKind::Agent, session.display_name))
-}
-
-fn current_agent_context_from_env(worktree_root: &Path) -> io::Result<Option<AgentCardContext>> {
-    Ok(agent_card_context_for_repo(
-        worktree_root,
-        current_session_from_env()?,
-    ))
-}
-
-fn agent_card_context_for_repo(
-    worktree_root: &Path,
-    session: Option<Session>,
-) -> Option<AgentCardContext> {
-    let session = session?;
-    if !same_worktree_path(&session.worktree_path, worktree_root) {
-        return None;
-    }
-    Some(AgentCardContext {
-        agent_id: session.display_name,
-        session_id: Some(session.id),
-        branch: session.branch,
-    })
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {
@@ -350,21 +170,10 @@ fn current_session_from_env() -> io::Result<Option<Session>> {
     Session::load(&path).map(Some)
 }
 
-fn same_worktree_path(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
 fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::CoordinationSnapshot) {
-    out.push_str("== Board ==\n");
+    out.push_str("== Chat ==\n");
     if snapshot.board.entries.is_empty() {
-        out.push_str("no board entries\n");
+        out.push_str("no chat messages\n");
     } else {
         for entry in &snapshot.board.entries {
             out.push_str(&format!(
@@ -374,26 +183,6 @@ fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::Coordina
                 entry.body,
                 entry.id
             ));
-        }
-    }
-
-    out.push_str("\n== Cards ==\n");
-    if snapshot.cards.cards.is_empty() {
-        out.push_str("no agent cards\n");
-    } else {
-        for card in &snapshot.cards.cards {
-            out.push_str(&format!(
-                "- {} [{}] {}\n",
-                card.agent_id,
-                card.status.as_deref().unwrap_or("unknown"),
-                card.branch
-            ));
-            if let Some(focus) = card.current_focus.as_deref() {
-                out.push_str(&format!("  focus: {focus}\n"));
-            }
-            if let Some(next) = card.next_action.as_deref() {
-                out.push_str(&format!("  next: {next}\n"));
-            }
         }
     }
 }
@@ -447,6 +236,12 @@ mod tests {
     }
 
     #[test]
+    fn board_family_rejects_card_subcommand() {
+        let err = parse(&[s("card"), s("set"), s("--status"), s("running")]).unwrap_err();
+        assert_eq!(err, CliParseError::UnknownSubcommand("card".into()));
+    }
+
+    #[test]
     fn board_family_run_post_updates_projection() {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
@@ -496,89 +291,9 @@ mod tests {
         let code = run(&mut env, CliCommand::BoardShow { json: false }, &mut out).unwrap();
 
         assert_eq!(code, 0);
-        assert!(out.contains("== Board =="));
+        assert!(out.contains("== Chat =="));
         assert!(out.contains("Need a board"));
-    }
-
-    #[test]
-    fn board_family_run_card_set_updates_card() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
-
-        let mut out = String::new();
-        let code = run(
-            &mut env,
-            CliCommand::BoardCardSet {
-                status: "running".into(),
-                role: Some("implementer".into()),
-                responsibility: None,
-                current_focus: Some("Storage".into()),
-                next_action: Some("Add watcher".into()),
-                blocked_reason: None,
-                topics: vec!["coordination".into()],
-                owners: vec!["1974".into()],
-                working_scope: None,
-                handoff_target: None,
-                agent_id: Some("Codex".into()),
-                session_id: Some("sess-1".into()),
-                branch: Some("feature/coordination".into()),
-            },
-            &mut out,
-        )
-        .unwrap();
-
-        assert_eq!(code, 0);
-        let snapshot = load_snapshot(tmp.path()).unwrap();
-        assert_eq!(snapshot.cards.cards.len(), 1);
-        assert_eq!(snapshot.cards.cards[0].status.as_deref(), Some("running"));
-        assert_eq!(snapshot.cards.cards[0].role.as_deref(), Some("implementer"));
-        assert!(out.contains("agent cards: 1"));
-    }
-
-    #[test]
-    fn board_family_run_card_set_rejects_missing_branch_without_session_context() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
-
-        let err = run(
-            &mut env,
-            CliCommand::BoardCardSet {
-                status: "running".into(),
-                role: None,
-                responsibility: None,
-                current_focus: None,
-                next_action: None,
-                blocked_reason: None,
-                topics: vec![],
-                owners: vec![],
-                working_scope: None,
-                handoff_target: None,
-                agent_id: Some("Codex".into()),
-                session_id: None,
-                branch: None,
-            },
-            &mut String::new(),
-        )
-        .expect_err("missing branch must be rejected");
-
-        assert!(
-            err.to_string().contains("requires --branch"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn agent_card_context_ignores_session_from_other_repo() {
-        let repo = tempfile::tempdir().unwrap();
-        let other_repo = tempfile::tempdir().unwrap();
-        let session = Session::new(
-            other_repo.path(),
-            "feature/other",
-            gwt_agent::AgentId::Codex,
-        );
-
-        let context = agent_card_context_for_repo(repo.path(), Some(session));
-
-        assert_eq!(context, None);
+        assert!(!out.contains("== Cards =="));
+        assert!(!out.contains("no agent cards"));
     }
 }

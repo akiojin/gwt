@@ -48,6 +48,12 @@ fn red_70_should_dispatch_cli_when_first_arg_is_cli_verb() {
         "hook",
         "workflow-policy"
     ])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt",
+        "hook",
+        "coordination-event",
+        "SessionStart"
+    ])));
     assert!(!should_dispatch_cli(&argv(&["gwt"])));
     assert!(!should_dispatch_cli(&argv(&["gwt", "/some/repo/path"])));
 }
@@ -87,6 +93,19 @@ fn red_92_parse_hook_workflow_policy_without_args() {
         CliCommand::Hook {
             name: "workflow-policy".to_string(),
             rest: vec![],
+        }
+    );
+}
+
+#[test]
+fn red_92a_parse_hook_coordination_event() {
+    use gwt_tui::cli::parse_hook_args;
+    let cmd = parse_hook_args(&[s("coordination-event"), s("SessionStart")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Hook {
+            name: "coordination-event".to_string(),
+            rest: vec!["SessionStart".to_string()],
         }
     );
 }
@@ -146,6 +165,19 @@ fn dispatch_hook_runtime_state_missing_event_exits_2() {
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let code = dispatch(&mut env, &argv(&["gwt", "hook", "runtime-state"]));
     assert_eq!(code, 2, "runtime-state without <event> should exit 2");
+    let err_text = String::from_utf8(env.stderr.clone()).unwrap();
+    assert!(
+        err_text.contains("missing <event> argument"),
+        "stderr should explain the missing argument, got {err_text:?}"
+    );
+}
+
+#[test]
+fn dispatch_hook_coordination_event_missing_event_exits_2() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "coordination-event"]));
+    assert_eq!(code, 2, "coordination-event without <event> should exit 2");
     let err_text = String::from_utf8(env.stderr.clone()).unwrap();
     assert!(
         err_text.contains("missing <event> argument"),

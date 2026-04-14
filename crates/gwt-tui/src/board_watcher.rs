@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gwt_core::coordination::{
     coordination_dir, ensure_repo_local_files, load_snapshot, CoordinationSnapshot,
-    BOARD_PROJECTION_FILE_NAME, CARDS_PROJECTION_FILE_NAME,
+    BOARD_PROJECTION_FILE_NAME,
 };
 use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
@@ -110,7 +110,7 @@ fn publish_snapshot(
 fn is_projection_path(path: &std::path::Path) -> bool {
     matches!(
         path.file_name().and_then(|value| value.to_str()),
-        Some(BOARD_PROJECTION_FILE_NAME | CARDS_PROJECTION_FILE_NAME)
+        Some(BOARD_PROJECTION_FILE_NAME)
     )
 }
 
@@ -123,7 +123,7 @@ mod tests {
         assert!(is_projection_path(std::path::Path::new(
             "board.latest.json"
         )));
-        assert!(is_projection_path(std::path::Path::new(
+        assert!(!is_projection_path(std::path::Path::new(
             "cards.latest.json"
         )));
         assert!(!is_projection_path(std::path::Path::new("events.jsonl")));

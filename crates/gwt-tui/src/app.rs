@@ -3159,14 +3159,19 @@ fn route_key_to_management(model: &mut Model, key: crossterm::event::KeyEvent) {
         }
         ManagementTab::Board => {
             let msg = match key.code {
+                KeyCode::Esc if model.board.detail_open => Some(BoardMessage::CloseDetail),
                 KeyCode::Esc if model.board.composer_open => Some(BoardMessage::CloseComposer),
                 KeyCode::Backspace
                     if model.board.composer_open || !model.board.composer_text.is_empty() =>
                 {
                     Some(BoardMessage::ComposerBackspace)
                 }
-                KeyCode::Enter if key.modifiers.is_empty() && model.board.composer_open => {
-                    Some(BoardMessage::SubmitComposer)
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if model.board.composer_text.trim().is_empty() {
+                        Some(BoardMessage::OpenDetail)
+                    } else {
+                        Some(BoardMessage::SubmitComposer)
+                    }
                 }
                 KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(BoardMessage::ComposerInput('\n'))
@@ -4817,6 +4822,7 @@ fn submit_board_composer(model: &mut Model) {
     match gwt_core::coordination::post_entry(model.repo_path(), entry) {
         Ok(snapshot) => {
             model.board.composer_text.clear();
+            model.board.detail_open = false;
             model.board.composer_open = true;
             screens::board::update(
                 &mut model.board,
@@ -9928,16 +9934,24 @@ fn issues_hint_text(model: &Model, compact: bool) -> String {
 }
 
 fn board_hint_text(model: &Model, compact: bool) -> String {
-    if model.board.composer_open {
+    let has_draft = !model.board.composer_text.trim().is_empty();
+    if model.board.detail_open && compact {
+        "↑↓ sel  Esc close  type msg  ↵ send  C-j nl  C-k kind  C-r rfsh".to_string()
+    } else if model.board.detail_open {
+        "↑↓:select  Esc:close detail  type message  Enter:send draft  Ctrl+J:new line  Ctrl+K:cycle kind  Ctrl+R:refresh".to_string()
+    } else if has_draft && compact {
+        "type msg  ↵ send  C-j nl  C-k kind  C-r rfsh  Esc done".to_string()
+    } else if has_draft {
         if compact {
             "type msg  ↵ send  C-j nl  C-k kind  C-r rfsh  Esc done".to_string()
         } else {
             "type message  Enter:send  Ctrl+J:new line  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:stop editing".to_string()
         }
     } else if compact {
-        "↑↓ sel  type post  C-k kind  C-r rfsh  Esc term".to_string()
+        "↑↓ sel  ↵ dtl  type post  C-k kind  C-r rfsh  Esc term".to_string()
     } else {
-        "↑↓:select  type to post  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:term".to_string()
+        "↑↓:select  Enter:detail  type to post  Ctrl+K:cycle kind  Ctrl+R:refresh  Esc:term"
+            .to_string()
     }
 }
 
@@ -15686,6 +15700,41 @@ services:
     }
 
     #[test]
+    fn route_key_to_management_board_enter_opens_detail_when_draft_is_empty() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Need coordination",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Board,
+            |_repo_path| panic!("PR loader should not run for Board"),
+            |_repo_path, _number| panic!("detail loader should not run for Board"),
+        );
+
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(model.board.detail_open);
+        assert_eq!(model.board.composer_text, "");
+        assert_eq!(model.board.snapshot.board.entries.len(), 1);
+    }
+
+    #[test]
     fn route_key_to_management_board_ctrl_j_inserts_newline_before_submit() {
         let dir = tempfile::tempdir().expect("temp repo");
         let mut model = Model::new(dir.path().to_path_buf());
@@ -15767,6 +15816,67 @@ services:
 
         assert_eq!(model.board.snapshot.board.entries.len(), 1);
         assert_eq!(model.board.snapshot.board.entries[0].body, "Reloaded");
+    }
+
+    #[test]
+    fn route_key_to_management_board_esc_closes_detail_before_fallback() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        gwt_core::coordination::post_entry(
+            dir.path(),
+            gwt_core::coordination::BoardEntry::new(
+                gwt_core::coordination::AuthorKind::User,
+                "user",
+                gwt_core::coordination::BoardEntryKind::Request,
+                "Need coordination",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .expect("seed board entry");
+
+        let mut model = Model::new(dir.path().to_path_buf());
+        model.active_layer = ActiveLayer::Management;
+        model.active_focus = FocusPane::TabContent;
+        switch_management_tab_with(
+            &mut model,
+            ManagementTab::Board,
+            |_repo_path| panic!("PR loader should not run for Board"),
+            |_repo_path, _number| panic!("detail loader should not run for Board"),
+        );
+        route_key_to_management(&mut model, key(KeyCode::Enter, KeyModifiers::NONE));
+
+        route_key_to_management(&mut model, key(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(!model.board.detail_open);
+        assert_eq!(model.active_layer, ActiveLayer::Management);
+        assert_eq!(model.management_tab, ManagementTab::Board);
+    }
+
+    #[test]
+    fn board_hint_text_uses_enter_for_detail_when_draft_is_empty() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Board;
+        model.board.composer_open = true;
+        model.board.composer_text.clear();
+
+        let hint = board_hint_text(&model, false);
+
+        assert!(hint.contains("Enter:detail"));
+        assert!(!hint.contains("Enter:send"));
+    }
+
+    #[test]
+    fn board_hint_text_uses_enter_for_send_when_draft_is_present() {
+        let mut model = test_model();
+        model.management_tab = ManagementTab::Board;
+        model.board.composer_open = true;
+        model.board.composer_text = "hello".into();
+
+        let hint = board_hint_text(&model, false);
+
+        assert!(hint.contains("Enter:send"));
     }
 
     #[test]

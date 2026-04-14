@@ -96,7 +96,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 ### PR Body Rules
 
-- Template: `.codex/skills/gwt-manage-pr/references/pr-body-template.md`
+- Template: `.claude/skills/gwt-manage-pr/references/pr-body-template.md`
 - Required sections: Summary, Changes, Testing, Closing Issues, Related Issues, Checklist
 - Conditional sections (remove if N/A): Context, Risk/Impact, Screenshots, Deployment
 - Remove all `<!-- GUIDE: ... -->` comments from final output

@@ -16,6 +16,7 @@ pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
+pub mod coordination_event;
 pub mod forward;
 pub mod runtime_state;
 pub mod segments;
@@ -33,6 +34,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
     RuntimeState,
+    CoordinationEvent,
     BlockBashPolicy,
     WorkflowPolicy,
     Forward,
@@ -46,6 +48,7 @@ impl HookKind {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "runtime-state" => Some(Self::RuntimeState),
+            "coordination-event" => Some(Self::CoordinationEvent),
             "block-bash-policy" => Some(Self::BlockBashPolicy),
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),

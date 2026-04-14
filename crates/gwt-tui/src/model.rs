@@ -2166,7 +2166,7 @@ impl Model {
         while let Ok(packet) = rx.try_recv() {
             match packet {
                 BoardWatcherPacket::SetSnapshot(snapshot) => {
-                    total += snapshot.board.entries.len() + snapshot.cards.cards.len();
+                    total += snapshot.board.entries.len();
                     board_update(&mut self.board, BoardMessage::SetSnapshot(snapshot));
                 }
             }
@@ -2560,7 +2560,25 @@ mod tests {
                     )],
                     updated_at: chrono::Utc::now(),
                 },
-                cards: gwt_core::coordination::AgentCardsProjection::default(),
+                cards: gwt_core::coordination::AgentCardsProjection {
+                    cards: vec![gwt_core::coordination::AgentCard {
+                        agent_id: "Codex".into(),
+                        session_id: Some("sess-1".into()),
+                        branch: "feature/demo".into(),
+                        role: None,
+                        responsibility: None,
+                        status: Some("running".into()),
+                        current_focus: Some("Board".into()),
+                        next_action: None,
+                        blocked_reason: None,
+                        related_topics: Vec::new(),
+                        related_owners: Vec::new(),
+                        working_scope: None,
+                        handoff_target: None,
+                        updated_at: chrono::Utc::now(),
+                    }],
+                    updated_at: chrono::Utc::now(),
+                },
             },
         ))
         .unwrap();
