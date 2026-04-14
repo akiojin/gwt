@@ -7,9 +7,10 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::theme;
 
@@ -31,10 +32,42 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
 
     let queue_count = error_queue.len();
 
-    // Centered overlay
     let width = (area.width * 60 / 100).max(40);
-    let overlay = super::centered_rect(width, 7, area);
+    // Inner width available for text (excluding left/right borders).
+    let inner_width = width.saturating_sub(2).max(1) as usize;
 
+    let summary = if notification.source == "app" && notification.detail.is_none() {
+        notification.message.clone()
+    } else {
+        format!("{}: {}", notification.source, notification.message)
+    };
+
+    let mut text = vec![Line::from(Span::styled(
+        summary.clone(),
+        theme::style::error_text(),
+    ))];
+    let mut content_lines: u16 = wrapped_line_count(&summary, inner_width);
+
+    if let Some(detail) = notification
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.is_empty())
+    {
+        text.push(Line::from(Span::styled(
+            detail.to_string(),
+            Style::default().fg(theme::color::TEXT_PRIMARY),
+        )));
+        content_lines += wrapped_line_count(detail, inner_width);
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        "Press Enter or Esc to dismiss",
+        theme::style::muted_text(),
+    )));
+    // +2 for the empty line and dismiss hint, +2 for top/bottom borders.
+    let height = (content_lines + 2 + 2).min(area.height * 60 / 100).max(5);
+
+    let overlay = super::centered_rect(width, height, area);
     frame.render_widget(Clear, overlay);
 
     let title = if queue_count > 1 {
@@ -49,36 +82,23 @@ pub fn render(error_queue: &VecDeque<Notification>, frame: &mut Frame, area: Rec
         .border_type(theme::border::modal())
         .border_style(Style::default().fg(theme::color::ERROR));
 
-    let summary = if notification.source == "app" && notification.detail.is_none() {
-        notification.message.clone()
-    } else {
-        format!("{}: {}", notification.source, notification.message)
-    };
-
-    let mut text = vec![Line::from(Span::styled(
-        summary,
-        theme::style::error_text(),
-    ))];
-    if let Some(detail) = notification
-        .detail
-        .as_deref()
-        .filter(|detail| !detail.is_empty())
-    {
-        text.push(Line::from(Span::styled(
-            detail.to_string(),
-            Style::default().fg(theme::color::TEXT_PRIMARY),
-        )));
-    }
-    text.push(Line::from(""));
-    text.push(Line::from(Span::styled(
-        "Press Enter or Esc to dismiss",
-        theme::style::muted_text(),
-    )));
-
     let paragraph = Paragraph::new(text)
         .block(block)
+        .wrap(Wrap { trim: false })
         .style(Style::default().fg(theme::color::ERROR));
     frame.render_widget(paragraph, overlay);
+}
+
+/// Calculate how many display lines a string occupies when wrapped to `max_width`.
+fn wrapped_line_count(text: &str, max_width: usize) -> u16 {
+    if max_width == 0 {
+        return 1;
+    }
+    let width = UnicodeWidthStr::width(text);
+    if width == 0 {
+        return 1;
+    }
+    width.div_ceil(max_width) as u16
 }
 
 #[cfg(test)]
@@ -185,6 +205,75 @@ mod tests {
         match msg {
             ErrorMessage::Dismiss => {}
         }
+    }
+
+    #[test]
+    fn wrapped_line_count_basic() {
+        assert_eq!(wrapped_line_count("hello", 10), 1);
+        assert_eq!(wrapped_line_count("hello world!!", 10), 2);
+        assert_eq!(wrapped_line_count("", 10), 1);
+        assert_eq!(wrapped_line_count("x", 0), 1);
+        // Exact boundary: 20 chars in width 10 → 2 lines
+        assert_eq!(wrapped_line_count("12345678901234567890", 10), 2);
+        // 21 chars → 3 lines
+        assert_eq!(wrapped_line_count("123456789012345678901", 10), 3);
+    }
+
+    #[test]
+    fn render_long_message_wraps_without_truncation() {
+        let long_msg = "A".repeat(120);
+        let errors: VecDeque<Notification> =
+            vec![Notification::new(Severity::Error, "app", &long_msg)].into();
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&errors, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Collect text from each row separately so we can join wrapped content.
+        let mut all_text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                all_text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        // The full 120-char message should appear (possibly across wrapped lines).
+        let a_count = all_text.chars().filter(|ch| *ch == 'A').count();
+        assert!(
+            a_count >= 120,
+            "Expected at least 120 'A' chars in buffer, found {a_count}"
+        );
+    }
+
+    #[test]
+    fn render_long_detail_expands_height() {
+        let long_detail = "D".repeat(200);
+        let errors: VecDeque<Notification> =
+            vec![Notification::new(Severity::Error, "core", "Short").with_detail(&long_detail)]
+                .into();
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render(&errors, f, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut all_text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                all_text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        let d_count = all_text.chars().filter(|ch| *ch == 'D').count();
+        assert!(
+            d_count >= 200,
+            "Expected at least 200 'D' chars in buffer, found {d_count}"
+        );
     }
 
     #[test]
