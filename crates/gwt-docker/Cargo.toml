@@ -1,0 +1,19 @@
+[package]
+name = "gwt-docker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Docker detection, container management, and DevContainer support for gwt"
+publish = false
+
+[dependencies]
+gwt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

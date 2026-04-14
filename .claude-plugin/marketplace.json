@@ -11,7 +11,7 @@
       "name": "gwt",
       "description": "GWT integration hooks, managed skills, and GitHub management for Claude Code",
       "version": "0.5.0",
-      "source": "./plugins/gwt",
+      "source": "./.claude",
       "category": "security"
     }
   ]

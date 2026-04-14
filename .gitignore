@@ -1,4 +1,5 @@
 .claude/settings.local.json
+.codex/hooks.json
 .docker/bash_history
 PLANS.md
 *.local.*
@@ -88,3 +89,8 @@ tests/voice_eval/samples/*.m4a
 # Python cache
 __pycache__/
 *.py[cod]
+
+
+# SPEC-12: local specs/ directory abolished in favor of GitHub Issues
+# (gwt-spec label). Prevent accidental recreation by legacy scripts.
+/specs/

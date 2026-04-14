@@ -58,6 +58,11 @@ done < <(git ls-files '*SKILL.md')
 
 for index in "${!SKILL_FILES[@]}"; do
   relative_path="${SKILL_FILES[$index]}"
+  if [ ! -f "$relative_path" ]; then
+    echo "$relative_path: tracked SKILL.md is missing from working tree" >&2
+    FAILURES=1
+    continue
+  fi
   frontmatter_file="$TMP_DIR/frontmatter-$index.yaml"
 
   if extract_frontmatter "$relative_path" "$frontmatter_file"; then

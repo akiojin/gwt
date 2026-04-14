@@ -19,45 +19,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install system dependencies (Linux)
-        run: |
-          bash scripts/install-linux-deps.sh
       - name: Generate coverage
-        run: cargo llvm-cov -p gwt-core -p gwt-tauri --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov -p gwt-core -p gwt-tui --all-features --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: lcov.info
           flags: rust
-          fail_ci_if_error: true
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  frontend-coverage:
-    name: Frontend Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: develop
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: gwt-gui/pnpm-lock.yaml
-      - name: Install dependencies
-        run: cd gwt-gui && pnpm install --frozen-lockfile
-      - name: Run tests with coverage
-        run: cd gwt-gui && pnpm test:coverage
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: gwt-gui/coverage/lcov.info
-          flags: frontend
           fail_ci_if_error: true
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

@@ -1,0 +1,28 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+expression: output
+---
+╔ Branches │ Issues │ PRs │...═════════╗╭ › Shell ─────────────────────────────╮
+║ View: Local │ Sort: Default          ║│Session: Shell (80x24)                │
+║▎– main ◇ ▸                           ║│                                      │
+║ ⠋ feature/api ◇                      ║│                                      │
+║ ⠋ feature/app-shell ◇                ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+║                                      ║│                                      │
+╚══════════════════════════════════════╝│                                      │
+╭ Overview │ Git │ Sessions  · main────╮│                                      │
+│ Branch: main (HEAD)                  ││                                      │
+│ Category: Main                       ││                                      │
+│ Type: Local                          ││                                      │
+│                                      ││                                      │
+│ Docker status                        ││                                      │
+│ No Docker services found             ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+│                                      ││                                      │
+╰──────────────────────────────────────╯╰──────────────────────────────────────╯
+ ⎇main  │  P:default  │  ↑↓ mv  ←→ tab  ↵ wiz  S↵ sh  Sp sel  ⇧C clean  a all  m

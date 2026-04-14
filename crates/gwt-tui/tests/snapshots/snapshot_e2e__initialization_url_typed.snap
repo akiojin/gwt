@@ -1,0 +1,23 @@
+---
+source: crates/gwt-tui/tests/snapshot_e2e.rs
+assertion_line: 358
+expression: output
+---
+
+          ╔═════════════════ gwt — Clone Repository ═════════════════╗
+          ║                         ╭─ gwt ─╮                        ║
+          ║                         │ ◆ ◇ ◆ │                        ║
+          ║                         ╰───────╯                        ║
+          ║                                                          ║
+          ║   Enter a repository URL to clone into this directory.   ║
+          ║                                                          ║
+          ║                                                          ║
+          ║Repository URL:                                           ║
+          ║╭────────────────────────────────────────────────────────╮║
+          ║│https://github.com/user/repo.git█                       │║
+          ║╰────────────────────────────────────────────────────────╯║
+          ║                                                          ║
+          ║                   Enter Clone  Esc Exit                  ║
+          ║                                                          ║
+          ║                                                          ║
+          ╚══════════════════════════════════════════════════════════╝

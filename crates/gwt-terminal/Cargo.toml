@@ -1,0 +1,23 @@
+[package]
+name = "gwt-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PTY management, vt100 terminal emulation, and scrollback for gwt"
+publish = false
+
+[dependencies]
+gwt-core.workspace = true
+portable-pty.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+vt100 = "0.15"
+crossterm = "0.29"
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
