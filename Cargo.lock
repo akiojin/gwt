@@ -686,7 +686,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "chrono",
  "gwt-core",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "dirs",
  "serde",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "gwt-core",
  "serde",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "dirs",
  "gwt-core",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "fs2",
  "regex",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "crossterm",
  "gwt-core",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-tui"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "base64",
  "chrono",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "8.17.2"
+version = "9.0.0"
 dependencies = [
  "gwt-core",
  "tempfile",

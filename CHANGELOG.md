@@ -1,6 +1,1005 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.0.0] - 2026-04-14
+
+### Bug Fixes
+
+- Improve worktree sidebar labels
+- Prioritize issue titles in worktree labels
+- Address clippy warnings in worktree labels
+- **gui:** Sync tab labels with worktree labels
+- **gui:** Auto-scroll selected worktree labels
+- **gui:** Refine worktree summary header
+- **gui:** Add profiling controls to developer tab (#1726)
+- **skill:** Allow new PRs after closed unmerged PRs (#1729)
+- **skills:** 新規Issue登録でgwt-issue-registerを必須化 (#1747)
+- **gui:** Complete workspace shell remediation (#1748)
+- **gui:** Use full-window shell surfaces (#1755)
+- **skills:** Gwt-spec-plan SKILL.md の YAML フロントマターを Codex パーサー互換に修正 (#1756)
+- **skill:** Avoid empty PR creation after base sync (#1757)
+- **issue:** Support artifact-first spec detail
+- **spec:** Harden issue migration retries
+- **skills:** Add REST fallbacks for github writes
+- Fail fast on one-shot AI network errors
+- **issue-spec:** Preserve utf-8 in artifact comments
+- **issue-spec:** Parse rest artifact comment responses
+- **issue-spec:** Repair gh api artifact writes
+- **gui:** Add profiling controls to developer tab
+- **gui:** Tighten profiling settings behavior
+- **ci:** Restore rustfmt compliance for terminal metrics
+- **profiling:** Propagate startup phase failures
+- **skills:** Prevent empty PR checks after squash merges
+- **logging:** レビュー指摘対応 — cache-hit ログ補完・error_code 空文字排除・URL サニタイズ
+- **logging:** Rustfmt フォーマット修正
+- **branches:** Split inventory snapshot from detail hydration
+- **branches:** Refresh detail after inventory invalidation
+- Validate skill frontmatter in lint
+- **gui:** Import vitest hooks in setup
+- **skills:** Detect post-merge PR commits after push
+- **gui:** Stabilize sidebar visibility refresh test
+- Project-local同梱アセットを.gwt配下へ移動
+- Reset legacy macOS WebKit local storage on startup
+- **tauri:** Guard macOS startup migration for CI
+- **tauri:** Address startup migration review feedback
+- **startup:** Add crash diagnostics toggles
+- **startup:** Defer watchdog until first heartbeat
+- **gui:** Normalize split tab group layout
+- **skill:** Allow new PRs after closed unmerged PRs
+- **gui:** Replace surrogate agent canvas layout
+- **skill:** Add spec completion gate guidance
+- **gui:** Drop split-shell persistence state
+- **gui:** Persist window-local shell state
+- **gui:** Restore branch browser shell hydration
+- **gui:** Use full-window shell surfaces
+- **skill:** Avoid empty PR creation after base sync
+- **gui:** Keep startup and resize interactive
+- **core:** Speed up branch inventory projection
+- **gui:** Render session cards with live terminal surfaces
+- **pr:** Address review blockers on #1759
+- **test:** Restore vi import in canvas tests
+- **gui:** Enable canvas pan from any non-tile background area
+- **clippy:** Remove let binding on unit value in project index warmup
+- **branches:** Address PR review follow-ups
+- .codex/skills/release/SKILL.md を管理対象として復元
+- **hooks:** Resolve Module not found for hook scripts when CWD != project root
+- **hooks:** Allow file-level git checkout in branch-ops hook
+- **hooks:** Add parentheses for clarity and restrict checkout to file-level targets
+- **core:** Restore memory/constitution.md required by include_str! at compile time
+- **core:** Rename SpecStatus::from_str to parse to satisfy clippy
+- **core:** Rename SpecStatus::from_str to parse to satisfy clippy
+- **core:** Update test assertions for renamed skills and apply cargo fmt
+- **core:** Update test assertions and fix markdownlint errors in specs
+- **build:** Restore memory/constitution.md to git tracking
+- **clippy:** Rename SpecPhase::from_str to parse to avoid trait confusion
+- **fmt:** Apply nightly rustfmt formatting to local_spec commands
+- **fmt:** Apply nightly rustfmt to local_spec modules
+- **lint:** Resolve markdownlint errors in specs and skill docs
+- **lint:** Resolve markdownlint errors in SPEC-1654
+- **test:** Update skill registration tests for local SPEC workflow
+- **lint:** Remove trailing newline from empty acceptance checklist
+- **skill:** CLAUDE_PLUGIN_ROOT 参照を .claude/ パスに置換し build.rs に hooks watcher を追加
+- **skill:** レビュー指摘対応 — レガシーコマンド削除、spec-register ワークフロー修正、タスク完了マーク
+- Make claude hook paths cwd-independent
+- **ci:** Avoid tracked claude settings test dependency
+- **test:** Align skill registration assertions
+- Resolve merge conflict with develop
+- テストモックを $lib/tauriInvoke 経由に統一 + rustfmt 適用
+- Resolve merge conflict with develop
+- BranchBrowser テスト・clippy 修正
+- Resolve merge conflict with develop
+- Resolve merge conflict with develop
+- Resolve merge conflict with develop
+- Resolve merge conflict with develop
+- Resolve merge conflict with develop
+- SettingsPanel テスト修正 — $lib/profiling.svelte モジュールのモック追加
+- Resolve merge conflict with develop
+- Cargo fmt
+- AppAppearanceRuntime テストに profiling プロパティ追加でビルドエラー修正
+- Resolve merge conflict with develop
+- Cargo fmt 適用
+- SPEC-1776 マネジメントパネル UI リベースコンフリクト解消・clippy 修正
+- SPEC-1776 エージェントタブで Ctrl+C を PTY に転送
+- SPEC-1776 起動時に Welcome 画面を表示（自動シェル起動を削除）
+- SPEC-1776 Launch Dialog でエージェント選択・起動を実装
+- SPEC-1776 AgentLaunchBuilder/ShellLaunchBuilder を使用
+- SPEC-1776 分割ペインにボーダー枠線を追加
+- SPEC-1776 Launch Dialog の見切れを修正
+- スキル登録を起動時から遅延実行に変更
+- SPEC-1776 管理画面の Tab キータブ切替と PTY キー転送を実装
+- IME/Release キーイベントを無視しキー入力の安定性を改善
+- シェル/エージェントタブの VT100 ターミナル描画を実装
+- SPEC-1776 Branches/Issues/Settings/Logs の初期データロードを接続
+- Codex レビュー指摘4件を修正
+- Ctrl+q 終了を廃止し Ctrl+C ダブルタップに統一 + カーソル表示
+- タブバーに背景色・区切り線・アクティブ表示を追加
+- ステータスバーをコンテキスト依存に変更 + タブ閉じを Ctrl+G,x に
+- ステータスバーのヒントを「Terminal」に修正
+- Default/Auto 選択時にモデル引数を渡さない + Codex gpt-5.4 追加
+- ログ読み込みをサブディレクトリ再帰検索に修正
+- Preserve tracked constitution during skill registration
+- Stabilize TUI PTY workflows and constitution assets
+- Preserve tracked constitution during skill registration
+- 管理画面の詳細表示とログ可観測性を改善
+- Branches の view filter で remote refs を正しく判定
+- Branches画面のAgent起動で選択ブランチのworktreeディレクトリを使用する
+- PTYスクロールバックとremote HEAD aliasを修正
+- ワークスペース親ディレクトリからの起動時にBranchesが空になる問題を修正
+- 終了済みセッションの最終エラーを残す
+- .codex/hooks.jsonをgit管理に変更し.gitignore除外行を削除
+- 通常モードのターミナルスクロールと選択を統合
+- 履歴表示中の入力で live follow に復帰
+- **tui:** Use materialized worktree path for branch launches
+- **tui:** Ignore stale resume entries for branch worktrees
+- **tui:** Sync pwd with launched worktree
+- Reset shell to branch-first entry
+- Restore gwt-tui test suite
+- Track canonical constitution asset
+- Remove dead Tool code and clean up legacy references
+- Address Codex review HIGH issues
+- Address Codex review MEDIUM issues
+- Filter KeyEventKind::Press only — fix all keyboard input being ignored
+- Add Ctrl+C double-tap quit handler
+- Add Ctrl+G,n (open wizard) keybind + sync SPEC-2 keybinding map
+- Default to Management layer + add tab switching + key input E2E tests
+- Detect bare repo in child directories for workspace detection
+- **tui:** Add list scrolling, widen management panel, fix Enter key
+- Add wizard overlay key routing + fix branch list cursor offset
+- **tui:** Complete focus system wiring and deduplicate action dispatch
+- **tui:** Pass focus state to branches render for correct border colors
+- **tui:** Preserve search escape while dismissing warnings
+- **tui:** Stabilize logs snapshots
+- Remove nested borders from all internal screen blocks
+- **skills:** Address gwt-spec-brainstorm review feedback
+- Remove redundant borders from simple screens and add focus-aware borders to branches
+- **clipboard:** Shell-quote pasted file paths
+- **ai:** Normalize branch suggestions
+- **notification:** Make bus and log capacities configurable
+- **clipboard:** Parse file URL clipboard payloads
+- **docker:** Lifecycle 実行経路をテスト可能にする
+- Clippy ptr_arg 警告を修正し SPEC-2/7/10 を Done に更新
+- **tui:** Enter on branch list opens action modal (was toggling detail_view)
+- **tui:** Enter on branch now correctly opens Wizard
+- **tui:** Wire agent detection into wizard and fix model catalog selection
+- **tui:** Show all builtin agents in wizard and remove version noise
+- **tui:** Keep specs detail navigation in tab
+- **tui:** Harden spec section editing
+- **tui:** Cover stale management focus recovery
+- **tui:** Compact terminal footer hints
+- **tui:** Consume branch detail escape before warnings
+- **skills:** Resolve all Anthropic guideline violations
+- **skills:** Remove AGENTS.md/CLAUDE.md from embedded distribution
+- Parse reasoned worktree annotations
+- Avoid utf-8 panics in terminal url detection
+- **tui:** PTYセッションの作業ディレクトリ解決・ブランチシェル・拡張キー・リサイズを復元する
+- **tui:** PTYセッションにvt100カーソル表示を追加する
+- **tui:** ターミナルフォーカス時にCtrl+Cダブルタップ終了を無効化する
+- **tui:** PTY初期サイズをセッションペイン領域に合わせる
+- **tui:** F1-F4をSS3シーケンスに修正しQuickStartルートをworktreeに合わせる
+- **tui:** Cache branch detail loading off the input path
+- **tui:** Normalize reverse focus keys and startup pty sizing
+- ブランチ一覧の端停止と管理タブ可視性を改善
+- Branchesの初期フィルターをLocalに変更
+- Branch Detail preloadを安定化
+- Split codex fast mode from skip permissions
+- **tui:** ボーダータイプ未設定3箇所の修正と残存アイコンリテラルのtheme::icon移行
+- **tui:** Launch AgentのAI branch suggestionを一時スキップする
+- **tui:** Issue DetailのLaunch Agent導線を復元する
+- **tui:** グリッドビューにフォーカスボーダーを適用しquickstart.mdの文字化けを修正
+- **tui:** グリッドビューのThickボーダー適用に合わせスナップショットを更新
+- **tui:** ブランチ詳細プリロード適用をtick単位でバッチ化
+- ウィザード枠構造修正・エージェント起動ステータス表示追加
+- **tui:** Rustfmtフォーマット修正
+- Resolve PR #1883 blockers after develop merge
+- **agent:** Collapse fast-mode version gate condition
+- Improve terminal session interaction
+- Add prefixed focus cycling for session panes
+- **skills:** Remove task-count based SPEC scope limits
+- フォーカス切替をCtrl+G+Tabに移動
+- スナップショットとE2Eキー操作を更新
+- **tui:** セッションペインのホイール操作でterminalへ再フォーカスする
+- **tui:** Keep AI branch suggestion disabled in wizard startup
+- 通常ペーストを bracketed paste 経路に統一
+- **tui:** Remove reintroduced specs tab
+- Revert SkipPermissions to legacy flags
+- **tui:** Startup version refreshを非同期化
+- **tui:** Route paste to active text inputs
+- Codexモデル一覧を最新スナップショットに同期
+- **skills:** Preserve tracked distributed assets
+- **skills:** Fail closed when tracked asset checks are unavailable
+- **tui:** Join branch detail workers on drop
+- **tui:** Skip gh startup metadata for repos without remotes
+- **tui:** Isolate docker preload tests from env
+- **tui:** Defer startup version cache detection
+- **tui:** Disable alternate scroll mode on startup
+- **tui:** Handle Terminal.app trackpad drag fallback
+- **tui:** Add snapshot scrollback for full-screen panes
+- **tui:** Normalize leaked mouse reports
+- **tui:** Batch wheel bursts before redraw
+- **tui:** Size snapshot scrollbar thumb from viewport
+- **tui:** Coalesce PTY chunks before snapshot capture
+- **tui:** Replace stale full-screen cache on redraw
+- **tui:** Avoid phantom blank frame at scrollback top
+- **tui:** Prune blank snapshot prefixes
+- **tui:** Restore snapshot scroll progression
+- **tui:** Stabilize snapshot scroll and sgr wheel normalization
+- **tui:** Normalize leaked sgr scroll input regardless of focus
+- **tui:** Improve snapshot shift detection under redraw churn
+- Snapshot cache keeps distinct vt frames
+- Prioritize snapshot scrollback in alt screen
+- Unify terminal viewport through cache surface
+- Restore Claude hook settings schema
+- Prepare hook assets before agent spawn
+- Use pid-scoped no-node hook runtime state
+- Show multi-agent branch spinners
+- Restore branch spinner agent palette
+- Enable codex hooks for live branch state
+- Allow codex runtime sidecars in sandbox
+- Materialize codex runtime writable root
+- Migrate tracked codex runtime hooks
+- Codex起動直後のブランチスピナーを復元
+- Launch Agentの新規ブランチ起動でworktreeを作成する
+- 新規ブランチ起動でselected worktree leakを防ぐ
+- Linked worktree起点のlaunch pathを修正
+- 既存worktreeがあるbranch launchを再利用する
+- Bare workspace launchのworktree pathを正しく導出する
+- Launch worktree paths should mirror branch hierarchy
+- Address launch path review feedback
+- Address hook runtime review blockers
+- Restore codex quick start resume flow
+- Snapshot scrollback retention under redraw flood
+- Hydrate agent scrollback from session transcripts
+- Worktree作成をorigin先行フローへ変更
+- **tui:** Remove useless vec literals in transcript tests
+- **tui:** Prevent scroll input starvation during pty updates
+- **tui:** Preserve styled cache before transcript fallback
+- **tui:** Preserve styled transcript tool outputs
+- **tui:** Collapse snapshot transcript overlap
+- **tui:** Normalize agent scrollback history
+- **tui:** Keep agent scrollback memory-backed
+- **tui:** Row scrollback 0 の agent を memory snapshot へフォールバック
+- **tui:** Reset scrollback before PTY key input
+- **tui:** Defer agent scroll to PTY mouse reporting
+- **tui:** Align codex scroll with pty ownership
+- **tui:** Restore codex local scrollback fallback
+- **tui:** Preserve coalesced agent redraw frames
+- **tui:** Route alternate-screen agent scroll to pty
+- **tui:** Route snapshot agents scroll to pty
+- **tui:** Keep non-SGR agent scroll local
+- **tui:** Keep codex scrollback line-based with row cache
+- **tui:** Remove terminal scrollbar overlay
+- **tui:** Lock snapshot history during live redraws
+- **tui:** Detect sparse codex redraw shifts
+- **agent:** Launch codex without alternate screen
+- Restore project index runtime bootstrap
+- Project index の Python bootstrap を硬化
+- Project index review 指摘を修正
+- File search skill naming を整合
+- Restore gwt-project-search as canonical skill
+- Split project file search into code and docs collections
+- **index:** Redesign vector index lifecycle with auto-build, watcher, and e5 embeddings
+- **index:** Satisfy newer clippy lints and markdownlint on Phase 8 artifacts
+- Claude Quick Startでskip permissions復元を無効化
+- Claude起動時のauto-mode差分を除去してskip復元を戻す
+- Claude起動でagent teams環境変数を常時付与する
+- エージェント起動パラメータ監査ログを追加する
+- **agent-launch:** Use codex env_vars parameter consistently
+- **test:** Drain multiple batches in burst_of_events_collapses_to_one_batch
+- Merge develop and resolve terminal scroll review feedback
+- **index:** Kick initial integrity build when watcher starts (FR-022)
+- **index:** Legacy --db-path entrypoints fall through to v2 auto-build
+- **index:** Defer eager build to per-pane spawn and serialize runner subprocesses
+- **index:** Exclude skill/target dirs from watcher and coalesce rebuild requests
+- **index:** Chunk spec.md by sections so large SPECs stay fully searchable
+- **index:** Address code review feedback on PR #1912
+- **branches:** Cleanup ガッターと選択マーカーをブランチ一覧に表示
+- **branches:** Merge 計算を非同期化しガッターを 1 列に圧縮
+- **branches:** Cleanup スピナーを可視化(レート制限 + アニメーション)
+- **branches:** Cleanup 候補から worktree を除外条件にしない
+- **branches:** Cleanup ガッターで非対象と未マージを別グリフで区別
+- **cleanup:** Runner の再バリデーションから checked_out_branches を撤去
+- **cleanup:** Review フィードバック対応 (6 blockers)
+- **cleanup:** Prune grace period と index worker teardown 順序の修正
+- **cleanup:** Footer hint wiring と SPEC-2 仕様の整合
+- **cleanup:** Merge worker race と dismiss teardown と SPEC-2 整合
+- **tui:** Stop hidden snapshot churn in agent scrollback
+- **tui:** Avoid quadratic visible line scans
+- **tui:** Avoid live render and index watcher churn
+- **tui:** PTY redraw を 30fps に制限する
+- **skills:** Remove unmanaged gwt asset residue
+- **skills:** Prune stale gwt assets on launch
+- **skills:** Prune stale nested managed assets
+- **skills:** Sweep stale assets on startup
+- **tui:** Split coalesced home repaint frames
+- **logging:** Address PR #1916 review comments (B1-B7)
+- Address PR #1943 review feedback from Codex
+- **skills:** Regenerate Claude and Codex hook configs to use gwt CLI
+- ターミナルIME候補選択を保護
+- IMEトグルを撤回して入力トレースを追加
+- Minimal kitty keyboard enhancement を常時有効化
+- IME入力の repeat と raw trace を改善
+- IME切り分け用の layered probe を追加
+- Terminal idle redrawを抑制
+- PTY出力の redraw 遅延を防ぐ
+- **skills:** Detect stale binary path in tracked codex hooks
+- **skills:** Enforce reply + resolve for all PR review comments
+- **tui:** Load Specs tab from cache on startup
+- Address PR #1945 review feedback
+- **branches:** Animate live session icons only while running
+- Avoid occupied worktree paths on launch
+- Stop animating idle sessions after launch
+- Limit branch indicator redraws to visible rows
+- Align local issue skills with gwt cli
+- Align local pr skills with gwt cli
+- Remove raw gh transport guidance from skills
+- Harden gwt pr cli review flows
+- Prioritize conflicting gwt-pr flows
+- Restore branch cleanup feedback and remote delete
+- Keep cleanup toasts visible at standard width
+- Route cleanup selection from branch detail
+- Ignore stopped sessions in cleanup guard
+- Keep cleanup progress redraws alive
+- **tui:** Fill branch test upstream fields
+- Add issue picker linkage to launch wizard
+- Load cached issues and show linked branches
+- 起動時にmanaged assetを自己修復する
+- Developの直接コミット制限を外す
+- Vt100 rendererのワイド文字見切れを防ぐ
+- ワイド文字のtrailing cellを明示クリアする
+- Brainstorm継続質問契約を回帰テストで固定する
+- ワイド文字 trailing clear の描画順を修正する
+- Surface active profiles in tui
+- Complete profiles environment editor
+- Profiles タブの編集導線を明確化
+- Profiles 環境変数一覧を統合
+- Profiles 右カラムを環境変数一覧に統一
+- Docker起動失敗をWizardで回復する
+- Docker launch wizardのversion flowを修正
+- Improve docker launch progress handling
+- Stream docker launch build logs
+- Probe docker package runners before launch
+- Restore claude docker launch env behavior
+- Sync claude host config into docker runtime
+- Refresh docker service snapshots
+- Tighten docker branch detail mapping
+- Resolve docker launch review blockers
+- Address docker review follow-ups
+- セッション内の左クリックをPTYへ転送する
+- タブ表示時のセッションタブクリックで切り替えを実装する
+- 端末喪失時の crossterm 内部スピンによる CPU 100% を防止する
+- **skills:** Retire codex hook scripts
+- **skills:** Retire hook script directories
+- **skills:** Prune empty retired hook dirs
+- **skills:** Use user language in gwt-spec flows
+- Scope issue and spec cache by repository
+- Preserve cleanup progress ticks under event activity
+- Info/exclude self-heal を git-path 基準に修正する
+- Add quick start live session focus
+- Codex進捗ブロックの重複表示を抑止
+- Address codex progress review feedback
+- PRレビュー指摘のブロッカーを解消する
+- **tui:** Clarify management focus chrome
+- **tui:** Unfocus grid session chrome in management
+- Migrate tracked codex hooks to current contract
+- Align codex skill references with claude assets
+- **tui:** Separate mouse focus clicks from terminal copy
+- **skills:** Stop bundling legacy hook scripts
+- **tui:** Restore legacy block bash policy hook
+- **tui:** Render grid session surfaces
+- 端末の選択コピー操作を統一する
+- 端末のクリックとドラッグ選択を分離する
+- Terminal copy shortcuts handle modifier key events
+- Restore terminal drag selection copy
+- CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC による Auto mode 不正有効化を修正
+- CI フラッキーテストの PTY 終了待機タイムアウトを拡大
+- セッション0件でもWelcome画面を表示する
+- 起動直後のWelcome表示を仕様に合わせる
+- 起動時のセッション復元よりWelcomeを優先する
+- Welcome画面のコマンド一覧を左寄せにする
+- Welcome画面の導入文だけ中央寄せに戻す
+- Welcome画面のコマンド一覧を中央ボックスに収める
+- Clamp terminal selection to visible snapshot
+- Remove stale settings environment surface
+- Add settings category bracket shortcuts
+- Auto-save settings edits
+- Scope board and logs by repo hash
+- Align spec search with repo-scoped issue cache
+- Allow worktree-local file ops in workflow-policy
+- Accept legacy coordination board_post events
+- Strip trailing newline from GWT_REPO_HASH shell computation
+- Repoint tracked codex hooks to develop binary
+- Respect codex hook ownership
+- IssuesタブからSPEC(gwt-specラベル)を除外
+- Launch Agent の不要な Docker sync を抑制する
+
+### Documentation
+
+- SPEC-1335〜1354 に gwt-tui 移行注釈を追加
+- SPEC-1314〜1334 に gwt-tui 移行注釈を追加
+- Simplify gwt-issue-search skill guidance
+- Refresh skill command descriptions
+- Clarify gwt-spec-plan wording in CLAUDE.md
+- Sync managed skill catalog in CLAUDE.md
+- Sync managed skills block in CLAUDE
+- **spec:** スキルと CLAUDE.md をローカル SPEC 管理に更新
+- Update managed skills block descriptions in CLAUDE.md
+- **spec:** SPEC-56429df0 に gwt-sync-base スキルを追加
+- Gwt-pty-communication を gwt-agent-dispatch に統一し Lead/Coordinator/Developer 記述を削除
+- **skill:** Anthropic スキル設計ガイド準拠のトリガーフレーズを全スキル description に追加
+- **spec:** SPEC-1579 にカスタムスラッシュコマンド仕様を追加
+- Add agent operating principles to claude guidance
+- Refresh claude skill command references
+- TUI マイグレーション設計ドキュメントを追加
+- SPEC-1776 TUI マイグレーション仕様・計画・タスクを追加
+- SPEC-1776 画面定義・キーバインド・tmux型概念モデルを追加
+- SPEC-1776 CI/CD・E2E テスト移行タスクを詳細化
+- SPEC-1776 ドキュメントを TUI 移行に合わせて更新
+- SPEC-1776 仕様・計画・タスクをインタビュー結果で全面更新
+- SPEC-1355〜1404 に gwt-tui 移行注釈を追加
+- SPEC-1526〜1558 に gwt-tui 移行注釈を追加
+- SPEC-1235〜1313 に gwt-tui 移行注釈を追加
+- SPEC-1407〜1521 に gwt-tui 移行注釈を追加
+- SPEC-1560〜1650 に gwt-tui 移行注釈を追加
+- SPEC-1651〜1776 に gwt-tui 移行注釈を追加
+- SPEC 粒度ガイドラインを constitution.md に追加
+- AGENTS.md を正本に変更、CLAUDE.md/GEMINI.md は参照のみ
+- SPEC-1646 にモデル一覧追加 + SPEC-1776 を実装に合わせ更新
+- SPEC-1438 を復元（Codex Hooks 対応仕様を含む）
+- Add SPEC-1785 artifacts for SPECs screen agent launch
+- SPEC-1782 Quick Start仕様更新と計画アーティファクト追加
+- Add SPEC-1786 Codex hooks.json merge with user-defined hooks
+- SPEC-1786にdirty worktree防止と更新通知の要件を追加
+- Add SPEC-1787 workspace initialization and SPEC-driven workflow
+- SPEC-1786に事前確認ダイアログの要件を追加
+- SPEC-1786の計画アーティファクト一式を追加
+- SPEC監査レポートを追加
+- SPEC群のP0正規化を進める
+- SPEC-1438のsettings.jsonをsettings.local.jsonに修正
+- SPEC監査のP1とP2を反映する
+- SPEC-1776を親SPEC前提へ再整理
+- SPEC-1776の関連SPEC監査範囲を拡張
+- SPEC-1776にworkflow監査メモを追加
+- 子SPECをbranch-first TUI方針へ同期
+- Sync SPEC-1776 artifacts with restored tabs
+- Close SPEC-1776 parent scope
+- Fix markdownlint spacing in SPEC-1785
+- Add implementation details to SPECs 2, 3, 7, 9
+- Create SPEC-10 (Project Workspace) with interview-driven requirements
+- Sync spec task progress
+- Update spec metadata states
+- Update SPEC-2 — remove SPECs tab, add Branch Detail view
+- Finalize Branch Detail actions in SPEC-2
+- Change Branch Detail to split layout (top list + bottom detail)
+- Update SPEC-3 startup task progress
+- Complete SPEC-2 artifacts — data-model, research, quickstart, tasks
+- Refresh gwt-spec supporting artifacts
+- Persist spec analysis artifacts
+- Redesign SPEC-2 keybindings with focus system + arrow keys
+- Reconcile SPEC-3 session conversion artifacts
+- Expand SPEC-3 reviewer evidence
+- Clarify gwt-spec-brainstorm existing-spec handoff
+- Sync SPEC-8 progress after input slices
+- Sync SPEC progress after parallel slices
+- Finalize SPEC-6 execution tracking
+- Sync SPEC-8 and SPEC-9 progress
+- SPEC-9 の Docker 進捗を同期する
+- SPEC-9 の DockerProgress 部分実装を記録する
+- SPEC-1/SPEC-4 タスク棚卸し — 実装済みタスクを [x] にマーク
+- SPEC-9 の Skills UI 進捗を同期する
+- SPEC-5/8/9 タスク棚卸し — 実装済み・廃止タスクを反映しスナップショット更新
+- **spec:** Retire obsolete SPEC-2 simplify task
+- **spec:** Sync SPEC-3 version-selection artifacts
+- **spec:** Reconcile completion-gate artifacts
+- **spec:** Refresh SPEC-4 and SPEC-8 status
+- **spec:** Update SPEC-9 US-3 for embedded skills redesign
+- Record docker verification serialization lesson
+- **spec:** Mark Phase 2c tasks complete in SPEC-9
+- **skills:** Gwtスキル手順を更新する
+- 仕様策定ワークフローで既存SPEC検索を最優先にする
+- Tui-design スキルを追加
+- **spec:** AI branch skipをplanとtasksに反映する
+- **spec:** Record recurring hooks regression guardrails
+- **spec-10:** Mark Phase 8 tasks complete and document index lifecycle in README
+- **spec:** Align snapshot history capacity wording
+- **spec:** Add SPEC-12 GitHub Issue ベース SPEC 管理（トークン最小化ハイブリッド）
+- **spec:** Add FR-029 user language principle to SPEC-12
+- **spec-9:** 統合 Node ベースマネージドランタイムフック仕様を追加
+- **spec-3:** Claude Code effort レベルと Codex 推論レベル UI を仕様化
+- Record legacy spec parser lesson
+- Add coordination shared board domain
+
+### Features
+
+- SPEC-1776 Elm Architecture コアを gwt-cli ベースで再構築
+- **gui:** Add workspace shell agent canvas and branch browser (#1728)
+- 通常ログ基盤の統合設計と機能・障害対応ログ90%カバレッジ (#1758)
+- **skills:** Align spec workflow with spec kit
+- **skills:** Operationalize spec artifacts
+- **spec:** Migrate to artifact-first spec storage
+- **pr:** Auto-merge base branch before pr updates
+- **skills:** PR・SPECワークフローの自律性を強化
+- **profiling:** Trace project startup hydration path
+- **profiling:** Trace project startup hydration path (#1760)
+- **profiling:** Trace startup hydration blockers (#1761)
+- **skills:** Use REST-first transport for PR workflows
+- **gui:** Add initial agent canvas shell
+- **gui:** Track selected canvas sessions
+- **gui:** Align shell navigation with canvas sessions
+- **gui:** Persist canvas session selection
+- **gui:** Add agent canvas worktree popup
+- **gui:** Add standalone branch browser panel
+- **gui:** Open worktrees from branch browser
+- **gui:** Finalize agent canvas shell implementation
+- **spec:** ローカルファイルベースの SPEC 管理 API を追加
+- **search:** Gwt-spec-search 新設、gwt-file-search → gwt-project-search リネーム、インデックス差分監視
+- **gui:** Axum HTTP IPC サーバー + フロントエンド安定化 (#1784 Phase 1)
+- **gui:** UI全面リデザイン + ブラウザdevモード対応 (#1784 Phase 1 続)
+- **gui:** AgentCanvasPanelCore のスタイルをデザイントークンに移行
+- Axum HTTP IPC サーバーで重い Git クエリを WKWebView メインスレッドからオフロード
+- SPEC-1776 gwt-tui クレート Phase 0 + Phase 1 コア実装
+- SPEC-1776 マネジメントパネル UI コンポーネントを追加
+- SPEC-1776 エージェント起動ビルダーを gwt-core に抽出
+- SPEC-1776 AI セッションサマリートリガーを gwt-core に追加
+- SPEC-1776 ボイスランタイムを gwt-core に追加
+- SPEC-1776 セッションウォッチャーを gwt-core に抽出
+- SPEC-1776 スプリットペインレイアウトモジュールを追加
+- SPEC-1776 PR ステータスダッシュボードを追加
+- SPEC-1776 Issue/SPEC パネルを追加
+- SPEC-1776 Phase 1 PTY wiring for gwt-tui crate
+- SPEC-1776 PaneManager PTY 統合 — ターミナルエミュレータとして動作
+- SPEC-1776 全機能を app.rs に統合
+- SPEC-1776 エージェント起動パラメータの完全移植
+- SPEC-1776 Launch Dialog に Session Mode と Skip Permissions を追加
+- SPEC-1776 Launch Dialog を GUI 版と同等の機能に拡張
+- SPEC-1776 Settings/Logs 管理画面を gwt-cli ベースで実装
+- SPEC-1776 Docker/Clone/Error/SpecKit 画面と起動時初期化を実装
+- SPEC-1776 15 ステップ起動ウィザードを gwt-cli ベースで実装
+- SPEC-1776 Branches/Issues 管理画面を gwt-cli ベースで実装
+- SPEC-1776 シェルタブ生成と PTY キー転送を実装
+- SPEC-1776 エージェントモデル定義・バージョン検出・推論レベルを gwt-cli から移植
+- SPEC-1784 SPEC セマンティック検索と検索命名規則統一
+- Wizard 完了時にエージェントを実際に起動するよう実装
+- SPECs タブ・Branches→Wizard起動・エラー dismiss を実装
+- SkipPermissions を選択式に変更 + Codex fast mode 追加
+- バージョン選択を npm registry から取得 + fast mode を選択式に
+- Codex CLI Hooks フレームワーク対応（SPEC-1438 FR-HOOK-001〜004）
+- エージェント起動時にスキル・hook 自動登録を実行（SPEC-1438 FR-REG-001）
+- SPEC-1776 詳細ビュー・セッション保存・終了確認・Versions タブを実装
+- Add SPECs screen launch agent UI and metadata utilities (SPEC-1785 T001-T006)
+- Add WizardState::open_for_spec() for SPEC screen agent launch (SPEC-1785 T007)
+- Integrate SPECs screen agent launch with app.rs (SPEC-1785 T008-T010)
+- Codex hooks.jsonをマージ方式に変更しユーザー定義hooksを保持
+- Bare Clone廃止 — 全てのBareリポジトリ関連コードを削除 (SPEC-1787 Phase 1)
+- Normal Clone移行とInitialization画面を実装 (SPEC-1787 Phase 2)
+- Developブランチコミット保護を実装 (SPEC-1787 Phase 3)
+- SPEC/Issueからのエージェント起動アクションを実装 (SPEC-1787 Phase 4)
+- MarkdownレンダラーにTable描画を追加 (FR-081)
+- Separate spec viewer from issues tab
+- Markdownレンダラーに太字・斜体のインライン書式を追加 (FR-081)
+- Branch enter flow for multi-session shell
+- Add grid and maximize session layouts
+- Expose profiles as a management tab
+- Preload management data and branch states
+- Merge OS env into profiles tab
+- Enrich branches with worktree details
+- Refresh branch metadata in background
+- Show linked issues in branch rows
+- Simplify tab bar in grid mode
+- Show quick start state in branch rows
+- Wire spec and issue launch entries
+- Improve profile env editor feedback
+- Align branch runtime summary
+- Re-expose versions and logs tabs
+- Restore settings management tab
+- Reset SPEC system — 9 domain-based SPECs replacing 41 legacy SPECs
+- Rewrite gwt-core as thin foundation crate
+- Add gwt-config crate for settings, profiles, voice and agent config
+- Integrate all Phase 1 backend crates into workspace
+- **agent:** Add Claude Code auto mode and telemetry disable env vars
+- **tui:** Implement Phase 2 Elm Architecture foundation with stub screens
+- **tui:** Implement Branches and Profiles screens
+- **tui:** Implement Issues, Git View, PR Dashboard screens
+- **tui:** Implement SPECs and Settings screens
+- **tui:** Implement Wizard, Logs, Versions, Confirm, Error screens
+- **tui:** Add voice input TUI integration
+- **tui:** Add file paste and AI branch naming in wizard
+- **tui:** Add Docker progress, service select, port select screens
+- **skills:** Complete hooks merge with backup/recovery + builtin skill registry
+- **tui:** Add SPEC launch/edit, URL detection, session persistence
+- Add SPEC search, GitHub Release workflow, npm/bunx distribution
+- Implement SPEC-10 — project workspace initialization, clone, migration
+- Auto-select develop worktree for bare repo workspace
+- **tui:** Load branches, specs, tags from repository on startup
+- Wire tui spec and session workflows
+- Harden cache and hook infrastructure
+- Wire wizard startup version cache
+- Complete SPEC-3 startup cache scheduling
+- Implement branch detail view with SPECs tab removal (SPEC-2 Phase 4)
+- Complete SPEC-3 session conversion flow
+- **tui:** Add FocusPane enum to model
+- **tui:** Implement focus system with Tab cycling, arrow keys, border colors
+- Advance SPEC-6 and SPEC-7 implementation
+- **tui:** Merge tab header into block title and simplify focus panes
+- **tui:** Render session tabs in Block title instead of separate tab bar
+- **tui:** Add logs filter controls and snapshot coverage
+- **tui:** Add logs filter cycling and debug toggle
+- Replace branch detail Actions section with action modal overlay
+- Restore borders on primary content panes across all screens
+- Add Ctrl+Left/Right for sub-tab switching in Settings and Logs
+- Add gwt-spec-brainstorm skill
+- **tui:** Reconnect specs tab to management shell
+- **tui:** Add manual input to ai suggestions
+- **tui:** Lazygit-style layout with green focused borders and keybind hints
+- **tui:** Initialize builtin skills registry at startup
+- **tui:** Clarify Docker progress status rendering
+- **tui:** Remove Specs tab, implement branch detail with gwt-git
+- **tui:** ServiceSelect の選択フローを完成する
+- **tui:** PortSelect の競合解決フローを完成する
+- **tui:** Add DockerProgress control surface
+- **tui:** DockerProgress を外部イベントで駆動可能にする
+- **tui:** Add Skills category to settings
+- **skills:** Add enabled-state sync api
+- **tui:** Settings の Skills toggle を registry に同期する
+- **tui:** URL underline rendering, region tracking, alt-screen tests
+- **git:** Add DivergenceInfo, git_divergence, and fetch_pr_list
+- **voice:** Add recording timeout, silence detection, and Qwen3 ASR stub
+- **tui:** Add docker controls to branch overview
+- **tui:** Hydrate git view from repository state
+- **tui:** Add keybinding help overlay
+- **tui:** Persist workspace shell session state
+- **tui:** Bridge docker progress worker
+- **tui:** Overhaul branch operation flow and management header
+- **tui:** Wire terminal URL opening in session surfaces
+- **agent:** Add VersionSelect step, bunx/npx runner, and Codex version-dependent flags
+- **tui:** Restore branch-first wizard flow
+- **tui:** Restore branch list primary actions
+- **tui:** Restore branch mnemonic shortcuts
+- **tui:** Restore old-tui wizard step machine
+- **tui:** Restore old-tui wizard option formatting
+- **tui:** Quick Start の履歴復元を実装
+- **tui:** Restore old-tui wizard chrome and agent select
+- **tui:** Load PR dashboard data on focus
+- **tui:** Wire voice runtime session
+- **tui:** Load live PR detail reports
+- **tui:** Wire live git view metadata
+- **tui:** Render pr detail checks as badges
+- **git:** Add rest fallback for pr list transport
+- **tui:** Restore live specs tab wiring
+- **tui:** Enrich spec launch context
+- **tui:** Expose specs detail edit keypaths
+- **tui:** Add spec section-scoped editing
+- **tui:** Render specs detail as markdown
+- **tui:** Add ranked specs search
+- **tui:** Restore branch detail session summaries
+- **tui:** Make branch detail sessions actionable
+- **tui:** Restore status bar footer context
+- **tui:** Restore branch detail direct actions
+- **tui:** Restore branch detail title context
+- **tui:** Restore branch detail escape back
+- **tui:** Restore pane focus border colors
+- **tui:** Make branch detail actions worktree-aware
+- **tui:** Restore management panel width balance
+- **tui:** Mirror branch mnemonics in detail pane
+- **tui:** Compact management header context
+- **tui:** Preserve terminal focus when toggling panel
+- **tui:** Preserve terminal focus for tab shortcuts
+- **tui:** Restore esc back in management detail views
+- **tui:** Restore esc back in logs detail view
+- **tui:** Return management escape to terminal
+- **tui:** Align profiles escape with panel contract
+- **tui:** Expose management escape in status hints
+- **tui:** Make management focus cycle tab-aware
+- **tui:** Make management split responsive
+- **tui:** Remove redundant management banner
+- **tui:** Restore terminal footer mnemonics
+- **tui:** Compact management footer hints
+- **tui:** Compact narrow management titles
+- **tui:** Compact narrow session titles
+- **tui:** Make management footer hints mode-aware
+- **tui:** Non-Branches footer hint を action-aware にする
+- **skills:** Replace BuiltinSkill with include_dir asset bundling
+- **tui:** Remove redundant branch detail inner titles
+- **tui:** Preserve session count in compact titles
+- **tui:** Restore split grid session title identity
+- **tui:** Restore wizard inline input prompts
+- **tui:** Simplify wizard popup content chrome
+- **tui:** Keep ai suggestion context in popup
+- **tui:** Align ai suggestion state layout
+- **tui:** Compact ai suggestion body copy
+- **tui:** Unify wizard selected row highlights
+- **tui:** Split wizard input into two rows
+- **tui:** Tighten quick start popup density
+- **tui:** Tighten quick start group spacing
+- **tui:** Compact quick start footer separator
+- **tui:** Describe quick start footer action
+- **tui:** Remove quick start footer separator
+- **tui:** Restore quick start action labels
+- **tui:** Drop ellipsis from quick start footer
+- **skills:** Add distribute tests, settings_local tests, and agent launch integration
+- **tui:** Lift single-entry quick start title context
+- **skills:** Rewrite all SKILL.md frontmatter per Anthropic guidelines
+- **tui:** Simplify quick start group headers
+- **tui:** Compact quick start resume hints
+- **tui:** Compact multi-entry quick start actions
+- **tui:** Simplify quick start footer action
+- **tui:** Align quick start option copy
+- **skills:** Complete Phase 2 with YAML validation and integration test
+- **tui:** Remove wizard progress row
+- **tui:** Compact single-entry quick start actions
+- **tui:** Compact quick start branch context
+- **tui:** Compact single-entry quick start title
+- **tui:** QuickStart の agent row を inline 化
+- **tui:** QuickStart title の default 表示を削る
+- **tui:** QuickStart footer label を短縮する
+- **tui:** AgentSelect の branch context を簡潔化
+- **skills:** Add gwt-spec-deepen for interactive SPEC deepening
+- **skills:** Distribute AGENTS.md and CLAUDE.md to worktrees
+- **tui:** QuickStart の Start new 表示を圧縮する
+- **tui:** QuickStart の Start new 行を中立化する
+- **tui:** QuickStartのStart new行を階層インデントする
+- Launch config-backed custom agents in PTY sessions
+- Add settings-backed custom agent CRUD
+- Add tui-design skill
+- **tui:** Theme.rsにセマンティックカラー・ボーダー・アイコンを一元定義しMinimalist Modernトーンを適用
+- **tui:** ステータスバー・Help・初期画面・視覚階層のビジュアル改善
+- Restore hook-driven branch session visibility
+- **tui:** Show branch names in agent tabs
+- **index:** Write index lifecycle events to ~/.gwt/logs/index.log
+- **index:** Publish lifecycle events to TUI Logs tab via notification bus
+- **branches:** Branch Cleanup フロー (FR-018)
+- **github:** Add gwt-github foundational crate (SPEC-12 Phase 1+2)
+- **github:** Add IssueClient trait + fake impl + cache layer (SPEC-12 Phase 3+4)
+- **github:** Add spec_ops high-level SPEC operations (SPEC-12 Phase 5)
+- **github:** Add HttpIssueClient + ReqwestTransport (SPEC-12 Phase 3b)
+- **tui:** Add gwt issue spec CLI dispatch (SPEC-12 Phase 6)
+- **tui:** Add Specs tab + complete CLI subcommands (SPEC-12 Phase 6 + 9)
+- **github:** Add migration module (SPEC-12 Phase 7)
+- **tui:** Add gwt hook subcommand scaffold + CORE-CLI domain
+- **logging:** Tracing-based structured logging foundation (SPEC-6 Phase 5)
+- **logging:** Live log level toggle from Logs tab + instrument sweep (SPEC-6 Phase 5)
+- **tui:** Add HookKind types and runtime-state hook handler
+- **tui:** Port 4 block hooks + forward stub to gwt hook CLI
+- **skills:** Generate settings with gwt hook CLI invocations
+- **skills:** Embed absolute self-path in generated hook commands
+- **skills:** Add gwt-spec-brainstorm + investigation-first principle
+- **skills:** Add gwt-spec-brainstorm slash command
+- **tui:** Add mouse focus hit-testing
+- Complete split-grid session visibility
+- Consolidate managed bash hook policy
+- Add cache-first gwt issue cli commands
+- Add live-first gwt pr and actions cli
+- Gate direct GitHub Issue CLI commands
+- Add gwt pr create and edit commands
+- Add Claude effort and refresh reasoning UI
+- **skills:** Improve brainstorm question flow
+- Broaden branch cleanup selection
+- Add docker launch options to agent wizard
+- Add docker lifecycle controls for compose services
+- Show agent launch parameters in session detail
+- Add task-based gwt skill entrypoints
+- Unify gwt discussion entrypoint
+- Resume unfinished gwt discussions
+- Workflow-policyで議論前の実装を止める
+- Remove gwt compatibility aliases
+- Add shared board coordination surface
+- Board入力欄を常設表示にする
+- Board入力欄の直打ちとカーソル表示を改善する
+- Switch shared board to chat timeline
+- Refine board chat conversation ui
+- Separate board coordination hook from runtime state
+- TUIキーマップをleader-firstへ統一
+- Ctrl+G,q 終了時にアクティブセッションがあれば確認ダイアログを表示
+
+### Miscellaneous Tasks
+
+- **fmt:** Format branch issue label lookup
+- **deps-dev:** Bump svelte from 5.53.12 to 5.54.1 in /gwt-gui (#1753)
+- **deps-dev:** Bump jsdom from 29.0.0 to 29.0.1 in /gwt-gui (#1754)
+- **skills:** Rename gwt-fix-pr to gwt-pr-fix
+- **skills:** Remove stale gwt-fix-pr assets
+- Format rust tracing annotations
+- Merge origin/develop into feature/issue-1644
+- Merge origin/develop into feature/issue-1579
+- **macos:** Expose local install workflow
+- **macos:** Speed up local app install
+- **skills:** Simplify PR skill descriptions and remove REST-first references
+- Merge origin/develop into feature/issue-1644
+- .codex/skills/gwt-*/ の誤 track を解除
+- .codex/skills/ の誤 track を解除
+- **spec:** 164件の gwt-spec Issue をローカル specs/ に逆移行
+- Untrack gwt managed local assets already covered by info/exclude
+- Merge origin/develop into feature/issue-1771
+- **hooks:** Hoist checkout regexes out of loop and clarify comments
+- Merge origin/develop into feature/issue-1771
+- Format tauri index files
+- Pre-commit に svelte-check + pnpm test、pre-push に pnpm build を追加
+- Pre-commit に svelte-check + pnpm test、pre-push に pnpm build を追加
+- **gui:** SettingsPanel の Tauri インポート移行とデザイントークン適用
+- SPEC-1776 gwt-tauri/gwt-gui を削除し TUI バイナリに移行
+- Resolve merge conflicts with feature/feature-1776 base branch
+- SPEC-1776 CI/CD パイプラインを TUI バイナリ用に更新
+- Merge feature/feature-1776 into PR branch to resolve conflicts
+- Resolve merge conflicts with feature/feature-1776 base branch
+- Merge feature/feature-1776 into worktree-agent-aebdacff to resolve conflicts
+- Merge feature/feature-1776 into worktree-agent-a2fedd2a to resolve conflicts
+- Resolve merge conflicts with feature/feature-1776 base branch
+- Resolve merge conflicts with latest feature/feature-1776
+- Feature/feature-1776 ブランチとのマージコンフリクト解消
+- Feature/feature-1776 最新との再マージコンフリクト解消・notify 依存追加
+- Resolve merge conflicts with latest feature/feature-1776 (round 3)
+- Merge latest feature/feature-1776 and resolve conflicts
+- Merge feature/feature-1776 base branch to resolve conflicts
+- GUI 固有の 10 SPEC を削除
+- SPEC-1776 Phase 5 クリーンアップと最終検証
+- TUI 無関係の 91 SPEC を削除（GUI固有73件+Game固有18件）
+- バグ修正 SPEC 34件を削除（SPEC は機能仕様のみ）
+- SPEC 全面整理 — 7 SPEC を TUI 向け更新 + 7 SPEC を新規作成
+- 全 36 SPEC の metadata.json を gwt-spec-register 標準フォーマットに統一
+- SPEC title から gwt-spec: プレフィックスを削除
+- Merge remote feature/feature-1776 before push
+- SPEC-1647をclosed (superseded by SPEC-1787) に更新、コードフォーマット修正 (SPEC-1787 Phase 6)
+- Archive legacy SPECs to specs-archive/
+- Restore gwt-tui to workspace members
+- Add all backend crate dependencies to gwt-tui
+- Mark SPEC-3 and SPEC-6 as Done
+- Accept updated E2E snapshots after SPEC completions
+- Accept updated E2E snapshots after operation flow overhaul
+- Apply cargo fmt and update lessons
+- Apply rustfmt formatting to lib.rs test assertions
+- SPEC-11 metadata をクローズ状態に更新
+- **tui:** Cargo fmtによるフォーマット修正
+- **tui:** Style モジュール末尾の余分な空行を削除
+- Codex用TUIデザインスキルを追加
+- Merge origin/develop into feature/performance
+- Expand assert! macros to multi-line for nightly rustfmt
+- Merge develop
+- Merge origin/develop into feature/terminal
+- **merge:** Sync develop into feature/tui-design
+- Merge develop into feature/models
+- **merge:** Sync origin/develop into bugfix/not-work-paste
+- Update obsolete skill references in gwt-search and gwt-spec-build
+- Merge latest develop
+- Lessons markdownlintを修正
+- **debug:** Add agent scrollback capture logs
+- Codex hooksのruntime-stateコマンドを反映
+- **skills:** Remove non-embedding gwt skills
+- **merge:** Sync develop into feature/performance
+- **merge:** Sync origin/develop into feature/specs
+- **merge:** Sync origin/develop into feature/specs
+- **merge:** Sync origin/develop into feature/specs
+- Update codex hooks.json with develop worktree binary path
+- **deps-dev:** Bump vite
+- **merge:** Sync origin/develop into feature/specs
+- Merge develop into feature/hooks
+- Merge origin/develop into bugfix/cleanup
+- Merge develop into feature/hooks
+- Developの更新をbugfix terminalへ取り込む
+- Merge develop into feature/docker
+- Merge origin/develop into bugfix/profiles
+- Merge origin/develop into bugfix/not-update-cleanup-window
+- Merge origin/develop into bugfix/info-exclude
+- Merge origin/develop into feature/update-skills
+- Merge origin/develop into bugfix/focus-color
+- Merge origin/develop into feature/mouse-focus
+- Remove unused constitution.md
+- Untrack local codex hooks
+- Nightly rustfmt に合わせてテストコードのフォーマットを修正
+
+### Refactor
+
+- **skills:** Rename project-index and pty-communication skills
+- **ai:** リトライループ統一・コンストラクタ追加・PrCache二重fetch修正
+- **logging:** 二重ログ出力の排除と format!() ホイスト
+- **gui:** Drop split shell path from main area
+- **spec:** Spec_artifact.py をローカルファイル操作に書き換え
+- **spec:** SPEC ID を UUID8 から連番方式に変更
+- **spec:** SPEC-1327/1730/1296 を SPEC-1579 に統合
+- **gui:** Rename Card terminology to Tile across Agent Canvas
+- **gui:** Branch Browser コンポーネントのハードコード px 値をデザイントークンに置換
+- **skill:** Plugins/gwt/ を .claude/ に正本移行し Anthropic ガイド準拠のトリガーフレーズを追加
+- **gui:** モーダル/ダイアログ状態管理を appModalStateRuntime に抽出
+- **gui:** ランチワークフローの状態管理を appLaunchStateRuntime.ts に抽出
+- **gui:** 音声入力状態管理を appVoiceInputRuntime.ts に抽出
+- **gui:** AppRoot に新ランタイムモジュールを統合
+- **voice:** Voice controller の Tauri invoke を集約レイヤー経由に移行
+- **gui:** ユーティリティモジュールの @tauri-apps 直接インポートを集約レイヤーへ移行
+- **gui:** AgentLaunchForm のスタイルをデザイントークンに移行
+- **gui:** Agent Canvas をFigma風フルスクリーンキャンバスに変更
+- **gui:** CleanupModal の Tauri インポート移行とデザイントークン適用
+- **gui:** MigrationModal モダナイズ — Tauri インポート統合とデザイントークン適用
+- **gui:** WorktreeSummaryPanel/VersionHistoryPanel の Tauri import 移行とデザイントークン適用
+- **gui:** TerminalView の @tauri-apps 直接インポートを集約レイヤーに移行
+- **gui:** Projectパネル群のハードコードされたpx値をデザイントークンに置換
+- **gui:** トースト/通知ステート管理を appToastRuntime.ts に抽出
+- **gui:** ハードコードされた px 値をデザイントークンに置換
+- **gui:** MarkdownRenderer のハードコード px 値をデザイントークンに置換
+- **gui:** AboutDialog のハードコード px 値をデザイントークンに置換
+- **gui:** Git View ファミリーのハードコード px 値をデザイントークンに置換
+- **gui:** PRファミリーコンポーネントのハードコード px 値をデザイントークンに置換
+- **gui:** Assistant コンポーネントのハードコード px 値をデザイントークンに置換
+- **gui:** App.svelte から外観・設定状態管理を appAppearanceRuntime.ts に抽出
+- **gui:** 汎用ダイアログ群のハードコード px 値をデザイントークンに置換
+- **gui:** ReportDialog のハードコード px 値をデザイントークンに置換
+- SPEC-1776 マネジメントパネル UI を簡素化
+- SPEC-1776 エージェント起動ビルダーを簡素化
+- SPEC-1776 AI サマリートリガーを簡素化
+- SPEC-1776 ボイスランタイムを簡素化
+- SPEC-1776 セッションウォッチャーを簡素化
+- SPEC-1776 スプリットレイアウトを簡素化
+- SPEC-1776 PR ダッシュボードを簡素化
+- SPEC-1776 Issue/SPEC パネルを簡素化
+- SPEC-1776 PTY 配線コードを簡素化
+- SPECs画面のagent起動ハンドラを簡素化しcopy mode scroll修正
+- Unify preload strategy for reset
+- **tui:** Simplify — extract shared utilities, remove redundancies
+- **tui:** Extract ManagementTab::next/prev and deduplicate render
+- **tui:** Extract SessionTabType::icon() to deduplicate icon mapping
+- **tui:** Unify all tab displays to Block title pattern
+- **tui:** Reuse build_tab_title in management panel and remove allocation
+- Extract bordered_block() helper to deduplicate border styling
+- Extract focus_block helper to deduplicate branches border construction
+- **git:** Extract PR check report parser
+- **skills:** Split gwt-agent-dispatch into 4 responsibility-based skills
+- **tui:** Remove BuiltinSkill runtime registry from TUI
+- **skills:** Apply progressive disclosure to 5 complex skills
+- **skills:** Apply progressive disclosure to gwt-pr-check and gwt-spec-register
+- **skills:** Consolidate 22 skills into 8 methodology-based skills
+- **tui:** 未使用テーマ定義を削除しstatus_separatorのアロケーションを除去
+- **skills:** Rename core skills for clarity
+- **skills:** Add proactive triggers to all skill descriptions
+- **tui:** Remove Branch Detail SPECs section (SPEC-12 Phase 9a)
+- **specs:** Complete migration to GitHub Issues
+- **logging:** Address PR #1916 follow-up nitpicks
+- **skills:** Restructure gwt-pr to commit-count-first decision flow
+- **skills:** Remove stale local specs/ references + fix prune race
+- **skills:** Remove stale local specs/ references + fix prune race
+- Modularize cli command families
+- Extract workspace shell boundaries
+- Specs-archive を削除する
+- Isolate crossterm runtime boundary
+
+### Styling
+
+- IssueListPanel/PrListPanel のデザイントークン適用
+- Normalize rustfmt output in suggestion tests
+- Format rust sources for CI
+
+### Testing
+
+- **gui:** Align headed e2e with current shell
+- **gui:** Add headed ux and backend perf coverage
+- **ci:** Run ux e2e in pre-commit hooks
+- **gui:** Raise headed e2e shell coverage
+- Agent_pane/specs/status_bar/terminal_view のテストを追加
+- Cover quick start selector behavior
+- Verify codex hooks launch contract
+- **tui:** Add E2E snapshot test framework with ratatui TestBackend + insta
+- **config:** Add unit tests for atomic write and error types
+- **tui:** Cover structured log severity routing
+- **tui:** Preserve error modal queue regression
+- **tui:** Cover info status notification dismissal
+- **tui:** Cover wizard ai suggestion rendering
+- **tui:** Cover voice hotkey chord registration
+- **notification:** Cover structured log entry fields
+- **tui:** Cover error modal queue under burst load
+- Refresh tui snapshots after develop merge
+- Relax flaky branch preload timing assertions
+- **tui:** Preload timing testをgh遅延から分離
+- **tui:** Cover launch-time stale asset cleanup
+- **tui:** Pin hook exit code contract
+- **skills:** Assert gwt-spec-brainstorm is bundled in binary
+- **skills:** Assert gwt-spec-brainstorm command is bundled
+- Clarify git dir override allow case
+- Stabilize profiles mouse selection
+- Stabilize profiles env mouse selection
+- Branches refresh 非ブロッキング検証の時間閾値を緩める
+- Cover stop hook legacy coordination events
+
+### Ci
+
+- **repo:** Disable squash merges
+- Add required build workflow for PRs
+
 
 ## [8.17.2] - 2026-03-20
 
