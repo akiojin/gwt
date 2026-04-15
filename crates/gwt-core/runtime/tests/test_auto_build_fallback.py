@@ -167,7 +167,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
                 result = runner.action_search_v2(
                     action="search-specs",
                     repo_hash="abc1234567890def",
-                    worktree_hash="111122223333ffff",
+                    worktree_hash=None,
                     project_root=str(root),
                     query="watcher debounce",
                     n_results=5,
@@ -183,6 +183,8 @@ class AutoBuildFallbackTests(unittest.TestCase):
                 result["specResults"][0]["title"],
                 "gwt-spec: Semantic search platform",
             )
+            db = db_root / "abc1234567890def" / "specs"
+            self.assertTrue(db.exists(), f"index dir was not created: {db}")
 
     def test_search_specs_refreshes_existing_index_from_issue_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,7 +204,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
                 initial = runner.action_search_v2(
                     action="search-specs",
                     repo_hash="abc1234567890def",
-                    worktree_hash="111122223333ffff",
+                    worktree_hash=None,
                     project_root=str(root),
                     query="watcher debounce",
                     n_results=5,
@@ -220,7 +222,7 @@ class AutoBuildFallbackTests(unittest.TestCase):
                 refreshed = runner.action_search_v2(
                     action="search-specs",
                     repo_hash="abc1234567890def",
-                    worktree_hash="111122223333ffff",
+                    worktree_hash=None,
                     project_root=str(root),
                     query="issue cache refresh contract",
                     n_results=5,

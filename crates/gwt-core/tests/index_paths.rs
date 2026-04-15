@@ -24,16 +24,10 @@ fn issue_db_path_omits_worktree_hash() {
 }
 
 #[test]
-fn specs_db_path_includes_worktree_hash() {
+fn specs_db_path_is_repo_scoped() {
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
-    let tmp = tempfile::tempdir().unwrap();
-    let wt = compute_worktree_hash(tmp.path()).unwrap();
-    let path = gwt_index_db_path(&repo, Some(&wt), Scope::Specs).unwrap();
-    let expected_suffix = format!(
-        ".gwt/index/{}/worktrees/{}/specs",
-        repo.as_str(),
-        wt.as_str()
-    );
+    let path = gwt_index_db_path(&repo, None, Scope::Specs).unwrap();
+    let expected_suffix = format!(".gwt/index/{}/specs", repo.as_str());
     assert!(
         path.to_string_lossy().ends_with(&expected_suffix),
         "got {}",
@@ -64,9 +58,9 @@ fn files_docs_db_path_under_worktree() {
 }
 
 #[test]
-fn worktree_scope_without_worktree_hash_errors() {
+fn files_scope_without_worktree_hash_errors() {
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
-    let result = gwt_index_db_path(&repo, None, Scope::Specs);
+    let result = gwt_index_db_path(&repo, None, Scope::FilesCode);
     assert!(result.is_err());
 }
 

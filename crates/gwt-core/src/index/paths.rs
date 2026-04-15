@@ -9,13 +9,15 @@
 //!     chroma.sqlite3
 //!     .lock
 //!     meta.json
+//!   manifest-specs.json
+//!   specs/
+//!     chroma.sqlite3
+//!     .lock
 //!   worktrees/
 //!     <wt-hash>/
 //!       meta.json
 //!       manifest-files.json
-//!       manifest-specs.json
 //!       .lock
-//!       specs/chroma.sqlite3
 //!       files/chroma.sqlite3
 //!       files-docs/chroma.sqlite3
 //! ```
@@ -32,7 +34,7 @@ use crate::worktree_hash::WorktreeHash;
 pub enum Scope {
     /// Worktree-independent: GitHub Issues.
     Issues,
-    /// Worktree-scoped: SPEC Issue search index.
+    /// Repo-scoped: cached SPEC Issue search index.
     Specs,
     /// Worktree-scoped: project source code files.
     FilesCode,
@@ -42,7 +44,7 @@ pub enum Scope {
 
 impl Scope {
     pub fn requires_worktree(self) -> bool {
-        !matches!(self, Scope::Issues)
+        matches!(self, Scope::FilesCode | Scope::FilesDocs)
     }
 
     /// Subdirectory leaf name relative to the worktree-or-repo prefix.
@@ -83,7 +85,7 @@ pub fn gwt_index_db_path(
     worktree: Option<&WorktreeHash>,
     scope: Scope,
 ) -> Result<PathBuf> {
-    if scope == Scope::Issues {
+    if matches!(scope, Scope::Issues | Scope::Specs) {
         return Ok(gwt_index_repo_dir(repo).join(scope.subdir()));
     }
     let wt = worktree.ok_or_else(|| {
@@ -111,7 +113,7 @@ mod tests {
     #[test]
     fn worktree_scope_requires_hash() {
         let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
-        assert!(gwt_index_db_path(&repo, None, Scope::Specs).is_err());
+        assert!(gwt_index_db_path(&repo, None, Scope::FilesCode).is_err());
     }
 
     #[test]
