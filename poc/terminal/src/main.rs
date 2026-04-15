@@ -21,11 +21,11 @@ use futures_util::{SinkExt, StreamExt};
 use gwt_terminal::{Pane, PaneStatus};
 use poc_terminal::{
     default_wizard_version_cache_path, detect_shell_program, list_branch_entries,
-    list_directory_entries, load_workspace_state, refresh_managed_gwt_assets_for_worktree,
-    resolve_launch_spec, save_workspace_state, workspace_state_path, BackendEvent,
-    DockerWizardContext, FrontendEvent, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardState, LiveSessionEntry, NativeMenuCommand, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState, APP_NAME,
+    list_directory_entries, load_app_state, refresh_managed_gwt_assets_for_worktree,
+    resolve_launch_spec, save_app_state, workspace_state_path, BackendEvent, DockerWizardContext,
+    FrontendEvent, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
+    LiveSessionEntry, NativeMenuCommand, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use tao::{
     event::{Event, WindowEvent},
@@ -81,6 +81,7 @@ struct ActiveAgentSession {
     branch_name: String,
     display_name: String,
     worktree_path: PathBuf,
+    tab_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -111,42 +112,110 @@ impl OutboundEvent {
     }
 }
 
-struct AppRuntime {
+#[derive(Debug, Clone)]
+struct ProjectTabRuntime {
+    id: String,
+    title: String,
+    project_root: PathBuf,
+    kind: poc_terminal::ProjectKind,
     workspace: WorkspaceState,
+}
+
+#[derive(Debug, Clone)]
+struct WindowAddress {
+    tab_id: String,
+    raw_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct LaunchWizardSession {
+    tab_id: String,
+    wizard: LaunchWizardState,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectOpenTarget {
+    project_root: PathBuf,
+    title: String,
+    kind: poc_terminal::ProjectKind,
+}
+
+struct AppRuntime {
+    tabs: Vec<ProjectTabRuntime>,
+    active_tab_id: Option<String>,
+    recent_projects: Vec<poc_terminal::RecentProjectEntry>,
     runtimes: HashMap<String, WindowRuntime>,
     window_details: HashMap<String, String>,
+    window_lookup: HashMap<String, WindowAddress>,
     state_path: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
-    workdir: PathBuf,
     sessions_dir: PathBuf,
-    launch_wizard: Option<LaunchWizardState>,
+    launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
+}
+
+impl ProjectTabRuntime {
+    fn from_persisted(tab: poc_terminal::PersistedProjectTabState) -> Self {
+        Self {
+            id: tab.id,
+            title: tab.title,
+            project_root: tab.project_root,
+            kind: tab.kind,
+            workspace: WorkspaceState::from_persisted(tab.workspace),
+        }
+    }
 }
 
 impl AppRuntime {
     fn new(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<Self> {
         let state_path = workspace_state_path();
-        let workspace = WorkspaceState::from_persisted(load_workspace_state(&state_path)?);
-        let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let legacy_target = resolve_project_target(&launch_dir)
+            .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
+        let persisted =
+            load_app_state(&state_path, &legacy_target.project_root, legacy_target.kind)?;
+        let tabs = persisted
+            .tabs
+            .into_iter()
+            .map(ProjectTabRuntime::from_persisted)
+            .collect::<Vec<_>>();
+        let active_tab_id = normalize_active_tab_id(&tabs, persisted.active_tab_id);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
-        Ok(Self {
-            workspace,
+
+        let mut app = Self {
+            tabs,
+            active_tab_id,
+            recent_projects: dedupe_recent_projects(persisted.recent_projects),
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
+            window_lookup: HashMap::new(),
             state_path,
             proxy,
-            workdir,
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
-        })
+        };
+        app.rebuild_window_lookup();
+        Ok(app)
     }
 
     fn bootstrap(&mut self) {
-        let windows = self.workspace.persisted().windows.clone();
-        for window in windows {
-            let _ = self.start_window(&window.id, window.preset, window.geometry.clone());
+        let windows = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .clone()
+                    .into_iter()
+                    .map(|window| (tab.id.clone(), window))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for (tab_id, window) in windows {
+            let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
         }
         let _ = self.persist();
     }
@@ -158,127 +227,41 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         match event {
             FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
-            FrontendEvent::CreateWindow { preset } => {
-                let window = self.workspace.add_window(preset);
-                let runtime_event =
-                    self.start_window(&window.id, window.preset, window.geometry.clone());
-                let _ = self.persist();
-                let mut events = vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })];
-                if let Some(event) = runtime_event {
-                    events.push(OutboundEvent::broadcast(event));
-                }
-                events
+            FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
+            FrontendEvent::ReopenRecentProject { path } => {
+                self.open_project_path_events(PathBuf::from(path))
             }
-            FrontendEvent::FocusWindow { id } => {
-                if !self.workspace.focus_window(&id) {
-                    return Vec::new();
-                }
-                let _ = self.persist();
-                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })]
-            }
+            FrontendEvent::SelectProjectTab { tab_id } => self.select_project_tab_events(&tab_id),
+            FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
+            FrontendEvent::CreateWindow { preset } => self.create_window_events(preset),
+            FrontendEvent::FocusWindow { id } => self.focus_window_events(&id),
             FrontendEvent::CycleFocus { direction, bounds } => {
-                if self.workspace.cycle_focus(direction, bounds).is_none() {
-                    return Vec::new();
-                }
-                let _ = self.persist();
-                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })]
+                self.cycle_focus_events(direction, bounds)
             }
-            FrontendEvent::UpdateViewport { viewport } => {
-                self.workspace.update_viewport(viewport);
-                let _ = self.persist();
-                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })]
-            }
+            FrontendEvent::UpdateViewport { viewport } => self.update_viewport_events(viewport),
             FrontendEvent::ArrangeWindows { mode, bounds } => {
-                if !self.workspace.arrange_windows(mode, bounds) {
-                    return Vec::new();
-                }
-
-                for window in self.workspace.persisted().windows.iter() {
-                    if !window.preset.requires_process() {
-                        continue;
-                    }
-                    if let Some(runtime) = self.runtimes.get(&window.id) {
-                        if let Ok(mut pane) = runtime.pane.lock() {
-                            let (cols, rows) = geometry_to_pty_size(&window.geometry);
-                            let _ = pane.resize(cols.max(20), rows.max(6));
-                        }
-                    }
-                }
-
-                let _ = self.persist();
-                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })]
+                self.arrange_windows_events(mode, bounds)
             }
             FrontendEvent::UpdateWindowGeometry {
                 id,
                 geometry,
                 cols,
                 rows,
-            } => {
-                if !self.workspace.update_geometry(&id, geometry) {
-                    return Vec::new();
-                }
-                if let Some(runtime) = self.runtimes.get(&id) {
-                    if let Ok(mut pane) = runtime.pane.lock() {
-                        let _ = pane.resize(cols.max(20), rows.max(6));
-                    }
-                }
-                let _ = self.persist();
-                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })]
-            }
-            FrontendEvent::CloseWindow { id } => {
-                self.mark_agent_session_stopped(&id);
-                if let Some(runtime) = self.runtimes.remove(&id) {
-                    if let Ok(pane) = runtime.pane.lock() {
-                        let _ = pane.kill();
-                    }
-                }
-                self.window_details.remove(&id);
-                if !self.workspace.close_window(&id) {
-                    return Vec::new();
-                }
-                let _ = self.persist();
-                vec![OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                    workspace: self.workspace.persisted().clone(),
-                })]
-            }
-            FrontendEvent::TerminalInput { id, data } => {
-                let Some(runtime) = self.runtimes.get(&id) else {
-                    return Vec::new();
-                };
-                match runtime
-                    .pane
-                    .lock()
-                    .map_err(|error| error.to_string())
-                    .and_then(|pane| {
-                        pane.write_input(data.as_bytes())
-                            .map_err(|error| error.to_string())
-                    }) {
-                    Ok(()) => Vec::new(),
-                    Err(error) => {
-                        self.handle_runtime_status(id, WindowProcessStatus::Error, Some(error))
-                    }
-                }
-            }
+            } => self.update_window_geometry_events(&id, geometry, cols, rows),
+            FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
+            FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::LoadFileTree { id, path } => {
                 let path = path.unwrap_or_default();
-                let event = self.load_file_tree_event(&id, &path);
-                vec![OutboundEvent::reply(client_id, event)]
+                vec![OutboundEvent::reply(
+                    client_id,
+                    self.load_file_tree_event(&id, &path),
+                )]
             }
             FrontendEvent::LoadBranches { id } => {
-                let event = self.load_branches_event(&id);
-                vec![OutboundEvent::reply(client_id, event)]
+                vec![OutboundEvent::reply(
+                    client_id,
+                    self.load_branches_event(&id),
+                )]
             }
             FrontendEvent::OpenLaunchWizard { id, branch_name } => {
                 self.open_launch_wizard(&id, &branch_name)
@@ -293,19 +276,19 @@ impl AppRuntime {
         let mut events = vec![OutboundEvent::reply(
             client_id,
             BackendEvent::WorkspaceState {
-                workspace: self.workspace.persisted().clone(),
+                workspace: self.app_state_view(),
             },
         )];
 
         for (id, detail) in &self.window_details {
-            let Some(window) = self.workspace.window(id) else {
+            let Some(status) = self.window_status(id) else {
                 continue;
             };
             events.push(OutboundEvent::reply(
                 client_id,
                 BackendEvent::TerminalStatus {
                     id: id.clone(),
-                    status: window.status.clone(),
+                    status,
                     detail: Some(detail.clone()),
                 },
             ));
@@ -333,7 +316,7 @@ impl AppRuntime {
             events.push(OutboundEvent::reply(
                 client_id,
                 BackendEvent::LaunchWizardState {
-                    wizard: Some(wizard.view()),
+                    wizard: Some(wizard.wizard.view()),
                 },
             ));
         }
@@ -341,8 +324,312 @@ impl AppRuntime {
         events
     }
 
+    fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
+        let selected = rfd::FileDialog::new().pick_folder();
+        let Some(path) = selected else {
+            return Vec::new();
+        };
+        self.open_project_path_events(path)
+    }
+
+    fn open_project_path_events(&mut self, path: PathBuf) -> Vec<OutboundEvent> {
+        match self.open_project_path(path) {
+            Ok(wizard_closed) => {
+                let mut events = vec![self.workspace_state_broadcast()];
+                if wizard_closed {
+                    events.push(self.launch_wizard_state_broadcast(None));
+                }
+                events
+            }
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: error,
+            })],
+        }
+    }
+
+    fn open_project_path(&mut self, path: PathBuf) -> Result<bool, String> {
+        let target = resolve_project_target(&path)?;
+        if let Some(existing) = self
+            .tabs
+            .iter()
+            .find(|tab| same_worktree_path(&tab.project_root, &target.project_root))
+            .map(|tab| tab.id.clone())
+        {
+            let wizard_closed = self.set_active_tab(existing);
+            self.remember_recent_project(&target);
+            self.persist().map_err(|error| error.to_string())?;
+            return Ok(wizard_closed);
+        }
+
+        let tab_id = format!("project-{}", Uuid::new_v4().simple());
+        self.tabs.push(ProjectTabRuntime {
+            id: tab_id.clone(),
+            title: target.title.clone(),
+            project_root: target.project_root.clone(),
+            kind: target.kind,
+            workspace: WorkspaceState::from_persisted(poc_terminal::empty_workspace_state()),
+        });
+        self.active_tab_id = Some(tab_id);
+        self.remember_recent_project(&target);
+        let wizard_closed = self.clear_launch_wizard().is_some();
+        self.persist().map_err(|error| error.to_string())?;
+        Ok(wizard_closed)
+    }
+
+    fn remember_recent_project(&mut self, target: &ProjectOpenTarget) {
+        self.recent_projects
+            .retain(|entry| !same_worktree_path(&entry.path, &target.project_root));
+        self.recent_projects.insert(
+            0,
+            poc_terminal::RecentProjectEntry {
+                path: target.project_root.clone(),
+                title: target.title.clone(),
+                kind: target.kind,
+            },
+        );
+        if self.recent_projects.len() > 12 {
+            self.recent_projects.truncate(12);
+        }
+    }
+
+    fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        if !self.tabs.iter().any(|tab| tab.id == tab_id) {
+            return Vec::new();
+        }
+        let wizard_closed = self.set_active_tab(tab_id.to_string());
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        if wizard_closed {
+            events.push(self.launch_wizard_state_broadcast(None));
+        }
+        events
+    }
+
+    fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return Vec::new();
+        };
+
+        let window_ids = self
+            .tabs
+            .get(index)
+            .map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .map(|window| combined_window_id(&tab.id, &window.id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for window_id in window_ids {
+            self.stop_window_runtime(&window_id);
+            self.window_lookup.remove(&window_id);
+        }
+
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.active_tab_id = None;
+        } else if self.active_tab_id.as_deref() == Some(tab_id) {
+            let next_index = index.saturating_sub(1).min(self.tabs.len() - 1);
+            self.active_tab_id = self.tabs.get(next_index).map(|tab| tab.id.clone());
+        }
+
+        let wizard_closed = self
+            .launch_wizard
+            .as_ref()
+            .is_some_and(|wizard| wizard.tab_id == tab_id);
+        if wizard_closed {
+            self.launch_wizard = None;
+        }
+        let _ = self.persist();
+
+        let mut events = vec![self.workspace_state_broadcast()];
+        if wizard_closed {
+            events.push(self.launch_wizard_state_broadcast(None));
+        }
+        events
+    }
+
+    fn create_window_events(&mut self, preset: WindowPreset) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return Vec::new();
+        };
+        let window = {
+            let Some(tab) = self.tab_mut(&tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.add_window(preset)
+        };
+        self.register_window(&tab_id, &window.id);
+        let runtime_event = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = runtime_event {
+            events.push(OutboundEvent::broadcast(event));
+        }
+        events
+    }
+
+    fn focus_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab_mut(&address.tab_id) else {
+            return Vec::new();
+        };
+        if !tab.workspace.focus_window(&address.raw_id) {
+            return Vec::new();
+        }
+        self.active_tab_id = Some(address.tab_id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn cycle_focus_events(
+        &mut self,
+        direction: poc_terminal::FocusCycleDirection,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Vec::new();
+        };
+        if tab.workspace.cycle_focus(direction, bounds).is_none() {
+            return Vec::new();
+        }
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn update_viewport_events(
+        &mut self,
+        viewport: poc_terminal::CanvasViewport,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab) = self.active_tab_mut() else {
+            return Vec::new();
+        };
+        tab.workspace.update_viewport(viewport);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn arrange_windows_events(
+        &mut self,
+        mode: poc_terminal::ArrangeMode,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return Vec::new();
+        };
+        let arranged = {
+            let Some(tab) = self.tab_mut(&tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.arrange_windows(mode, bounds)
+        };
+        if !arranged {
+            return Vec::new();
+        }
+        if let Some(tab) = self.tab(&tab_id) {
+            for window in tab.workspace.persisted().windows.iter() {
+                if !window.preset.requires_process() {
+                    continue;
+                }
+                let window_id = combined_window_id(&tab_id, &window.id);
+                if let Some(runtime) = self.runtimes.get(&window_id) {
+                    if let Ok(mut pane) = runtime.pane.lock() {
+                        let (cols, rows) = geometry_to_pty_size(&window.geometry);
+                        let _ = pane.resize(cols.max(20), rows.max(6));
+                    }
+                }
+            }
+        }
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn update_window_geometry_events(
+        &mut self,
+        id: &str,
+        geometry: WindowGeometry,
+        cols: u16,
+        rows: u16,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.update_geometry(&address.raw_id, geometry)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        if let Some(runtime) = self.runtimes.get(id) {
+            if let Ok(mut pane) = runtime.pane.lock() {
+                let _ = pane.resize(cols.max(20), rows.max(6));
+            }
+        }
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        self.stop_window_runtime(id);
+        let closed = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.close_window(&address.raw_id)
+        };
+        if !closed {
+            return Vec::new();
+        }
+        self.window_lookup.remove(id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
+        let Some(runtime) = self.runtimes.get(id) else {
+            return Vec::new();
+        };
+        match runtime
+            .pane
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|pane| {
+                pane.write_input(data.as_bytes())
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(()) => Vec::new(),
+            Err(error) => {
+                self.handle_runtime_status(id.to_string(), WindowProcessStatus::Error, Some(error))
+            }
+        }
+    }
+
     fn load_file_tree_event(&self, id: &str, path: &str) -> BackendEvent {
-        let Some(window) = self.workspace.window(id) else {
+        let Some(address) = self.window_lookup.get(id) else {
+            return BackendEvent::FileTreeError {
+                id: id.to_string(),
+                path: path.to_string(),
+                message: "Window not found".to_string(),
+            };
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return BackendEvent::FileTreeError {
+                id: id.to_string(),
+                path: path.to_string(),
+                message: "Project tab not found".to_string(),
+            };
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
             return BackendEvent::FileTreeError {
                 id: id.to_string(),
                 path: path.to_string(),
@@ -364,7 +651,7 @@ impl AppRuntime {
             Some(Path::new(path))
         };
 
-        match list_directory_entries(&self.workdir, relative_path) {
+        match list_directory_entries(&tab.project_root, relative_path) {
             Ok(entries) => BackendEvent::FileTreeEntries {
                 id: id.to_string(),
                 path: path.to_string(),
@@ -379,7 +666,19 @@ impl AppRuntime {
     }
 
     fn load_branches_event(&self, id: &str) -> BackendEvent {
-        let Some(window) = self.workspace.window(id) else {
+        let Some(address) = self.window_lookup.get(id) else {
+            return BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            };
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Project tab not found".to_string(),
+            };
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
             return BackendEvent::BranchError {
                 id: id.to_string(),
                 message: "Window not found".to_string(),
@@ -393,7 +692,7 @@ impl AppRuntime {
             };
         }
 
-        match list_branch_entries(&self.workdir) {
+        match list_branch_entries(&tab.project_root) {
             Ok(entries) => BackendEvent::BranchEntries {
                 id: id.to_string(),
                 entries,
@@ -406,7 +705,19 @@ impl AppRuntime {
     }
 
     fn open_launch_wizard(&mut self, id: &str, branch_name: &str) -> Vec<OutboundEvent> {
-        let Some(window) = self.workspace.window(id) else {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            })];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Project tab not found".to_string(),
+            })];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
                 message: "Window not found".to_string(),
@@ -420,7 +731,7 @@ impl AppRuntime {
             })];
         }
 
-        let entries = match list_branch_entries(&self.workdir) {
+        let entries = match list_branch_entries(&tab.project_root) {
             Ok(entries) => entries,
             Err(error) => {
                 return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
@@ -439,97 +750,94 @@ impl AppRuntime {
         };
 
         let normalized_branch_name = normalize_branch_name(&selected_branch.name);
-        let worktree_path = branch_worktree_path(&self.workdir, &normalized_branch_name);
+        let worktree_path = branch_worktree_path(&tab.project_root, &normalized_branch_name);
         let quick_start_root = worktree_path
             .clone()
-            .unwrap_or_else(|| self.workdir.clone());
-        let live_sessions = self.live_sessions_for_branch(&normalized_branch_name);
+            .unwrap_or_else(|| tab.project_root.clone());
+        let live_sessions = self.live_sessions_for_branch(&address.tab_id, &normalized_branch_name);
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);
-        let wizard = LaunchWizardState::open(
-            LaunchWizardContext {
-                selected_branch,
-                normalized_branch_name,
-                worktree_path,
-                quick_start_root,
-                live_sessions,
-                docker_context,
-                docker_service_status,
-            },
-            &self.sessions_dir,
-            &default_wizard_version_cache_path(),
-        );
-        self.launch_wizard = Some(wizard);
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id: address.tab_id,
+            wizard: LaunchWizardState::open(
+                LaunchWizardContext {
+                    selected_branch,
+                    normalized_branch_name,
+                    worktree_path,
+                    quick_start_root,
+                    live_sessions,
+                    docker_context,
+                    docker_service_status,
+                },
+                &self.sessions_dir,
+                &default_wizard_version_cache_path(),
+            ),
+        });
 
-        vec![OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: self.launch_wizard.as_ref().map(LaunchWizardState::view),
-        })]
+        vec![self.launch_wizard_state_outbound()]
     }
 
     fn handle_launch_wizard_action(
         &mut self,
         action: poc_terminal::LaunchWizardAction,
     ) -> Vec<OutboundEvent> {
-        let Some(mut wizard) = self.launch_wizard.take() else {
+        let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
         };
-        wizard.apply(action);
+        session.wizard.apply(action);
 
-        match wizard.completion.take() {
+        match session.wizard.completion.take() {
             Some(LaunchWizardCompletion::Cancelled) => {
-                vec![OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-                    wizard: None,
-                })]
+                vec![self.launch_wizard_state_broadcast(None)]
             }
             Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
-                if self.workspace.focus_window(&window_id) {
-                    let _ = self.persist();
-                    vec![
-                        OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                            workspace: self.workspace.persisted().clone(),
-                        }),
-                        OutboundEvent::broadcast(BackendEvent::LaunchWizardState { wizard: None }),
-                    ]
-                } else {
-                    wizard.error =
+                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    session.wizard.error =
                         Some("The selected session window is no longer available".to_string());
-                    self.launch_wizard = Some(wizard);
-                    vec![OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-                        wizard: self.launch_wizard.as_ref().map(LaunchWizardState::view),
-                    })]
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                let Some(tab) = self.tab_mut(&address.tab_id) else {
+                    return Vec::new();
+                };
+                if !tab.workspace.focus_window(&address.raw_id) {
+                    session.wizard.error =
+                        Some("The selected session window is no longer available".to_string());
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
                 }
+                self.active_tab_id = Some(address.tab_id);
+                let _ = self.persist();
+                vec![
+                    self.workspace_state_broadcast(),
+                    self.launch_wizard_state_broadcast(None),
+                ]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
-                match self.spawn_agent_window(*config) {
+                match self.spawn_agent_window(&session.tab_id, *config) {
                     Ok(mut events) => {
-                        events.push(OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-                            wizard: None,
-                        }));
+                        events.push(self.launch_wizard_state_broadcast(None));
                         events
                     }
                     Err(error) => {
-                        wizard.error = Some(error);
-                        self.launch_wizard = Some(wizard);
-                        vec![OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-                            wizard: self.launch_wizard.as_ref().map(LaunchWizardState::view),
-                        })]
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
                     }
                 }
             }
             None => {
-                self.launch_wizard = Some(wizard);
-                vec![OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-                    wizard: self.launch_wizard.as_ref().map(LaunchWizardState::view),
-                })]
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
             }
         }
     }
 
-    fn live_sessions_for_branch(&self, branch_name: &str) -> Vec<LiveSessionEntry> {
+    fn live_sessions_for_branch(&self, tab_id: &str, branch_name: &str) -> Vec<LiveSessionEntry> {
         let mut entries = self
             .active_agent_sessions
             .values()
-            .filter(|session| session.branch_name == branch_name)
+            .filter(|session| session.tab_id == tab_id && session.branch_name == branch_name)
             .map(|session| LiveSessionEntry {
                 session_id: session.session_id.clone(),
                 window_id: session.window_id.clone(),
@@ -544,7 +852,7 @@ impl AppRuntime {
     }
 
     fn handle_runtime_output(&mut self, id: String, data: Vec<u8>) -> Vec<OutboundEvent> {
-        if self.workspace.window(&id).is_none() {
+        if !self.window_lookup.contains_key(&id) {
             return Vec::new();
         }
         vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
@@ -559,13 +867,15 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
-        if self.workspace.window(&id).is_none() {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
             return Vec::new();
-        }
+        };
 
-        self.workspace.set_status(&id, status.clone());
+        if let Some(tab) = self.tab_mut(&address.tab_id) {
+            let _ = tab.workspace.set_status(&address.raw_id, status.clone());
+        }
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
@@ -584,32 +894,38 @@ impl AppRuntime {
         let _ = self.persist();
 
         vec![
-            OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                workspace: self.workspace.persisted().clone(),
-            }),
+            self.workspace_state_broadcast(),
             OutboundEvent::broadcast(BackendEvent::TerminalStatus { id, status, detail }),
         ]
     }
 
     fn start_window(
         &mut self,
-        id: &str,
+        tab_id: &str,
+        raw_id: &str,
         preset: WindowPreset,
         geometry: WindowGeometry,
     ) -> Option<BackendEvent> {
+        self.register_window(tab_id, raw_id);
+        let window_id = combined_window_id(tab_id, raw_id);
         if !preset.requires_process() {
-            self.workspace.set_status(id, WindowProcessStatus::Ready);
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Ready);
             return None;
         }
+
+        let project_root = self
+            .tab(tab_id)
+            .map(|tab| tab.project_root.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
 
         let shell = match detect_shell_program() {
             Ok(shell) => shell,
             Err(error) => {
-                self.workspace.set_status(id, WindowProcessStatus::Error);
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
-                    .insert(id.to_string(), error.to_string());
+                    .insert(window_id.clone(), error.to_string());
                 return Some(BackendEvent::TerminalStatus {
-                    id: id.to_string(),
+                    id: window_id,
                     status: WindowProcessStatus::Error,
                     detail: Some(error.to_string()),
                 });
@@ -619,11 +935,11 @@ impl AppRuntime {
         let launch = match resolve_launch_spec_with_fallback(preset, &shell) {
             Ok(launch) => launch,
             Err(error) => {
-                self.workspace.set_status(id, WindowProcessStatus::Error);
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
-                    .insert(id.to_string(), error.to_string());
+                    .insert(window_id.clone(), error.to_string());
                 return Some(BackendEvent::TerminalStatus {
-                    id: id.to_string(),
+                    id: window_id,
                     status: WindowProcessStatus::Error,
                     detail: Some(error.to_string()),
                 });
@@ -631,21 +947,21 @@ impl AppRuntime {
         };
 
         match self.spawn_process_window(
-            id,
+            &window_id,
             geometry,
             ProcessLaunch {
                 command: launch.command,
                 args: launch.args,
                 env: spawn_env(),
-                cwd: Some(self.workdir.clone()),
+                cwd: Some(project_root),
             },
         ) {
             Ok(event) => Some(event),
             Err(error) => {
-                self.workspace.set_status(id, WindowProcessStatus::Error);
-                self.window_details.insert(id.to_string(), error.clone());
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                self.window_details.insert(window_id.clone(), error.clone());
                 Some(BackendEvent::TerminalStatus {
-                    id: id.to_string(),
+                    id: window_id,
                     status: WindowProcessStatus::Error,
                     detail: Some(error),
                 })
@@ -673,7 +989,13 @@ impl AppRuntime {
         let pane = Arc::new(Mutex::new(pane));
 
         self.spawn_output_thread(id.to_string(), pane.clone());
-        self.workspace.set_status(id, WindowProcessStatus::Running);
+        if let Some(address) = self.window_lookup.get(id).cloned() {
+            self.set_window_status(
+                &address.tab_id,
+                &address.raw_id,
+                WindowProcessStatus::Running,
+            );
+        }
         self.window_details.remove(id);
         self.runtimes.insert(id.to_string(), WindowRuntime { pane });
         Ok(BackendEvent::TerminalStatus {
@@ -685,15 +1007,20 @@ impl AppRuntime {
 
     fn spawn_agent_window(
         &mut self,
+        tab_id: &str,
         mut config: gwt_agent::LaunchConfig,
     ) -> Result<Vec<OutboundEvent>, String> {
-        resolve_launch_worktree(&self.workdir, &mut config)?;
-        apply_docker_runtime_to_launch_config(&self.workdir, &mut config)?;
+        let project_root = self
+            .tab(tab_id)
+            .map(|tab| tab.project_root.clone())
+            .ok_or_else(|| "Project tab not found".to_string())?;
+        resolve_launch_worktree(&project_root, &mut config)?;
+        apply_docker_runtime_to_launch_config(&project_root, &mut config)?;
 
         let worktree_path = config
             .working_dir
             .clone()
-            .unwrap_or_else(|| self.workdir.clone());
+            .unwrap_or_else(|| project_root.clone());
         refresh_managed_gwt_assets_for_worktree(&worktree_path)
             .map_err(|error| error.to_string())?;
         let branch_name = config
@@ -732,11 +1059,17 @@ impl AppRuntime {
             .or_insert_with(|| "truecolor".to_string());
 
         let title = format!("{} · {}", config.display_name, branch_name);
-        let window = self
-            .workspace
-            .add_window_with_title(WindowPreset::Agent, title, false);
+        let window = {
+            let Some(tab) = self.tab_mut(tab_id) else {
+                return Err("Project tab not found".to_string());
+            };
+            tab.workspace
+                .add_window_with_title(WindowPreset::Agent, title, false)
+        };
+        self.register_window(tab_id, &window.id);
+        let window_id = combined_window_id(tab_id, &window.id);
         let runtime_event = match self.spawn_process_window(
-            &window.id,
+            &window_id,
             window.geometry.clone(),
             ProcessLaunch {
                 command: config.command.clone(),
@@ -747,7 +1080,10 @@ impl AppRuntime {
         ) {
             Ok(event) => event,
             Err(error) => {
-                let _ = self.workspace.close_window(&window.id);
+                if let Some(tab) = self.tab_mut(tab_id) {
+                    let _ = tab.workspace.close_window(&window.id);
+                }
+                self.window_lookup.remove(&window_id);
                 return Err(error);
             }
         };
@@ -760,21 +1096,20 @@ impl AppRuntime {
             .map_err(|error| error.to_string())?;
 
         self.active_agent_sessions.insert(
-            window.id.clone(),
+            window_id.clone(),
             ActiveAgentSession {
-                window_id: window.id.clone(),
+                window_id: window_id.clone(),
                 session_id: session.id.clone(),
                 branch_name,
                 display_name: config.display_name.clone(),
                 worktree_path,
+                tab_id: tab_id.to_string(),
             },
         );
 
         let _ = self.persist();
         Ok(vec![
-            OutboundEvent::broadcast(BackendEvent::WorkspaceState {
-                workspace: self.workspace.persisted().clone(),
-            }),
+            self.workspace_state_broadcast(),
             OutboundEvent::broadcast(runtime_event),
         ])
     }
@@ -788,6 +1123,16 @@ impl AppRuntime {
             &session.session_id,
             gwt_agent::AgentStatus::Stopped,
         );
+    }
+
+    fn stop_window_runtime(&mut self, window_id: &str) {
+        self.mark_agent_session_stopped(window_id);
+        if let Some(runtime) = self.runtimes.remove(window_id) {
+            if let Ok(pane) = runtime.pane.lock() {
+                let _ = pane.kill();
+            }
+        }
+        self.window_details.remove(window_id);
     }
 
     fn spawn_output_thread(&self, id: String, pane: Arc<Mutex<Pane>>) {
@@ -870,9 +1215,238 @@ impl AppRuntime {
         });
     }
 
-    fn persist(&self) -> std::io::Result<()> {
-        save_workspace_state(&self.state_path, &self.workspace.persistable_state())
+    fn app_state_view(&self) -> poc_terminal::AppStateView {
+        poc_terminal::AppStateView {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| poc_terminal::ProjectTabView {
+                    id: tab.id.clone(),
+                    title: tab.title.clone(),
+                    project_root: tab.project_root.display().to_string(),
+                    kind: tab.kind,
+                    workspace: self.workspace_view(tab),
+                })
+                .collect(),
+            active_tab_id: self.active_tab_id.clone(),
+            recent_projects: self
+                .recent_projects
+                .iter()
+                .map(|project| poc_terminal::RecentProjectView {
+                    path: project.path.display().to_string(),
+                    title: project.title.clone(),
+                    kind: project.kind,
+                })
+                .collect(),
+        }
     }
+
+    fn workspace_view(&self, tab: &ProjectTabRuntime) -> poc_terminal::WorkspaceView {
+        poc_terminal::WorkspaceView {
+            viewport: tab.workspace.persisted().viewport.clone(),
+            windows: tab
+                .workspace
+                .persisted()
+                .windows
+                .iter()
+                .cloned()
+                .map(|mut window| {
+                    window.id = combined_window_id(&tab.id, &window.id);
+                    window
+                })
+                .collect(),
+        }
+    }
+
+    fn workspace_state_broadcast(&self) -> OutboundEvent {
+        OutboundEvent::broadcast(BackendEvent::WorkspaceState {
+            workspace: self.app_state_view(),
+        })
+    }
+
+    fn launch_wizard_state_outbound(&self) -> OutboundEvent {
+        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
+            wizard: self
+                .launch_wizard
+                .as_ref()
+                .map(|wizard| wizard.wizard.view()),
+        })
+    }
+
+    fn launch_wizard_state_broadcast(
+        &self,
+        wizard: Option<poc_terminal::LaunchWizardView>,
+    ) -> OutboundEvent {
+        OutboundEvent::broadcast(BackendEvent::LaunchWizardState { wizard })
+    }
+
+    fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
+        let address = self.window_lookup.get(window_id)?;
+        let tab = self.tab(&address.tab_id)?;
+        let window = tab.workspace.window(&address.raw_id)?;
+        Some(window.status.clone())
+    }
+
+    fn register_window(&mut self, tab_id: &str, raw_id: &str) {
+        self.window_lookup.insert(
+            combined_window_id(tab_id, raw_id),
+            WindowAddress {
+                tab_id: tab_id.to_string(),
+                raw_id: raw_id.to_string(),
+            },
+        );
+    }
+
+    fn set_window_status(&mut self, tab_id: &str, raw_id: &str, status: WindowProcessStatus) {
+        if let Some(tab) = self.tab_mut(tab_id) {
+            let _ = tab.workspace.set_status(raw_id, status);
+        }
+    }
+
+    fn tab(&self, tab_id: &str) -> Option<&ProjectTabRuntime> {
+        self.tabs.iter().find(|tab| tab.id == tab_id)
+    }
+
+    fn tab_mut(&mut self, tab_id: &str) -> Option<&mut ProjectTabRuntime> {
+        self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut ProjectTabRuntime> {
+        let active_tab_id = self.active_tab_id.clone()?;
+        self.tab_mut(&active_tab_id)
+    }
+
+    fn set_active_tab(&mut self, tab_id: String) -> bool {
+        let wizard_closed = self
+            .launch_wizard
+            .as_ref()
+            .is_some_and(|wizard| wizard.tab_id != tab_id);
+        self.active_tab_id = Some(tab_id);
+        if wizard_closed {
+            self.launch_wizard = None;
+        }
+        wizard_closed
+    }
+
+    fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
+        self.launch_wizard.take()
+    }
+
+    fn rebuild_window_lookup(&mut self) {
+        self.window_lookup.clear();
+        let pairs = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .map(|window| (tab.id.clone(), window.id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for (tab_id, raw_id) in pairs {
+            self.register_window(&tab_id, &raw_id);
+        }
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
+        save_app_state(
+            &self.state_path,
+            &poc_terminal::PersistedAppState {
+                tabs: self
+                    .tabs
+                    .iter()
+                    .map(|tab| poc_terminal::PersistedProjectTabState {
+                        id: tab.id.clone(),
+                        title: tab.title.clone(),
+                        project_root: tab.project_root.clone(),
+                        kind: tab.kind,
+                        workspace: tab.workspace.persistable_state(),
+                    })
+                    .collect(),
+                active_tab_id: normalize_active_tab_id(&self.tabs, self.active_tab_id.clone()),
+                recent_projects: self.recent_projects.clone(),
+            },
+        )
+    }
+}
+
+fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
+    format!("{tab_id}::{raw_id}")
+}
+
+fn normalize_active_tab_id(
+    tabs: &[ProjectTabRuntime],
+    active_tab_id: Option<String>,
+) -> Option<String> {
+    let Some(active_tab_id) = active_tab_id else {
+        return tabs.first().map(|tab| tab.id.clone());
+    };
+    if tabs.iter().any(|tab| tab.id == active_tab_id) {
+        Some(active_tab_id)
+    } else {
+        tabs.first().map(|tab| tab.id.clone())
+    }
+}
+
+fn dedupe_recent_projects(
+    entries: Vec<poc_terminal::RecentProjectEntry>,
+) -> Vec<poc_terminal::RecentProjectEntry> {
+    let mut deduped: Vec<poc_terminal::RecentProjectEntry> = Vec::new();
+    for entry in entries {
+        if deduped
+            .iter()
+            .any(|existing| same_worktree_path(&existing.path, &entry.path))
+        {
+            continue;
+        }
+        deduped.push(entry);
+    }
+    deduped
+}
+
+fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
+    ProjectOpenTarget {
+        title: poc_terminal::project_title_from_path(&path),
+        project_root: path,
+        kind: poc_terminal::ProjectKind::NonRepo,
+    }
+}
+
+fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
+    let canonical = dunce::canonicalize(path)
+        .map_err(|error| format!("failed to open project {}: {error}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "selected project is not a directory: {}",
+            canonical.display()
+        ));
+    }
+
+    let (project_root, kind) = match gwt_git::detect_repo_type(&canonical) {
+        gwt_git::RepoType::Normal(root) => (
+            dunce::canonicalize(root).unwrap_or_else(|_| canonical.clone()),
+            poc_terminal::ProjectKind::Git,
+        ),
+        gwt_git::RepoType::Bare {
+            develop_worktree: Some(worktree),
+        } => (
+            dunce::canonicalize(worktree).unwrap_or_else(|_| canonical.clone()),
+            poc_terminal::ProjectKind::Git,
+        ),
+        gwt_git::RepoType::Bare {
+            develop_worktree: None,
+        } => (canonical.clone(), poc_terminal::ProjectKind::Bare),
+        gwt_git::RepoType::NonRepo => (canonical.clone(), poc_terminal::ProjectKind::NonRepo),
+    };
+
+    Ok(ProjectOpenTarget {
+        title: poc_terminal::project_title_from_path(&project_root),
+        project_root,
+        kind,
+    })
 }
 
 #[derive(Clone, Default)]
@@ -1824,6 +2398,10 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 if let Some(command) = poc_terminal::native_menu_command_for_id(event.id.as_ref()) {
                     match command {
+                        NativeMenuCommand::OpenProject => {
+                            let events = app.open_project_dialog_events();
+                            clients.dispatch(events);
+                        }
                         NativeMenuCommand::ReloadWebView => {
                             if let Err(error) = webview.reload() {
                                 eprintln!("webview reload failed: {error}");

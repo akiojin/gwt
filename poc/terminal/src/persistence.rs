@@ -55,13 +55,50 @@ pub struct PersistedWorkspaceState {
     pub next_z_index: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectKind {
+    Git,
+    Bare,
+    NonRepo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentProjectEntry {
+    pub path: PathBuf,
+    pub title: String,
+    pub kind: ProjectKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedProjectTabState {
+    pub id: String,
+    pub title: String,
+    pub project_root: PathBuf,
+    pub kind: ProjectKind,
+    pub workspace: PersistedWorkspaceState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedAppState {
+    #[serde(default)]
+    pub tabs: Vec<PersistedProjectTabState>,
+    pub active_tab_id: Option<String>,
+    #[serde(default)]
+    pub recent_projects: Vec<RecentProjectEntry>,
+}
+
+pub fn empty_workspace_state() -> PersistedWorkspaceState {
+    PersistedWorkspaceState {
+        viewport: default_canvas_viewport(),
+        windows: Vec::new(),
+        next_z_index: 1,
+    }
+}
+
 pub fn default_workspace_state() -> PersistedWorkspaceState {
     PersistedWorkspaceState {
-        viewport: CanvasViewport {
-            x: 0.0,
-            y: 0.0,
-            zoom: 1.0,
-        },
+        viewport: default_canvas_viewport(),
         windows: vec![
             PersistedWindowState {
                 id: "claude-1".to_string(),
@@ -96,6 +133,14 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
     }
 }
 
+pub fn default_app_state() -> PersistedAppState {
+    PersistedAppState {
+        tabs: Vec::new(),
+        active_tab_id: None,
+        recent_projects: Vec::new(),
+    }
+}
+
 fn default_persist_window() -> bool {
     true
 }
@@ -107,15 +152,44 @@ pub fn workspace_state_path() -> PathBuf {
         .join("workspace.json")
 }
 
-pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWorkspaceState> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => Ok(serde_json::from_str(&content)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(default_workspace_state()),
-        Err(error) => Err(error),
+pub fn load_app_state(
+    path: &Path,
+    legacy_project_root: &Path,
+    legacy_kind: ProjectKind,
+) -> std::io::Result<PersistedAppState> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(default_app_state());
+        }
+        Err(error) => return Err(error),
+    };
+
+    let value: serde_json::Value = serde_json::from_str(&content)?;
+    if value.get("tabs").is_some() {
+        return Ok(serde_json::from_value(value)?);
     }
+
+    let workspace: PersistedWorkspaceState = serde_json::from_value(value)?;
+    let title = project_title_from_path(legacy_project_root);
+    Ok(PersistedAppState {
+        active_tab_id: Some("project-1".to_string()),
+        recent_projects: vec![RecentProjectEntry {
+            path: legacy_project_root.to_path_buf(),
+            title: title.clone(),
+            kind: legacy_kind,
+        }],
+        tabs: vec![PersistedProjectTabState {
+            id: "project-1".to_string(),
+            title,
+            project_root: legacy_project_root.to_path_buf(),
+            kind: legacy_kind,
+            workspace,
+        }],
+    })
 }
 
-pub fn save_workspace_state(path: &Path, state: &PersistedWorkspaceState) -> std::io::Result<()> {
+pub fn save_app_state(path: &Path, state: &PersistedAppState) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         gwt_core::paths::ensure_dir(parent)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -125,22 +199,30 @@ pub fn save_workspace_state(path: &Path, state: &PersistedWorkspaceState) -> std
     Ok(())
 }
 
+pub fn project_title_from_path(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
 
     #[test]
+    fn empty_workspace_contains_no_windows() {
+        let state = empty_workspace_state();
+        assert_eq!(state.viewport, default_canvas_viewport());
+        assert!(state.windows.is_empty());
+        assert_eq!(state.next_z_index, 1);
+    }
+
+    #[test]
     fn default_workspace_contains_claude_and_codex_windows() {
         let state = default_workspace_state();
-        assert_eq!(
-            state.viewport,
-            CanvasViewport {
-                x: 0.0,
-                y: 0.0,
-                zoom: 1.0
-            }
-        );
+        assert_eq!(state.viewport, default_canvas_viewport());
         let titles: Vec<&str> = state
             .windows
             .iter()
@@ -151,52 +233,111 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_workspace_round_trip() {
+    fn load_app_state_defaults_to_empty_state_for_missing_file() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
-        let state = PersistedWorkspaceState {
-            viewport: CanvasViewport {
-                x: 120.0,
-                y: -48.0,
-                zoom: 1.4,
-            },
-            windows: vec![PersistedWindowState {
-                id: "shell-1".to_string(),
-                title: "Shell".to_string(),
-                preset: WindowPreset::Shell,
-                geometry: WindowGeometry {
-                    x: 10.0,
-                    y: 20.0,
-                    width: 640.0,
-                    height: 420.0,
+
+        let loaded =
+            load_app_state(&path, &dir.path().join("workspace"), ProjectKind::Git).expect("load");
+        assert_eq!(loaded, default_app_state());
+    }
+
+    #[test]
+    fn save_and_load_app_state_round_trip() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        let project_root = dir.path().join("demo");
+        let state = PersistedAppState {
+            active_tab_id: Some("project-2".to_string()),
+            recent_projects: vec![
+                RecentProjectEntry {
+                    path: project_root.clone(),
+                    title: "demo".to_string(),
+                    kind: ProjectKind::Git,
                 },
-                z_index: 4,
-                status: WindowProcessStatus::Running,
-                persist: true,
-            }],
-            next_z_index: 5,
+                RecentProjectEntry {
+                    path: dir.path().join("notes"),
+                    title: "notes".to_string(),
+                    kind: ProjectKind::NonRepo,
+                },
+            ],
+            tabs: vec![
+                PersistedProjectTabState {
+                    id: "project-1".to_string(),
+                    title: "demo".to_string(),
+                    project_root: project_root.clone(),
+                    kind: ProjectKind::Git,
+                    workspace: PersistedWorkspaceState {
+                        viewport: CanvasViewport {
+                            x: 120.0,
+                            y: -48.0,
+                            zoom: 1.4,
+                        },
+                        windows: vec![PersistedWindowState {
+                            id: "shell-1".to_string(),
+                            title: "Shell".to_string(),
+                            preset: WindowPreset::Shell,
+                            geometry: WindowGeometry {
+                                x: 10.0,
+                                y: 20.0,
+                                width: 640.0,
+                                height: 420.0,
+                            },
+                            z_index: 4,
+                            status: WindowProcessStatus::Running,
+                            persist: true,
+                        }],
+                        next_z_index: 5,
+                    },
+                },
+                PersistedProjectTabState {
+                    id: "project-2".to_string(),
+                    title: "notes".to_string(),
+                    project_root: dir.path().join("notes"),
+                    kind: ProjectKind::NonRepo,
+                    workspace: empty_workspace_state(),
+                },
+            ],
         };
 
-        save_workspace_state(&path, &state).expect("save should succeed");
-        let loaded = load_workspace_state(&path).expect("load should succeed");
+        save_app_state(&path, &state).expect("save should succeed");
+        let loaded = load_app_state(&path, &project_root, ProjectKind::Git).expect("load");
         assert_eq!(loaded, state);
     }
 
     #[test]
-    fn load_workspace_state_defaults_viewport_for_legacy_file() {
+    fn load_app_state_migrates_legacy_workspace_file_to_single_project_tab() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
+        let legacy_project_root = dir.path().join("workspace");
         std::fs::write(
             &path,
             r#"{
-  "windows": [],
-  "next_z_index": 3
+  "windows": [
+    {
+      "id": "shell-1",
+      "title": "Shell",
+      "preset": "shell",
+      "geometry": { "x": 20.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true
+    }
+  ],
+  "next_z_index": 2
 }"#,
         )
         .expect("legacy workspace write");
 
-        let loaded = load_workspace_state(&path).expect("legacy load should succeed");
-        assert_eq!(loaded.viewport, default_canvas_viewport());
-        assert_eq!(loaded.next_z_index, 3);
+        let loaded =
+            load_app_state(&path, &legacy_project_root, ProjectKind::Git).expect("legacy load");
+        assert_eq!(loaded.active_tab_id.as_deref(), Some("project-1"));
+        assert_eq!(loaded.tabs.len(), 1);
+        assert_eq!(loaded.recent_projects.len(), 1);
+        assert_eq!(loaded.tabs[0].project_root, legacy_project_root);
+        assert_eq!(loaded.tabs[0].title, "workspace");
+        assert_eq!(loaded.tabs[0].kind, ProjectKind::Git);
+        assert_eq!(loaded.tabs[0].workspace.viewport, default_canvas_viewport());
+        assert_eq!(loaded.tabs[0].workspace.next_z_index, 2);
     }
 }

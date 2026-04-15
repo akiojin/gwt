@@ -21,16 +21,20 @@ pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 pub use native_app::MacosNativeMenu;
 pub use native_app::{
     macos_bundle_identifier, macos_native_menu_titles, native_menu_command_for_id,
-    NativeMenuCommand, APP_NAME, MACOS_BUNDLE_IDENTIFIER, RELOAD_MENU_ID,
+    NativeMenuCommand, APP_NAME, MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 pub use persistence::{
-    default_workspace_state, load_workspace_state, save_workspace_state, workspace_state_path,
-    CanvasViewport, PersistedWindowState, PersistedWorkspaceState, WindowGeometry,
-    WindowProcessStatus,
+    default_app_state, default_workspace_state, empty_workspace_state, load_app_state,
+    project_title_from_path, save_app_state, workspace_state_path, CanvasViewport,
+    PersistedAppState, PersistedProjectTabState, PersistedWindowState, PersistedWorkspaceState,
+    ProjectKind, RecentProjectEntry, WindowGeometry, WindowProcessStatus,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
     WindowPreset, WindowSurface,
 };
-pub use protocol::{ArrangeMode, BackendEvent, FocusCycleDirection, FrontendEvent};
+pub use protocol::{
+    AppStateView, ArrangeMode, BackendEvent, FocusCycleDirection, FrontendEvent, ProjectTabView,
+    RecentProjectView, WorkspaceView,
+};
 pub use workspace::WorkspaceState;

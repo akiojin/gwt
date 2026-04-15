@@ -2,7 +2,7 @@ use crate::branch_list::BranchListEntry;
 use crate::file_tree::FileTreeEntry;
 use crate::launch_wizard::{LaunchWizardAction, LaunchWizardView};
 use crate::persistence::{
-    CanvasViewport, PersistedWorkspaceState, WindowGeometry, WindowProcessStatus,
+    CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
 };
 use crate::preset::WindowPreset;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,16 @@ pub enum FocusCycleDirection {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    OpenProjectDialog,
+    ReopenRecentProject {
+        path: String,
+    },
+    SelectProjectTab {
+        tab_id: String,
+    },
+    CloseProjectTab {
+        tab_id: String,
+    },
     CreateWindow {
         preset: WindowPreset,
     },
@@ -72,10 +82,39 @@ pub enum FrontendEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceView {
+    pub viewport: CanvasViewport,
+    pub windows: Vec<PersistedWindowState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectTabView {
+    pub id: String,
+    pub title: String,
+    pub project_root: String,
+    pub kind: ProjectKind,
+    pub workspace: WorkspaceView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentProjectView {
+    pub path: String,
+    pub title: String,
+    pub kind: ProjectKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppStateView {
+    pub tabs: Vec<ProjectTabView>,
+    pub active_tab_id: Option<String>,
+    pub recent_projects: Vec<RecentProjectView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
     WorkspaceState {
-        workspace: PersistedWorkspaceState,
+        workspace: AppStateView,
     },
     TerminalOutput {
         id: String,
@@ -106,6 +145,9 @@ pub enum BackendEvent {
     },
     BranchError {
         id: String,
+        message: String,
+    },
+    ProjectOpenError {
         message: String,
     },
     LaunchWizardState {

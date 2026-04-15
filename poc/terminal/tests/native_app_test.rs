@@ -1,6 +1,6 @@
 use poc_terminal::{
     macos_bundle_identifier, macos_native_menu_titles, native_menu_command_for_id,
-    NativeMenuCommand, RELOAD_MENU_ID,
+    NativeMenuCommand, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 
 #[test]
@@ -16,7 +16,11 @@ fn macos_native_shell_uses_expected_bundle_identifier_and_menu_titles() {
 }
 
 #[test]
-fn native_menu_command_maps_reload_and_ignores_unknown_ids() {
+fn native_menu_command_maps_supported_ids_and_ignores_unknown_ids() {
+    assert_eq!(
+        native_menu_command_for_id(OPEN_PROJECT_MENU_ID),
+        Some(NativeMenuCommand::OpenProject)
+    );
     assert_eq!(
         native_menu_command_for_id(RELOAD_MENU_ID),
         Some(NativeMenuCommand::ReloadWebView)

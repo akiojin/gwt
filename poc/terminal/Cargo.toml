@@ -35,6 +35,7 @@ axum = { version = "0.8", features = ["ws"] }
 wry = "0.55"
 tao = "0.35"
 base64.workspace = true
+rfd = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.17"

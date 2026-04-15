@@ -36,6 +36,87 @@
         height: 100vh;
       }
 
+      .project-shell {
+        display: flex;
+        flex-direction: column;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      .project-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 48px;
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.96);
+        border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+      }
+
+      .project-tabs {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex: 1;
+        overflow-x: auto;
+      }
+
+      .project-tab {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: 280px;
+        height: 32px;
+        padding: 0 8px 0 10px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #334155;
+        cursor: pointer;
+      }
+
+      .project-tab.active {
+        border-color: rgba(37, 99, 235, 0.34);
+        background: rgba(59, 130, 246, 0.1);
+        color: #0f172a;
+      }
+
+      .project-tab-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .project-tab-close {
+        width: 18px;
+        height: 18px;
+        border: none;
+        border-radius: 4px;
+        background: rgba(148, 163, 184, 0.18);
+        color: inherit;
+        cursor: pointer;
+      }
+
+      .project-tab-close:hover {
+        background: rgba(148, 163, 184, 0.28);
+      }
+
+      .project-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .canvas-area {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+      }
+
       .canvas {
         position: absolute;
         inset: 0;
@@ -759,25 +840,156 @@
         color: #ffffff;
         border-color: #0f172a;
       }
+
+      .project-picker,
+      .project-onboarding {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(237, 241, 246, 0.72);
+        z-index: 1200;
+      }
+
+      .project-picker.visible,
+      .project-onboarding.visible {
+        display: flex;
+      }
+
+      .project-picker-card,
+      .project-onboarding-card {
+        width: min(560px, calc(100vw - 40px));
+        padding: 18px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(148, 163, 184, 0.32);
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
+      }
+
+      .project-picker-title,
+      .project-onboarding-title {
+        margin: 0 0 8px;
+        font-size: 20px;
+        color: #0f172a;
+      }
+
+      .project-picker-copy,
+      .project-onboarding-copy {
+        margin: 0 0 16px;
+        font-size: 13px;
+        color: #475569;
+      }
+
+      .project-picker-error {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.18);
+        color: #b91c1c;
+        font-size: 12px;
+      }
+
+      .picker-section-label {
+        margin: 16px 0 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
+      }
+
+      .project-recent-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .recent-project-row {
+        width: 100%;
+        text-align: left;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: #f8fafc;
+        cursor: pointer;
+      }
+
+      .recent-project-row:hover {
+        background: #eef4ff;
+      }
+
+      .recent-project-title {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .recent-project-meta {
+        display: block;
+        margin-top: 4px;
+        font-size: 12px;
+        color: #64748b;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
     </style>
   </head>
   <body>
     <div id="app">
-      <div class="hint">
-        <span class="connection-dot" id="connection-dot"></span>
-        <span id="connection-label">Connecting</span>
-        <span>Drag windows | Drag empty canvas to pan | Use +/- buttons or Ctrl/Cmd + wheel to zoom</span>
-      </div>
-      <div class="canvas" id="canvas">
-        <div class="canvas-stage" id="canvas-stage"></div>
-      </div>
-      <div class="floating-actions">
-        <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
-        <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
-        <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
-        <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
-        <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-        <button class="add-button" id="add-button" aria-label="Add window">+</button>
+      <div class="project-shell">
+        <div class="project-bar">
+          <div class="project-tabs" id="project-tabs"></div>
+          <div class="project-actions">
+            <button class="arrange-button" id="open-project-button" aria-label="Open project">
+              Open Project
+            </button>
+          </div>
+        </div>
+        <div class="canvas-area">
+          <div class="hint">
+            <span class="connection-dot" id="connection-dot"></span>
+            <span id="connection-label">Connecting</span>
+            <span>Drag windows | Drag empty canvas to pan | Use +/- buttons or Ctrl/Cmd + wheel to zoom</span>
+          </div>
+          <div class="canvas" id="canvas">
+            <div class="canvas-stage" id="canvas-stage"></div>
+          </div>
+          <div class="project-picker" id="project-picker">
+            <div class="project-picker-card">
+              <h2 class="project-picker-title">Open a project</h2>
+              <p class="project-picker-copy">
+                Restore previous workspaces or choose a new folder.
+              </p>
+              <div class="project-picker-error" id="project-picker-error" hidden></div>
+              <button class="wizard-button primary" id="picker-open-project">
+                Open Project...
+              </button>
+              <div class="picker-section-label">Recent</div>
+              <div class="project-recent-list" id="recent-project-list"></div>
+            </div>
+          </div>
+          <div class="project-onboarding" id="project-onboarding">
+            <div class="project-onboarding-card">
+              <h2 class="project-onboarding-title" id="project-onboarding-title">
+                Project setup required
+              </h2>
+              <p class="project-onboarding-copy" id="project-onboarding-copy"></p>
+              <button class="wizard-button primary" id="onboarding-open-project">
+                Open Another Project...
+              </button>
+            </div>
+          </div>
+          <div class="floating-actions">
+            <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
+            <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
+            <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
+            <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
+            <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
+            <button class="add-button" id="add-button" aria-label="Add window">+</button>
+          </div>
+        </div>
       </div>
       <div class="modal-backdrop" id="preset-modal">
         <div class="modal">
@@ -877,6 +1089,22 @@
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
+      const projectTabs = document.getElementById("project-tabs");
+      const openProjectButton = document.getElementById("open-project-button");
+      const projectPicker = document.getElementById("project-picker");
+      const projectPickerError = document.getElementById("project-picker-error");
+      const pickerOpenProjectButton = document.getElementById("picker-open-project");
+      const recentProjectList = document.getElementById("recent-project-list");
+      const projectOnboarding = document.getElementById("project-onboarding");
+      const projectOnboardingTitle = document.getElementById(
+        "project-onboarding-title",
+      );
+      const projectOnboardingCopy = document.getElementById(
+        "project-onboarding-copy",
+      );
+      const onboardingOpenProjectButton = document.getElementById(
+        "onboarding-open-project",
+      );
       const addButton = document.getElementById("add-button");
       const tileButton = document.getElementById("tile-button");
       const stackButton = document.getElementById("stack-button");
@@ -914,6 +1142,8 @@
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
       let launchWizard = null;
+      let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
+      let projectError = "";
 
       function presetSurface(preset) {
         if (
@@ -981,6 +1211,127 @@
           }
           reconnectTimer = window.setTimeout(connectSocket, 1000);
         });
+      }
+
+      function emptyWorkspace() {
+        return {
+          viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [],
+        };
+      }
+
+      function activeProjectTab() {
+        if (!appState?.tabs?.length) {
+          return null;
+        }
+        return (
+          appState.tabs.find((tab) => tab.id === appState.active_tab_id) ||
+          appState.tabs[0] ||
+          null
+        );
+      }
+
+      function sendOpenProjectDialog() {
+        send({ kind: "open_project_dialog" });
+      }
+
+      function updateActionAvailability() {
+        const hasActiveTab = Boolean(activeProjectTab());
+        addButton.disabled = !hasActiveTab;
+        tileButton.disabled = !hasActiveTab;
+        stackButton.disabled = !hasActiveTab;
+      }
+
+      function renderProjectTabs() {
+        projectTabs.innerHTML = "";
+        for (const tab of appState.tabs || []) {
+          const button = document.createElement("div");
+          button.className = "project-tab";
+          button.title = tab.project_root;
+          button.setAttribute("role", "button");
+          button.tabIndex = 0;
+          if (tab.id === appState.active_tab_id) {
+            button.classList.add("active");
+          }
+          button.innerHTML = `
+            <span class="project-tab-label">${tab.title}</span>
+            <button class="project-tab-close" type="button" aria-label="Close ${tab.title}">×</button>
+          `;
+          button.addEventListener("click", () => {
+            send({ kind: "select_project_tab", tab_id: tab.id });
+          });
+          button.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              send({ kind: "select_project_tab", tab_id: tab.id });
+            }
+          });
+          button
+            .querySelector(".project-tab-close")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              send({ kind: "close_project_tab", tab_id: tab.id });
+            });
+          projectTabs.appendChild(button);
+        }
+      }
+
+      function renderRecentProjects() {
+        recentProjectList.innerHTML = "";
+        const recentProjects = appState?.recent_projects || [];
+        if (recentProjects.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "file-tree-empty";
+          empty.textContent = "No recent projects";
+          recentProjectList.appendChild(empty);
+          return;
+        }
+
+        for (const project of recentProjects) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "recent-project-row";
+          row.innerHTML = `
+            <span class="recent-project-title">${project.title}</span>
+            <span class="recent-project-meta">${project.kind} · ${project.path}</span>
+          `;
+          row.addEventListener("click", () => {
+            send({ kind: "reopen_recent_project", path: project.path });
+          });
+          recentProjectList.appendChild(row);
+        }
+      }
+
+      function renderProjectPicker() {
+        const shouldShow = !activeProjectTab();
+        projectPicker.classList.toggle("visible", shouldShow);
+        projectPickerError.hidden = !projectError;
+        projectPickerError.textContent = projectError;
+        renderRecentProjects();
+      }
+
+      function renderProjectOnboarding(tab) {
+        if (!tab || tab.kind === "git") {
+          projectOnboarding.classList.remove("visible");
+          return;
+        }
+        projectOnboarding.classList.add("visible");
+        projectOnboardingTitle.textContent =
+          tab.kind === "bare" ? "Bare repository selected" : "Project setup required";
+        projectOnboardingCopy.textContent =
+          tab.kind === "bare"
+            ? `No develop worktree was found for ${tab.project_root}. Open a worktree folder or another project.`
+            : `${tab.project_root} is not a Git workspace yet. Open another project or initialize this folder outside the PoC.`;
+      }
+
+      function renderAppState(nextState) {
+        appState = nextState || { tabs: [], active_tab_id: null, recent_projects: [] };
+        renderProjectTabs();
+        renderProjectPicker();
+        updateActionAvailability();
+        const tab = activeProjectTab();
+        renderProjectOnboarding(tab);
+        renderWorkspace(tab?.workspace || emptyWorkspace());
       }
 
       function openModal() {
@@ -1132,6 +1483,11 @@
       }
 
       function applyStatus(windowId, status, detail) {
+        if (detail) {
+          detailMap.set(windowId, detail);
+        } else if (status === "running" || status === "ready") {
+          detailMap.delete(windowId);
+        }
         const element = windowMap.get(windowId);
         if (!element) {
           return;
@@ -1142,11 +1498,6 @@
         chip.classList.remove("starting", "running", "ready", "exited", "error");
         chip.classList.add(status);
         label.textContent = status;
-        if (detail) {
-          detailMap.set(windowId, detail);
-        } else if (status === "running" || status === "ready") {
-          detailMap.delete(windowId);
-        }
         const effectiveDetail = detailMap.get(windowId);
         if (overlay) {
           overlay.textContent = effectiveDetail || "";
@@ -1892,7 +2243,8 @@
       function receive(event) {
         switch (event.kind) {
           case "workspace_state":
-            renderWorkspace(event.workspace);
+            projectError = "";
+            renderAppState(event.workspace);
             break;
           case "terminal_output":
             writeOutput(event.id, event.data_base64);
@@ -1933,6 +2285,11 @@
             renderBranches(event.id);
             break;
           }
+          case "project_open_error":
+            projectError = event.message;
+            renderProjectPicker();
+            renderProjectOnboarding(activeProjectTab());
+            break;
           case "launch_wizard_state":
             launchWizard = event.wizard;
             renderLaunchWizard();
@@ -2050,7 +2407,15 @@
         true,
       );
 
-      addButton.addEventListener("click", openModal);
+      openProjectButton.addEventListener("click", sendOpenProjectDialog);
+      pickerOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
+      onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
+      addButton.addEventListener("click", () => {
+        if (addButton.disabled) {
+          return;
+        }
+        openModal();
+      });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
       zoomOutButton.addEventListener("click", () => zoomCanvasByFactor(0.9));
@@ -2083,6 +2448,7 @@
 
       window.__POC__ = { receive };
 
+      renderAppState(appState);
       connectSocket();
     </script>
   </body>

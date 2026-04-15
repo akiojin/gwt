@@ -1,9 +1,11 @@
 pub const APP_NAME: &str = "GWT Terminal PoC";
 pub const MACOS_BUNDLE_IDENTIFIER: &str = "io.github.akiojin.gwt.pocterminal";
+pub const OPEN_PROJECT_MENU_ID: &str = "file.open_project";
 pub const RELOAD_MENU_ID: &str = "view.reload";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeMenuCommand {
+    OpenProject,
     ReloadWebView,
 }
 
@@ -17,6 +19,7 @@ pub fn macos_native_menu_titles() -> &'static [&'static str] {
 
 pub fn native_menu_command_for_id(menu_id: &str) -> Option<NativeMenuCommand> {
     match menu_id {
+        OPEN_PROJECT_MENU_ID => Some(NativeMenuCommand::OpenProject),
         RELOAD_MENU_ID => Some(NativeMenuCommand::ReloadWebView),
         _ => None,
     }
@@ -48,6 +51,12 @@ impl MacosNativeMenu {
         let file_menu = Submenu::new("File", true);
         let view_menu = Submenu::new("View", true);
         let window_menu = Submenu::new("Window", true);
+        let open_project_item = MenuItem::with_id(
+            OPEN_PROJECT_MENU_ID,
+            "Open Project...",
+            true,
+            Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyO)),
+        );
         let reload_item = MenuItem::with_id(
             RELOAD_MENU_ID,
             "Reload",
@@ -73,7 +82,11 @@ impl MacosNativeMenu {
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::quit(None),
         ]);
-        let _ = file_menu.append_items(&[&PredefinedMenuItem::close_window(None)]);
+        let _ = file_menu.append_items(&[
+            &open_project_item,
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::close_window(None),
+        ]);
         let _ = view_menu.append_items(&[&reload_item]);
         let _ = window_menu.append_items(&[
             &PredefinedMenuItem::minimize(None),
