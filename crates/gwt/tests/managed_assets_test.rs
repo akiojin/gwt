@@ -3,9 +3,8 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use tempfile::tempdir;
-
 use gwt::refresh_managed_gwt_assets_for_worktree;
+use tempfile::tempdir;
 
 #[test]
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {

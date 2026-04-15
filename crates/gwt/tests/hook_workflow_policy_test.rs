@@ -1,13 +1,17 @@
 //! T-112 (SPEC #1935) — workflow-policy gating tests.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 use gwt::cli::hook::{workflow_policy, HookEvent};
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
 use gwt_core::{paths::gwt_sessions_dir, repo_hash::compute_repo_hash};
-use gwt_github::client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
-use gwt_github::Cache;
+use gwt_github::{
+    client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+    Cache,
+};
 use serde_json::json;
 use tempfile::TempDir;
 

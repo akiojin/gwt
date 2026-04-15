@@ -1,10 +1,14 @@
 //! Agent launch builder: construct launch configurations for coding agents.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
-use crate::types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode};
+use crate::{
+    session::GWT_SESSION_RUNTIME_PATH_ENV,
+    types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
+};
 
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.

@@ -1,10 +1,9 @@
 //! Contract tests for the `IssueClient` trait via [`FakeIssueClient`]
 //! (SPEC-12 tdd.md Layer 4).
 
-use gwt_github::client::fake::FakeIssueClient;
 use gwt_github::client::{
-    ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
-    IssueState, SpecListFilter, UpdatedAt,
+    fake::FakeIssueClient, ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient,
+    IssueNumber, IssueSnapshot, IssueState, SpecListFilter, UpdatedAt,
 };
 
 fn seed_simple(client: &FakeIssueClient, number: u64, title: &str, body: &str) -> IssueSnapshot {

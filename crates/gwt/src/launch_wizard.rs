@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use crate::BranchListEntry;
 
@@ -2186,9 +2188,10 @@ pub fn load_quick_start_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
+
+    use super::*;
 
     fn sample_agent_options() -> Vec<AgentOption> {
         vec![

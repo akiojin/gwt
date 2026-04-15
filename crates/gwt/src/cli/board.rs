@@ -1,8 +1,10 @@
 use std::io;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
-use gwt_core::coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry};
-use gwt_core::paths::gwt_sessions_dir;
+use gwt_core::{
+    coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry},
+    paths::gwt_sessions_dir,
+};
 use gwt_github::SpecOpsError;
 
 use crate::cli::{CliCommand, CliEnv, CliParseError};
@@ -197,8 +199,9 @@ fn gwt_error_to_spec_ops_error(err: gwt_core::GwtError) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gwt_core::coordination::BoardEntryKind;
+
+    use super::*;
 
     fn s(value: &str) -> String {
         value.to_string()

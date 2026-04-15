@@ -11,16 +11,20 @@
 //! The actual ChromaDB writes happen inside the Python runner. This module
 //! never touches sqlite directly.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{GwtError, Result};
-use crate::index::paths::gwt_index_worktree_dir;
-use crate::repo_hash::RepoHash;
-use crate::worktree_hash::compute_worktree_hash;
+use crate::{
+    error::{GwtError, Result},
+    index::paths::gwt_index_worktree_dir,
+    repo_hash::RepoHash,
+    worktree_hash::compute_worktree_hash,
+};
 
 // =====================================================================
 // reconcile_repo
@@ -261,9 +265,10 @@ fn _layout_anchor(repo: &RepoHash, wt_hash: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::repo_hash::compute_repo_hash;
-    use std::sync::{Arc, Mutex};
 
     #[derive(Default, Clone)]
     struct RecordingSpawner {

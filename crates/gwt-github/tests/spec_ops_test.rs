@@ -1,10 +1,13 @@
 //! Contract tests for the `spec_ops` module (SPEC-12 tdd.md Layer 7).
 
-use gwt_github::client::fake::FakeIssueClient;
-use gwt_github::client::{IssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
-use gwt_github::sections::SectionName;
-use gwt_github::spec_ops::{SpecOps, SpecOpsError};
-use gwt_github::Cache;
+use gwt_github::{
+    client::{
+        fake::FakeIssueClient, IssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+    },
+    sections::SectionName,
+    spec_ops::{SpecOps, SpecOpsError},
+    Cache,
+};
 use tempfile::TempDir;
 
 fn n(s: &str) -> SectionName {

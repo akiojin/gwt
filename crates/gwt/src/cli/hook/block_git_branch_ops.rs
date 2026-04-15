@@ -12,8 +12,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::segments::split_command_segments;
-use super::{BlockDecision, HookError, HookEvent};
+use super::{segments::split_command_segments, BlockDecision, HookError, HookEvent};
 
 /// Evaluate a single raw command string. Returns `Some` if any segment
 /// triggers a block rule, `None` if every segment is allowed.

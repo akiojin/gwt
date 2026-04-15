@@ -1,11 +1,14 @@
 //! Hooks management — merge managed and user hooks while preserving ownership.
 
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
 use chrono::Utc;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 
 /// Marker prefix that identifies gwt-managed hooks.
 const GWT_MANAGED_MARKER: &str = "# gwt-managed";
