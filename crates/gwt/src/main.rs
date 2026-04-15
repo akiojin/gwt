@@ -247,6 +247,14 @@ impl AppRuntime {
             FrontendEvent::ArrangeWindows { mode, bounds } => {
                 self.arrange_windows_events(mode, bounds)
             }
+            FrontendEvent::MaximizeWindow { id, bounds } => {
+                self.maximize_window_events(&id, bounds)
+            }
+            FrontendEvent::MinimizeWindow { id } => self.minimize_window_events(&id),
+            FrontendEvent::RestoreWindow { id } => self.restore_window_events(&id),
+            FrontendEvent::ListWindows => {
+                vec![OutboundEvent::reply(client_id, self.list_windows_event())]
+            }
             FrontendEvent::UpdateWindowGeometry {
                 id,
                 geometry,
@@ -534,18 +542,66 @@ impl AppRuntime {
         }
         if let Some(tab) = self.tab(&tab_id) {
             for window in tab.workspace.persisted().windows.iter() {
-                if !window.preset.requires_process() {
-                    continue;
-                }
-                let window_id = combined_window_id(&tab_id, &window.id);
-                if let Some(runtime) = self.runtimes.get(&window_id) {
-                    if let Ok(mut pane) = runtime.pane.lock() {
-                        let (cols, rows) = geometry_to_pty_size(&window.geometry);
-                        let _ = pane.resize(cols.max(20), rows.max(6));
-                    }
-                }
+                self.resize_runtime_to_window(&combined_window_id(&tab_id, &window.id));
             }
         }
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn maximize_window_events(&mut self, id: &str, bounds: WindowGeometry) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.maximize_window(&address.raw_id, bounds)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        self.resize_runtime_to_window(id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn minimize_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.minimize_window(&address.raw_id)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        self.resize_runtime_to_window(id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    fn restore_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.restore_window(&address.raw_id)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        self.resize_runtime_to_window(id);
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }
@@ -595,6 +651,16 @@ impl AppRuntime {
         self.window_lookup.remove(id);
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
+    }
+
+    fn list_windows_event(&self) -> BackendEvent {
+        let windows = self
+            .active_tab_id
+            .as_ref()
+            .and_then(|tab_id| self.tab(tab_id))
+            .map(|tab| self.workspace_view(tab).windows)
+            .unwrap_or_default();
+        BackendEvent::WindowList { windows }
     }
 
     fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
@@ -1307,6 +1373,27 @@ impl AppRuntime {
         }
     }
 
+    fn resize_runtime_to_window(&self, window_id: &str) {
+        let Some(address) = self.window_lookup.get(window_id) else {
+            return;
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return;
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return;
+        };
+        if !window.preset.requires_process() {
+            return;
+        }
+        if let Some(runtime) = self.runtimes.get(window_id) {
+            if let Ok(mut pane) = runtime.pane.lock() {
+                let (cols, rows) = geometry_to_pty_size(&window.geometry);
+                let _ = pane.resize(cols.max(20), rows.max(6));
+            }
+        }
+    }
+
     fn tab(&self, tab_id: &str) -> Option<&ProjectTabRuntime> {
         self.tabs.iter().find(|tab| tab.id == tab_id)
     }
@@ -1424,6 +1511,9 @@ mod tests {
             },
             z_index: 1,
             status,
+            minimized: false,
+            maximized: false,
+            pre_maximize_geometry: None,
             persist: true,
         }
     }

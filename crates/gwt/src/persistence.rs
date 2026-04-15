@@ -43,6 +43,12 @@ pub struct PersistedWindowState {
     pub geometry: WindowGeometry,
     pub z_index: u32,
     pub status: WindowProcessStatus,
+    #[serde(default)]
+    pub minimized: bool,
+    #[serde(default)]
+    pub maximized: bool,
+    #[serde(default)]
+    pub pre_maximize_geometry: Option<WindowGeometry>,
     #[serde(default = "default_persist_window")]
     pub persist: bool,
 }
@@ -112,6 +118,9 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 },
                 z_index: 1,
                 status: WindowProcessStatus::Starting,
+                minimized: false,
+                maximized: false,
+                pre_maximize_geometry: None,
                 persist: true,
             },
             PersistedWindowState {
@@ -126,6 +135,9 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 },
                 z_index: 2,
                 status: WindowProcessStatus::Starting,
+                minimized: false,
+                maximized: false,
+                pre_maximize_geometry: None,
                 persist: true,
             },
         ],
@@ -239,6 +251,12 @@ mod tests {
             .map(|window| window.title.as_str())
             .collect();
         assert_eq!(titles, vec!["Claude", "Codex"]);
+        assert!(state.windows.iter().all(|window| !window.minimized));
+        assert!(state.windows.iter().all(|window| !window.maximized));
+        assert!(state
+            .windows
+            .iter()
+            .all(|window| window.pre_maximize_geometry.is_none()));
         assert_eq!(state.next_z_index, 3);
     }
 
@@ -283,21 +301,48 @@ mod tests {
                             y: -48.0,
                             zoom: 1.4,
                         },
-                        windows: vec![PersistedWindowState {
-                            id: "shell-1".to_string(),
-                            title: "Shell".to_string(),
-                            preset: WindowPreset::Shell,
-                            geometry: WindowGeometry {
-                                x: 10.0,
-                                y: 20.0,
-                                width: 640.0,
-                                height: 420.0,
+                        windows: vec![
+                            PersistedWindowState {
+                                id: "shell-1".to_string(),
+                                title: "Shell".to_string(),
+                                preset: WindowPreset::Shell,
+                                geometry: WindowGeometry {
+                                    x: 10.0,
+                                    y: 20.0,
+                                    width: 640.0,
+                                    height: 420.0,
+                                },
+                                z_index: 4,
+                                status: WindowProcessStatus::Running,
+                                minimized: false,
+                                maximized: true,
+                                pre_maximize_geometry: Some(WindowGeometry {
+                                    x: 48.0,
+                                    y: 64.0,
+                                    width: 720.0,
+                                    height: 480.0,
+                                }),
+                                persist: true,
                             },
-                            z_index: 4,
-                            status: WindowProcessStatus::Running,
-                            persist: true,
-                        }],
-                        next_z_index: 5,
+                            PersistedWindowState {
+                                id: "branches-1".to_string(),
+                                title: "Branches".to_string(),
+                                preset: WindowPreset::Branches,
+                                geometry: WindowGeometry {
+                                    x: 36.0,
+                                    y: 48.0,
+                                    width: 540.0,
+                                    height: 360.0,
+                                },
+                                z_index: 5,
+                                status: WindowProcessStatus::Ready,
+                                minimized: true,
+                                maximized: false,
+                                pre_maximize_geometry: None,
+                                persist: true,
+                            },
+                        ],
+                        next_z_index: 6,
                     },
                 },
                 PersistedProjectTabState {
@@ -349,6 +394,11 @@ mod tests {
         assert_eq!(loaded.tabs[0].kind, ProjectKind::Git);
         assert_eq!(loaded.tabs[0].workspace.viewport, default_canvas_viewport());
         assert_eq!(loaded.tabs[0].workspace.next_z_index, 2);
+        assert!(!loaded.tabs[0].workspace.windows[0].minimized);
+        assert!(!loaded.tabs[0].workspace.windows[0].maximized);
+        assert!(loaded.tabs[0].workspace.windows[0]
+            .pre_maximize_geometry
+            .is_none());
     }
 
     #[test]
@@ -376,6 +426,9 @@ mod tests {
                             },
                             z_index: 1,
                             status: WindowProcessStatus::Running,
+                            minimized: false,
+                            maximized: false,
+                            pre_maximize_geometry: None,
                             persist: true,
                         },
                         PersistedWindowState {
@@ -390,6 +443,9 @@ mod tests {
                             },
                             z_index: 2,
                             status: WindowProcessStatus::Ready,
+                            minimized: false,
+                            maximized: false,
+                            pre_maximize_geometry: None,
                             persist: true,
                         },
                     ],

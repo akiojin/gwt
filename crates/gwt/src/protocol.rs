@@ -52,6 +52,17 @@ pub enum FrontendEvent {
         mode: ArrangeMode,
         bounds: WindowGeometry,
     },
+    MaximizeWindow {
+        id: String,
+        bounds: WindowGeometry,
+    },
+    MinimizeWindow {
+        id: String,
+    },
+    RestoreWindow {
+        id: String,
+    },
+    ListWindows,
     UpdateWindowGeometry {
         id: String,
         geometry: WindowGeometry,
@@ -115,6 +126,9 @@ pub struct AppStateView {
 pub enum BackendEvent {
     WorkspaceState {
         workspace: AppStateView,
+    },
+    WindowList {
+        windows: Vec<PersistedWindowState>,
     },
     TerminalOutput {
         id: String,

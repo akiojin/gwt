@@ -175,6 +175,78 @@
         gap: 8px;
       }
 
+      .window-list-shell {
+        position: relative;
+      }
+
+      .window-list-panel {
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 8px);
+        width: 320px;
+        max-height: 320px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        box-shadow: 0 16px 36px rgba(15, 23, 42, 0.2);
+      }
+
+      .window-list-panel[hidden] {
+        display: none;
+      }
+
+      .window-list-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #0f172a;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .window-list-row:hover {
+        background: #eff6ff;
+        border-color: rgba(59, 130, 246, 0.28);
+      }
+
+      .window-list-copy {
+        min-width: 0;
+      }
+
+      .window-list-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .window-list-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: #64748b;
+      }
+
+      .window-list-empty {
+        padding: 12px;
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #64748b;
+        font-size: 12px;
+      }
+
       .arrange-button {
         height: 38px;
         padding: 0 12px;
@@ -226,6 +298,10 @@
           0 0 0 1px rgba(37, 99, 235, 0.24);
       }
 
+      .workspace-window.minimized {
+        min-height: 38px;
+      }
+
       .workspace-window.surface-terminal {
         background: #0b1220;
       }
@@ -261,6 +337,10 @@
 
       .titlebar:active {
         cursor: grabbing;
+      }
+
+      .workspace-window.maximized .titlebar {
+        cursor: default;
       }
 
       .title {
@@ -354,6 +434,12 @@
         right: 0;
         top: 38px;
         bottom: 0;
+      }
+
+      .workspace-window.minimized .window-body,
+      .workspace-window.minimized .resize-handle,
+      .workspace-window.maximized .resize-handle {
+        display: none;
       }
 
       .surface-terminal .window-body {
@@ -1181,6 +1267,17 @@
           <div class="floating-actions">
             <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
             <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
+            <div class="window-list-shell">
+              <button
+                class="arrange-button"
+                id="window-list-button"
+                aria-label="List windows"
+                aria-expanded="false"
+              >
+                Windows
+              </button>
+              <div class="window-list-panel" id="window-list-panel" hidden></div>
+            </div>
             <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
@@ -1305,6 +1402,8 @@
       const addButton = document.getElementById("add-button");
       const tileButton = document.getElementById("tile-button");
       const stackButton = document.getElementById("stack-button");
+      const windowListButton = document.getElementById("window-list-button");
+      const windowListPanel = document.getElementById("window-list-panel");
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -1343,6 +1442,9 @@
       let wizardAdvancedOpen = false;
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
+      let windowListOpen = false;
+      let windowListEntries = [];
+      let titlebarClickState = null;
       let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
       let projectError = "";
 
@@ -1432,6 +1534,14 @@
         );
       }
 
+      function activeWorkspace() {
+        return activeProjectTab()?.workspace || emptyWorkspace();
+      }
+
+      function workspaceWindowById(windowId) {
+        return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
+      }
+
       function sendOpenProjectDialog() {
         send({ kind: "open_project_dialog" });
       }
@@ -1441,6 +1551,126 @@
         addButton.disabled = !hasActiveTab;
         tileButton.disabled = !hasActiveTab;
         stackButton.disabled = !hasActiveTab;
+        windowListButton.disabled = !hasActiveTab;
+        if (!hasActiveTab) {
+          windowListOpen = false;
+          windowListEntries = [];
+          renderWindowList();
+        }
+      }
+
+      function presetLabel(preset) {
+        return preset
+          .split("_")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ");
+      }
+
+      function windowStateLabel(windowData) {
+        if (windowData.minimized) {
+          return "Minimized";
+        }
+        if (windowData.maximized) {
+          return "Maximized";
+        }
+        return "Normal";
+      }
+
+      function requestWindowList() {
+        if (!activeProjectTab()) {
+          return;
+        }
+        send({ kind: "list_windows" });
+      }
+
+      function renderWindowList() {
+        windowListPanel.hidden = !windowListOpen;
+        windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
+        if (!windowListOpen) {
+          return;
+        }
+        const entries =
+          windowListEntries.length > 0 ? windowListEntries : activeWorkspace().windows || [];
+        windowListPanel.innerHTML = "";
+        if (entries.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "window-list-empty";
+          empty.textContent = "No windows";
+          windowListPanel.appendChild(empty);
+          return;
+        }
+        for (const entry of entries) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "window-list-row";
+          row.innerHTML = `
+            <div class="window-list-copy">
+              <div class="window-list-title">${entry.title}</div>
+              <div class="window-list-meta">${presetLabel(entry.preset)} · ${windowStateLabel(entry)}</div>
+            </div>
+            <span class="status-chip ${entry.status}">
+              <span class="status-dot"></span>
+              <span class="status-label">${windowStateLabel(entry)}</span>
+            </span>
+          `;
+          row.addEventListener("click", () => {
+            windowListOpen = false;
+            renderWindowList();
+            focusWindowRemotely(entry.id);
+            if (entry.minimized) {
+              send({ kind: "restore_window", id: entry.id });
+            }
+          });
+          windowListPanel.appendChild(row);
+        }
+      }
+
+      function toggleWindowList() {
+        if (windowListButton.disabled) {
+          return;
+        }
+        windowListOpen = !windowListOpen;
+        windowListEntries = [];
+        renderWindowList();
+        if (windowListOpen) {
+          requestWindowList();
+        }
+      }
+
+      function maximizedGeometry(bounds) {
+        return {
+          x: bounds.x + 24,
+          y: bounds.y + 24,
+          width: Math.max(bounds.width - 48, 0),
+          height: Math.max(bounds.height - 48, 0),
+        };
+      }
+
+      function geometryMatches(left, right) {
+        return (
+          Math.abs(left.x - right.x) < 0.5 &&
+          Math.abs(left.y - right.y) < 0.5 &&
+          Math.abs(left.width - right.width) < 0.5 &&
+          Math.abs(left.height - right.height) < 0.5
+        );
+      }
+
+      function syncMaximizedWindowsToViewport() {
+        const bounds = visibleBounds();
+        const nextGeometry = maximizedGeometry(bounds);
+        for (const windowData of activeWorkspace().windows || []) {
+          if (!windowData.maximized) {
+            continue;
+          }
+          if (geometryMatches(windowData.geometry, nextGeometry)) {
+            continue;
+          }
+          send({
+            kind: "maximize_window",
+            id: windowData.id,
+            bounds,
+          });
+        }
       }
 
       function renderProjectTabs() {
@@ -1533,6 +1763,7 @@
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
         renderWorkspace(tab?.workspace || emptyWorkspace());
+        renderWindowList();
       }
 
       function openModal() {
@@ -1669,14 +1900,19 @@
         if (!element) {
           return;
         }
+        const windowData = workspaceWindowById(windowId);
         send({
           kind: "update_window_geometry",
           id: windowId,
           geometry: {
             x: parseNumber(element.style.left),
             y: parseNumber(element.style.top),
-            width: parseNumber(element.style.width),
-            height: parseNumber(element.style.height),
+            width: windowData?.minimized
+              ? windowData.geometry.width
+              : parseNumber(element.style.width),
+            height: windowData?.minimized
+              ? windowData.geometry.height
+              : parseNumber(element.style.height),
           },
           cols,
           rows,
@@ -1714,6 +1950,66 @@
         for (const [id, element] of windowMap.entries()) {
           element.classList.toggle("focused", id === windowId);
         }
+      }
+
+      function focusWindowRemotely(windowId) {
+        focusWindowLocally(windowId);
+        send({ kind: "focus_window", id: windowId });
+      }
+
+      function toggleMinimizeWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        focusWindowRemotely(windowId);
+        send({
+          kind: windowData.minimized ? "restore_window" : "minimize_window",
+          id: windowId,
+        });
+      }
+
+      function toggleMaximizeWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        focusWindowRemotely(windowId);
+        if (windowData.maximized) {
+          send({ kind: "restore_window", id: windowId });
+          return;
+        }
+        if (windowData.minimized) {
+          send({ kind: "restore_window", id: windowId });
+        }
+        send({
+          kind: "maximize_window",
+          id: windowId,
+          bounds: visibleBounds(),
+        });
+      }
+
+      function handleTitlebarClick(windowId) {
+        const now = Date.now();
+        if (
+          titlebarClickState &&
+          titlebarClickState.id === windowId &&
+          now - titlebarClickState.timestamp <= 300
+        ) {
+          titlebarClickState = null;
+          const windowData = workspaceWindowById(windowId);
+          if (windowData?.minimized) {
+            focusWindowRemotely(windowId);
+            send({ kind: "restore_window", id: windowId });
+            return;
+          }
+          toggleMaximizeWindow(windowId);
+          return;
+        }
+        titlebarClickState = {
+          id: windowId,
+          timestamp: now,
+        };
       }
 
       function decodeBase64(base64) {
@@ -2854,6 +3150,8 @@
                 </span>
               </div>
               <div class="window-actions">
+                <button class="icon-button" data-action="minimize" aria-label="Minimize window">▁</button>
+                <button class="icon-button" data-action="maximize" aria-label="Maximize window">◻</button>
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
@@ -2864,8 +3162,20 @@
           windowMap.set(windowData.id, element);
 
           const titlebar = element.querySelector(".titlebar");
+          const minimizeButton = element.querySelector("[data-action='minimize']");
+          const maximizeButton = element.querySelector("[data-action='maximize']");
           const closeButton = element.querySelector("[data-action='close']");
           const resizeHandle = element.querySelector(".resize-handle");
+
+          minimizeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleMinimizeWindow(windowData.id);
+          });
+
+          maximizeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleMaximizeWindow(windowData.id);
+          });
 
           closeButton.addEventListener("click", (event) => {
             event.stopPropagation();
@@ -2876,8 +3186,8 @@
             if (event.target.closest("button")) {
               return;
             }
-            focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
+            const currentWindow = workspaceWindowById(windowData.id);
+            focusWindowRemotely(windowData.id);
             dragState = {
               id: windowData.id,
               pointerId: event.pointerId,
@@ -2885,13 +3195,14 @@
               startY: event.clientY,
               left: parseNumber(element.style.left),
               top: parseNumber(element.style.top),
+              moved: false,
+              allowMove: !currentWindow?.maximized,
             };
             titlebar.setPointerCapture(event.pointerId);
           });
 
           resizeHandle.addEventListener("pointerdown", (event) => {
-            focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
+            focusWindowRemotely(windowData.id);
             resizeState = {
               id: windowData.id,
               pointerId: event.pointerId,
@@ -2910,13 +3221,17 @@
         }
 
         element.querySelector(".title-text").textContent = windowData.title;
+        element.classList.toggle("minimized", Boolean(windowData.minimized));
+        element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.style.left = `${windowData.geometry.x}px`;
         element.style.top = `${windowData.geometry.y}px`;
         element.style.width = `${windowData.geometry.width}px`;
-        element.style.height = `${windowData.geometry.height}px`;
+        element.style.height = `${windowData.minimized ? 38 : windowData.geometry.height}px`;
         element.style.zIndex = String(windowData.z_index);
+        element.querySelector(".resize-handle").hidden =
+          Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
-        if (presetSurface(windowData.preset) === "terminal") {
+        if (presetSurface(windowData.preset) === "terminal" && !windowData.minimized) {
           requestAnimationFrame(() => fitTerminal(windowData.id, false));
         }
       }
@@ -2950,6 +3265,8 @@
           ensureWindow(windowData);
         }
 
+        requestAnimationFrame(syncMaximizedWindowsToViewport);
+
         const topmostId = topmostWindowId(workspace);
         if (topmostId && ids.has(topmostId)) {
           focusWindowLocally(topmostId);
@@ -2967,6 +3284,10 @@
           case "workspace_state":
             projectError = "";
             renderAppState(event.workspace);
+            break;
+          case "window_list":
+            windowListEntries = event.windows || [];
+            renderWindowList();
             break;
           case "terminal_output":
             writeOutput(event.id, event.data_base64);
@@ -3032,8 +3353,16 @@
           if (!element) {
             return;
           }
-          element.style.left = `${dragState.left + (event.clientX - dragState.startX) / viewport.zoom}px`;
-          element.style.top = `${dragState.top + (event.clientY - dragState.startY) / viewport.zoom}px`;
+          const deltaX = (event.clientX - dragState.startX) / viewport.zoom;
+          const deltaY = (event.clientY - dragState.startY) / viewport.zoom;
+          if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+            dragState.moved = true;
+          }
+          if (!dragState.allowMove) {
+            return;
+          }
+          element.style.left = `${dragState.left + deltaX}px`;
+          element.style.top = `${dragState.top + deltaY}px`;
           return;
         }
 
@@ -3065,12 +3394,16 @@
         }
 
         if (dragState && dragState.pointerId === event.pointerId) {
-          const runtime = terminalMap.get(dragState.id);
-          sendGeometry(
-            dragState.id,
-            runtime?.terminal.cols || 80,
-            runtime?.terminal.rows || 24,
-          );
+          if (dragState.moved) {
+            const runtime = terminalMap.get(dragState.id);
+            sendGeometry(
+              dragState.id,
+              runtime?.terminal.cols || 80,
+              runtime?.terminal.rows || 24,
+            );
+          } else {
+            handleTitlebarClick(dragState.id);
+          }
           dragState = null;
         }
 
@@ -3140,6 +3473,7 @@
       });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
+      windowListButton.addEventListener("click", toggleWindowList);
       zoomOutButton.addEventListener("click", () => zoomCanvasByFactor(0.9));
       zoomResetButton.addEventListener("click", resetCanvasZoom);
       zoomInButton.addEventListener("click", () => zoomCanvasByFactor(1.1));
@@ -3163,6 +3497,23 @@
         if (event.target === wizardModal) {
           sendWizardAction({ kind: "cancel" });
         }
+      });
+      window.addEventListener("resize", () => {
+        renderWindowList();
+        syncMaximizedWindowsToViewport();
+      });
+      window.addEventListener("pointerdown", (event) => {
+        if (!windowListOpen) {
+          return;
+        }
+        if (
+          windowListPanel.contains(event.target) ||
+          windowListButton.contains(event.target)
+        ) {
+          return;
+        }
+        windowListOpen = false;
+        renderWindowList();
       });
 
       for (const button of modal.querySelectorAll("[data-preset]")) {

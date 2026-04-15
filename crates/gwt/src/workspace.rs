@@ -317,16 +317,6 @@ impl WorkspaceState {
         self.persisted.next_z_index = self.persisted.windows.len() as u32 + 1;
     }
 
-    fn focus_order_ids(&self) -> Vec<String> {
-        let mut windows = self.persisted.windows.iter().collect::<Vec<_>>();
-        windows.sort_by(|left, right| right.z_index.cmp(&left.z_index));
-        windows
-            .into_iter()
-            .filter(|window| !window.minimized)
-            .map(|window| window.id.clone())
-            .collect::<Vec<_>>()
-    }
-
     fn center_window(&mut self, id: &str, bounds: WindowGeometry) -> bool {
         let Some(window) = self.persisted.windows.iter().find(|window| window.id == id) else {
             return false;
@@ -341,7 +331,10 @@ impl WorkspaceState {
     }
 
     fn window_index(&self, id: &str) -> Option<usize> {
-        self.persisted.windows.iter().position(|window| window.id == id)
+        self.persisted
+            .windows
+            .iter()
+            .position(|window| window.id == id)
     }
 
     fn bring_to_front(&mut self, index: usize) {
@@ -578,10 +571,7 @@ mod tests {
         let maximized = workspace.window("claude-1").expect("claude");
         assert!(maximized.maximized);
         assert!(!maximized.minimized);
-        assert_eq!(
-            maximized.pre_maximize_geometry,
-            Some(original.clone())
-        );
+        assert_eq!(maximized.pre_maximize_geometry, Some(original.clone()));
         assert_eq!(
             maximized.geometry,
             WindowGeometry {
@@ -612,11 +602,17 @@ mod tests {
 
         assert!(workspace.minimize_window("claude-1"));
         assert!(workspace.window("claude-1").expect("claude").minimized);
-        assert_eq!(workspace.window("claude-1").expect("claude").geometry, original);
+        assert_eq!(
+            workspace.window("claude-1").expect("claude").geometry,
+            original
+        );
 
         assert!(workspace.minimize_window("claude-1"));
         assert!(!workspace.window("claude-1").expect("claude").minimized);
-        assert_eq!(workspace.window("claude-1").expect("claude").geometry, original);
+        assert_eq!(
+            workspace.window("claude-1").expect("claude").geometry,
+            original
+        );
     }
 
     #[test]
@@ -638,7 +634,10 @@ mod tests {
         assert!(workspace.minimize_window("claude-1"));
         assert!(workspace.restore_window("claude-1"));
         assert!(!workspace.window("claude-1").expect("claude").minimized);
-        assert_eq!(workspace.window("claude-1").expect("claude").geometry, original);
+        assert_eq!(
+            workspace.window("claude-1").expect("claude").geometry,
+            original
+        );
     }
 
     #[test]
@@ -692,11 +691,7 @@ mod tests {
     fn arranging_windows_skips_minimized_windows() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell);
-        let minimized_geometry = workspace
-            .window("codex-1")
-            .expect("codex")
-            .geometry
-            .clone();
+        let minimized_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
         assert!(workspace.minimize_window("codex-1"));
 
         assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
