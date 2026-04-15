@@ -1670,7 +1670,7 @@ impl ClientHub {
         let (tx, rx) = mpsc::unbounded_channel();
         self.clients
             .lock()
-            .expect("client hub lock")
+            .unwrap_or_else(|p| p.into_inner())
             .insert(client_id, tx);
         rx
     }
@@ -1678,12 +1678,12 @@ impl ClientHub {
     fn unregister(&self, client_id: &str) {
         self.clients
             .lock()
-            .expect("client hub lock")
+            .unwrap_or_else(|p| p.into_inner())
             .remove(client_id);
     }
 
     fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let clients = self.clients.lock().expect("client hub lock");
+        let clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
         for outbound in events {
             let payload = serde_json::to_string(&outbound.event).expect("backend event json");
             match outbound.target {

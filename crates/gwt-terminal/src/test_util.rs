@@ -10,7 +10,7 @@ pub fn lock_pty_test() -> MutexGuard<'static, ()> {
     PTY_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("pty test lock poisoned")
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 /// Read from a PTY reader in a separate thread with timeout.

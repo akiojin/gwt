@@ -43,7 +43,7 @@ impl FakeIssueClient {
 
     /// Preload an Issue snapshot. Used by tests to set up fixtures.
     pub fn seed(&self, snapshot: IssueSnapshot) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         // Ensure next_issue_number stays ahead of seeded numbers.
         let current_next = self.next_issue_number.load(Ordering::SeqCst);
         if snapshot.number.0 >= current_next {
@@ -62,7 +62,7 @@ impl FakeIssueClient {
 
     /// Snapshot of the recorded call log.
     pub fn call_log(&self) -> Vec<String> {
-        self.inner.lock().unwrap().call_log.clone()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).call_log.clone()
     }
 
     fn record(&self, state: &mut FakeState, op: &str, target: &str) {
@@ -87,7 +87,7 @@ impl IssueClient for FakeIssueClient {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "fetch", &number.to_string());
         let issue = state
             .issues
@@ -106,7 +106,7 @@ impl IssueClient for FakeIssueClient {
         if new_body.len() > 65_536 {
             return Err(ApiError::BodyTooLarge);
         }
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "patch_body", &number.to_string());
         let issue = state
             .issues
@@ -118,7 +118,7 @@ impl IssueClient for FakeIssueClient {
     }
 
     fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "patch_title", &number.to_string());
         let issue = state
             .issues
@@ -137,7 +137,7 @@ impl IssueClient for FakeIssueClient {
         if new_body.len() > 65_536 {
             return Err(ApiError::BodyTooLarge);
         }
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "patch_comment", &comment_id.to_string());
         // Find the issue owning this comment and update it in place.
         for issue in state.issues.values_mut() {
@@ -158,7 +158,7 @@ impl IssueClient for FakeIssueClient {
             return Err(ApiError::BodyTooLarge);
         }
         let new_id = CommentId(self.next_comment_id.fetch_add(1, Ordering::SeqCst));
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "create_comment", &number.to_string());
         let issue = state
             .issues
@@ -184,7 +184,7 @@ impl IssueClient for FakeIssueClient {
             return Err(ApiError::BodyTooLarge);
         }
         let number = IssueNumber(self.next_issue_number.fetch_add(1, Ordering::SeqCst));
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "create_issue", &number.to_string());
         let snapshot = IssueSnapshot {
             number,
@@ -204,7 +204,7 @@ impl IssueClient for FakeIssueClient {
         number: IssueNumber,
         labels: &[String],
     ) -> Result<IssueSnapshot, ApiError> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "set_labels", &number.to_string());
         let issue = state
             .issues
@@ -220,7 +220,7 @@ impl IssueClient for FakeIssueClient {
         number: IssueNumber,
         new_state: IssueState,
     ) -> Result<IssueSnapshot, ApiError> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "set_state", &number.to_string());
         let issue = state
             .issues
@@ -232,7 +232,7 @@ impl IssueClient for FakeIssueClient {
     }
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.record(&mut state, "list_spec_issues", "*");
         let mut out: Vec<SpecSummary> = state
             .issues

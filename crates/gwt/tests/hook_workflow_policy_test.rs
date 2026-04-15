@@ -37,7 +37,7 @@ fn evaluate(
 }
 
 fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = tempfile::tempdir().expect("temp home");
     let previous_home = std::env::var_os("HOME");
     let previous_session_id = std::env::var_os(GWT_SESSION_ID_ENV);

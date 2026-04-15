@@ -19,7 +19,7 @@ impl RunnerSpawner for RecordingSpawner {
         project_root: &std::path::Path,
         respect_ttl: bool,
     ) -> std::io::Result<()> {
-        self.calls.lock().unwrap().push(format!(
+        self.calls.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
             "{}|{}|{}",
             repo_hash,
             project_root.display(),
@@ -57,7 +57,7 @@ async fn refresh_kicks_runner_when_ttl_expired() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap();
+    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(calls.len(), 1, "expected one runner spawn call");
 }
 
@@ -77,7 +77,7 @@ async fn refresh_skipped_within_ttl() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap();
+    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(calls.len(), 0, "must not spawn runner within TTL window");
 }
 
@@ -95,7 +95,7 @@ async fn refresh_kicks_runner_when_meta_missing() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap();
+    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(calls.len(), 1, "missing meta means stale");
 }
 
