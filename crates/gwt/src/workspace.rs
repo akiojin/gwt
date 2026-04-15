@@ -78,11 +78,14 @@ impl WorkspaceState {
         true
     }
 
-    pub fn focus_window(&mut self, id: &str) -> bool {
+    pub fn focus_window(&mut self, id: &str, bounds: Option<WindowGeometry>) -> bool {
         let Some(index) = self.window_index(id) else {
             return false;
         };
         self.bring_to_front(index);
+        if let Some(b) = bounds {
+            self.center_window(id, b);
+        }
         true
     }
 
@@ -121,13 +124,17 @@ impl WorkspaceState {
             FocusCycleDirection::Backward => (pos + eligible.len() - 1) % eligible.len(),
         };
         let next_id = self.persisted.windows[eligible[next_pos]].id.clone();
-        let _ = self.focus_window(&next_id);
+        let _ = self.focus_window(&next_id, None);
         self.center_window(&next_id, bounds);
         Some(next_id)
     }
 
-    pub fn add_window(&mut self, preset: WindowPreset) -> PersistedWindowState {
-        self.add_window_with_title(preset, preset.title(), true)
+    pub fn add_window(
+        &mut self,
+        preset: WindowPreset,
+        bounds: WindowGeometry,
+    ) -> PersistedWindowState {
+        self.add_window_with_title(preset, preset.title(), true, bounds)
     }
 
     pub fn add_window_with_title(
@@ -135,6 +142,7 @@ impl WorkspaceState {
         preset: WindowPreset,
         title: impl Into<String>,
         persist: bool,
+        bounds: WindowGeometry,
     ) -> PersistedWindowState {
         let count = self
             .persisted
@@ -149,8 +157,8 @@ impl WorkspaceState {
             title: title.into(),
             preset,
             geometry: WindowGeometry {
-                x: 120.0 + (self.persisted.windows.len() as f64 * 28.0),
-                y: 96.0 + (self.persisted.windows.len() as f64 * 24.0),
+                x: bounds.x + (bounds.width - width) / 2.0,
+                y: bounds.y + (bounds.height - height) / 2.0,
                 width,
                 height,
             },
@@ -363,7 +371,7 @@ mod tests {
     #[test]
     fn focusing_window_brings_it_to_front() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        assert!(workspace.focus_window("claude-1"));
+        assert!(workspace.focus_window("claude-1", None));
         let claude = workspace
             .persisted()
             .windows
@@ -377,7 +385,7 @@ mod tests {
     #[test]
     fn adding_window_appends_shell_with_next_z_index() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        let window = workspace.add_window(WindowPreset::Shell);
+        let window = workspace.add_window(WindowPreset::Shell, arrange_bounds());
         assert_eq!(window.title, "Shell");
         assert_eq!(window.preset, WindowPreset::Shell);
         assert_eq!(window.z_index, 3);
@@ -389,7 +397,7 @@ mod tests {
     #[test]
     fn adding_file_tree_window_marks_it_ready_without_process() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        let window = workspace.add_window(WindowPreset::FileTree);
+        let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         assert_eq!(window.title, "File Tree");
         assert_eq!(window.preset, WindowPreset::FileTree);
         assert_eq!(window.status, WindowProcessStatus::Ready);
@@ -398,7 +406,7 @@ mod tests {
     #[test]
     fn adding_branches_window_marks_it_ready_without_process() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        let window = workspace.add_window(WindowPreset::Branches);
+        let window = workspace.add_window(WindowPreset::Branches, arrange_bounds());
         assert_eq!(window.title, "Branches");
         assert_eq!(window.preset, WindowPreset::Branches);
         assert_eq!(window.status, WindowProcessStatus::Ready);
@@ -460,8 +468,8 @@ mod tests {
     #[test]
     fn tile_arrangement_places_windows_on_a_grid() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::FileTree);
-        workspace.add_window(WindowPreset::Branches);
+        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+        workspace.add_window(WindowPreset::Branches, arrange_bounds());
 
         assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
 
@@ -485,7 +493,7 @@ mod tests {
     #[test]
     fn stack_arrangement_overlaps_windows_with_offsets() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::FileTree);
+        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
 
         assert!(workspace.arrange_windows(ArrangeMode::Stack, arrange_bounds()));
 
@@ -507,7 +515,7 @@ mod tests {
     #[test]
     fn cycling_focus_forward_brings_next_window_to_front_and_centers_it() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::Shell);
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
         // Array order: [claude-1(z=1), codex-1(z=2), shell-1(z=3)]
         // Current focus: shell-1 (highest z). Forward wraps to claude-1.
 
@@ -531,7 +539,7 @@ mod tests {
     #[test]
     fn cycling_focus_backward_wraps_and_preserves_zoom_when_centering() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::Shell);
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
         // Array order: [claude-1(z=1), codex-1(z=2), shell-1(z=3)]
         // Current focus: shell-1 (highest z). Backward goes to codex-1.
         workspace.update_viewport(CanvasViewport {
@@ -668,7 +676,7 @@ mod tests {
     #[test]
     fn cycling_focus_skips_minimized_windows() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::Shell);
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
         assert!(workspace.minimize_window("codex-1"));
 
         let focused = workspace
@@ -690,7 +698,7 @@ mod tests {
     #[test]
     fn arranging_windows_skips_minimized_windows() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::Shell);
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
         let minimized_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
         assert!(workspace.minimize_window("codex-1"));
 

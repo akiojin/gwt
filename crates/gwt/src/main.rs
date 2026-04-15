@@ -249,8 +249,10 @@ impl AppRuntime {
             }
             FrontendEvent::SelectProjectTab { tab_id } => self.select_project_tab_events(&tab_id),
             FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
-            FrontendEvent::CreateWindow { preset } => self.create_window_events(preset),
-            FrontendEvent::FocusWindow { id } => self.focus_window_events(&id),
+            FrontendEvent::CreateWindow { preset, bounds } => {
+                self.create_window_events(preset, bounds)
+            }
+            FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(direction, bounds)
             }
@@ -290,8 +292,8 @@ impl AppRuntime {
             FrontendEvent::OpenLaunchWizard { id, branch_name } => {
                 self.open_launch_wizard(&id, &branch_name)
             }
-            FrontendEvent::LaunchWizardAction { action } => {
-                self.handle_launch_wizard_action(action)
+            FrontendEvent::LaunchWizardAction { action, bounds } => {
+                self.handle_launch_wizard_action(action, bounds)
             }
         }
     }
@@ -478,7 +480,11 @@ impl AppRuntime {
         events
     }
 
-    fn create_window_events(&mut self, preset: WindowPreset) -> Vec<OutboundEvent> {
+    fn create_window_events(
+        &mut self,
+        preset: WindowPreset,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
@@ -486,7 +492,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset)
+            tab.workspace.add_window(preset, bounds)
         };
         self.register_window(&tab_id, &window.id);
         let runtime_event = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -498,14 +504,18 @@ impl AppRuntime {
         events
     }
 
-    fn focus_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+    fn focus_window_events(
+        &mut self,
+        id: &str,
+        bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        if !tab.workspace.focus_window(&address.raw_id) {
+        if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
         }
         self.active_tab_id = Some(address.tab_id);
@@ -862,6 +872,7 @@ impl AppRuntime {
     fn handle_launch_wizard_action(
         &mut self,
         action: gwt::LaunchWizardAction,
+        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
         let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
@@ -882,7 +893,7 @@ impl AppRuntime {
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
                     return Vec::new();
                 };
-                if !tab.workspace.focus_window(&address.raw_id) {
+                if !tab.workspace.focus_window(&address.raw_id, bounds) {
                     session.wizard.error =
                         Some("The selected session window is no longer available".to_string());
                     self.launch_wizard = Some(session);
@@ -896,7 +907,7 @@ impl AppRuntime {
                 ]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
-                match self.spawn_agent_window(&session.tab_id, *config) {
+                match self.spawn_agent_window(&session.tab_id, *config, bounds) {
                     Ok(mut events) => {
                         events.push(self.launch_wizard_state_broadcast(None));
                         events
@@ -1091,6 +1102,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         mut config: gwt_agent::LaunchConfig,
+        bounds: Option<WindowGeometry>,
     ) -> Result<Vec<OutboundEvent>, String> {
         let project_root = self
             .tab(tab_id)
@@ -1145,8 +1157,14 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(tab_id) else {
                 return Err("Project tab not found".to_string());
             };
+            let b = bounds.unwrap_or_else(|| WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+            });
             tab.workspace
-                .add_window_with_title(WindowPreset::Agent, title, false)
+                .add_window_with_title(WindowPreset::Agent, title, false, b)
         };
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
