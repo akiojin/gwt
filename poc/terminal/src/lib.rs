@@ -27,8 +27,8 @@ pub use persistence::{
     default_app_state, default_workspace_state, empty_workspace_state, load_app_state,
     pause_process_windows_for_restore, project_title_from_path, save_app_state,
     workspace_state_path, CanvasViewport, PersistedAppState, PersistedProjectTabState,
-    PersistedWindowState, PersistedWorkspaceState, ProjectKind, RecentProjectEntry,
-    WindowGeometry, WindowProcessStatus,
+    PersistedWindowState, PersistedWorkspaceState, ProjectKind, RecentProjectEntry, WindowGeometry,
+    WindowProcessStatus,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,

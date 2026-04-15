@@ -1359,8 +1359,7 @@ impl AppRuntime {
     fn seed_restored_window_details(&mut self) {
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
-                if window.preset.requires_process()
-                    && window.status == WindowProcessStatus::Exited
+                if window.preset.requires_process() && window.status == WindowProcessStatus::Exited
                 {
                     self.window_details.insert(
                         combined_window_id(&tab.id, &window.id),
@@ -1408,8 +1407,10 @@ fn should_auto_start_restored_window(window: &poc_terminal::PersistedWindowState
 
 #[cfg(test)]
 mod tests {
-    use super::should_auto_start_restored_window;
+    use super::{resolve_project_target, should_auto_start_restored_window};
     use poc_terminal::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
+    use std::{fs, process::Command};
+    use tempfile::tempdir;
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -1450,6 +1451,30 @@ mod tests {
             WindowPreset::Branches,
             WindowProcessStatus::Ready,
         )));
+    }
+
+    #[test]
+    fn resolve_project_target_uses_selected_directory_name_for_git_subdir_title() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("demo-repo");
+        fs::create_dir_all(repo.join("apps/frontend")).expect("create repo dirs");
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .arg(&repo)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+
+        let selected = repo.join("apps/frontend");
+        let target = resolve_project_target(&selected).expect("project target");
+
+        assert_eq!(target.title, "frontend");
+        assert_eq!(target.kind, poc_terminal::ProjectKind::Git);
+        assert_eq!(
+            target.project_root,
+            dunce::canonicalize(&repo).expect("canonical repo root"),
+        );
     }
 }
 
@@ -1500,6 +1525,7 @@ fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
             canonical.display()
         ));
     }
+    let title = poc_terminal::project_title_from_path(&canonical);
 
     let (project_root, kind) = match gwt_git::detect_repo_type(&canonical) {
         gwt_git::RepoType::Normal(root) => (
@@ -1519,7 +1545,7 @@ fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
     };
 
     Ok(ProjectOpenTarget {
-        title: poc_terminal::project_title_from_path(&project_root),
+        title,
         project_root,
         kind,
     })
