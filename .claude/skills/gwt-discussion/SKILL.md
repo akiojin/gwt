@@ -78,12 +78,10 @@ Use this contract:
   `[active]` to `[parked]`.
 - `Dismiss for now` suppresses the prompt only for the current agent session. A
   later session may surface it again.
-- `PreToolUse` may also dispatch `workflow-policy` before mutating tool calls.
-- `workflow-policy` should allow read-only investigation, but block
-  implementation edits until an owner Issue or SPEC is linked.
-- If the owner is a `gwt-spec` Issue, `workflow-policy` should block
-  implementation until the owner SPEC cache has non-empty `plan` and `tasks`
-  sections; local files alone do not unblock it.
+- `PreToolUse` may also dispatch `workflow-policy` before tool calls.
+- `workflow-policy` enforces safety guardrails only: branch switching,
+  worktree escape, and direct `gh` CLI are blocked. It does not gate
+  implementation by owner Issue/SPEC or plan/tasks presence.
 
 ## Platform question tool
 
