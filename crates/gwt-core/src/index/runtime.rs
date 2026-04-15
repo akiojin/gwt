@@ -3,6 +3,8 @@
 //! This module owns the Rust side of:
 //! - Reconciling `~/.gwt/index/<repo-hash>/worktrees/` against `git worktree list`
 //!   and removing orphans + legacy `$WORKTREE/.gwt/index/` directories
+//! - Cleaning up legacy worktree-scoped SPEC index artifacts after SPEC index
+//!   moved to the repo root
 //! - Refreshing the Issue index according to a TTL window
 //! - Spawning the Python runner as background tokio tasks
 //!
@@ -45,7 +47,9 @@ pub fn reconcile_repo(opts: &ReconcileOptions) -> Result<()> {
     let mut valid_hashes = std::collections::HashSet::new();
     for path in &opts.active_worktree_paths {
         if let Ok(h) = compute_worktree_hash(path) {
-            valid_hashes.insert(h.as_str().to_string());
+            let hash = h.as_str().to_string();
+            remove_legacy_worktree_specs_artifacts(&opts.index_root, &opts.repo_hash, &hash)?;
+            valid_hashes.insert(hash);
         }
     }
 
@@ -76,6 +80,26 @@ pub fn reconcile_repo(opts: &ReconcileOptions) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn remove_legacy_worktree_specs_artifacts(
+    index_root: &Path,
+    repo: &RepoHash,
+    worktree_hash: &str,
+) -> Result<()> {
+    let worktree_dir = index_root
+        .join(repo.as_str())
+        .join("worktrees")
+        .join(worktree_hash);
+    let legacy_specs = worktree_dir.join("specs");
+    if legacy_specs.exists() {
+        std::fs::remove_dir_all(&legacy_specs)?;
+    }
+    let legacy_manifest = worktree_dir.join("manifest-specs.json");
+    if legacy_manifest.exists() {
+        std::fs::remove_file(&legacy_manifest)?;
+    }
     Ok(())
 }
 

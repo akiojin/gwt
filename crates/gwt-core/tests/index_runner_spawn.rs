@@ -103,7 +103,6 @@ fn search_specs_e2e_with_real_e5_auto_builds() {
     fs::create_dir_all(&repo_root).unwrap();
 
     let repo = compute_repo_hash("https://github.com/example/test.git");
-    let wt = compute_worktree_hash(&repo_root).unwrap();
     let fake_home = tmp.path().join("fake_home");
     fs::create_dir_all(&fake_home).unwrap();
     let cache_dir = fake_home
@@ -133,8 +132,6 @@ fn search_specs_e2e_with_real_e5_auto_builds() {
         .arg("search-specs")
         .arg("--repo-hash")
         .arg(repo.as_str())
-        .arg("--worktree-hash")
-        .arg(wt.as_str())
         .arg("--project-root")
         .arg(&repo_root)
         .arg("--query")

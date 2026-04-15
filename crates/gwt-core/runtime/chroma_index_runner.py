@@ -968,7 +968,7 @@ LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
 V2_SCOPES = ("issues", "specs", "files", "files-docs")
-WORKTREE_SCOPED = {"specs", "files", "files-docs"}
+WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
 V2_FILES_DOCS_COLLECTION = "files_docs"
@@ -997,8 +997,8 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope == "issues":
-        return repo_dir / "issues"
+    if scope in {"issues", "specs"}:
+        return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
 
@@ -1506,7 +1506,7 @@ def _chunk_spec_content(content: str, max_chunk_len: int = 1800) -> List[Dict[st
 def action_index_specs_v2(
     project_root: str,
     repo_hash: str,
-    worktree_hash: str,
+    worktree_hash: Optional[str],
     mode: str = "full",
     db_root: Optional[Path] = None,
 ) -> dict:
