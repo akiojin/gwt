@@ -16,7 +16,7 @@ Run these before any creation or routing decision:
 3. **Local SPEC listing** if ownership is still unclear:
 
 ```bash
-python3 ".claude/scripts/spec_artifact.py" --repo "." --list-all
+gwt issue spec list
 ```
 
 ### Search evaluation
