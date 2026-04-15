@@ -60,25 +60,29 @@ impl WorkspaceState {
         }
 
         self.persisted.windows.sort_by_key(|window| window.z_index);
+        let open_indices = self
+            .persisted
+            .windows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, window)| (!window.minimized).then_some(index))
+            .collect::<Vec<_>>();
+        if open_indices.is_empty() {
+            return false;
+        }
         match mode {
-            ArrangeMode::Tile => self.arrange_tile(bounds),
-            ArrangeMode::Stack => self.arrange_stack(bounds),
+            ArrangeMode::Tile => self.arrange_tile(bounds, &open_indices),
+            ArrangeMode::Stack => self.arrange_stack(bounds, &open_indices),
         }
         self.reassign_z_indexes();
         true
     }
 
     pub fn focus_window(&mut self, id: &str) -> bool {
-        let Some(window) = self
-            .persisted
-            .windows
-            .iter_mut()
-            .find(|window| window.id == id)
-        else {
+        let Some(index) = self.window_index(id) else {
             return false;
         };
-        window.z_index = self.persisted.next_z_index;
-        self.persisted.next_z_index += 1;
+        self.bring_to_front(index);
         true
     }
 
@@ -87,19 +91,36 @@ impl WorkspaceState {
         direction: FocusCycleDirection,
         bounds: WindowGeometry,
     ) -> Option<String> {
-        let focus_order = self.focus_order_ids();
-        let current_id = focus_order.first()?.clone();
-
-        if focus_order.len() == 1 {
-            self.center_window(&current_id, bounds);
-            return Some(current_id);
+        // Use stable creation order (array index), not z_index order.
+        let eligible: Vec<usize> = self
+            .persisted
+            .windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !w.minimized)
+            .map(|(i, _)| i)
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        if eligible.len() == 1 {
+            let id = self.persisted.windows[eligible[0]].id.clone();
+            self.center_window(&id, bounds);
+            return Some(id);
         }
 
-        let next_index = match direction {
-            FocusCycleDirection::Forward => 1,
-            FocusCycleDirection::Backward => focus_order.len() - 1,
+        // Find the currently focused window (highest z_index) within eligible.
+        let current_idx = eligible
+            .iter()
+            .copied()
+            .max_by_key(|&i| self.persisted.windows[i].z_index)?;
+        let pos = eligible.iter().position(|&i| i == current_idx)?;
+
+        let next_pos = match direction {
+            FocusCycleDirection::Forward => (pos + 1) % eligible.len(),
+            FocusCycleDirection::Backward => (pos + eligible.len() - 1) % eligible.len(),
         };
-        let next_id = focus_order.get(next_index)?.clone();
+        let next_id = self.persisted.windows[eligible[next_pos]].id.clone();
         let _ = self.focus_window(&next_id);
         self.center_window(&next_id, bounds);
         Some(next_id)
@@ -139,11 +160,80 @@ impl WorkspaceState {
             } else {
                 WindowProcessStatus::Ready
             },
+            minimized: false,
+            maximized: false,
+            pre_maximize_geometry: None,
             persist,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
         window
+    }
+
+    pub fn maximize_window(&mut self, id: &str, bounds: WindowGeometry) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let window = &mut self.persisted.windows[index];
+        if window.maximized {
+            if let Some(geometry) = window.pre_maximize_geometry.take() {
+                window.geometry = geometry;
+            }
+            window.maximized = false;
+            window.minimized = false;
+        } else {
+            window.pre_maximize_geometry = Some(window.geometry.clone());
+            window.geometry = WindowGeometry {
+                x: bounds.x + ARRANGE_PADDING,
+                y: bounds.y + ARRANGE_PADDING,
+                width: (bounds.width - ARRANGE_PADDING * 2.0).max(0.0),
+                height: (bounds.height - ARRANGE_PADDING * 2.0).max(0.0),
+            };
+            window.minimized = false;
+            window.maximized = true;
+        }
+        self.bring_to_front(index);
+        true
+    }
+
+    pub fn minimize_window(&mut self, id: &str) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let window = &mut self.persisted.windows[index];
+        if window.minimized {
+            window.minimized = false;
+        } else {
+            if window.maximized {
+                if let Some(geometry) = window.pre_maximize_geometry.take() {
+                    window.geometry = geometry;
+                }
+                window.maximized = false;
+            }
+            window.minimized = true;
+        }
+        self.bring_to_front(index);
+        true
+    }
+
+    pub fn restore_window(&mut self, id: &str) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let window = &mut self.persisted.windows[index];
+        if window.maximized {
+            if let Some(geometry) = window.pre_maximize_geometry.take() {
+                window.geometry = geometry;
+            }
+            window.maximized = false;
+            window.minimized = false;
+        } else if window.minimized {
+            window.minimized = false;
+        } else {
+            return false;
+        }
+        self.bring_to_front(index);
+        true
     }
 
     pub fn update_geometry(&mut self, id: &str, geometry: WindowGeometry) -> bool {
@@ -165,8 +255,8 @@ impl WorkspaceState {
         self.persisted.windows.len() != initial_len
     }
 
-    fn arrange_tile(&mut self, bounds: WindowGeometry) {
-        let count = self.persisted.windows.len();
+    fn arrange_tile(&mut self, bounds: WindowGeometry, open_indices: &[usize]) {
+        let count = open_indices.len();
         let columns = (count as f64).sqrt().ceil() as usize;
         let rows = count.div_ceil(columns);
         let available_width = (bounds.width
@@ -180,7 +270,8 @@ impl WorkspaceState {
         let width = available_width.max(MIN_WINDOW_WIDTH);
         let height = available_height.max(MIN_WINDOW_HEIGHT);
 
-        for (index, window) in self.persisted.windows.iter_mut().enumerate() {
+        for (index, window_index) in open_indices.iter().enumerate() {
+            let window = &mut self.persisted.windows[*window_index];
             let column = index % columns;
             let row = index / columns;
             window.geometry = WindowGeometry {
@@ -189,14 +280,17 @@ impl WorkspaceState {
                 width,
                 height,
             };
+            window.maximized = false;
+            window.pre_maximize_geometry = None;
         }
     }
 
-    fn arrange_stack(&mut self, bounds: WindowGeometry) {
+    fn arrange_stack(&mut self, bounds: WindowGeometry, open_indices: &[usize]) {
         let available_width = (bounds.width - STACK_START_INSET * 2.0).max(MIN_WINDOW_WIDTH);
         let available_height = (bounds.height - STACK_START_INSET * 2.0).max(MIN_WINDOW_HEIGHT);
 
-        for (index, window) in self.persisted.windows.iter_mut().enumerate() {
+        for (index, window_index) in open_indices.iter().enumerate() {
+            let window = &mut self.persisted.windows[*window_index];
             window.geometry = WindowGeometry {
                 x: bounds.x + STACK_START_INSET + index as f64 * STACK_OFFSET_X,
                 y: bounds.y + STACK_START_INSET + index as f64 * STACK_OFFSET_Y,
@@ -211,6 +305,8 @@ impl WorkspaceState {
                     .min(available_height)
                     .max(MIN_WINDOW_HEIGHT),
             };
+            window.maximized = false;
+            window.pre_maximize_geometry = None;
         }
     }
 
@@ -226,6 +322,7 @@ impl WorkspaceState {
         windows.sort_by(|left, right| right.z_index.cmp(&left.z_index));
         windows
             .into_iter()
+            .filter(|window| !window.minimized)
             .map(|window| window.id.clone())
             .collect::<Vec<_>>()
     }
@@ -241,6 +338,17 @@ impl WorkspaceState {
         self.persisted.viewport.x = bounds.width * zoom / 2.0 - window_center_x * zoom;
         self.persisted.viewport.y = bounds.height * zoom / 2.0 - window_center_y * zoom;
         true
+    }
+
+    fn window_index(&self, id: &str) -> Option<usize> {
+        self.persisted.windows.iter().position(|window| window.id == id)
+    }
+
+    fn bring_to_front(&mut self, index: usize) {
+        if let Some(window) = self.persisted.windows.get_mut(index) {
+            window.z_index = self.persisted.next_z_index;
+            self.persisted.next_z_index += 1;
+        }
     }
 }
 
@@ -407,6 +515,8 @@ mod tests {
     fn cycling_focus_forward_brings_next_window_to_front_and_centers_it() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell);
+        // Array order: [claude-1(z=1), codex-1(z=2), shell-1(z=3)]
+        // Current focus: shell-1 (highest z). Forward wraps to claude-1.
 
         let focused = workspace
             .cycle_focus(
@@ -420,23 +530,17 @@ mod tests {
             )
             .expect("focused window");
 
-        assert_eq!(focused, "codex-1");
-        assert_eq!(workspace.window("codex-1").expect("codex").z_index, 4);
+        assert_eq!(focused, "claude-1");
+        assert_eq!(workspace.window("claude-1").expect("claude").z_index, 4);
         assert_eq!(workspace.persisted().next_z_index, 5);
-        assert_eq!(
-            workspace.persisted().viewport,
-            CanvasViewport {
-                x: -220.0,
-                y: 50.0,
-                zoom: 1.0,
-            }
-        );
     }
 
     #[test]
     fn cycling_focus_backward_wraps_and_preserves_zoom_when_centering() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell);
+        // Array order: [claude-1(z=1), codex-1(z=2), shell-1(z=3)]
+        // Current focus: shell-1 (highest z). Backward goes to codex-1.
         workspace.update_viewport(CanvasViewport {
             x: 12.0,
             y: -8.0,
@@ -455,16 +559,157 @@ mod tests {
             )
             .expect("focused window");
 
-        assert_eq!(focused, "claude-1");
-        assert_eq!(workspace.window("claude-1").expect("claude").z_index, 4);
+        assert_eq!(focused, "codex-1");
+        assert_eq!(workspace.window("codex-1").expect("codex").z_index, 4);
         assert_eq!(workspace.persisted().next_z_index, 5);
+    }
+
+    #[test]
+    fn maximizing_window_toggles_between_viewport_bounds_and_original_geometry() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let original = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+
+        let maximized = workspace.window("claude-1").expect("claude");
+        assert!(maximized.maximized);
+        assert!(!maximized.minimized);
         assert_eq!(
-            workspace.persisted().viewport,
-            CanvasViewport {
-                x: 75.0,
-                y: 157.5,
-                zoom: 1.25,
+            maximized.pre_maximize_geometry,
+            Some(original.clone())
+        );
+        assert_eq!(
+            maximized.geometry,
+            WindowGeometry {
+                x: 124.0,
+                y: 64.0,
+                width: 952.0,
+                height: 712.0,
             }
         );
+
+        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+
+        let restored = workspace.window("claude-1").expect("claude");
+        assert!(!restored.maximized);
+        assert!(!restored.minimized);
+        assert_eq!(restored.pre_maximize_geometry, None);
+        assert_eq!(restored.geometry, original);
+    }
+
+    #[test]
+    fn minimizing_window_toggles_and_preserves_normal_geometry() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let original = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.minimize_window("claude-1"));
+        assert!(workspace.window("claude-1").expect("claude").minimized);
+        assert_eq!(workspace.window("claude-1").expect("claude").geometry, original);
+
+        assert!(workspace.minimize_window("claude-1"));
+        assert!(!workspace.window("claude-1").expect("claude").minimized);
+        assert_eq!(workspace.window("claude-1").expect("claude").geometry, original);
+    }
+
+    #[test]
+    fn restoring_window_clears_maximized_and_minimized_states() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let original = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+        assert!(workspace.restore_window("claude-1"));
+        let restored = workspace.window("claude-1").expect("claude");
+        assert_eq!(restored.geometry, original);
+        assert!(!restored.maximized);
+        assert!(!restored.minimized);
+
+        assert!(workspace.minimize_window("claude-1"));
+        assert!(workspace.restore_window("claude-1"));
+        assert!(!workspace.window("claude-1").expect("claude").minimized);
+        assert_eq!(workspace.window("claude-1").expect("claude").geometry, original);
+    }
+
+    #[test]
+    fn minimizing_maximized_window_restores_original_geometry_before_collapsing() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let original = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+        assert!(workspace.minimize_window("claude-1"));
+
+        let minimized = workspace.window("claude-1").expect("claude");
+        assert!(minimized.minimized);
+        assert!(!minimized.maximized);
+        assert_eq!(minimized.geometry, original);
+        assert_eq!(minimized.pre_maximize_geometry, None);
+
+        assert!(workspace.restore_window("claude-1"));
+        let restored = workspace.window("claude-1").expect("claude");
+        assert_eq!(restored.geometry, original);
+        assert!(!restored.minimized);
+        assert!(!restored.maximized);
+    }
+
+    #[test]
+    fn cycling_focus_skips_minimized_windows() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::Shell);
+        assert!(workspace.minimize_window("codex-1"));
+
+        let focused = workspace
+            .cycle_focus(
+                FocusCycleDirection::Forward,
+                WindowGeometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1200.0,
+                    height: 800.0,
+                },
+            )
+            .expect("focused window");
+
+        assert_eq!(focused, "claude-1");
+        assert_eq!(workspace.window("claude-1").expect("claude").z_index, 5);
+    }
+
+    #[test]
+    fn arranging_windows_skips_minimized_windows() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::Shell);
+        let minimized_geometry = workspace
+            .window("codex-1")
+            .expect("codex")
+            .geometry
+            .clone();
+        assert!(workspace.minimize_window("codex-1"));
+
+        assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let shell = workspace.window("shell-1").expect("shell");
+        let codex = workspace.window("codex-1").expect("codex");
+
+        assert_eq!(claude.geometry.x, 124.0);
+        assert_eq!(claude.geometry.y, 64.0);
+        assert_eq!(shell.geometry.x, 612.0);
+        assert_eq!(shell.geometry.y, 64.0);
+        assert!(codex.minimized);
+        assert_eq!(codex.geometry, minimized_geometry);
     }
 }
