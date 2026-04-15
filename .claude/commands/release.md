@@ -182,17 +182,13 @@ AskUserQuestion のオプション（minor / patch の場合）:
 
 `"version": "X.Y.Z"` を `"version": "{NEW_VERSION}"` に更新
 
-#### 6.3 crates/gwt-tauri/tauri.conf.json
-
-`"version": "X.Y.Z"` を `"version": "{NEW_VERSION}"` に更新
-
-#### 6.4 Cargo.lock
+#### 6.3 Cargo.lock
 
 ```bash
 cargo update -w
 ```
 
-#### 6.5 CHANGELOG.md
+#### 6.4 CHANGELOG.md
 
 前回リリースタグ以降の変更のみを追加してください。git-cliffが過去の変更を含める場合は、手動でv{PREV_TAG}以降の変更のみを追加してください。
 
@@ -205,7 +201,7 @@ GITHUB_TOKEN=$(gh auth token) git-cliff --unreleased --tag v{NEW_VERSION} --prep
 ### 7. リリースコミット作成
 
 ```bash
-git add Cargo.toml Cargo.lock package.json crates/gwt-tauri/tauri.conf.json CHANGELOG.md
+git add Cargo.toml Cargo.lock package.json CHANGELOG.md
 git commit -m "chore(release): v{NEW_VERSION}"
 ```
 
