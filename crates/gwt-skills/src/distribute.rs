@@ -36,7 +36,7 @@ enum RootEntryKind {
 ///
 /// Claude and Codex hook execution are now driven only by generated config
 /// (`.claude/settings.local.json` and `.codex/hooks.json`).
-/// Retired `hooks/scripts/gwt-*.mjs` files are pruned as stale managed
+/// Retired `hooks/scripts/gwt-*` files are pruned as stale managed
 /// assets instead of being redistributed.
 pub fn distribute_to_worktree(worktree: &Path) -> io::Result<DistributeReport> {
     let mut report = DistributeReport::default();
@@ -360,8 +360,6 @@ mod tests {
     fn distribute_does_not_create_retired_codex_hook_scripts() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
-        let hook = dir.path().join(".codex/hooks/scripts/gwt-forward-hook.mjs");
-        assert!(!hook.exists(), "unexpected {}", hook.display());
         assert!(
             !dir.path().join(".codex/hooks").exists(),
             "unexpected stale .codex/hooks directory"
@@ -417,7 +415,9 @@ mod tests {
 
         let stale_skill = dir.path().join(".codex/skills/gwt-agent-read");
         let stale_command = dir.path().join(".claude/commands/gwt-issue-search.md");
-        let stale_hook = dir.path().join(".claude/hooks/scripts/gwt-legacy-hook.mjs");
+        let stale_hook = dir
+            .path()
+            .join(".claude/hooks/scripts/gwt-legacy-hook.retired");
 
         fs::create_dir_all(stale_skill.join("nested")).unwrap();
         fs::create_dir_all(stale_command.parent().unwrap()).unwrap();
@@ -451,7 +451,9 @@ mod tests {
         init_git_repo(dir.path());
 
         let tracked_command = dir.path().join(".claude/commands/gwt-issue-search.md");
-        let tracked_hook = dir.path().join(".codex/hooks/scripts/gwt-legacy-hook.mjs");
+        let tracked_hook = dir
+            .path()
+            .join(".codex/hooks/scripts/gwt-legacy-hook.retired");
 
         fs::create_dir_all(tracked_command.parent().unwrap()).unwrap();
         fs::create_dir_all(tracked_hook.parent().unwrap()).unwrap();
@@ -459,7 +461,7 @@ mod tests {
         fs::write(&tracked_hook, "tracked hook").unwrap();
 
         track_path(dir.path(), ".claude/commands/gwt-issue-search.md");
-        track_path(dir.path(), ".codex/hooks/scripts/gwt-legacy-hook.mjs");
+        track_path(dir.path(), ".codex/hooks/scripts/gwt-legacy-hook.retired");
 
         distribute_to_worktree(dir.path()).unwrap();
 
@@ -521,7 +523,7 @@ mod tests {
         let stale_skill = dir.path().join(".codex/skills/gwt-agent-read/SKILL.md");
         let stale_hook = dir
             .path()
-            .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
+            .join(".claude/hooks/scripts/gwt-legacy-hook.retired");
 
         fs::create_dir_all(stale_command.parent().unwrap()).unwrap();
         fs::create_dir_all(stale_skill.parent().unwrap()).unwrap();
@@ -580,10 +582,6 @@ mod tests {
     fn distribute_does_not_create_retired_claude_hook_scripts() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
-        let hook = dir
-            .path()
-            .join(".claude/hooks/scripts/gwt-forward-hook.mjs");
-        assert!(!hook.exists(), "unexpected {}", hook.display());
         assert!(
             !dir.path().join(".claude/hooks").exists(),
             "unexpected stale .claude/hooks directory"

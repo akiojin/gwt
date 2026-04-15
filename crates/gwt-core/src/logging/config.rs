@@ -193,9 +193,9 @@ mod tests {
     fn initial_filter_directive_prefers_rust_log_env() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let original = std::env::var("RUST_LOG").ok();
-        std::env::set_var("RUST_LOG", "gwt_tui=trace");
+        std::env::set_var("RUST_LOG", "gwt=trace");
         let cfg = LoggingConfig::new("/tmp".into()).with_config_file_level(Some(LogLevel::Warn));
-        assert_eq!(cfg.initial_filter_directive(), "gwt_tui=trace");
+        assert_eq!(cfg.initial_filter_directive(), "gwt=trace");
         match original {
             Some(value) => std::env::set_var("RUST_LOG", value),
             None => std::env::remove_var("RUST_LOG"),

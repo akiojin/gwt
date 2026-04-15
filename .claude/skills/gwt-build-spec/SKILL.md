@@ -32,19 +32,18 @@ unless an existing artifact must keep its established language.
 Determine the mode at entry:
 
 - **SPEC mode** if a SPEC ID is provided or discoverable from the current branch/context, AND
-  `specs/SPEC-{id}/tasks.md` exists
+  `gwt issue spec <N> --section tasks` で tasks セクションが取得できる
 - **Standalone mode** otherwise
 
 ## Phase 1: Context Load
 
 ### SPEC mode
 
-1. Load the SPEC directory: `spec.md`, `plan.md`, `tasks.md`, `progress.md` (if present).
-2. Load supporting artifacts: `research.md`, `data-model.md`, `quickstart.md`, `contracts/*`, `checklists/*`.
-3. Identify the next incomplete task slice in dependency order:
+1. `gwt issue spec <N>` で SPEC の全セクション（spec, plan, tasks）を読み込む。
+2. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-4. Use `.claude/scripts/spec_artifact.py` for artifact read/update operations.
+3. SPEC セクションの読み書きは `gwt issue spec <N> --section <name>` / `gwt issue spec <N> --edit <name> -f <file>` を使用する。
 
 ### Standalone mode
 
@@ -98,10 +97,10 @@ All other changes require the TDD loop.
 
 Run the smallest meaningful validation set first, then broaden:
 
-1. **Tests**: `cargo test -p gwt-core -p gwt-tui` (or narrower scope first)
+1. **Tests**: `cargo test -p gwt-core -p gwt` (or narrower scope first)
 2. **Lint**: `cargo clippy --all-targets --all-features -- -D warnings`
 3. **Format**: `cargo fmt -- --check`
-4. **Build**: `cargo build -p gwt-tui`
+4. **Build**: `cargo build -p gwt`
 
 In SPEC mode, also verify:
 
@@ -128,16 +127,15 @@ Reconcile implemented behavior against all SPEC artifacts. See `references/compl
 Required checks:
 
 - Every completed task in `tasks.md` matches the implementation
-- `checklists/acceptance.md` reflects actual accepted behavior
-- `checklists/tdd.md` reflects actual verification evidence
-- `progress.md` entries do not claim completion unsupported by code
+- tasks セクションの受け入れチェックボックスが実際の受け入れ済み動作を反映している
+- tasks セクションの TDD チェックボックスが実際の検証エビデンスを反映している
+- tasks セクションの完了マーカーがコードで裏付けられていない完了を主張していない
 - If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
 
 Update execution tracking:
 
 - Mark completed tasks in `tasks.md`
-- Append progress to `specs/SPEC-{id}/progress.md` using the Progress / Done / Next template
-- Use `.claude/scripts/spec_artifact.py` for artifact updates
+- tasks セクションのチェックボックスを `gwt issue spec <N> --edit tasks -f <file>` で更新する
 
 ### Standalone mode
 

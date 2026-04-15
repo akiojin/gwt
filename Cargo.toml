@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/gwt",
     "crates/gwt-agent",
     "crates/gwt-ai",
     "crates/gwt-clipboard",
@@ -11,11 +12,10 @@ members = [
     "crates/gwt-github",
     "crates/gwt-skills",
     "crates/gwt-terminal",
-    "crates/gwt-tui",
     "crates/gwt-voice",
 ]
 default-members = [
-    "crates/gwt-tui",
+    "crates/gwt",
 ]
 
 [workspace.package]
@@ -145,6 +145,3 @@ debug = true
 [profile.bench]
 inherits = "release"
 debug = true
-
-[patch.crates-io]
-ratatui-core = { path = "vendor/ratatui-core" }

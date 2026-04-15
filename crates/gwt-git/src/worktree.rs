@@ -300,7 +300,7 @@ impl WorktreeManager {
 
     /// Force-remove the worktree bound to `branch` (when one exists) and
     /// then delete the local branch (FR-018f, FR-018g). Mirrors the old
-    /// `WorktreeManager::cleanup_branch` from `gwt-tauri/src/commands/cleanup.rs`.
+    /// the legacy GUI cleanup command implementation.
     ///
     /// The function is idempotent against missing worktrees, missing
     /// branches, and orphaned worktree metadata: a `git worktree prune`

@@ -32,7 +32,7 @@ behind the visible `gwt-plan-spec` entrypoint.
 
 ## Required outputs
 
-All artifacts are written to the SPEC directory (`specs/SPEC-<id>/`):
+All artifacts are written to the SPEC's GitHub Issue sections:
 
 - `plan.md` — architecture, phases, constitution check
 - `research.md` — unknowns, tradeoff decisions, external findings
@@ -188,52 +188,18 @@ When invoked without a SPEC:
 
 ## Operations
 
-Use `.claude/scripts/spec_artifact.py` for artifact persistence:
+Use `gwt issue spec` CLI for artifact persistence:
 
 ```bash
-# Write plan.md
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --upsert \
-  --artifact "doc:plan.md" \
-  --body-file /tmp/plan.md
+# Read spec section
+gwt issue spec <Issue番号> --section spec
 
-# Write research.md
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --upsert \
-  --artifact "doc:research.md" \
-  --body-file /tmp/research.md
+# Write plan section
+gwt issue spec <Issue番号> --edit plan -f /tmp/plan.md
 
-# Write data-model.md
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --upsert \
-  --artifact "doc:data-model.md" \
-  --body-file /tmp/data-model.md
+# Write tasks section
+gwt issue spec <Issue番号> --edit tasks -f /tmp/tasks.md
 
-# Write quickstart.md
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --upsert \
-  --artifact "doc:quickstart.md" \
-  --body-file /tmp/quickstart.md
-
-# Write tasks.md
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --upsert \
-  --artifact "doc:tasks.md" \
-  --body-file /tmp/tasks.md
-
-# List artifacts
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." \
-  --spec "<id>" \
-  --list
+# List all SPEC Issues
+gwt issue spec list
 ```

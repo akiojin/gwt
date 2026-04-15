@@ -1,42 +1,40 @@
 # Architecture
 
-gwt は Git worktree とコーディングエージェント起動を扱うデスクトップ GUI アプリです。
+gwt は単一の Rust バイナリで GUI と CLI を提供します。
 
 ## Components
 
-- `gwt-gui/`
-  - Svelte 5 + TypeScript + Vite
-  - xterm.js による内蔵ターミナル UI
-- `crates/gwt-tauri/`
-  - Tauri v2 バックエンド（Rust）
-  - Tauri Commands とアプリ状態管理
+- `crates/gwt/`
+  - Wry + Tao ベースのネイティブ GUI
+  - ローカル HTTP/WebSocket サーバー
+  - WebView / ブラウザ共通のキャンバス UI
+  - `gwt issue ...` / `gwt pr ...` / `gwt hook ...` の CLI 入口
 - `crates/gwt-core/`
-  - コアロジック（Git/Worktree/設定/ログ/Docker/PTY）
+  - Git / worktree / 設定 / ログ / coordination / index ランタイム
+- `crates/gwt-github/`
+  - SPEC Issue の取得・更新・ローカルキャッシュ
+- `crates/gwt-agent/`
+  - エージェントセッション状態とランタイムメタデータ
+- `crates/gwt-terminal/`
+  - PTY とプロセスウィンドウ管理
 
 ## Data Flow
 
-UI は `@tauri-apps/api` の `invoke()` でバックエンドのコマンドを呼び出し、結果を表示します。
-
-- Project:
-  - open/create
-  - repo type check
-- Branch/Worktree:
-  - list branches/worktrees
-  - create worktree (必要に応じて新規ブランチ作成)
-- Terminal/Agent:
-  - PTY 起動
-  - エージェント起動（Claude Code/Codex/Gemini/OpenCode）
-- Settings/Profiles:
-  - グローバル設定の読み書き
-  - グローバルプロファイル（環境変数、AI 設定）の読み書き
+1. `gwt` を GUI モードで起動すると、ネイティブウィンドウとローカル HTTP/WebSocket サーバーが立ち上がる
+2. WebView は同じサーバーへ接続し、キャンバス上のウィンドウ状態を同期する
+3. `Shell` / `Agent` ウィンドウは PTY を通してプロセスを実行する
+4. `Branches` / `File Tree` / `Issue` などのウィンドウは Rust 側でデータを集約し、フロントエンドへ送る
+5. `gwt issue ...` などの CLI サブコマンドは GUI を起動せず、同じバイナリ内で完結する
 
 ## Persistence
 
-設定と履歴はローカルファイルとして保存します（DB なし）。
-
+- GUI 状態:
+  - `~/.gwt/workspace-state.json`
 - 設定:
   - `~/.gwt/config.toml`
 - プロファイル:
   - `~/.gwt/profiles.yaml`
+- Issue / SPEC キャッシュ:
+  - `~/.gwt/cache/issues/<repo-hash>/`
 - ログ:
   - `~/.gwt/logs/`

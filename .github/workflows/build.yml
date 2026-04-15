@@ -10,10 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Install WebView dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build workspace targets
-        run: cargo build -p gwt-core -p gwt-tui --all-features
+        run: cargo build -p gwt-core -p gwt --all-features
 
   check-windows:
     name: Check (Windows)
@@ -25,4 +29,4 @@ jobs:
         with:
           key: check-windows
       - name: Check Windows compilation
-        run: cargo check -p gwt-core -p gwt-tui
+        run: cargo check -p gwt-core -p gwt

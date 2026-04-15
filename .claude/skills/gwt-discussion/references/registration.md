@@ -7,145 +7,65 @@ Detailed logic for the SPEC creation/update phase of gwt-discussion.
 Phase 3 runs only when Phase 1 routing produced `NEW-SPEC` and Phase 2 domain
 discovery confirmed the scope is right for a SPEC.
 
-## SPEC ID allocation
+## SPEC creation
 
-SPEC IDs are sequential integers. Determine the next ID by listing existing SPECs:
+SPEC の作成・更新は `gwt issue spec` CLI で行う。
+すべての要約・タイトル・更新説明は current user's language で記述する。
 
-```bash
-python3 ".claude/scripts/spec_artifact.py" --repo "." --list-all
-```
-
-Pick the next available number.
-
-## Title convention
-
-All SPECs must use the `gwt-spec:` prefix:
-
-```text
-gwt-spec: <concise description in the current user's language>
-```
-
-- Always use `gwt-spec:` (not other prefixes).
-- Description should be a short action-oriented summary in the current user's
-  language.
-
-## Directory creation
+### コマンド
 
 ```bash
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." --create --title "gwt-spec: <description in the current user's language>"
+# SPEC 一覧
+gwt issue spec list
+
+# SPEC 作成（構造化 JSON 推奨）
+gwt issue spec create --help
+gwt issue spec create --json --title "SPEC: <説明> — <サブタイトル>" \
+  -f <spec.json>
+
+# SPEC 作成（既存 Markdown 断片から直接作る互換パス）
+gwt issue spec create --title "SPEC: <説明> — <サブタイトル>" \
+  -f <spec.md>
+
+# SPEC セクション読み取り
+gwt issue spec <Issue番号>
+gwt issue spec <Issue番号> --section spec
+
+# SPEC セクション更新
+gwt issue spec <Issue番号> --edit spec -f <file>
 ```
 
-This creates:
+注意:
+
+- `gwt issue spec create --help` をフォーマット、JSON スキーマ、入力例の唯一の正とする。
+- `spec create -f` はファイル内に `<!-- artifact:spec BEGIN/END -->` マーカーを期待する。
+- マーカーなしの場合は `spec create` でタイトルだけ作成し、`--edit spec -f` または
+  `--edit spec --json` で内容を投入する。
+
+### Title convention
 
 ```text
-specs/SPEC-{id}/
-  metadata.json
+SPEC-<Issue#>: <現在のユーザー言語での簡潔な説明> — <サブタイトル>
 ```
 
-### metadata.json structure
+`SPEC-<Issue#>:` プレフィックスは Issue 作成後に確定する。
 
-```json
-{
-  "id": "SPEC-{id}",
-  "title": "gwt-spec: <description in the current user's language>",
-  "status": "open",
-  "phase": "Specify",
-  "created_at": "2024-01-01T00:00:00Z",
-  "updated_at": "2024-01-01T00:00:00Z"
-}
-```
-
-## Seeding spec.md
-
-After directory creation, write spec.md populated from the intake memo and
-domain model summary.
-
-### Template
-
-Use the current user's language for the actual artifact text. The headings below
-show structure, not a required output language.
-
-```markdown
-# Feature Specification: <title>
-
-## Background
-
-<from intake memo: Request + Why now>
-
-## Ubiquitous Language
-
-<from domain model: term definitions>
-
-| Term | Definition |
-|---|---|
-| <term> | <definition> |
-
-## User Stories
-
-### User Story 1 - <title> (Priority: P1)
-
-As a <actor>, I want to <goal>, so that <benefit>.
-
-## Acceptance Scenarios
-
-1. Given <precondition>, when <action>, then <expected result>.
-
-## Edge Cases
-
-- <edge case description>
-
-## Functional Requirements
-
-- FR-001: <requirement>
-
-## Non-Functional Requirements
-
-- NFR-001: <requirement>
-
-## Success Criteria
-
-- SC-001: <measurable criterion>
-```
-
-### Rules for seeding
+### Seeding rules
 
 - Populate from the intake memo and domain model. Do not invent requirements.
 - Use `[NEEDS CLARIFICATION: <question>]` for unknowns instead of guessing.
-- Include the Ubiquitous Language section from Phase 2.
+- Include ユビキタス言語 from Phase 2.
 - Map user stories to the entities and BCs identified in Phase 2.
-- Do not create plan.md or tasks.md at this phase.
-
-### Upload
-
-```bash
-cat <<'SPEC_EOF' > /tmp/spec.md
-<spec content>
-SPEC_EOF
-
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." --spec "<id>" --upsert \
-  --artifact "doc:spec.md" --body-file /tmp/spec.md
-```
+- Do not create plan or tasks at this phase.
 
 ## Post-registration
 
-After creating the SPEC and seeding spec.md, proceed directly to Phase 4
-(Clarification). Do not stop unless the user explicitly requested register-only.
+After creating the SPEC, proceed directly to Phase 4 (Clarification). Do not
+stop unless the user explicitly requested register-only.
 
-## Full SPEC directory structure (for reference)
+## SPEC storage
 
-Later phases will add these files:
+SPEC は GitHub Issue の body 内に `<!-- artifact:NAME BEGIN/END -->` マーカーで
+格納される。大きなセクションは Issue comment に分割される。
 
-```text
-specs/SPEC-{id}/
-  metadata.json      # created in Phase 3
-  spec.md            # created in Phase 3
-  plan.md            # created by gwt-spec-plan
-  tasks.md           # created by gwt-spec-plan/gwt-tasks
-  research.md        # created by gwt-spec-plan
-  data-model.md      # created by gwt-spec-plan
-  quickstart.md      # created by gwt-spec-plan
-  contracts/         # created by gwt-spec-plan
-  checklists/        # created by gwt-spec-plan
-```
+ローカルキャッシュ: `~/.gwt/cache/issues/<Issue番号>/`

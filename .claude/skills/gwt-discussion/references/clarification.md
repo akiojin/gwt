@@ -12,28 +12,26 @@ scenarios.
 
 This phase works on:
 
-```text
-specs/SPEC-{id}/spec.md
-```
+GitHub Issue #<Issue番号> の spec セクション。`gwt issue spec <Issue番号> --section spec` で取得する。
 
-The file must contain these sections:
+spec セクションは以下の構造を含む:
 
-- Background
-- Ubiquitous Language (added in Phase 2/3)
-- User Stories
-- Acceptance Scenarios
-- Edge Cases
-- Functional Requirements
-- Non-Functional Requirements
-- Success Criteria
+- 状態
+- 背景
+- ユビキタス言語 (Phase 2/3 で追加)
+- ユーザーストーリー
+- 受け入れシナリオ
+- エッジケース
+- 機能要件
+- 非機能要件
+- 成功基準
 
 ## Workflow
 
 ### Step 1: Read current spec.md
 
 ```bash
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." --spec "<id>" --get --artifact "doc:spec.md"
+gwt issue spec <Issue番号> --section spec
 ```
 
 If spec.md does not exist, return to Phase 3 (registration) first.
@@ -81,9 +79,7 @@ After receiving answers:
 Upload:
 
 ```bash
-python3 ".claude/scripts/spec_artifact.py" \
-  --repo "." --spec "<id>" --upsert \
-  --artifact "doc:spec.md" --body-file /tmp/spec.md
+gwt issue spec <Issue番号> --edit spec -f /tmp/spec.md
 ```
 
 ### Step 6: Decide next step

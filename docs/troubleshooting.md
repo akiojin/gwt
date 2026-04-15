@@ -5,15 +5,12 @@
 1. ログを確認します。
 
 - `~/.gwt/logs/`
+- `stderr` に出力される `http://127.0.0.1:<port>/` の URL を通常のブラウザで開き、WebView 固有の問題かどうかを切り分けます。
 
-1. 開発環境の場合は、フロントエンド依存関係と Tauri の起動順を確認します。
+1. 開発環境では GUI を直接起動して確認します。
 
 ```bash
-cd gwt-gui
-npm ci
-
-cd ..
-cargo tauri dev
+cargo run -p gwt
 ```
 
 ## 設定が壊れている/読み込めない
@@ -27,6 +24,11 @@ cargo tauri dev
 
 - 選択したディレクトリが Git リポジトリであることを確認してください。
 - bare リポジトリを直接開くのではなく、worktree（作業ツリー）側のディレクトリを選択してください。
+
+## CLI 実行で GUI が開く
+
+- `gwt issue ...` / `gwt pr ...` / `gwt actions ...` / `gwt board ...` / `gwt hook ...` は GUI を起動しません。
+- GUI が開いてしまう場合は、実行しているバイナリが古い可能性があります。`which gwt` と `gwt --help` 相当の配置を確認し、最新の `gwt` バイナリへ置き換えてください。
 
 ## Windows: Host OS 起動でタブが空白になる / 入力できない
 

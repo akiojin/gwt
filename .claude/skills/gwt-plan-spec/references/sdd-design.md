@@ -30,7 +30,7 @@ For each new or significantly modified component:
 - Prefer modifying existing components over introducing new ones
 - A component that cannot be described in one sentence is too large — split it
 - Record the reason in `Complexity Tracking` when adding a new abstraction layer
-- Follow the project's existing module hierarchy (`gwt-core`, `gwt-tui`)
+- Follow the project's existing module hierarchy (`gwt-core`, `gwt`)
 
 ## Interface Contracts
 
@@ -38,7 +38,7 @@ For each new or significantly modified component:
 
 Write a contract file in `contracts/` when:
 
-- An interface crosses crate boundaries (e.g., `gwt-core` to `gwt-tui`)
+- An interface crosses crate boundaries (e.g., `gwt-core` to `gwt`)
 - A public API will be consumed by multiple callers
 - A message format or protocol needs stability guarantees
 - An external system boundary is involved
