@@ -142,7 +142,7 @@ impl Pane {
     /// Resize the pane (PTY + vt100 parser).
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         self.pty.resize(cols, rows)?;
-        self.parser.set_size(rows, cols);
+        self.parser.screen_mut().set_size(rows, cols);
         Ok(())
     }
 
