@@ -9,7 +9,7 @@
 //! - allow read-only investigation and docs/chore-style edits
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
 use gwt_agent::types::WorkflowBypass;
@@ -17,7 +17,7 @@ use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
-use super::{block_bash_policy, block_file_ops, BlockDecision, HookError, HookEvent};
+use super::{block_bash_policy, BlockDecision, HookError, HookEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -80,37 +80,11 @@ struct IssueBranchLinkStore {
 pub fn evaluate_with_context(
     event: &HookEvent,
     worktree_root: &Path,
-    context: &WorkflowContext,
+    _context: &WorkflowContext,
 ) -> Result<Option<BlockDecision>, HookError> {
-    // 1. Legacy safety (gh issue CLI, branch ops, worktree-external file ops)
-    if let Some(decision) = block_bash_policy::evaluate(event, worktree_root)? {
-        return Ok(Some(decision));
-    }
-
-    // 2. Docs/chore path exemption + non-mutating tools
-    if is_exempt_chore_change(event) || !is_mutating_tool_call(event, worktree_root) {
-        return Ok(None);
-    }
-
-    // 3. Worktree-internal operations are allowed without owner
-    if is_worktree_internal_operation(event, worktree_root) {
-        return Ok(None);
-    }
-
-    // 4. Session-level bypass (release/chore workflows)
-    if context.bypass.is_some() {
-        return Ok(None);
-    }
-
-    // 5. Owner gate (only reached for external operations like git push)
-    match context.owner {
-        WorkflowOwner::Unknown => Ok(Some(missing_owner_decision())),
-        WorkflowOwner::Issue(_) => Ok(None),
-        WorkflowOwner::Spec(issue_number) if !context.has_plan || !context.has_tasks => Ok(Some(
-            missing_spec_artifacts_decision(issue_number, context.has_plan, context.has_tasks),
-        )),
-        WorkflowOwner::Spec(_) => Ok(None),
-    }
+    // Safety guardrails only: branch switching, worktree escape, direct gh CLI.
+    // No owner gate — git push/commit and worktree-internal edits are always allowed.
+    block_bash_policy::evaluate(event, worktree_root)
 }
 
 pub fn evaluate(
@@ -213,217 +187,4 @@ fn has_nonempty_section(spec_body: &SpecBody, name: &str) -> bool {
         .sections
         .get(&SectionName(name.to_string()))
         .is_some_and(|content| !content.trim().is_empty())
-}
-
-fn is_worktree_internal_operation(event: &HookEvent, worktree_root: &Path) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "Write" | "MultiEdit") => extract_target_path(event)
-            .is_some_and(|path| is_path_within_worktree(&path, worktree_root)),
-        Some("Bash") => event
-            .command()
-            .is_some_and(|cmd| !has_external_side_effects(cmd)),
-        _ => true,
-    }
-}
-
-fn has_external_side_effects(command: &str) -> bool {
-    for segment in super::segments::split_command_segments(command) {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        if tokens.first().copied() == Some("git") && tokens.get(1).copied() == Some("push") {
-            return true;
-        }
-    }
-    false
-}
-
-fn normalize_path(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        use std::path::Component::*;
-        match comp {
-            ParentDir => {
-                out.pop();
-            }
-            CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-fn is_path_within_worktree(path: &Path, worktree_root: &Path) -> bool {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        worktree_root.join(path)
-    };
-    let abs = normalize_path(&abs);
-    let root = normalize_path(worktree_root);
-    abs == root || abs.starts_with(&root)
-}
-
-fn is_mutating_tool_call(event: &HookEvent, worktree_root: &Path) -> bool {
-    match event.tool_name.as_deref() {
-        Some("Edit" | "Write" | "MultiEdit") => true,
-        Some("Bash") => event
-            .command()
-            .is_some_and(|command| is_mutating_bash_command(command, worktree_root)),
-        _ => false,
-    }
-}
-
-fn is_exempt_chore_change(event: &HookEvent) -> bool {
-    matches!(
-        event.tool_name.as_deref(),
-        Some("Edit" | "Write" | "MultiEdit")
-    ) && extract_target_path(event).is_some_and(is_docs_or_chore_path)
-}
-
-fn extract_target_path(event: &HookEvent) -> Option<PathBuf> {
-    let tool_input = event.tool_input.as_ref()?;
-    let raw = tool_input
-        .get("file_path")
-        .or_else(|| tool_input.get("path"))
-        .and_then(serde_json::Value::as_str)?;
-    Some(PathBuf::from(raw))
-}
-
-fn is_docs_or_chore_path(path: PathBuf) -> bool {
-    let path = path.as_path();
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    let path_text = path.to_string_lossy();
-
-    file_name.eq_ignore_ascii_case("AGENTS.md")
-        || file_name.ends_with(".md")
-        || path_text.starts_with("docs/")
-        || path_text.starts_with("tasks/")
-        || path_text.starts_with(".gwt/")
-        || path_text.starts_with(".claude/")
-        || path_text.starts_with(".codex/")
-        || path_text.starts_with(".github/")
-}
-
-fn is_mutating_bash_command(command: &str, worktree_root: &Path) -> bool {
-    for segment in super::segments::split_command_segments(command) {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if contains_shell_write_operator(trimmed) {
-            return true;
-        }
-
-        let tokens = command_tokens(trimmed);
-        let Some(command_name) = tokens.first().copied() else {
-            continue;
-        };
-        let subcommand = tokens.get(1).copied().unwrap_or_default();
-
-        if is_worktree_local_file_op(command_name, trimmed, worktree_root) {
-            continue;
-        }
-
-        match command_name {
-            "touch" | "mkdir" | "rm" | "mv" | "cp" | "install" | "tee" | "truncate" => {
-                return true;
-            }
-            "sed"
-                if tokens
-                    .iter()
-                    .any(|token| *token == "-i" || *token == "--in-place") =>
-            {
-                return true;
-            }
-            "perl" if tokens.iter().any(|token| token.starts_with("-i")) => {
-                return true;
-            }
-            "cargo" if subcommand == "fmt" => {
-                return true;
-            }
-            "git" if matches!(subcommand, "add" | "commit" | "push" | "rm" | "mv") => {
-                return true;
-            }
-            "npx" | "bunx" | "prettier" if tokens.contains(&"--write") => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-fn is_worktree_local_file_op(command_name: &str, segment: &str, worktree_root: &Path) -> bool {
-    matches!(
-        command_name,
-        "mkdir" | "rmdir" | "rm" | "touch" | "cp" | "mv"
-    ) && block_file_ops::evaluate_bash_command(segment, worktree_root).is_none()
-}
-
-fn contains_shell_write_operator(command: &str) -> bool {
-    command.contains(">>")
-        || command.contains(">|")
-        || command.contains(">")
-        || command.contains("<<")
-}
-
-fn command_tokens(segment: &str) -> Vec<&str> {
-    let raw: Vec<&str> = segment.split_whitespace().collect();
-    let mut start = 0;
-
-    if raw.get(start) == Some(&"env") {
-        start += 1;
-    }
-    while start < raw.len() && is_env_assignment(raw[start]) {
-        start += 1;
-    }
-
-    raw[start..].to_vec()
-}
-
-fn is_env_assignment(token: &str) -> bool {
-    let Some((name, _value)) = token.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn missing_owner_decision() -> BlockDecision {
-    BlockDecision::new(
-        "workflow owner is required before implementation",
-        "This tool call would change project state before an owner Issue or SPEC is linked.\n\n\
-Continue with `gwt-discussion` to settle the owner, run `gwt-search` if scope ownership is unclear, or relaunch from a linked Issue before editing code.",
-    )
-}
-
-fn missing_spec_artifacts_decision(
-    issue_number: u64,
-    has_plan: bool,
-    has_tasks: bool,
-) -> BlockDecision {
-    let mut missing = Vec::new();
-    if !has_plan {
-        missing.push("plan");
-    }
-    if !has_tasks {
-        missing.push("tasks");
-    }
-    let missing_text = missing.join(" + ");
-    BlockDecision::new(
-        format!("linked SPEC #{issue_number} is missing {missing_text}"),
-        format!(
-            "Issue #{issue_number} is a `gwt-spec` owner, so implementation stays blocked until `{missing_text}` is ready.\n\n\
-Use `gwt-discussion` to finalize the decision surface, then update the owner through `gwt-plan-spec` before resuming code changes."
-        ),
-    )
 }

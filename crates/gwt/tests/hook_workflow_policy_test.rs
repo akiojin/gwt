@@ -191,14 +191,18 @@ fn allows_worktree_internal_edit_with_relative_path() {
 }
 
 #[test]
-fn blocks_edit_outside_worktree_without_owner() {
+fn allows_edit_outside_worktree_without_owner() {
+    // Edit/Write path control is handled by Claude Code permissions, not by
+    // workflow-policy. The hook only enforces Bash safety guardrails.
     let event = event(
         "Edit",
         json!({ "file_path": "/outside/project/src/lib.rs", "old_string": "x", "new_string": "y" }),
     );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("edit outside worktree must block without owner");
-    assert!(decision.reason.contains("owner"));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "Edit outside worktree is not gated by workflow-policy"
+    );
 }
 
 #[test]
@@ -225,27 +229,29 @@ fn allows_mutation_for_plain_issue_owner() {
 }
 
 #[test]
-fn blocks_spec_owner_without_plan_on_external_op() {
+fn allows_git_push_even_for_spec_without_plan() {
     let event = event("Bash", json!({ "command": "git push" }));
     let decision = evaluate(
         &event,
         workflow_policy::WorkflowContext::spec_issue(1935, false, true),
-    )
-    .expect("spec without plan must block external ops");
-    assert!(decision.reason.contains("plan"));
-    assert!(decision.stop_reason.contains("gwt-plan-spec"));
+    );
+    assert!(
+        decision.is_none(),
+        "git push is transport and must not be gated by plan/tasks"
+    );
 }
 
 #[test]
-fn blocks_spec_owner_without_tasks_on_external_op() {
+fn allows_git_push_even_for_spec_without_tasks() {
     let event = event("Bash", json!({ "command": "git push" }));
     let decision = evaluate(
         &event,
         workflow_policy::WorkflowContext::spec_issue(1935, true, false),
-    )
-    .expect("spec without tasks must block external ops");
-    assert!(decision.reason.contains("tasks"));
-    assert!(decision.stop_reason.contains("gwt-plan-spec"));
+    );
+    assert!(
+        decision.is_none(),
+        "git push is transport and must not be gated by plan/tasks"
+    );
 }
 
 #[test]
@@ -321,11 +327,13 @@ fn allows_git_commit_without_owner() {
 }
 
 #[test]
-fn blocks_git_push_without_owner() {
+fn allows_git_push_without_owner() {
     let event = event("Bash", json!({ "command": "git push origin main" }));
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("git push must block without owner");
-    assert!(decision.reason.contains("owner"));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "git push is a transport operation and must not be gated by owner"
+    );
 }
 
 #[test]
@@ -372,14 +380,16 @@ fn allows_shell_redirect_without_owner() {
 }
 
 #[test]
-fn blocks_git_push_in_chained_command() {
+fn allows_git_push_in_chained_command() {
     let event = event(
         "Bash",
         json!({ "command": "cargo fmt && git push origin main" }),
     );
-    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
-        .expect("chained command with git push must block");
-    assert!(decision.reason.contains("owner"));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "chained command with git push must not be gated by owner"
+    );
 }
 
 #[test]
@@ -398,7 +408,7 @@ fn reuses_legacy_bash_policy_rules_before_spec_gate() {
         workflow_policy::WorkflowContext::spec_issue(1935, true, true),
     )
     .expect("issue cli must still be blocked");
-    assert!(decision.reason.contains("GitHub Issue CLI"));
+    assert!(decision.reason.contains("GitHub workflow CLI"));
 }
 
 #[test]
@@ -412,8 +422,10 @@ fn evaluate_resolves_spec_owner_from_session_cache() {
         let event = event("Bash", json!({ "command": "git push" }));
         let decision =
             workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
-        let decision = decision.expect("missing plan must block external ops");
-        assert!(decision.reason.contains("plan"));
+        assert!(
+            decision.is_none(),
+            "git push is transport and must not be gated by plan/tasks"
+        );
     });
 }
 
