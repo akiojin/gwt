@@ -2479,11 +2479,7 @@ mod tests {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.linked_issue_number = Some(1234);
 
-        let state = LaunchWizardState::open_with(
-            ctx,
-            sample_agent_options(),
-            Vec::new(),
-        );
+        let state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
 
         let config = state.build_launch_config().expect("config");
 
