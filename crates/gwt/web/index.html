@@ -2953,6 +2953,10 @@
         const topmostId = topmostWindowId(workspace);
         if (topmostId && ids.has(topmostId)) {
           focusWindowLocally(topmostId);
+          const runtime = terminalMap.get(topmostId);
+          if (runtime) {
+            runtime.terminal.focus();
+          }
         } else {
           focusedId = null;
         }
