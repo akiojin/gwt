@@ -23,8 +23,7 @@ use gwt::{
     list_directory_entries, load_app_state, refresh_managed_gwt_assets_for_worktree,
     resolve_launch_spec, save_app_state, workspace_state_path, BackendEvent, DockerWizardContext,
     FrontendEvent, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
-    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
