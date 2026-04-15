@@ -141,6 +141,16 @@ pub fn default_app_state() -> PersistedAppState {
     }
 }
 
+pub fn pause_process_windows_for_restore(state: &mut PersistedAppState) {
+    for tab in &mut state.tabs {
+        for window in &mut tab.workspace.windows {
+            if window.preset.requires_process() {
+                window.status = WindowProcessStatus::Exited;
+            }
+        }
+    }
+}
+
 fn default_persist_window() -> bool {
     true
 }
@@ -339,5 +349,64 @@ mod tests {
         assert_eq!(loaded.tabs[0].kind, ProjectKind::Git);
         assert_eq!(loaded.tabs[0].workspace.viewport, default_canvas_viewport());
         assert_eq!(loaded.tabs[0].workspace.next_z_index, 2);
+    }
+
+    #[test]
+    fn pause_process_windows_for_restore_marks_only_process_windows_exited() {
+        let mut state = PersistedAppState {
+            active_tab_id: Some("project-1".to_string()),
+            recent_projects: Vec::new(),
+            tabs: vec![PersistedProjectTabState {
+                id: "project-1".to_string(),
+                title: "demo".to_string(),
+                project_root: PathBuf::from("/tmp/demo"),
+                kind: ProjectKind::Git,
+                workspace: PersistedWorkspaceState {
+                    viewport: default_canvas_viewport(),
+                    windows: vec![
+                        PersistedWindowState {
+                            id: "shell-1".to_string(),
+                            title: "Shell".to_string(),
+                            preset: WindowPreset::Shell,
+                            geometry: WindowGeometry {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 640.0,
+                                height: 420.0,
+                            },
+                            z_index: 1,
+                            status: WindowProcessStatus::Running,
+                            persist: true,
+                        },
+                        PersistedWindowState {
+                            id: "branches-1".to_string(),
+                            title: "Branches".to_string(),
+                            preset: WindowPreset::Branches,
+                            geometry: WindowGeometry {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 640.0,
+                                height: 420.0,
+                            },
+                            z_index: 2,
+                            status: WindowProcessStatus::Ready,
+                            persist: true,
+                        },
+                    ],
+                    next_z_index: 3,
+                },
+            }],
+        };
+
+        pause_process_windows_for_restore(&mut state);
+
+        assert_eq!(
+            state.tabs[0].workspace.windows[0].status,
+            WindowProcessStatus::Exited
+        );
+        assert_eq!(
+            state.tabs[0].workspace.windows[1].status,
+            WindowProcessStatus::Ready
+        );
     }
 }

@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-15 — fix: GUI workspace restore では process window を自動再 spawn しない
+
+### 事象
+
+GUI PoC の起動時に、前回保存していた Shell / Claude / Codex / Agent window を
+そのまま再 spawn してしまい、複数 project / window を開いていた環境では
+大量のプロセスが同時に立ち上がった。
+
+### 原因
+
+- restore を「layout の復元」と「process の再起動」を分けずに扱っていた。
+- `workspace.json` に残っている process window を `bootstrap()` が無条件に起動していた。
+
+### 再発防止策
+
+1. GUI restore ではまず layout/state を復元し、process window は paused/exited 扱いで読む。
+2. startup bootstrap は persisted window 全件ではなく、「自動再開が明示された window」だけを起動する。
+3. restore semantics を変える変更では、既存 state fixture を使って「起動時に追加プロセスが増えない」回帰テストを入れる。
+
 ## 2026-04-14 — feat: WebView-only GUI PoC でも browser access の可能性があるなら transport を最初から外出しする
 
 ### 事象

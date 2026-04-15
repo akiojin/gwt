@@ -172,8 +172,9 @@ impl AppRuntime {
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
-        let persisted =
+        let mut persisted =
             load_app_state(&state_path, &legacy_target.project_root, legacy_target.kind)?;
+        poc_terminal::pause_process_windows_for_restore(&mut persisted);
         let tabs = persisted
             .tabs
             .into_iter()
@@ -197,6 +198,7 @@ impl AppRuntime {
             active_agent_sessions: HashMap::new(),
         };
         app.rebuild_window_lookup();
+        app.seed_restored_window_details();
         Ok(app)
     }
 
@@ -215,6 +217,9 @@ impl AppRuntime {
             })
             .collect::<Vec<_>>();
         for (tab_id, window) in windows {
+            if !should_auto_start_restored_window(&window) {
+                continue;
+            }
             let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
         }
         let _ = self.persist();
@@ -1351,6 +1356,22 @@ impl AppRuntime {
         }
     }
 
+    fn seed_restored_window_details(&mut self) {
+        for tab in &self.tabs {
+            for window in &tab.workspace.persisted().windows {
+                if window.preset.requires_process()
+                    && window.status == WindowProcessStatus::Exited
+                {
+                    self.window_details.insert(
+                        combined_window_id(&tab.id, &window.id),
+                        "Restored window is paused. Launch a new terminal when you want to start it."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
     fn persist(&self) -> std::io::Result<()> {
         save_app_state(
             &self.state_path,
@@ -1375,6 +1396,61 @@ impl AppRuntime {
 
 fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
+}
+
+fn should_auto_start_restored_window(window: &poc_terminal::PersistedWindowState) -> bool {
+    window.preset.requires_process()
+        && matches!(
+            window.status,
+            WindowProcessStatus::Starting | WindowProcessStatus::Running
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_auto_start_restored_window;
+    use poc_terminal::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
+
+    fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
+        PersistedWindowState {
+            id: "sample-1".to_string(),
+            title: "Sample".to_string(),
+            preset,
+            geometry: WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 420.0,
+            },
+            z_index: 1,
+            status,
+            persist: true,
+        }
+    }
+
+    #[test]
+    fn restored_process_window_is_not_auto_started_when_exited() {
+        assert!(!should_auto_start_restored_window(&sample_window(
+            WindowPreset::Claude,
+            WindowProcessStatus::Exited,
+        )));
+    }
+
+    #[test]
+    fn restored_process_window_is_auto_started_only_when_running_or_starting() {
+        assert!(should_auto_start_restored_window(&sample_window(
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        )));
+        assert!(should_auto_start_restored_window(&sample_window(
+            WindowPreset::Shell,
+            WindowProcessStatus::Starting,
+        )));
+        assert!(!should_auto_start_restored_window(&sample_window(
+            WindowPreset::Branches,
+            WindowProcessStatus::Ready,
+        )));
+    }
 }
 
 fn normalize_active_tab_id(
