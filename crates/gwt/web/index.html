@@ -3419,6 +3419,10 @@
         }
       });
 
+      canvas.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+      });
+
       canvas.addEventListener("pointerdown", (event) => {
         // Middle button (button===1) starts pan from anywhere (including over windows)
         const isMiddleButton = event.button === 1;
