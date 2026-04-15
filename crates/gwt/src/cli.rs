@@ -11,11 +11,13 @@
 //! - `gwt issue spec <n> --section <name>` — print one section only
 //! - `gwt issue spec <n> --edit <name> -f <file>` — replace one section
 //!   from a file (`-` means stdin)
+//! - `gwt issue spec <n> --edit spec --json [-f <file>] [--replace]` —
+//!   structured JSON update for the spec section
 //! - `gwt issue spec list [--phase <name>] [--state open|closed]` —
 //!   list SPEC-labeled issues
-//!
-//! Missing (deferred to next cycle): `pull`, `create`, `repair`,
-//! `migrate-specs`.
+//! - `gwt issue spec create --json --title <t> [-f <file>]` —
+//!   create a SPEC from structured JSON
+//! - `gwt issue spec <n> --rename <title>` — rename the Issue title
 
 mod actions;
 mod board;
@@ -134,6 +136,13 @@ pub enum CliCommand {
         section: String,
         file: String,
     },
+    /// `gwt issue spec <n> --edit spec --json [-f <file>] [--replace]`.
+    SpecEditSectionJson {
+        number: u64,
+        section: String,
+        file: Option<String>,
+        replace: bool,
+    },
     /// `gwt issue spec list [--phase <name>] [--state open|closed]`.
     SpecList {
         phase: Option<String>,
@@ -145,10 +154,20 @@ pub enum CliCommand {
         file: String,
         labels: Vec<String>,
     },
+    /// `gwt issue spec create --json --title <t> [-f <file>] [--label <l>]*`.
+    SpecCreateJson {
+        title: String,
+        file: Option<String>,
+        labels: Vec<String>,
+    },
+    /// `gwt issue spec create --help`.
+    SpecCreateHelp,
     /// `gwt issue spec pull [--all | <n>...]` — refresh cache from server.
     SpecPull { all: bool, numbers: Vec<u64> },
     /// `gwt issue spec repair <n>` — clear cache and re-fetch from server.
     SpecRepair { number: u64 },
+    /// `gwt issue spec <n> --rename <title>` — update the Issue title.
+    SpecRename { number: u64, title: String },
     /// `gwt issue view <n> [--refresh]` — print a plain issue from cache/live.
     IssueView { number: u64, refresh: bool },
     /// `gwt issue comments <n> [--refresh]` — print issue comments.
@@ -229,7 +248,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwt issue spec <n> [--section <name>|--edit <name> -f <file>] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]*"
+                "usage: gwt issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]*"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -322,10 +341,14 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         cmd @ (CliCommand::SpecReadAll { .. }
         | CliCommand::SpecReadSection { .. }
         | CliCommand::SpecEditSection { .. }
+        | CliCommand::SpecEditSectionJson { .. }
         | CliCommand::SpecList { .. }
         | CliCommand::SpecCreate { .. }
+        | CliCommand::SpecCreateJson { .. }
+        | CliCommand::SpecCreateHelp
         | CliCommand::SpecPull { .. }
         | CliCommand::SpecRepair { .. }
+        | CliCommand::SpecRename { .. }
         | CliCommand::IssueView { .. }
         | CliCommand::IssueComments { .. }
         | CliCommand::IssueLinkedPrs { .. }

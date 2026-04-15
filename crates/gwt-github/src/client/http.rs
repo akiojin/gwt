@@ -556,6 +556,14 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         parse_rest_issue(&value)
     }
 
+    fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError> {
+        let path = format!("/repos/{}/{}/issues/{}", self.owner, self.repo, number.0);
+        let resp = self.rest_patch(&path, json!({ "title": new_title }))?;
+        let value: Value = serde_json::from_str(&resp.body)
+            .map_err(|e| ApiError::Unexpected(format!("patch_title json: {e}")))?;
+        parse_rest_issue(&value)
+    }
+
     fn patch_comment(
         &self,
         comment_id: CommentId,

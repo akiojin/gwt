@@ -9,7 +9,7 @@ use gwt_git::PrStatus;
 use gwt_github::client::{
     CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
 };
-use gwt_github::Cache;
+use gwt_github::{Cache, SectionName};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {
@@ -674,6 +674,271 @@ fn red_85_dispatch_section_not_found_errors() {
     assert_ne!(code, 0);
     let err = String::from_utf8(env.stderr.clone()).unwrap();
     assert!(err.contains("plan"));
+}
+
+#[test]
+fn red_86_dispatch_spec_create_json_from_stdin() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.stdin = r#"{
+  "background": [
+    "The CLI should accept structured SPEC input.",
+    "Formatting must stay consistent across create and edit flows."
+  ],
+  "user_stories": [
+    {
+      "title": "Create a spec from JSON",
+      "priority": "p0",
+      "statement": "As an agent, I want to create a SPEC from JSON, so that formatting is generated consistently.",
+      "acceptance_scenarios": [
+        "Given structured JSON on stdin, when the command runs, then a canonical spec section is created."
+      ]
+    }
+  ],
+  "edge_cases": [
+    "Unknown fields should not break parsing."
+  ],
+  "functional_requirements": [
+    "Accept structured JSON input on stdin.",
+    "Render canonical Markdown for the spec section."
+  ],
+  "non_functional_requirements": [
+    "Keep the formatting rules in one place."
+  ],
+  "success_criteria": [
+    "The created spec follows the canonical heading and numbering rules."
+  ]
+}"#
+        .to_string();
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "issue",
+            "spec",
+            "create",
+            "--json",
+            "--title",
+            "SPEC: JSON create flow",
+        ]),
+    );
+    assert_eq!(code, 0);
+
+    let spec = Cache::new(tmp.path().to_path_buf())
+        .read_section(IssueNumber(1), &SectionName("spec".into()))
+        .unwrap()
+        .expect("spec section");
+    assert!(spec.contains("# JSON create flow"));
+    assert!(spec.contains("## Background"));
+    assert!(spec.contains("## User Stories"));
+    assert!(spec.contains("### US-1: Create a spec from JSON (P0)"));
+    assert!(spec.contains("- **FR-001**: Accept structured JSON input on stdin."));
+    assert!(spec.contains("- **NFR-001**: Keep the formatting rules in one place."));
+    assert!(spec.contains(
+        "- **SC-001**: The created spec follows the canonical heading and numbering rules."
+    ));
+}
+
+#[test]
+fn red_87_dispatch_spec_rename_updates_issue_title_and_cache() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(42),
+        title: "SPEC-42: Old title".to_string(),
+        body: mk_body_spec_and_tasks_in_body("# Old title", "- [ ] T-001"),
+        labels: vec!["gwt-spec".to_string()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new("seeded"),
+        comments: Vec::new(),
+    };
+    env.client.seed(snapshot.clone());
+    Cache::new(tmp.path().to_path_buf())
+        .write_snapshot(&snapshot)
+        .unwrap();
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "issue",
+            "spec",
+            "42",
+            "--rename",
+            "SPEC-42: New title",
+        ]),
+    );
+    assert_eq!(code, 0);
+
+    let cached = Cache::new(tmp.path().to_path_buf())
+        .load_entry(IssueNumber(42))
+        .expect("cache entry");
+    assert_eq!(cached.snapshot.title, "SPEC-42: New title");
+    assert!(env
+        .client
+        .call_log()
+        .iter()
+        .any(|entry| entry == "patch_title:#42"));
+}
+
+#[test]
+fn red_88_dispatch_spec_create_help_prints_json_schema() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "issue", "spec", "create", "--help"]),
+    );
+    assert_eq!(code, 0);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("gwt issue spec create --json"));
+    assert!(out.contains("\"background\""));
+    assert!(out.contains("\"user_stories\""));
+    assert!(out.contains("\"functional_requirements\""));
+    assert!(out.contains("\"success_criteria\""));
+}
+
+#[test]
+fn red_89_dispatch_spec_edit_json_merges_named_sections() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let existing_spec = r#"# Existing title
+
+## Background
+
+Old background paragraph.
+
+## User Stories
+
+### US-1: Keep existing story (P1)
+
+As a user, I want the existing story to remain, so that partial updates are safe.
+
+**Acceptance Scenarios:**
+
+1. Given the old spec, when a partial update runs, then untouched sections remain.
+
+## Functional Requirements
+
+- **FR-001**: Keep untouched requirements intact.
+
+## Success Criteria
+
+- **SC-001**: Old success criterion.
+"#;
+    seed(&env, 42, existing_spec, "- [ ] T-001");
+    env.files.insert(
+        "/virtual/spec-update.json".to_string(),
+        r#"{
+  "background": [
+    "New background paragraph."
+  ],
+  "success_criteria": [
+    "Updated success criterion."
+  ]
+}"#
+        .to_string(),
+    );
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "issue",
+            "spec",
+            "42",
+            "--edit",
+            "spec",
+            "--json",
+            "-f",
+            "/virtual/spec-update.json",
+        ]),
+    );
+    assert_eq!(code, 0);
+
+    let spec = Cache::new(tmp.path().to_path_buf())
+        .read_section(IssueNumber(42), &SectionName("spec".into()))
+        .unwrap()
+        .expect("spec section");
+    assert!(spec.contains("New background paragraph."));
+    assert!(spec.contains("### US-1: Keep existing story (P1)"));
+    assert!(spec.contains("- **SC-001**: Updated success criterion."));
+    assert!(!spec.contains("Old success criterion."));
+}
+
+#[test]
+fn red_89a_dispatch_spec_edit_json_replace_rewrites_spec_section() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let existing_spec = r#"# Existing title
+
+## Background
+
+Old background paragraph.
+
+## User Stories
+
+### US-1: Old story (P1)
+
+As a user, I want the old story, so that the old content exists.
+
+**Acceptance Scenarios:**
+
+1. Given the old spec, when replace is not used, then this story would remain.
+
+## Functional Requirements
+
+- **FR-001**: Old requirement.
+"#;
+    seed(&env, 42, existing_spec, "- [ ] T-001");
+    env.files.insert(
+        "/virtual/spec-replace.json".to_string(),
+        r#"{
+  "background": [
+    "Replacement background."
+  ],
+  "user_stories": [
+    {
+      "title": "Replacement story",
+      "priority": "P0",
+      "statement": "As a user, I want the replacement story, so that the section is regenerated.",
+      "acceptance_scenarios": [
+        "Given replace mode, when the command runs, then the old sections disappear."
+      ]
+    }
+  ]
+}"#
+        .to_string(),
+    );
+
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "issue",
+            "spec",
+            "42",
+            "--edit",
+            "spec",
+            "--json",
+            "--replace",
+            "-f",
+            "/virtual/spec-replace.json",
+        ]),
+    );
+    assert_eq!(code, 0);
+
+    let spec = Cache::new(tmp.path().to_path_buf())
+        .read_section(IssueNumber(42), &SectionName("spec".into()))
+        .unwrap()
+        .expect("spec section");
+    assert!(spec.contains("Replacement background."));
+    assert!(spec.contains("### US-1: Replacement story (P0)"));
+    assert!(!spec.contains("Old requirement."));
+    assert!(!spec.contains("Old story"));
 }
 
 #[test]

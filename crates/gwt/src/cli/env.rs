@@ -24,6 +24,7 @@ pub trait CliEnv {
     fn repo_path(&self) -> &std::path::Path;
     fn stdout(&mut self) -> &mut dyn io::Write;
     fn stderr(&mut self) -> &mut dyn io::Write;
+    fn read_stdin(&mut self) -> io::Result<String>;
     fn read_file(&self, path: &str) -> io::Result<String>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
@@ -76,6 +77,13 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
         new_body: &str,
     ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
         self.inner.patch_body(number, new_body)
+    }
+    fn patch_title(
+        &self,
+        number: IssueNumber,
+        new_title: &str,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.inner.patch_title(number, new_title)
     }
     fn patch_comment(
         &self,
@@ -199,6 +207,11 @@ impl CliEnv for DefaultCliEnv {
     }
     fn stderr(&mut self) -> &mut dyn io::Write {
         &mut self.stderr
+    }
+    fn read_stdin(&mut self) -> io::Result<String> {
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut io::stdin(), &mut buffer)?;
+        Ok(buffer)
     }
     fn read_file(&self, path: &str) -> io::Result<String> {
         fs::read_to_string(path)
@@ -327,6 +340,7 @@ pub struct TestEnv {
     pub client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
+    pub stdin: String,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
@@ -360,6 +374,7 @@ impl TestEnv {
             client: FakeIssueClient::new(),
             cache_root,
             repo_path,
+            stdin: String::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
             files: HashMap::new(),
@@ -448,6 +463,9 @@ impl CliEnv for TestEnv {
     }
     fn stderr(&mut self) -> &mut dyn io::Write {
         &mut self.stderr
+    }
+    fn read_stdin(&mut self) -> io::Result<String> {
+        Ok(std::mem::take(&mut self.stdin))
     }
     fn read_file(&self, path: &str) -> io::Result<String> {
         self.files

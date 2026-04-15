@@ -10,10 +10,7 @@ discovery confirmed the scope is right for a SPEC.
 ## SPEC creation
 
 SPEC の作成・更新は `gwt issue spec` CLI で行う。
-
-> **将来**: FR-070〜075 (#1942) が実装されると `gwt issue spec create --json`
-> で構造化入力を渡し、CLI がフォーマットを生成する。実装後は
-> `gwt issue spec create --help` を正として参照すること。
+フォーマット、JSON スキーマ、入力例は `gwt issue spec create --help` を正として参照すること。
 
 ### 現行コマンド
 
@@ -21,9 +18,14 @@ SPEC の作成・更新は `gwt issue spec` CLI で行う。
 # SPEC 一覧
 gwt issue spec list
 
-# SPEC 作成（Markdown ファイルを渡す）
+# SPEC 作成（構造化 JSON 推奨）
+gwt issue spec create --help
+gwt issue spec create --json --title "SPEC: <説明> — <サブタイトル>" \
+  -f <spec.json>
+
+# SPEC 作成（既存 Markdown 断片から直接作る互換パス）
 gwt issue spec create --title "SPEC: <説明> — <サブタイトル>" \
-  -f <spec.md> --label gwt-spec
+  -f <spec.md>
 
 # SPEC セクション読み取り
 gwt issue spec <Issue番号>
