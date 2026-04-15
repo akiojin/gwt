@@ -59,6 +59,14 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    LaunchProgress {
+        window_id: String,
+        message: String,
+    },
+    LaunchComplete {
+        window_id: String,
+        result: Result<(ProcessLaunch, String, String, String, PathBuf), String>,
+    },
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -981,6 +989,70 @@ impl AppRuntime {
         ]
     }
 
+    fn handle_launch_complete(
+        &mut self,
+        window_id: String,
+        result: Result<(ProcessLaunch, String, String, String, PathBuf), String>,
+    ) -> Vec<OutboundEvent> {
+        match result {
+            Ok((process_launch, session_id, branch_name, display_name, worktree_path)) => {
+                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Window not found".to_string()),
+                    })];
+                };
+                let Some(tab) = self.tab(&address.tab_id) else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Project tab not found".to_string()),
+                    })];
+                };
+                let Some(window) = tab.workspace.window(&address.raw_id) else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Window not found".to_string()),
+                    })];
+                };
+                let geometry = window.geometry.clone();
+
+                self.active_agent_sessions.insert(
+                    window_id.clone(),
+                    ActiveAgentSession {
+                        window_id: window_id.clone(),
+                        session_id,
+                        branch_name,
+                        display_name,
+                        worktree_path,
+                        tab_id: address.tab_id,
+                    },
+                );
+
+                let _ = self.persist();
+
+                match self.spawn_process_window(&window_id, geometry, process_launch) {
+                    Ok(event) => vec![
+                        self.workspace_state_broadcast(),
+                        OutboundEvent::broadcast(event),
+                    ],
+                    Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(error),
+                    })],
+                }
+            }
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id,
+                status: WindowProcessStatus::Error,
+                detail: Some(error),
+            })],
+        }
+    }
+
     fn start_window(
         &mut self,
         tab_id: &str,
@@ -1090,110 +1162,142 @@ impl AppRuntime {
     fn spawn_agent_window(
         &mut self,
         tab_id: &str,
-        mut config: gwt_agent::LaunchConfig,
+        config: gwt_agent::LaunchConfig,
     ) -> Result<Vec<OutboundEvent>, String> {
-        let project_root = self
-            .tab(tab_id)
-            .map(|tab| tab.project_root.clone())
+        let tab = self
+            .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        resolve_launch_worktree(&project_root, &mut config)?;
-        apply_docker_runtime_to_launch_config(&project_root, &mut config)?;
-
-        let worktree_path = config
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| project_root.clone());
-        refresh_managed_gwt_assets_for_worktree(&worktree_path)
-            .map_err(|error| error.to_string())?;
-        let branch_name = config
-            .branch
-            .clone()
-            .unwrap_or_else(|| "workspace".to_string());
-
-        let mut session =
-            gwt_agent::Session::new(&worktree_path, branch_name.clone(), config.agent_id.clone());
-        session.display_name = config.display_name.clone();
-        session.tool_version = config.tool_version.clone();
-        session.model = config.model.clone();
-        session.reasoning_level = config.reasoning_level.clone();
-        session.skip_permissions = config.skip_permissions;
-        session.codex_fast_mode = config.codex_fast_mode;
-        session.runtime_target = config.runtime_target;
-        session.docker_service = config.docker_service.clone();
-        session.docker_lifecycle_intent = config.docker_lifecycle_intent;
-        session.linked_issue_number = config.linked_issue_number;
-        session.launch_command = config.command.clone();
-        session.launch_args = config.args.clone();
-        session.update_status(gwt_agent::AgentStatus::Running);
-
-        let runtime_path = gwt_agent::runtime_state_path(&self.sessions_dir, &session.id);
-        config.env_vars.insert(
-            gwt_agent::GWT_SESSION_ID_ENV.to_string(),
-            session.id.clone(),
-        );
-        config.env_vars.insert(
-            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
-            runtime_path.display().to_string(),
-        );
-        config
-            .env_vars
-            .entry("COLORTERM".to_string())
-            .or_insert_with(|| "truecolor".to_string());
-
-        let title = format!("{} · {}", config.display_name, branch_name);
-        let window = {
-            let Some(tab) = self.tab_mut(tab_id) else {
-                return Err("Project tab not found".to_string());
-            };
-            tab.workspace
-                .add_window_with_title(WindowPreset::Agent, title, false)
-        };
+        let project_root = tab.project_root.display().to_string();
+        let title = format!("{} · {}", config.display_name, config.branch.as_ref().unwrap_or(&"workspace".to_string()));
+        let window = tab
+            .workspace
+            .add_window_with_title(WindowPreset::Agent, title.clone(), false);
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
-        let runtime_event = match self.spawn_process_window(
-            &window_id,
-            window.geometry.clone(),
-            ProcessLaunch {
+
+        let events = vec![
+            self.workspace_state_broadcast(),
+            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id.clone(),
+                status: WindowProcessStatus::Starting,
+                detail: None,
+            }),
+        ];
+
+        let proxy = self.proxy.clone();
+        let sessions_dir = self.sessions_dir.clone();
+
+        thread::spawn(move || {
+            Self::spawn_agent_window_async(
+                proxy,
+                sessions_dir,
+                project_root,
+                window_id,
+                config,
+            )
+        });
+
+        Ok(events)
+    }
+
+    fn spawn_agent_window_async(
+        proxy: EventLoopProxy<UserEvent>,
+        sessions_dir: PathBuf,
+        project_root: String,
+        window_id: String,
+        mut config: gwt_agent::LaunchConfig,
+    ) {
+        let result = (|| {
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Preparing worktree...".to_string(),
+            });
+            resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Starting Docker service...".to_string(),
+            });
+            apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Configuring workspace...".to_string(),
+            });
+            let worktree_path = config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&project_root));
+            refresh_managed_gwt_assets_for_worktree(&worktree_path)
+                .map_err(|error| error.to_string())?;
+
+            let branch_name = config
+                .branch
+                .clone()
+                .unwrap_or_else(|| "workspace".to_string());
+
+            let mut session =
+                gwt_agent::Session::new(&worktree_path, branch_name.clone(), config.agent_id.clone());
+            session.display_name = config.display_name.clone();
+            session.tool_version = config.tool_version.clone();
+            session.model = config.model.clone();
+            session.reasoning_level = config.reasoning_level.clone();
+            session.skip_permissions = config.skip_permissions;
+            session.codex_fast_mode = config.codex_fast_mode;
+            session.runtime_target = config.runtime_target;
+            session.docker_service = config.docker_service.clone();
+            session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+            session.linked_issue_number = config.linked_issue_number;
+            session.launch_command = config.command.clone();
+            session.launch_args = config.args.clone();
+            session.update_status(gwt_agent::AgentStatus::Running);
+
+            let session_id = session.id.clone();
+            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+            config.env_vars.insert(
+                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                session_id.clone(),
+            );
+            config.env_vars.insert(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+                runtime_path.display().to_string(),
+            );
+            config
+                .env_vars
+                .entry("COLORTERM".to_string())
+                .or_insert_with(|| "truecolor".to_string());
+
+            session
+                .save(&sessions_dir)
+                .map_err(|error| error.to_string())?;
+            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+                .save(&runtime_path)
+                .map_err(|error| error.to_string())?;
+
+            let process_launch = ProcessLaunch {
                 command: config.command.clone(),
                 args: config.args.clone(),
                 env: config.env_vars.clone(),
                 cwd: config.working_dir.clone(),
-            },
-        ) {
-            Ok(event) => event,
-            Err(error) => {
-                if let Some(tab) = self.tab_mut(tab_id) {
-                    let _ = tab.workspace.close_window(&window.id);
-                }
-                self.window_lookup.remove(&window_id);
-                return Err(error);
+            };
+
+            Ok((process_launch, session_id, branch_name, config.display_name, worktree_path))
+        })();
+
+        match result {
+            Ok((process_launch, session_id, branch_name, display_name, worktree_path)) => {
+                let _ = proxy.send_event(UserEvent::LaunchComplete {
+                    window_id,
+                    result: Ok((process_launch, session_id, branch_name, display_name, worktree_path)),
+                });
             }
-        };
-
-        session
-            .save(&self.sessions_dir)
-            .map_err(|error| error.to_string())?;
-        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-            .save(&runtime_path)
-            .map_err(|error| error.to_string())?;
-
-        self.active_agent_sessions.insert(
-            window_id.clone(),
-            ActiveAgentSession {
-                window_id: window_id.clone(),
-                session_id: session.id.clone(),
-                branch_name,
-                display_name: config.display_name.clone(),
-                worktree_path,
-                tab_id: tab_id.to_string(),
-            },
-        );
-
-        let _ = self.persist();
-        Ok(vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(runtime_event),
-        ])
+            Err(error) => {
+                let _ = proxy.send_event(UserEvent::LaunchComplete {
+                    window_id,
+                    result: Err(error),
+                });
+            }
+        }
     }
 
     fn mark_agent_session_stopped(&mut self, window_id: &str) {
@@ -2690,6 +2794,15 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::LaunchProgress { id: window_id, message },
+                )]);
+            }
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
+                let events = app.handle_launch_complete(window_id, result);
                 clients.dispatch(events);
             }
             #[cfg(target_os = "macos")]

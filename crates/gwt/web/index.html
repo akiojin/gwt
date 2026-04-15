@@ -474,7 +474,35 @@
       }
 
       .terminal-overlay.visible {
-        display: block;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: rgba(15, 23, 42, 0.95);
+      }
+
+      .overlay-spinner {
+        font-size: 24px;
+        line-height: 1;
+        display: inline-block;
+        animation: spin-text 0.8s steps(8) infinite;
+      }
+
+      .overlay-message {
+        font-size: 13px;
+        color: #bfdbfe;
+      }
+
+      @keyframes spin-text {
+        0% { content: "⣾"; }
+        12.5% { content: "⣽"; }
+        25% { content: "⣻"; }
+        37.5% { content: "⢿"; }
+        50% { content: "⡿"; }
+        62.5% { content: "⣟"; }
+        75% { content: "⣯"; }
+        87.5% { content: "⣷"; }
       }
 
       .file-tree-root,
@@ -1937,12 +1965,41 @@
         label.textContent = status;
         const effectiveDetail = detailMap.get(windowId);
         if (overlay) {
-          overlay.textContent = effectiveDetail || "";
+          const messageEl = overlay.querySelector(".overlay-message");
+          if (messageEl) {
+            messageEl.textContent = effectiveDetail || "";
+          } else {
+            overlay.textContent = effectiveDetail || "";
+          }
           overlay.classList.toggle(
             "visible",
-            status === "error" || status === "exited",
+            status === "starting" || status === "error" || status === "exited",
           );
+          if (status === "starting") {
+            startSpinnerAnimation(overlay);
+          }
         }
+      }
+
+      function startSpinnerAnimation(overlay) {
+        const spinner = overlay.querySelector(".overlay-spinner");
+        if (!spinner) return;
+        const chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+        let index = 0;
+        const interval = setInterval(() => {
+          spinner.textContent = chars[index % chars.length];
+          index++;
+        }, 100);
+        const cleanup = () => {
+          clearInterval(interval);
+          overlay.removeEventListener("visibilitychange", cleanup);
+        };
+        const observer = new MutationObserver(() => {
+          if (!overlay.classList.contains("visible")) {
+            cleanup();
+          }
+        });
+        observer.observe(overlay, { attributes: true });
       }
 
       function focusWindowLocally(windowId) {
@@ -3021,6 +3078,15 @@
             <div class="terminal-overlay"></div>
           `;
           const terminalRoot = body.querySelector(".terminal-root");
+          const overlay = body.querySelector(".terminal-overlay");
+          const spinner = document.createElement("div");
+          spinner.className = "overlay-spinner";
+          spinner.textContent = "⣾";
+          const message = document.createElement("div");
+          message.className = "overlay-message";
+          message.textContent = "Launching...";
+          overlay.appendChild(spinner);
+          overlay.appendChild(message);
           terminalRoot.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
             send({ kind: "focus_window", id: windowData.id });
@@ -3298,6 +3364,16 @@
           case "terminal_status":
             applyStatus(event.id, event.status, event.detail);
             break;
+          case "launch_progress": {
+            const element = windowMap.get(event.id);
+            if (element) {
+              const messageEl = element.querySelector(".terminal-overlay .overlay-message");
+              if (messageEl) {
+                messageEl.textContent = event.message;
+              }
+            }
+            break;
+          }
           case "file_tree_entries": {
             const state = ensureFileTreeState(event.id);
             state.loaded.set(event.path, event.entries);

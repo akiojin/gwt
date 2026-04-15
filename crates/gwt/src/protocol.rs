@@ -167,4 +167,8 @@ pub enum BackendEvent {
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
     },
+    LaunchProgress {
+        id: String,
+        message: String,
+    },
 }
