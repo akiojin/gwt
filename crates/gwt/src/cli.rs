@@ -27,20 +27,21 @@ mod issue;
 mod issue_spec;
 mod pr;
 
-use std::fs;
-use std::io::{self};
-use std::path::PathBuf;
-use std::process::Command;
-
-use gwt_git::PrStatus;
-use gwt_github::{
-    cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
-    SpecOpsError,
+use std::{
+    fs,
+    io::{self},
+    path::PathBuf,
+    process::Command,
 };
 
 pub(crate) use board::parse as parse_board_args;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
+use gwt_git::PrStatus;
+use gwt_github::{
+    cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
+    SpecOpsError,
+};
 
 /// Compact linked PR summary used by `gwt issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

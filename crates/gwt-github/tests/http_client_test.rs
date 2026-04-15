@@ -6,8 +6,8 @@
 //! parsing path handles GraphQL / REST responses correctly and that status
 //! code mapping matches [`ApiError`].
 
-use gwt_github::client::http::{FakeTransport, HttpIssueClient, HttpMethod, HttpResponse};
 use gwt_github::client::{
+    http::{FakeTransport, HttpIssueClient, HttpMethod, HttpResponse},
     ApiError, CommentId, FetchResult, IssueClient, IssueNumber, IssueState, SpecListFilter,
     UpdatedAt,
 };

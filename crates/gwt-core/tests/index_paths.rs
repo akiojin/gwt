@@ -1,8 +1,10 @@
 //! Phase 8: integration tests for `gwt_core::index::paths`.
 
-use gwt_core::index::paths::{gwt_index_db_path, gwt_index_repo_dir, gwt_index_root, Scope};
-use gwt_core::repo_hash::compute_repo_hash;
-use gwt_core::worktree_hash::compute_worktree_hash;
+use gwt_core::{
+    index::paths::{gwt_index_db_path, gwt_index_repo_dir, gwt_index_root, Scope},
+    repo_hash::compute_repo_hash,
+    worktree_hash::compute_worktree_hash,
+};
 
 #[test]
 fn gwt_index_root_ends_with_index() {

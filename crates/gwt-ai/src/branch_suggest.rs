@@ -5,8 +5,10 @@
 
 use serde::Deserialize;
 
-use crate::client::{AIClient, ChatMessage};
-use crate::error::AIError;
+use crate::{
+    client::{AIClient, ChatMessage},
+    error::AIError,
+};
 
 const SYSTEM_PROMPT: &str = "\
 You are a git branch naming assistant. Generate 3 to 5 branch name suggestions \
@@ -136,8 +138,9 @@ pub fn suggest_branch_name(client: &AIClient, context: &str) -> Result<Vec<Strin
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::process::Command;
+
+    use super::*;
 
     // ── validate_branch_name ───────────────────────────────────────────
 

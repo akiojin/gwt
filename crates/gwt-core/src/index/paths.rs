@@ -24,10 +24,12 @@
 
 use std::path::PathBuf;
 
-use crate::error::{GwtError, Result};
-use crate::paths::gwt_home;
-use crate::repo_hash::RepoHash;
-use crate::worktree_hash::WorktreeHash;
+use crate::{
+    error::{GwtError, Result},
+    paths::gwt_home,
+    repo_hash::RepoHash,
+    worktree_hash::WorktreeHash,
+};
 
 /// Index scope discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,8 +102,7 @@ pub fn gwt_index_db_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_hash::compute_repo_hash;
-    use crate::worktree_hash::compute_worktree_hash;
+    use crate::{repo_hash::compute_repo_hash, worktree_hash::compute_worktree_hash};
 
     #[test]
     fn issue_scope_resolution() {

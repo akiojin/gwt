@@ -164,9 +164,10 @@ fn parse_issue_comment_args(args: &[&String]) -> Result<CliCommand, CliParseErro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gwt_github::client::{IssueSnapshot, IssueState, UpdatedAt};
     use tempfile::TempDir;
+
+    use super::*;
 
     fn s(value: &str) -> String {
         value.to_string()

@@ -3,8 +3,10 @@
 //! Checks for Docker CLI availability, daemon status, and discovers
 //! Docker-related files (Dockerfile, docker-compose.yml, .devcontainer/).
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use tracing::debug;
 

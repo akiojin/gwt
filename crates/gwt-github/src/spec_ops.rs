@@ -7,14 +7,16 @@
 
 use std::collections::BTreeMap;
 
-use crate::body::{Comment as BodyComment, SectionLocation, SectionsIndex, SpecMeta};
-use crate::cache::{Cache, CacheError};
-use crate::client::{
-    ApiError, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot, IssueState,
-    UpdatedAt,
+use crate::{
+    body::{Comment as BodyComment, SectionLocation, SectionsIndex, SpecMeta},
+    cache::{Cache, CacheError},
+    client::{
+        ApiError, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
+        IssueState, UpdatedAt,
+    },
+    routing::decide_routing,
+    sections::SectionName,
 };
-use crate::routing::decide_routing;
-use crate::sections::SectionName;
 
 /// Errors surfaced by [`SpecOps`] operations.
 #[derive(Debug, thiserror::Error)]

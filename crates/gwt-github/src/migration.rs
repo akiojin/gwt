@@ -36,17 +36,17 @@
 //!   ...
 //! ```
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::Cache;
-use crate::client::IssueClient;
-use crate::sections::SectionName;
-use crate::spec_ops::SpecOps;
-use crate::SpecOpsError;
+use crate::{
+    cache::Cache, client::IssueClient, sections::SectionName, spec_ops::SpecOps, SpecOpsError,
+};
 
 /// Mapping of legacy `status` field values in `metadata.json` to the canonical
 /// `phase/*` labels used by SPEC-12.
@@ -285,8 +285,9 @@ pub struct MigratedSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn write_spec(
         root: &Path,
