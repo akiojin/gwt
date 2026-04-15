@@ -3475,6 +3475,14 @@
           if (!canvas.contains(event.target)) {
             return;
           }
+          // Let terminal windows handle their own scroll (xterm.js scrollback)
+          if (
+            !event.ctrlKey &&
+            !event.metaKey &&
+            event.target.closest(".surface-terminal")
+          ) {
+            return;
+          }
           if (event.ctrlKey || event.metaKey) {
             // Ctrl/Cmd + wheel = zoom
             event.preventDefault();
