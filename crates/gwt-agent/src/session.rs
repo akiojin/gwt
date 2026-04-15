@@ -21,6 +21,9 @@ pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
 /// Environment variable injected into agent PTYs so hooks can write the
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
+/// Environment variable injected into agent PTYs so skills can locate the
+/// gwt binary for calling gwt CLI (GitHub operations, etc.).
+pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
 
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]

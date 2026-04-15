@@ -1135,6 +1135,12 @@ impl AppRuntime {
             gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
             runtime_path.display().to_string(),
         );
+        if let Ok(gwt_bin) = std::env::current_exe() {
+            config.env_vars.insert(
+                gwt_agent::GWT_BIN_PATH_ENV.to_string(),
+                gwt_bin.display().to_string(),
+            );
+        }
         config
             .env_vars
             .entry("COLORTERM".to_string())
@@ -2028,6 +2034,7 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    ensure_docker_gwt_binary_setup(&worktree)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
 
@@ -2049,6 +2056,11 @@ fn apply_docker_runtime_to_launch_config(
     config
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    // Override GWT_BIN_PATH for Docker containers to use the mounted binary
+    config.env_vars.insert(
+        gwt_agent::GWT_BIN_PATH_ENV.to_string(),
+        "/usr/local/bin/gwt".to_string(),
+    );
     config.docker_service = Some(launch.service);
     Ok(())
 }
@@ -2063,6 +2075,59 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     if !gwt_docker::daemon_running() {
         return Err("Docker daemon is not running".to_string());
     }
+    Ok(())
+}
+
+fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE")
+    } else {
+        std::env::var("HOME")
+    }
+    .map(PathBuf::from)
+    .map_err(|_| "Could not determine home directory".to_string())?;
+
+    let gwt_bin_dir = home.join(".gwt").join("bin");
+    let gwt_linux = gwt_bin_dir.join("gwt-linux");
+
+    // Check if Linux gwt binary exists
+    if !gwt_linux.exists() {
+        // TODO: Download Linux gwt binary from GitHub Release
+        // For now, create a note for the user
+        let override_path = repo_path.join("docker-compose.override.yml");
+        if !override_path.exists() {
+            eprintln!(
+                "Note: Linux gwt binary not found at ~/.gwt/bin/gwt-linux\n\
+                 This is required for Docker agent support.\n\
+                 You can either:\n\
+                 1. Download gwt-linux-x86_64 from GitHub Releases and place it at ~/.gwt/bin/gwt-linux\n\
+                 2. Run 'gwt setup docker' to set up Docker integration automatically"
+            );
+        }
+    }
+
+    // Ensure docker-compose.override.yml exists with gwt volume mount
+    let override_path = repo_path.join("docker-compose.override.yml");
+    if !override_path.exists() {
+        let override_content = "# Auto-generated docker-compose override for gwt binary mounting\n\
+                                version: '3.8'\n\
+                                services:\n\
+                                  # Add your service name and uncomment the volumes section\n\
+                                  # <service>:\n\
+                                  #   volumes:\n\
+                                  #     - ~/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro\n";
+        fs::write(&override_path, override_content).map_err(|err| {
+            format!(
+                "Failed to create docker-compose.override.yml: {err}\n\
+                 Manually create {} with gwt volume mount",
+                override_path.display()
+            )
+        })?;
+    }
+
     Ok(())
 }
 
