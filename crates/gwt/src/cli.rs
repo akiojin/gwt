@@ -24,6 +24,7 @@ mod board;
 mod env;
 pub mod hook;
 mod issue;
+mod issue_spec;
 mod pr;
 
 use std::fs;
