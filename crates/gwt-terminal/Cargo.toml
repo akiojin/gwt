@@ -14,7 +14,7 @@ portable-pty.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-vt100 = "0.15"
+vt100 = "0.16"
 crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
