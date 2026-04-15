@@ -13,7 +13,7 @@ const os = require("os");
 
 const REPO = "akiojin/gwt";
 const BIN_DIR = __dirname;
-const BIN_NAME = process.platform === "win32" ? "gwt-tui.exe" : "gwt-tui";
+const BIN_NAME = process.platform === "win32" ? "gwt.exe" : "gwt";
 const BIN_PATH = path.join(BIN_DIR, BIN_NAME);
 
 function releaseAssetName() {

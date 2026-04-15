@@ -4,7 +4,7 @@
 
 A Bounded Context (BC) is a region of the codebase where a particular domain model applies consistently. In practice, BCs often align with:
 
-- Top-level crates or packages (`gwt-core`, `gwt-tui`)
+- Top-level crates or packages (`gwt-core`, `gwt`)
 - Module directories with their own public API (`mod.rs` or `lib.rs`)
 - Namespaces that group related types and behaviors
 
@@ -54,7 +54,7 @@ Same concept, different names across the codebase:
 
 Same name, different meanings in different contexts:
 
-- Check: Does `Config` mean the same thing in `gwt-core` and `gwt-tui`?
+- Check: Does `Config` mean the same thing in `gwt-core` and `gwt`?
 - Method: For each commonly-used name, compare its fields/methods across modules
 
 ### Consistency checklist

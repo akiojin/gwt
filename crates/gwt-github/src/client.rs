@@ -141,6 +141,8 @@ pub trait IssueClient: Send + Sync {
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError>;
 
+    fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError>;
+
     fn patch_comment(
         &self,
         comment_id: CommentId,

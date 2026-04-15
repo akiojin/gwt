@@ -1,6 +1,66 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.1.0] - 2026-04-15
+
+### Bug Fixes
+
+- **gui:** Pause restored terminal windows
+- **gui:** Use selected directory name for project tabs
+- **gui:** Delegate CLI invocations before opening windows
+- Ignore untracked skills in build validation
+- Workflow-policy の owner gate を除去し安全ガードレールのみ残す
+- CycleFocus 後にターミナルへキーボードフォーカスを移す
+- CycleFocus が全ウィンドウをサイクルするように修正
+- キャンバス上の右クリックコンテキストメニューを抑制
+- ウィンドウ上でもトラックパッドパンと中ボタンドラッグが効くように修正
+- Linux CI に WebView 依存パッケージをインストール
+- NativeMenuCommand import を macOS cfg ブロック内に移動
+- Make spec index repo-scoped
+- **gui:** ターミナルウィンドウ上の二本指スクロールを xterm.js に委譲
+- Release フロー定義の陳腐化を修正 (SPEC-1932)
+
+### Documentation
+
+- Record terminal gui clarification lesson
+- SPEC 参照ドキュメントを GitHub Issue ベースに統一
+- SPEC フォーマット制御を CLI に移行する方針を反映
+- 全スキルファイルの旧システム参照を gwt CLI に統一
+- AGENTS.md とスキルを現行 CLI/GUI 実装に完全整合
+- Gwt-discussion スキルから owner gate 記述を除去
+
+### Features
+
+- Add canvas terminal gui poc
+- Add canvas pan and zoom to terminal poc
+- Serve canvas poc over local web server
+- Add branches window to canvas poc
+- Add window arrangement controls to canvas poc
+- Add branch launch wizard to terminal poc
+- Add zoom buttons to terminal poc
+- Terminal pocのagent起動前にgwt managed skillsを適用
+- Poc-terminalをmacOSアプリとして起動可能にする
+- Poc-terminalにフォーカス切替ショートカットを追加
+- **gui:** Add project picker tabs to poc terminal
+- **gui:** Present launch agent as centered panel
+- Promote desktop app as gwt
+- Add structured spec issue commands
+- Activate github workflow cli guardrails
+- **gui:** Add window state controls
+- トラックパッド二本指スクロールと中ボタンドラッグでキャンバスパン
+- **gui:** Split session and project workspace state
+
+### Miscellaneous Tasks
+
+- **gui:** Align knowledge bridge mock copy
+- Merge origin/develop into feature/poc-terminal
+- Cargo fmt でインポート行を整形
+
+### Refactor
+
+- Extract issue spec cli module
+- Decouple retired hook migration from mjs filenames
+
 ## [9.0.4] - 2026-04-14
 
 ### Bug Fixes

@@ -78,3 +78,53 @@ fn reconcile_is_idempotent() {
     reconcile_repo(&opts).unwrap();
     reconcile_repo(&opts).unwrap();
 }
+
+#[test]
+fn legacy_worktree_scoped_specs_directory_is_removed_for_live_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+
+    let live_wt = tmp.path().join("live");
+    fs::create_dir(&live_wt).unwrap();
+    let live_hash = compute_worktree_hash(&live_wt).unwrap();
+
+    let legacy_specs = index_root
+        .join(repo.as_str())
+        .join("worktrees")
+        .join(live_hash.as_str())
+        .join("specs");
+    fs::create_dir_all(&legacy_specs).unwrap();
+    fs::write(legacy_specs.join("chroma.sqlite3"), "data").unwrap();
+    let legacy_manifest = index_root
+        .join(repo.as_str())
+        .join("worktrees")
+        .join(live_hash.as_str())
+        .join("manifest-specs.json");
+    fs::write(&legacy_manifest, "[]").unwrap();
+
+    let live_files = index_root
+        .join(repo.as_str())
+        .join("worktrees")
+        .join(live_hash.as_str())
+        .join("files");
+    fs::create_dir_all(&live_files).unwrap();
+
+    let opts = ReconcileOptions {
+        index_root: index_root.clone(),
+        repo_hash: repo,
+        active_worktree_paths: vec![live_wt],
+        legacy_worktree_dirs: Vec::new(),
+    };
+    reconcile_repo(&opts).unwrap();
+
+    assert!(
+        !legacy_specs.exists(),
+        "legacy worktree-scoped specs dir should be removed"
+    );
+    assert!(
+        !legacy_manifest.exists(),
+        "legacy worktree-scoped specs manifest should be removed"
+    );
+    assert!(live_files.exists(), "live files dir must be preserved");
+}

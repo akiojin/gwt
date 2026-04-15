@@ -10,8 +10,8 @@ Create distinctive, production-grade terminal user interfaces with high design q
 
 ## gwt Technology Context
 
-- **Primary TUI framework:** Rust ratatui (gwt-core TUI migration target)
-- **Terminal emulation:** xterm.js v6 (gwt-gui, rendered in Tauri WebView)
+- **Primary TUI framework:** Rust ratatui (gwt-core terminal rendering)
+- **Terminal emulation:** xterm.js v6 (gwt GUI, rendered in WebView)
 - **Design principle:** シンプルさの極限を追求しつつ、ユーザビリティと開発者体験の品質は妥協しない (CLAUDE.md)
 - **Scope:** TUI/CLI/terminal rendering — Web UI components use `frontend-design` skill instead
 
@@ -143,8 +143,8 @@ NEVER use generic terminal aesthetics like:
 
 | Framework | Language | Notes |
 |-----------|----------|-------|
-| **ratatui** | **Rust** | **gwt primary TUI framework** |
-| xterm.js v6 | TypeScript | gwt-gui terminal emulation (Tauri WebView) |
+| **ratatui** | **Rust** | **gwt terminal rendering** |
+| xterm.js v6 | TypeScript | gwt GUI terminal emulation (WebView) |
 | Rich, Textual | Python | General purpose |
 | Bubbletea, Lipgloss | Go | General purpose |
 | Ink, Blessed | Node.js | General purpose |

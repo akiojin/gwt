@@ -1,0 +1,3587 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>gwt terminal poc</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #edf1f6;
+        color: #0f172a;
+      }
+
+      #app {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      .project-shell {
+        display: flex;
+        flex-direction: column;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      .project-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 48px;
+        padding: 8px 12px;
+        background: rgba(255, 255, 255, 0.96);
+        border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+      }
+
+      .project-tabs {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        flex: 1;
+        overflow-x: auto;
+      }
+
+      .project-tab {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: 280px;
+        height: 32px;
+        padding: 0 8px 0 10px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #334155;
+        cursor: pointer;
+      }
+
+      .project-tab.active {
+        border-color: rgba(37, 99, 235, 0.34);
+        background: rgba(59, 130, 246, 0.1);
+        color: #0f172a;
+      }
+
+      .project-tab-label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .project-tab-close {
+        width: 18px;
+        height: 18px;
+        border: none;
+        border-radius: 4px;
+        background: rgba(148, 163, 184, 0.18);
+        color: inherit;
+        cursor: pointer;
+      }
+
+      .project-tab-close:hover {
+        background: rgba(148, 163, 184, 0.28);
+      }
+
+      .project-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .canvas-area {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .canvas {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        cursor: grab;
+      }
+
+      .canvas.panning {
+        cursor: grabbing;
+      }
+
+      .canvas-stage {
+        position: absolute;
+        inset: 0;
+        transform-origin: 0 0;
+        will-change: transform;
+        background-image:
+          linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+        background-size: 24px 24px;
+      }
+
+      .hint {
+        position: absolute;
+        left: 18px;
+        top: 16px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        color: #334155;
+        backdrop-filter: blur(12px);
+      }
+
+      .connection-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #f59e0b;
+      }
+
+      .connection-dot.connected {
+        background: #22c55e;
+      }
+
+      .floating-actions {
+        position: absolute;
+        right: 18px;
+        bottom: 18px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .window-list-shell {
+        position: relative;
+      }
+
+      .window-list-panel {
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 8px);
+        width: 320px;
+        max-height: 320px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        box-shadow: 0 16px 36px rgba(15, 23, 42, 0.2);
+      }
+
+      .window-list-panel[hidden] {
+        display: none;
+      }
+
+      .window-list-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #0f172a;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .window-list-row:hover {
+        background: #eff6ff;
+        border-color: rgba(59, 130, 246, 0.28);
+      }
+
+      .window-list-copy {
+        min-width: 0;
+      }
+
+      .window-list-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .window-list-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: #64748b;
+      }
+
+      .window-list-empty {
+        padding: 12px;
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #64748b;
+        font-size: 12px;
+      }
+
+      .arrange-button {
+        height: 38px;
+        padding: 0 12px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.96);
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12);
+      }
+
+      .arrange-button:hover {
+        background: #f8fafc;
+      }
+
+      .add-button {
+        width: 46px;
+        height: 46px;
+        border: none;
+        border-radius: 6px;
+        background: #0f172a;
+        color: white;
+        font-size: 26px;
+        cursor: pointer;
+        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.25);
+      }
+
+      .add-button:hover {
+        background: #111f37;
+      }
+
+      .workspace-window {
+        position: absolute;
+        min-width: 420px;
+        min-height: 260px;
+        border-radius: 6px;
+        overflow: hidden;
+        border: 1px solid rgba(15, 23, 42, 0.24);
+        box-shadow:
+          0 18px 42px rgba(15, 23, 42, 0.2),
+          0 2px 6px rgba(15, 23, 42, 0.1);
+      }
+
+      .workspace-window.focused {
+        box-shadow:
+          0 22px 54px rgba(15, 23, 42, 0.28),
+          0 0 0 1px rgba(37, 99, 235, 0.24);
+      }
+
+      .workspace-window.minimized {
+        min-height: 38px;
+      }
+
+      .workspace-window.surface-terminal {
+        background: #0b1220;
+      }
+
+      .workspace-window.surface-file-tree,
+      .workspace-window.surface-branches,
+      .workspace-window.surface-mock {
+        background: rgba(255, 255, 255, 0.98);
+      }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        height: 38px;
+        padding: 0 12px;
+        user-select: none;
+        cursor: grab;
+      }
+
+      .surface-terminal .titlebar {
+        background: rgba(15, 23, 42, 0.98);
+        color: #e2e8f0;
+      }
+
+      .surface-file-tree .titlebar,
+      .surface-branches .titlebar,
+      .surface-mock .titlebar {
+        background: rgba(248, 250, 252, 0.98);
+        color: #0f172a;
+      }
+
+      .titlebar:active {
+        cursor: grabbing;
+      }
+
+      .workspace-window.maximized .titlebar {
+        cursor: default;
+      }
+
+      .title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .title-text {
+        font-size: 13px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .status-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.16);
+        font-size: 11px;
+      }
+
+      .surface-terminal .status-chip {
+        color: #cbd5e1;
+      }
+
+      .surface-file-tree .status-chip,
+      .surface-branches .status-chip,
+      .surface-mock .status-chip {
+        color: #334155;
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #f59e0b;
+      }
+
+      .status-chip.running .status-dot {
+        background: #22c55e;
+      }
+
+      .status-chip.ready .status-dot {
+        background: #3b82f6;
+      }
+
+      .status-chip.error .status-dot {
+        background: #ef4444;
+      }
+
+      .status-chip.exited .status-dot {
+        background: #94a3b8;
+      }
+
+      .window-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .icon-button {
+        width: 24px;
+        height: 24px;
+        border: none;
+        border-radius: 4px;
+        background: rgba(148, 163, 184, 0.16);
+        cursor: pointer;
+      }
+
+      .surface-terminal .icon-button {
+        color: #cbd5e1;
+      }
+
+      .surface-file-tree .icon-button,
+      .surface-branches .icon-button,
+      .surface-mock .icon-button {
+        color: #334155;
+      }
+
+      .icon-button:hover {
+        background: rgba(148, 163, 184, 0.28);
+      }
+
+      .window-body {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 38px;
+        bottom: 0;
+      }
+
+      .workspace-window.minimized .window-body,
+      .workspace-window.minimized .resize-handle,
+      .workspace-window.maximized .resize-handle {
+        display: none;
+      }
+
+      .surface-terminal .window-body {
+        background: #020617;
+      }
+
+      .surface-file-tree .window-body,
+      .surface-branches .window-body,
+      .surface-mock .window-body {
+        background: #ffffff;
+      }
+
+      .terminal-root {
+        position: absolute;
+        inset: 0;
+        padding: 8px 10px 10px;
+      }
+
+      .terminal-overlay {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.82);
+        color: #dbeafe;
+        font-size: 12px;
+        border: 1px solid rgba(59, 130, 246, 0.18);
+        pointer-events: none;
+        display: none;
+      }
+
+      .terminal-overlay.visible {
+        display: block;
+      }
+
+      .file-tree-root,
+      .branch-list-root,
+      .mock-root {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .file-tree-toolbar,
+      .branch-toolbar,
+      .mock-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      }
+
+      .file-tree-path,
+      .branch-heading,
+      .mock-heading {
+        min-width: 0;
+        font-size: 12px;
+        font-weight: 600;
+        color: #334155;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .file-tree-scroll,
+      .branch-scroll,
+      .mock-scroll {
+        flex: 1;
+        overflow: auto;
+      }
+
+      .file-tree-list,
+      .branch-list {
+        padding: 8px 0;
+      }
+
+      .file-tree-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 30px;
+        padding: 0 12px;
+        font-size: 13px;
+        color: #0f172a;
+        cursor: pointer;
+      }
+
+      .file-tree-row:hover {
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .file-tree-row.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .tree-caret {
+        width: 12px;
+        color: #64748b;
+        text-align: center;
+      }
+
+      .tree-icon {
+        width: 16px;
+        color: #2563eb;
+      }
+
+      .tree-icon.file {
+        color: #64748b;
+      }
+
+      .tree-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .file-tree-footer {
+        padding: 10px 12px;
+        border-top: 1px solid rgba(148, 163, 184, 0.25);
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .branch-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        cursor: pointer;
+      }
+
+      .branch-row:hover {
+        background: rgba(59, 130, 246, 0.06);
+      }
+
+      .branch-row.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .branch-row:last-child {
+        border-bottom: none;
+      }
+
+      .branch-main {
+        min-width: 0;
+      }
+
+      .branch-name {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        margin-bottom: 4px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .branch-name-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .branch-head {
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(16, 185, 129, 0.12);
+        color: #047857;
+        font-size: 10px;
+      }
+
+      .branch-upstream,
+      .branch-date {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .branch-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .branch-scope {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+        font-size: 11px;
+      }
+
+      .branch-summary {
+        font-size: 11px;
+        color: #475569;
+      }
+
+      .file-tree-empty,
+      .branch-empty,
+      .mock-empty {
+        padding: 16px 12px;
+        font-size: 12px;
+        color: #64748b;
+      }
+
+      .mock-section {
+        padding: 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .mock-label {
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
+      }
+
+      .mock-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 32px;
+        font-size: 13px;
+        color: #0f172a;
+      }
+
+      .mock-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+        font-size: 11px;
+      }
+
+      .resize-handle {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 18px;
+        height: 18px;
+        cursor: nwse-resize;
+        background:
+          linear-gradient(135deg, transparent 0 50%, rgba(148, 163, 184, 0.5) 50% 60%, transparent 60% 70%, rgba(148, 163, 184, 0.5) 70% 80%, transparent 80%);
+      }
+
+      .modal-backdrop {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.12);
+      }
+
+      .modal-backdrop.open {
+        display: flex;
+      }
+
+      .modal {
+        width: min(520px, calc(100vw - 32px));
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        padding: 14px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
+      }
+
+      .modal h2 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      .preset-section + .preset-section {
+        margin-top: 12px;
+      }
+
+      .preset-section-label {
+        margin-bottom: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
+      }
+
+      .preset-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .preset-button {
+        width: 100%;
+        text-align: left;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #f8fafc;
+        cursor: pointer;
+      }
+
+      .preset-button strong {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 3px;
+      }
+
+      .preset-button span {
+        display: block;
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .modal-footer {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 10px;
+      }
+
+      .text-button {
+        border: none;
+        background: transparent;
+        color: #334155;
+        cursor: pointer;
+        font-size: 12px;
+      }
+
+      .wizard-backdrop {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.18);
+        z-index: 2000;
+      }
+
+      .wizard-backdrop.open {
+        display: flex;
+      }
+
+      .wizard-modal {
+        width: min(980px, calc(100vw - 32px));
+        max-height: calc(100vh - 48px);
+        overflow: auto;
+        padding: 18px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.22);
+      }
+
+      .wizard-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .wizard-title {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .wizard-meta {
+        margin-top: 4px;
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .wizard-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 8px;
+      }
+
+      .wizard-summary:empty {
+        display: none;
+      }
+
+      .wizard-summary-item {
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        background: #f8fafc;
+        display: grid;
+        gap: 4px;
+      }
+
+      .wizard-summary-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: #64748b;
+      }
+
+      .wizard-summary-value {
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+        overflow-wrap: anywhere;
+      }
+
+      .launch-panel {
+        display: grid;
+        gap: 12px;
+      }
+
+      .launch-section {
+        display: grid;
+        gap: 12px;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: #f8fafc;
+      }
+
+      .launch-section-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .launch-section-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .launch-section-copy {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .launch-form-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+      }
+
+      .launch-field {
+        min-width: 0;
+        display: grid;
+        gap: 6px;
+      }
+
+      .launch-field.wide {
+        grid-column: 1 / -1;
+      }
+
+      .launch-field-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: #334155;
+      }
+
+      .launch-select,
+      .launch-input {
+        width: 100%;
+        min-width: 0;
+        height: 38px;
+        padding: 0 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
+        font-size: 13px;
+        color: #0f172a;
+      }
+
+      .launch-field-help {
+        font-size: 11px;
+        color: #64748b;
+      }
+
+      .launch-choice-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .launch-choice-button {
+        min-width: 0;
+        display: grid;
+        gap: 3px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
+        color: #0f172a;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .launch-choice-button.selected {
+        border-color: rgba(37, 99, 235, 0.45);
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .launch-choice-title {
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .launch-choice-detail {
+        font-size: 11px;
+        color: #64748b;
+      }
+
+      .quick-start-grid,
+      .live-session-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .quick-start-grid {
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+
+      .quick-start-card {
+        display: grid;
+        gap: 10px;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        background: #ffffff;
+      }
+
+      .quick-start-head {
+        display: grid;
+        gap: 4px;
+      }
+
+      .quick-start-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .quick-start-meta,
+      .quick-start-secondary,
+      .live-session-detail,
+      .launch-note {
+        font-size: 12px;
+        color: #475569;
+        overflow-wrap: anywhere;
+      }
+
+      .quick-start-secondary,
+      .launch-note {
+        font-size: 11px;
+      }
+
+      .quick-start-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .live-session-button {
+        width: 100%;
+        display: grid;
+        gap: 4px;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: #ffffff;
+        color: #0f172a;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .live-session-name {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .live-session-status {
+        font-size: 11px;
+        font-weight: 600;
+        color: #2563eb;
+      }
+
+      .launch-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .launch-inline-check {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #334155;
+      }
+
+      .launch-inline-check input {
+        margin: 0;
+      }
+
+      .wizard-error {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.18);
+        font-size: 12px;
+        color: #b91c1c;
+      }
+
+      .wizard-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      .wizard-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .wizard-button {
+        height: 36px;
+        padding: 0 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #f8fafc;
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .wizard-button.primary {
+        background: #0f172a;
+        color: #ffffff;
+        border-color: #0f172a;
+      }
+
+      @media (max-width: 720px) {
+        .wizard-modal {
+          width: calc(100vw - 16px);
+          max-height: calc(100vh - 16px);
+          padding: 14px;
+        }
+
+        .wizard-footer {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .wizard-actions {
+          width: 100%;
+        }
+
+        .wizard-actions .wizard-button {
+          flex: 1 1 0;
+        }
+
+        .launch-toggle-row {
+          flex-direction: column;
+          align-items: stretch;
+        }
+      }
+
+      .project-picker,
+      .project-onboarding {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(237, 241, 246, 0.72);
+        z-index: 1200;
+      }
+
+      .project-picker.visible,
+      .project-onboarding.visible {
+        display: flex;
+      }
+
+      .project-picker-card,
+      .project-onboarding-card {
+        width: min(560px, calc(100vw - 40px));
+        padding: 18px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.98);
+        border: 1px solid rgba(148, 163, 184, 0.32);
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
+      }
+
+      .project-picker-title,
+      .project-onboarding-title {
+        margin: 0 0 8px;
+        font-size: 20px;
+        color: #0f172a;
+      }
+
+      .project-picker-copy,
+      .project-onboarding-copy {
+        margin: 0 0 16px;
+        font-size: 13px;
+        color: #475569;
+      }
+
+      .project-picker-error {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.18);
+        color: #b91c1c;
+        font-size: 12px;
+      }
+
+      .picker-section-label {
+        margin: 16px 0 8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #475569;
+      }
+
+      .project-recent-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .recent-project-row {
+        width: 100%;
+        text-align: left;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: #f8fafc;
+        cursor: pointer;
+      }
+
+      .recent-project-row:hover {
+        background: #eef4ff;
+      }
+
+      .recent-project-title {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .recent-project-meta {
+        display: block;
+        margin-top: 4px;
+        font-size: 12px;
+        color: #64748b;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="project-shell">
+        <div class="project-bar">
+          <div class="project-tabs" id="project-tabs"></div>
+          <div class="project-actions">
+            <button class="arrange-button" id="open-project-button" aria-label="Open project">
+              Open Project
+            </button>
+          </div>
+        </div>
+        <div class="canvas-area">
+          <div class="hint">
+            <span class="connection-dot" id="connection-dot"></span>
+            <span id="connection-label">Connecting</span>
+            <span>Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
+          </div>
+          <div class="canvas" id="canvas">
+            <div class="canvas-stage" id="canvas-stage"></div>
+          </div>
+          <div class="project-picker" id="project-picker">
+            <div class="project-picker-card">
+              <h2 class="project-picker-title">Open a project</h2>
+              <p class="project-picker-copy">
+                Restore previous workspaces or choose a new folder.
+              </p>
+              <div class="project-picker-error" id="project-picker-error" hidden></div>
+              <button class="wizard-button primary" id="picker-open-project">
+                Open Project...
+              </button>
+              <div class="picker-section-label">Recent</div>
+              <div class="project-recent-list" id="recent-project-list"></div>
+            </div>
+          </div>
+          <div class="project-onboarding" id="project-onboarding">
+            <div class="project-onboarding-card">
+              <h2 class="project-onboarding-title" id="project-onboarding-title">
+                Project setup required
+              </h2>
+              <p class="project-onboarding-copy" id="project-onboarding-copy"></p>
+              <button class="wizard-button primary" id="onboarding-open-project">
+                Open Another Project...
+              </button>
+            </div>
+          </div>
+          <div class="floating-actions">
+            <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
+            <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
+            <div class="window-list-shell">
+              <button
+                class="arrange-button"
+                id="window-list-button"
+                aria-label="List windows"
+                aria-expanded="false"
+              >
+                Windows
+              </button>
+              <div class="window-list-panel" id="window-list-panel" hidden></div>
+            </div>
+            <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
+            <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
+            <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
+            <button class="add-button" id="add-button" aria-label="Add window">+</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-backdrop" id="preset-modal">
+        <div class="modal">
+          <h2>Add window</h2>
+          <div class="preset-section">
+            <div class="preset-section-label">Terminal</div>
+            <div class="preset-list">
+              <button class="preset-button" data-preset="shell">
+                <strong>Shell</strong>
+                <span>Open a standard shell terminal</span>
+              </button>
+              <button class="preset-button" data-preset="claude">
+                <strong>Claude</strong>
+                <span>Start the Claude CLI when available</span>
+              </button>
+              <button class="preset-button" data-preset="codex">
+                <strong>Codex</strong>
+                <span>Start the Codex CLI when available</span>
+              </button>
+            </div>
+          </div>
+          <div class="preset-section">
+            <div class="preset-section-label">Workspace</div>
+            <div class="preset-list">
+              <button class="preset-button" data-preset="file_tree">
+                <strong>File Tree</strong>
+                <span>Browse repository files in a read-only tree</span>
+              </button>
+              <button class="preset-button" data-preset="branches">
+                <strong>Branches</strong>
+                <span>Browse repository branches and launch agents</span>
+              </button>
+              <button class="preset-button" data-preset="settings">
+                <strong>Settings</strong>
+                <span>Open the settings surface</span>
+              </button>
+              <button class="preset-button" data-preset="memo">
+                <strong>Memo</strong>
+                <span>Open a notes surface</span>
+              </button>
+              <button class="preset-button" data-preset="profile">
+                <strong>Profile</strong>
+                <span>Open the active profile surface</span>
+              </button>
+              <button class="preset-button" data-preset="logs">
+                <strong>Logs</strong>
+                <span>Open the logs surface</span>
+              </button>
+              <button class="preset-button" data-preset="issue">
+                <strong>Issue</strong>
+                <span>Open the issue surface</span>
+              </button>
+              <button class="preset-button" data-preset="spec">
+                <strong>SPEC</strong>
+                <span>Open the SPEC surface</span>
+              </button>
+              <button class="preset-button" data-preset="board">
+                <strong>Board</strong>
+                <span>Open the board surface</span>
+              </button>
+              <button class="preset-button" data-preset="pr">
+                <strong>PR</strong>
+                <span>Open the PR surface</span>
+              </button>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="text-button" id="close-modal">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div class="wizard-backdrop" id="wizard-modal">
+        <div class="wizard-modal">
+          <div class="wizard-header">
+            <div>
+              <h2 class="wizard-title">Launch Agent</h2>
+              <div class="wizard-meta" id="wizard-meta"></div>
+            </div>
+            <button class="wizard-button" id="wizard-close-button">Close</button>
+          </div>
+          <div class="wizard-error" id="wizard-error" hidden></div>
+          <div class="wizard-summary" id="wizard-summary"></div>
+          <div id="wizard-body"></div>
+          <div class="wizard-footer">
+            <div class="wizard-actions">
+              <button class="wizard-button" id="wizard-cancel-button">Cancel</button>
+              <button class="wizard-button primary" id="wizard-submit-button">Launch</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import { Terminal } from "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm";
+      import { FitAddon } from "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm";
+
+      const canvas = document.getElementById("canvas");
+      const stage = document.getElementById("canvas-stage");
+      const projectTabs = document.getElementById("project-tabs");
+      const openProjectButton = document.getElementById("open-project-button");
+      const projectPicker = document.getElementById("project-picker");
+      const projectPickerError = document.getElementById("project-picker-error");
+      const pickerOpenProjectButton = document.getElementById("picker-open-project");
+      const recentProjectList = document.getElementById("recent-project-list");
+      const projectOnboarding = document.getElementById("project-onboarding");
+      const projectOnboardingTitle = document.getElementById(
+        "project-onboarding-title",
+      );
+      const projectOnboardingCopy = document.getElementById(
+        "project-onboarding-copy",
+      );
+      const onboardingOpenProjectButton = document.getElementById(
+        "onboarding-open-project",
+      );
+      const addButton = document.getElementById("add-button");
+      const tileButton = document.getElementById("tile-button");
+      const stackButton = document.getElementById("stack-button");
+      const windowListButton = document.getElementById("window-list-button");
+      const windowListPanel = document.getElementById("window-list-panel");
+      const zoomOutButton = document.getElementById("zoom-out-button");
+      const zoomResetButton = document.getElementById("zoom-reset-button");
+      const zoomInButton = document.getElementById("zoom-in-button");
+      const modal = document.getElementById("preset-modal");
+      const closeModalButton = document.getElementById("close-modal");
+      const wizardModal = document.getElementById("wizard-modal");
+      const wizardMeta = document.getElementById("wizard-meta");
+      const wizardSummary = document.getElementById("wizard-summary");
+      const wizardBody = document.getElementById("wizard-body");
+      const wizardError = document.getElementById("wizard-error");
+      const wizardCloseButton = document.getElementById("wizard-close-button");
+      const wizardCancelButton = document.getElementById("wizard-cancel-button");
+      const wizardSubmitButton = document.getElementById("wizard-submit-button");
+      const connectionDot = document.getElementById("connection-dot");
+      const connectionLabel = document.getElementById("connection-label");
+
+      const decoderMap = new Map();
+      const pendingOutputMap = new Map();
+      const pendingSnapshotMap = new Map();
+      const detailMap = new Map();
+      const terminalMap = new Map();
+      const windowMap = new Map();
+      const fileTreeStateMap = new Map();
+      const branchListStateMap = new Map();
+      const pendingMessages = [];
+
+      let socket = null;
+      let reconnectTimer = null;
+      let focusedId = null;
+      let dragState = null;
+      let panState = null;
+      let resizeState = null;
+      let viewport = { x: 0, y: 0, zoom: 1 };
+      let launchWizard = null;
+      let wizardWasOpen = false;
+      let wizardAdvancedOpen = false;
+      let wizardBranchDraft = "";
+      let wizardBranchBackendValue = "";
+      let windowListOpen = false;
+      let windowListEntries = [];
+      let titlebarClickState = null;
+      let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
+      let projectError = "";
+
+      function presetSurface(preset) {
+        if (
+          preset === "shell" ||
+          preset === "claude" ||
+          preset === "codex" ||
+          preset === "agent"
+        ) {
+          return "terminal";
+        }
+        if (preset === "file_tree") {
+          return "file-tree";
+        }
+        if (preset === "branches") {
+          return "branches";
+        }
+        return "mock";
+      }
+
+      function send(message) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify(message));
+          return;
+        }
+        pendingMessages.push(message);
+      }
+
+      function setConnectionState(connected) {
+        connectionDot.classList.toggle("connected", connected);
+        connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
+      }
+
+      function websocketUrl() {
+        const url = new URL(window.location.href);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        url.pathname = "/ws";
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      }
+
+      function connectSocket() {
+        if (socket && socket.readyState <= WebSocket.OPEN) {
+          return;
+        }
+        socket = new WebSocket(websocketUrl());
+        setConnectionState(false);
+
+        socket.addEventListener("open", () => {
+          setConnectionState(true);
+          send({ kind: "frontend_ready" });
+          while (pendingMessages.length > 0) {
+            socket.send(JSON.stringify(pendingMessages.shift()));
+          }
+        });
+
+        socket.addEventListener("message", (event) => {
+          receive(JSON.parse(event.data));
+        });
+
+        socket.addEventListener("close", () => {
+          setConnectionState(false);
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+          }
+          reconnectTimer = window.setTimeout(connectSocket, 1000);
+        });
+      }
+
+      function emptyWorkspace() {
+        return {
+          viewport: { x: 0, y: 0, zoom: 1 },
+          windows: [],
+        };
+      }
+
+      function activeProjectTab() {
+        if (!appState?.tabs?.length) {
+          return null;
+        }
+        return (
+          appState.tabs.find((tab) => tab.id === appState.active_tab_id) ||
+          appState.tabs[0] ||
+          null
+        );
+      }
+
+      function activeWorkspace() {
+        return activeProjectTab()?.workspace || emptyWorkspace();
+      }
+
+      function workspaceWindowById(windowId) {
+        return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
+      }
+
+      function sendOpenProjectDialog() {
+        send({ kind: "open_project_dialog" });
+      }
+
+      function updateActionAvailability() {
+        const hasActiveTab = Boolean(activeProjectTab());
+        addButton.disabled = !hasActiveTab;
+        tileButton.disabled = !hasActiveTab;
+        stackButton.disabled = !hasActiveTab;
+        windowListButton.disabled = !hasActiveTab;
+        if (!hasActiveTab) {
+          windowListOpen = false;
+          windowListEntries = [];
+          renderWindowList();
+        }
+      }
+
+      function presetLabel(preset) {
+        return preset
+          .split("_")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ");
+      }
+
+      function windowStateLabel(windowData) {
+        if (windowData.minimized) {
+          return "Minimized";
+        }
+        if (windowData.maximized) {
+          return "Maximized";
+        }
+        return "Normal";
+      }
+
+      function requestWindowList() {
+        if (!activeProjectTab()) {
+          return;
+        }
+        send({ kind: "list_windows" });
+      }
+
+      function renderWindowList() {
+        windowListPanel.hidden = !windowListOpen;
+        windowListButton.setAttribute("aria-expanded", windowListOpen ? "true" : "false");
+        if (!windowListOpen) {
+          return;
+        }
+        const entries =
+          windowListEntries.length > 0 ? windowListEntries : activeWorkspace().windows || [];
+        windowListPanel.innerHTML = "";
+        if (entries.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "window-list-empty";
+          empty.textContent = "No windows";
+          windowListPanel.appendChild(empty);
+          return;
+        }
+        for (const entry of entries) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "window-list-row";
+          row.innerHTML = `
+            <div class="window-list-copy">
+              <div class="window-list-title">${entry.title}</div>
+              <div class="window-list-meta">${presetLabel(entry.preset)} · ${windowStateLabel(entry)}</div>
+            </div>
+            <span class="status-chip ${entry.status}">
+              <span class="status-dot"></span>
+              <span class="status-label">${windowStateLabel(entry)}</span>
+            </span>
+          `;
+          row.addEventListener("click", () => {
+            windowListOpen = false;
+            renderWindowList();
+            focusWindowRemotely(entry.id);
+            if (entry.minimized) {
+              send({ kind: "restore_window", id: entry.id });
+            }
+          });
+          windowListPanel.appendChild(row);
+        }
+      }
+
+      function toggleWindowList() {
+        if (windowListButton.disabled) {
+          return;
+        }
+        windowListOpen = !windowListOpen;
+        windowListEntries = [];
+        renderWindowList();
+        if (windowListOpen) {
+          requestWindowList();
+        }
+      }
+
+      function maximizedGeometry(bounds) {
+        return {
+          x: bounds.x + 24,
+          y: bounds.y + 24,
+          width: Math.max(bounds.width - 48, 0),
+          height: Math.max(bounds.height - 48, 0),
+        };
+      }
+
+      function geometryMatches(left, right) {
+        return (
+          Math.abs(left.x - right.x) < 0.5 &&
+          Math.abs(left.y - right.y) < 0.5 &&
+          Math.abs(left.width - right.width) < 0.5 &&
+          Math.abs(left.height - right.height) < 0.5
+        );
+      }
+
+      function syncMaximizedWindowsToViewport() {
+        const bounds = visibleBounds();
+        const nextGeometry = maximizedGeometry(bounds);
+        for (const windowData of activeWorkspace().windows || []) {
+          if (!windowData.maximized) {
+            continue;
+          }
+          if (geometryMatches(windowData.geometry, nextGeometry)) {
+            continue;
+          }
+          send({
+            kind: "maximize_window",
+            id: windowData.id,
+            bounds,
+          });
+        }
+      }
+
+      function renderProjectTabs() {
+        projectTabs.innerHTML = "";
+        for (const tab of appState.tabs || []) {
+          const button = document.createElement("div");
+          button.className = "project-tab";
+          button.title = tab.project_root;
+          button.setAttribute("role", "button");
+          button.tabIndex = 0;
+          if (tab.id === appState.active_tab_id) {
+            button.classList.add("active");
+          }
+          button.innerHTML = `
+            <span class="project-tab-label">${tab.title}</span>
+            <button class="project-tab-close" type="button" aria-label="Close ${tab.title}">×</button>
+          `;
+          button.addEventListener("click", () => {
+            send({ kind: "select_project_tab", tab_id: tab.id });
+          });
+          button.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              send({ kind: "select_project_tab", tab_id: tab.id });
+            }
+          });
+          button
+            .querySelector(".project-tab-close")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              send({ kind: "close_project_tab", tab_id: tab.id });
+            });
+          projectTabs.appendChild(button);
+        }
+      }
+
+      function renderRecentProjects() {
+        recentProjectList.innerHTML = "";
+        const recentProjects = appState?.recent_projects || [];
+        if (recentProjects.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "file-tree-empty";
+          empty.textContent = "No recent projects";
+          recentProjectList.appendChild(empty);
+          return;
+        }
+
+        for (const project of recentProjects) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "recent-project-row";
+          row.innerHTML = `
+            <span class="recent-project-title">${project.title}</span>
+            <span class="recent-project-meta">${project.kind} · ${project.path}</span>
+          `;
+          row.addEventListener("click", () => {
+            send({ kind: "reopen_recent_project", path: project.path });
+          });
+          recentProjectList.appendChild(row);
+        }
+      }
+
+      function renderProjectPicker() {
+        const shouldShow = !activeProjectTab();
+        projectPicker.classList.toggle("visible", shouldShow);
+        projectPickerError.hidden = !projectError;
+        projectPickerError.textContent = projectError;
+        renderRecentProjects();
+      }
+
+      function renderProjectOnboarding(tab) {
+        if (!tab || tab.kind === "git") {
+          projectOnboarding.classList.remove("visible");
+          return;
+        }
+        projectOnboarding.classList.add("visible");
+        projectOnboardingTitle.textContent =
+          tab.kind === "bare" ? "Bare repository selected" : "Project setup required";
+        projectOnboardingCopy.textContent =
+          tab.kind === "bare"
+            ? `No develop worktree was found for ${tab.project_root}. Open a worktree folder or another project.`
+            : `${tab.project_root} is not a Git workspace yet. Open another project or initialize this folder outside the PoC.`;
+      }
+
+      function renderAppState(nextState) {
+        appState = nextState || { tabs: [], active_tab_id: null, recent_projects: [] };
+        renderProjectTabs();
+        renderProjectPicker();
+        updateActionAvailability();
+        const tab = activeProjectTab();
+        renderProjectOnboarding(tab);
+        renderWorkspace(tab?.workspace || emptyWorkspace());
+        renderWindowList();
+      }
+
+      function openModal() {
+        modal.classList.add("open");
+      }
+
+      function closeModal() {
+        modal.classList.remove("open");
+      }
+
+      function clamp(value, min) {
+        return Math.max(min, value);
+      }
+
+      function clampRange(value, min, max) {
+        return Math.min(Math.max(value, min), max);
+      }
+
+      function parseNumber(value) {
+        return Number.parseFloat(value || "0");
+      }
+
+      function applyViewport() {
+        stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+      }
+
+      function persistViewport() {
+        send({
+          kind: "update_viewport",
+          viewport,
+        });
+      }
+
+      function canvasCenterAnchor() {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: rect.width / 2,
+          y: rect.height / 2,
+        };
+      }
+
+      function zoomCanvasAt(anchorX, anchorY, nextZoom) {
+        const clampedZoom = clampRange(nextZoom, 0.6, 2.4);
+        const worldX = (anchorX - viewport.x) / viewport.zoom;
+        const worldY = (anchorY - viewport.y) / viewport.zoom;
+        viewport.x = anchorX - worldX * clampedZoom;
+        viewport.y = anchorY - worldY * clampedZoom;
+        viewport.zoom = clampedZoom;
+        applyViewport();
+        persistViewport();
+      }
+
+      function zoomCanvasByFactor(factor) {
+        const anchor = canvasCenterAnchor();
+        zoomCanvasAt(anchor.x, anchor.y, viewport.zoom * factor);
+      }
+
+      function resetCanvasZoom() {
+        const anchor = canvasCenterAnchor();
+        zoomCanvasAt(anchor.x, anchor.y, 1);
+      }
+
+      function visibleBounds() {
+        return {
+          x: -viewport.x / viewport.zoom,
+          y: -viewport.y / viewport.zoom,
+          width: canvas.clientWidth / viewport.zoom,
+          height: canvas.clientHeight / viewport.zoom,
+        };
+      }
+
+      function topmostWindowId(workspace) {
+        if (!workspace.windows || workspace.windows.length === 0) {
+          return null;
+        }
+        return workspace.windows.reduce((topmost, candidate) => {
+          if (!topmost || candidate.z_index > topmost.z_index) {
+            return candidate;
+          }
+          return topmost;
+        }, null)?.id;
+      }
+
+      function cycleFocus(direction) {
+        if (windowMap.size === 0) {
+          return;
+        }
+        send({
+          kind: "cycle_focus",
+          direction,
+          bounds: visibleBounds(),
+        });
+      }
+
+      function shouldHandleFocusShortcut(event) {
+        if (event.repeat) {
+          return false;
+        }
+        if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) {
+          return false;
+        }
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") {
+          return false;
+        }
+        if (modal.classList.contains("open") || wizardModal.classList.contains("open")) {
+          return false;
+        }
+        return true;
+      }
+
+      function arrangeWindows(mode) {
+        send({
+          kind: "arrange_windows",
+          mode,
+          bounds: visibleBounds(),
+        });
+      }
+
+      function fitTerminal(windowId, persist = false) {
+        const runtime = terminalMap.get(windowId);
+        const element = windowMap.get(windowId);
+        if (!runtime || !element) {
+          return;
+        }
+        runtime.fitAddon.fit();
+        if (!persist) {
+          return;
+        }
+        sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+      }
+
+      function sendGeometry(windowId, cols, rows) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const windowData = workspaceWindowById(windowId);
+        send({
+          kind: "update_window_geometry",
+          id: windowId,
+          geometry: {
+            x: parseNumber(element.style.left),
+            y: parseNumber(element.style.top),
+            width: windowData?.minimized
+              ? windowData.geometry.width
+              : parseNumber(element.style.width),
+            height: windowData?.minimized
+              ? windowData.geometry.height
+              : parseNumber(element.style.height),
+          },
+          cols,
+          rows,
+        });
+      }
+
+      function applyStatus(windowId, status, detail) {
+        if (detail) {
+          detailMap.set(windowId, detail);
+        } else if (status === "running" || status === "ready") {
+          detailMap.delete(windowId);
+        }
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const chip = element.querySelector(".status-chip");
+        const label = element.querySelector(".status-label");
+        const overlay = element.querySelector(".terminal-overlay");
+        chip.classList.remove("starting", "running", "ready", "exited", "error");
+        chip.classList.add(status);
+        label.textContent = status;
+        const effectiveDetail = detailMap.get(windowId);
+        if (overlay) {
+          overlay.textContent = effectiveDetail || "";
+          overlay.classList.toggle(
+            "visible",
+            status === "error" || status === "exited",
+          );
+        }
+      }
+
+      function focusWindowLocally(windowId) {
+        focusedId = windowId;
+        for (const [id, element] of windowMap.entries()) {
+          element.classList.toggle("focused", id === windowId);
+        }
+      }
+
+      function focusWindowRemotely(windowId) {
+        focusWindowLocally(windowId);
+        send({ kind: "focus_window", id: windowId });
+      }
+
+      function toggleMinimizeWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        focusWindowRemotely(windowId);
+        send({
+          kind: windowData.minimized ? "restore_window" : "minimize_window",
+          id: windowId,
+        });
+      }
+
+      function toggleMaximizeWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        focusWindowRemotely(windowId);
+        if (windowData.maximized) {
+          send({ kind: "restore_window", id: windowId });
+          return;
+        }
+        if (windowData.minimized) {
+          send({ kind: "restore_window", id: windowId });
+        }
+        send({
+          kind: "maximize_window",
+          id: windowId,
+          bounds: visibleBounds(),
+        });
+      }
+
+      function handleTitlebarClick(windowId) {
+        const now = Date.now();
+        if (
+          titlebarClickState &&
+          titlebarClickState.id === windowId &&
+          now - titlebarClickState.timestamp <= 300
+        ) {
+          titlebarClickState = null;
+          const windowData = workspaceWindowById(windowId);
+          if (windowData?.minimized) {
+            focusWindowRemotely(windowId);
+            send({ kind: "restore_window", id: windowId });
+            return;
+          }
+          toggleMaximizeWindow(windowId);
+          return;
+        }
+        titlebarClickState = {
+          id: windowId,
+          timestamp: now,
+        };
+      }
+
+      function decodeBase64(base64) {
+        return Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
+      }
+
+      function createTerminalRuntime(windowId, terminalContainer) {
+        if (terminalMap.has(windowId)) {
+          return terminalMap.get(windowId);
+        }
+        const terminal = new Terminal({
+          cursorBlink: true,
+          convertEol: true,
+          theme: {
+            background: "#020617",
+            foreground: "#e2e8f0",
+            cursor: "#f8fafc",
+            black: "#0f172a",
+            red: "#ef4444",
+            green: "#22c55e",
+            yellow: "#f59e0b",
+            blue: "#3b82f6",
+            magenta: "#a855f7",
+            cyan: "#06b6d4",
+            white: "#cbd5e1",
+            brightBlack: "#334155",
+            brightRed: "#f87171",
+            brightGreen: "#4ade80",
+            brightYellow: "#fbbf24",
+            brightBlue: "#60a5fa",
+            brightMagenta: "#c084fc",
+            brightCyan: "#22d3ee",
+            brightWhite: "#f8fafc",
+          },
+          fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+          fontSize: 13,
+          lineHeight: 1.2,
+          scrollback: 5000,
+        });
+        const fitAddon = new FitAddon();
+        terminal.loadAddon(fitAddon);
+        terminal.open(terminalContainer);
+        terminal.onData((data) => {
+          send({ kind: "terminal_input", id: windowId, data });
+        });
+        terminalMap.set(windowId, { terminal, fitAddon });
+        decoderMap.set(windowId, new TextDecoder());
+        requestAnimationFrame(() => fitTerminal(windowId, true));
+
+        const snapshot = pendingSnapshotMap.get(windowId);
+        if (snapshot) {
+          replaceTerminalSnapshot(windowId, snapshot);
+          pendingSnapshotMap.delete(windowId);
+        }
+
+        const pending = pendingOutputMap.get(windowId);
+        if (pending?.length) {
+          for (const chunk of pending) {
+            writeOutput(windowId, chunk);
+          }
+          pendingOutputMap.delete(windowId);
+        }
+        return { terminal, fitAddon };
+      }
+
+      function writeOutput(windowId, base64) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          const queue = pendingOutputMap.get(windowId) || [];
+          queue.push(base64);
+          pendingOutputMap.set(windowId, queue);
+          return;
+        }
+        const decoder = decoderMap.get(windowId);
+        runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }));
+      }
+
+      function replaceTerminalSnapshot(windowId, base64) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime) {
+          pendingSnapshotMap.set(windowId, base64);
+          return;
+        }
+        const decoder = decoderMap.get(windowId);
+        runtime.terminal.reset();
+        runtime.terminal.write(decoder.decode(decodeBase64(base64)));
+      }
+
+      function mockContentForPreset(preset) {
+        switch (preset) {
+          case "settings":
+            return {
+              heading: "Environment",
+              rows: [
+                ["Theme", "Canvas"],
+                ["Agents", "Claude / Codex"],
+                ["Transport", "Local server"],
+              ],
+            };
+          case "memo":
+            return {
+              heading: "Daily Notes",
+              rows: [
+                ["Workspace", "Floating windows"],
+                ["Pinned", "2 notes"],
+                ["Draft", "Canvas review"],
+              ],
+            };
+          case "profile":
+            return {
+              heading: "Active Profile",
+              rows: [
+                ["Profile", "default"],
+                ["Model", "Mixed"],
+                ["Shell", "Interactive"],
+              ],
+            };
+          case "logs":
+            return {
+              heading: "Recent Events",
+              rows: [
+                ["Workspace", "synced"],
+                ["Transport", "connected"],
+                ["Canvas", "ready"],
+              ],
+            };
+          case "issue":
+            return {
+              heading: "Issue Bridge",
+              rows: [
+                ["Cache", "repo-scoped"],
+                ["Refresh", "gwt-managed"],
+                ["Launch", "issue context"],
+              ],
+            };
+          case "spec":
+            return {
+              heading: "SPEC Bridge",
+              rows: [
+                ["Sections", "spec/plan/tasks"],
+                ["Refresh", "cache pull"],
+                ["Repair", "cache recovery"],
+              ],
+            };
+          case "board":
+            return {
+              heading: "Coordination",
+              rows: [
+                ["Backlog", "4 cards"],
+                ["Doing", "2 cards"],
+                ["Blocked", "0 cards"],
+              ],
+            };
+          case "pr":
+            return {
+              heading: "PR Bridge",
+              rows: [
+                ["Cache", "repo-scoped"],
+                ["Checks", "cache-backed"],
+                ["Workflow", "gwt-managed"],
+              ],
+            };
+          default:
+            return {
+              heading: "Workspace",
+              rows: [
+                ["Canvas", "ready"],
+                ["Windows", "floating"],
+                ["Transport", "shared"],
+              ],
+            };
+        }
+      }
+
+      function ensureFileTreeState(windowId) {
+        if (!fileTreeStateMap.has(windowId)) {
+          fileTreeStateMap.set(windowId, {
+            loaded: new Map(),
+            expanded: new Set(),
+            loading: new Set(),
+            selectedPath: "",
+            error: "",
+          });
+        }
+        return fileTreeStateMap.get(windowId);
+      }
+
+      function ensureBranchListState(windowId) {
+        if (!branchListStateMap.has(windowId)) {
+          branchListStateMap.set(windowId, {
+            entries: [],
+            loading: false,
+            error: "",
+            selectedBranchName: "",
+          });
+        }
+        return branchListStateMap.get(windowId);
+      }
+
+      function requestFileTree(windowId, path = "") {
+        const state = ensureFileTreeState(windowId);
+        if (state.loading.has(path)) {
+          return;
+        }
+        state.loading.add(path);
+        send({
+          kind: "load_file_tree",
+          id: windowId,
+          path: path || null,
+        });
+      }
+
+      function requestBranches(windowId) {
+        const state = ensureBranchListState(windowId);
+        if (state.loading) {
+          return;
+        }
+        state.loading = true;
+        send({
+          kind: "load_branches",
+          id: windowId,
+        });
+      }
+
+      function sendWizardAction(action) {
+        send({
+          kind: "launch_wizard_action",
+          action,
+        });
+      }
+
+      function createNode(tagName, className, textContent) {
+        const node = document.createElement(tagName);
+        if (className) {
+          node.className = className;
+        }
+        if (textContent !== undefined) {
+          node.textContent = textContent;
+        }
+        return node;
+      }
+
+      function createLaunchSection(title, copy) {
+        const section = createNode("section", "launch-section");
+        const header = createNode("div", "launch-section-header");
+        const text = createNode("div");
+        text.appendChild(createNode("div", "launch-section-title", title));
+        if (copy) {
+          text.appendChild(createNode("div", "launch-section-copy", copy));
+        }
+        header.appendChild(text);
+        section.appendChild(header);
+        return section;
+      }
+
+      function createLaunchField(label, wide = false) {
+        const field = createNode(
+          "div",
+          wide ? "launch-field wide" : "launch-field",
+        );
+        field.appendChild(createNode("div", "launch-field-label", label));
+        return field;
+      }
+
+      function createChoiceButton(option, selected, onSelect) {
+        const button = createNode("button", "launch-choice-button");
+        button.type = "button";
+        if (selected) {
+          button.classList.add("selected");
+        }
+        button.appendChild(createNode("span", "launch-choice-title", option.label));
+        if (option.description) {
+          button.appendChild(
+            createNode("span", "launch-choice-detail", option.description),
+          );
+        }
+        button.addEventListener("click", onSelect);
+        return button;
+      }
+
+      function appendChoiceField(
+        parent,
+        label,
+        options,
+        selectedValue,
+        onSelect,
+        wide = false,
+      ) {
+        const field = createLaunchField(label, wide);
+        const row = createNode("div", "launch-choice-row");
+        for (const option of options) {
+          row.appendChild(
+            createChoiceButton(option, option.value === selectedValue, () =>
+              onSelect(option.value),
+            ),
+          );
+        }
+        field.appendChild(row);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendSelectField(
+        parent,
+        label,
+        options,
+        selectedValue,
+        onChange,
+        wide = false,
+        emptyLabel = "Unavailable",
+      ) {
+        const field = createLaunchField(label, wide);
+        const select = createNode("select", "launch-select");
+        if (options.length === 0) {
+          select.disabled = true;
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = emptyLabel;
+          select.appendChild(option);
+        } else {
+          for (const item of options) {
+            const option = document.createElement("option");
+            option.value = item.value;
+            option.textContent = item.label;
+            select.appendChild(option);
+          }
+          const hasSelected = options.some((item) => item.value === selectedValue);
+          select.value = hasSelected ? selectedValue : options[0].value;
+          select.addEventListener("change", () => onChange(select.value));
+        }
+        field.appendChild(select);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendCheckboxField(
+        parent,
+        label,
+        copy,
+        checked,
+        onChange,
+        wide = false,
+      ) {
+        const field = createLaunchField(label, wide);
+        const checkboxLabel = createNode("label", "launch-inline-check");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = checked;
+        input.addEventListener("change", () => onChange(input.checked));
+        checkboxLabel.appendChild(input);
+        checkboxLabel.appendChild(createNode("span", "", copy));
+        field.appendChild(checkboxLabel);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function runtimeTargetPayload(value) {
+        return value === "docker" ? "Docker" : "Host";
+      }
+
+      function dockerLifecyclePayload(value) {
+        switch (value) {
+          case "connect":
+            return "Connect";
+          case "start":
+            return "Start";
+          case "restart":
+            return "Restart";
+          case "recreate":
+            return "Recreate";
+          case "create_and_start":
+            return "CreateAndStart";
+          default:
+            return "Connect";
+        }
+      }
+
+      function syncWizardDraftState() {
+        if (!launchWizard) {
+          wizardWasOpen = false;
+          wizardAdvancedOpen = false;
+          wizardBranchDraft = "";
+          wizardBranchBackendValue = "";
+          return;
+        }
+
+        if (!wizardWasOpen) {
+          wizardWasOpen = true;
+          wizardAdvancedOpen =
+            launchWizard.selected_runtime_target === "docker" ||
+            Boolean(launchWizard.selected_docker_service);
+          wizardBranchDraft = launchWizard.branch_name || "";
+          wizardBranchBackendValue = wizardBranchDraft;
+          return;
+        }
+
+        if ((launchWizard.branch_name || "") !== wizardBranchBackendValue) {
+          wizardBranchDraft = launchWizard.branch_name || "";
+          wizardBranchBackendValue = wizardBranchDraft;
+        }
+      }
+
+      function flushWizardBranchDraft() {
+        if (!launchWizard || launchWizard.branch_mode !== "create_new") {
+          return;
+        }
+        if (wizardBranchDraft === wizardBranchBackendValue) {
+          return;
+        }
+        wizardBranchBackendValue = wizardBranchDraft;
+        sendWizardAction({
+          kind: "set_branch_name",
+          value: wizardBranchDraft,
+        });
+      }
+
+      function renderWizardSummary() {
+        wizardSummary.innerHTML = "";
+        for (const item of launchWizard.launch_summary || []) {
+          const card = createNode("div", "wizard-summary-item");
+          card.appendChild(createNode("div", "wizard-summary-label", item.label));
+          card.appendChild(createNode("div", "wizard-summary-value", item.value));
+          wizardSummary.appendChild(card);
+        }
+      }
+
+      function renderLaunchWizard() {
+        if (!launchWizard) {
+          wizardModal.classList.remove("open");
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          wizardError.hidden = true;
+          wizardError.textContent = "";
+          wizardSubmitButton.textContent = "Launch";
+          syncWizardDraftState();
+          return;
+        }
+
+        syncWizardDraftState();
+        closeModal();
+        wizardModal.classList.add("open");
+        wizardMeta.textContent = `Selected branch · ${
+          launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
+        }`;
+        wizardSubmitButton.textContent =
+          launchWizard.branch_mode === "create_new"
+            ? "Create and launch"
+            : "Launch";
+
+        if (launchWizard.error) {
+          wizardError.hidden = false;
+          wizardError.textContent = launchWizard.error;
+        } else {
+          wizardError.hidden = true;
+          wizardError.textContent = "";
+        }
+
+        renderWizardSummary();
+        wizardBody.innerHTML = "";
+        const panel = createNode("div", "launch-panel");
+
+        if (
+          (launchWizard.quick_start_entries || []).length > 0 ||
+          (launchWizard.live_sessions || []).length > 0
+        ) {
+          const section = createLaunchSection(
+            "Quick start",
+            "Reuse a recent launch profile or jump to a running window.",
+          );
+
+          if ((launchWizard.quick_start_entries || []).length > 0) {
+            const quickStartGrid = createNode("div", "quick-start-grid");
+            for (const entry of launchWizard.quick_start_entries) {
+              const card = createNode("div", "quick-start-card");
+              const head = createNode("div", "quick-start-head");
+              head.appendChild(
+                createNode("div", "quick-start-title", entry.tool_label),
+              );
+              head.appendChild(
+                createNode("div", "quick-start-meta", entry.summary),
+              );
+              if (entry.resume_session_id) {
+                head.appendChild(
+                  createNode(
+                    "div",
+                    "quick-start-secondary",
+                    `Resume ID · ${entry.resume_session_id}`,
+                  ),
+                );
+              }
+              card.appendChild(head);
+
+              const actions = createNode("div", "quick-start-actions");
+              const resumeButton = createNode(
+                "button",
+                "wizard-button",
+                entry.resume_session_id ? "Resume" : "Continue",
+              );
+              resumeButton.type = "button";
+              resumeButton.addEventListener("click", () => {
+                sendWizardAction({
+                  kind: "apply_quick_start",
+                  index: entry.index,
+                  mode: "resume",
+                });
+              });
+              actions.appendChild(resumeButton);
+
+              const startNewButton = createNode(
+                "button",
+                "wizard-button primary",
+                "Start new",
+              );
+              startNewButton.type = "button";
+              startNewButton.addEventListener("click", () => {
+                sendWizardAction({
+                  kind: "apply_quick_start",
+                  index: entry.index,
+                  mode: "start_new",
+                });
+              });
+              actions.appendChild(startNewButton);
+
+              card.appendChild(actions);
+              quickStartGrid.appendChild(card);
+            }
+            section.appendChild(quickStartGrid);
+          }
+
+          if ((launchWizard.live_sessions || []).length > 0) {
+            const liveSection = createNode("div", "live-session-list");
+            for (const session of launchWizard.live_sessions) {
+              const button = createNode("button", "live-session-button");
+              button.type = "button";
+              button.appendChild(
+                createNode("div", "live-session-name", session.name),
+              );
+              button.appendChild(
+                createNode(
+                  "div",
+                  "live-session-status",
+                  session.active ? "Active window" : "Running window",
+                ),
+              );
+              if (session.detail) {
+                button.appendChild(
+                  createNode("div", "live-session-detail", session.detail),
+                );
+              }
+              button.addEventListener("click", () => {
+                sendWizardAction({
+                  kind: "focus_existing_session",
+                  index: session.index,
+                });
+              });
+              liveSection.appendChild(button);
+            }
+            section.appendChild(liveSection);
+          }
+
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
+            "Branch",
+            "Choose the selected branch or create a new branch from it.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          appendChoiceField(
+            grid,
+            "Branch target",
+            [
+              {
+                value: "use_selected",
+                label: "Use selected",
+                description:
+                  launchWizard.selected_branch_name || "Launch on the selected branch",
+              },
+              {
+                value: "create_new",
+                label: "Create new",
+                description: `Base · ${
+                  launchWizard.selected_branch_name || "selected branch"
+                }`,
+              },
+            ],
+            launchWizard.branch_mode,
+            (value) => {
+              sendWizardAction({
+                kind: "set_branch_mode",
+                create_new: value === "create_new",
+              });
+            },
+            true,
+          );
+
+          if (launchWizard.branch_mode === "create_new") {
+            appendChoiceField(
+              grid,
+              "Branch type",
+              launchWizard.branch_type_options || [],
+              launchWizard.selected_branch_type,
+              (value) => {
+                flushWizardBranchDraft();
+                sendWizardAction({
+                  kind: "set_branch_type",
+                  prefix: value,
+                });
+              },
+              true,
+            );
+            const field = createLaunchField("Branch name", true);
+            const input = createNode("input", "launch-input");
+            input.type = "text";
+            input.value = wizardBranchDraft;
+            input.placeholder = "feature/my-task";
+            input.addEventListener("input", () => {
+              wizardBranchDraft = input.value;
+            });
+            input.addEventListener("blur", () => {
+              flushWizardBranchDraft();
+            });
+            field.appendChild(input);
+            field.appendChild(
+              createNode(
+                "div",
+                "launch-field-help",
+                `Base branch · ${launchWizard.selected_branch_name || "selected"}`,
+              ),
+            );
+            grid.appendChild(field);
+          } else {
+            const note = createLaunchField("Resolved target", true);
+            note.appendChild(
+              createNode(
+                "div",
+                "launch-note",
+                launchWizard.selected_branch_name || launchWizard.branch_name,
+              ),
+            );
+            grid.appendChild(note);
+          }
+
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
+            "Launch",
+            "Choose the agent and default execution behavior.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          appendSelectField(
+            grid,
+            "Agent",
+            launchWizard.agent_options || [],
+            launchWizard.selected_agent_id,
+            (value) =>
+              sendWizardAction({
+                kind: "set_agent",
+                agent_id: value,
+              }),
+          );
+          if ((launchWizard.model_options || []).length > 0) {
+            appendSelectField(
+              grid,
+              "Model",
+              launchWizard.model_options || [],
+              launchWizard.selected_model,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_model",
+                  model: value,
+                }),
+            );
+          }
+          if (launchWizard.show_reasoning) {
+            appendSelectField(
+              grid,
+              "Reasoning",
+              launchWizard.reasoning_options || [],
+              launchWizard.selected_reasoning,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_reasoning",
+                  reasoning: value,
+                }),
+            );
+          }
+          appendSelectField(
+            grid,
+            "Execution mode",
+            launchWizard.execution_mode_options || [],
+            launchWizard.selected_execution_mode,
+            (value) =>
+              sendWizardAction({
+                kind: "set_execution_mode",
+                mode: value,
+              }),
+          );
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
+            "Advanced",
+            "Runtime target, versions, and launch flags.",
+          );
+          const toggleRow = createNode("div", "launch-toggle-row");
+          toggleRow.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              wizardAdvancedOpen
+                ? "Docker, version, permissions, and tool-specific flags."
+                : "Show runtime and launch flags.",
+            ),
+          );
+          const toggleButton = createNode(
+            "button",
+            "wizard-button",
+            wizardAdvancedOpen ? "Hide advanced" : "Show advanced",
+          );
+          toggleButton.type = "button";
+          toggleButton.addEventListener("click", () => {
+            wizardAdvancedOpen = !wizardAdvancedOpen;
+            renderLaunchWizard();
+          });
+          toggleRow.appendChild(toggleButton);
+          section.appendChild(toggleRow);
+
+          if (wizardAdvancedOpen) {
+            const grid = createNode("div", "launch-form-grid");
+            if (launchWizard.show_runtime_target) {
+              appendSelectField(
+                grid,
+                "Runtime target",
+                launchWizard.runtime_target_options || [],
+                launchWizard.selected_runtime_target,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_runtime_target",
+                    target: runtimeTargetPayload(value),
+                  }),
+              );
+            }
+            if (
+              launchWizard.show_docker_service &&
+              (launchWizard.docker_service_options || []).length > 0
+            ) {
+              appendSelectField(
+                grid,
+                "Docker service",
+                launchWizard.docker_service_options || [],
+                launchWizard.selected_docker_service,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_docker_service",
+                    service: value,
+                  }),
+              );
+            }
+            if (
+              launchWizard.show_docker_lifecycle &&
+              (launchWizard.docker_lifecycle_options || []).length > 0
+            ) {
+              appendSelectField(
+                grid,
+                "Docker lifecycle",
+                launchWizard.docker_lifecycle_options || [],
+                launchWizard.selected_docker_lifecycle,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_docker_lifecycle",
+                    intent: dockerLifecyclePayload(value),
+                  }),
+              );
+            }
+            if (launchWizard.show_version) {
+              appendSelectField(
+                grid,
+                "Version",
+                launchWizard.version_options || [],
+                launchWizard.selected_version,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_version",
+                    version: value,
+                  }),
+              );
+            }
+            appendCheckboxField(
+              grid,
+              "Permissions",
+              "Skip permission prompts",
+              launchWizard.skip_permissions,
+              (enabled) =>
+                sendWizardAction({
+                  kind: "set_skip_permissions",
+                  enabled,
+                }),
+            );
+            if (launchWizard.show_codex_fast_mode) {
+              appendCheckboxField(
+                grid,
+                "Codex fast mode",
+                "Use the fast service tier",
+                launchWizard.codex_fast_mode,
+                (enabled) =>
+                  sendWizardAction({
+                    kind: "set_codex_fast_mode",
+                    enabled,
+                  }),
+              );
+            }
+            section.appendChild(grid);
+          }
+
+          panel.appendChild(section);
+        }
+
+        wizardBody.appendChild(panel);
+      }
+
+      function renderFileTree(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const state = ensureFileTreeState(windowId);
+        const list = element.querySelector(".file-tree-list");
+        const footer = element.querySelector(".file-tree-footer");
+        if (!list || !footer) {
+          return;
+        }
+        list.innerHTML = "";
+        footer.textContent = state.selectedPath || ".";
+
+        if (state.error) {
+          const errorRow = document.createElement("div");
+          errorRow.className = "file-tree-empty";
+          errorRow.textContent = state.error;
+          list.appendChild(errorRow);
+        }
+
+        if (!state.loaded.has("")) {
+          const loadingRow = document.createElement("div");
+          loadingRow.className = "file-tree-empty";
+          loadingRow.textContent = "Loading repository";
+          list.appendChild(loadingRow);
+          return;
+        }
+
+        function appendRows(parentPath, depth) {
+          const entries = state.loaded.get(parentPath) || [];
+          for (const entry of entries) {
+            const row = document.createElement("div");
+            row.className = "file-tree-row";
+            if (state.selectedPath === entry.path) {
+              row.classList.add("selected");
+            }
+            row.style.paddingLeft = `${12 + depth * 18}px`;
+
+            const expanded = state.expanded.has(entry.path);
+            const isDirectory = entry.kind === "directory";
+            row.innerHTML = `
+              <span class="tree-caret">${isDirectory ? (expanded ? "▾" : "▸") : ""}</span>
+              <span class="tree-icon ${isDirectory ? "dir" : "file"}">${isDirectory ? "▣" : "•"}</span>
+              <span class="tree-name">${entry.name}</span>
+            `;
+            row.addEventListener("click", () => {
+              state.selectedPath = entry.path;
+              if (isDirectory) {
+                if (state.expanded.has(entry.path)) {
+                  state.expanded.delete(entry.path);
+                } else {
+                  state.expanded.add(entry.path);
+                  if (!state.loaded.has(entry.path)) {
+                    requestFileTree(windowId, entry.path);
+                  }
+                }
+              }
+              renderFileTree(windowId);
+            });
+            list.appendChild(row);
+
+            if (isDirectory && state.expanded.has(entry.path)) {
+              if (state.loaded.has(entry.path)) {
+                appendRows(entry.path, depth + 1);
+              } else {
+                const loadingRow = document.createElement("div");
+                loadingRow.className = "file-tree-empty";
+                loadingRow.style.paddingLeft = `${30 + depth * 18}px`;
+                loadingRow.textContent = "Loading";
+                list.appendChild(loadingRow);
+              }
+            }
+          }
+        }
+
+        appendRows("", 0);
+
+        if (list.childElementCount === 0) {
+          const emptyRow = document.createElement("div");
+          emptyRow.className = "file-tree-empty";
+          emptyRow.textContent = "No visible files";
+          list.appendChild(emptyRow);
+        }
+      }
+
+      function renderBranches(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const state = ensureBranchListState(windowId);
+        const list = element.querySelector(".branch-list");
+        if (!list) {
+          return;
+        }
+        list.innerHTML = "";
+
+        if (state.error) {
+          const errorRow = document.createElement("div");
+          errorRow.className = "branch-empty";
+          errorRow.textContent = state.error;
+          list.appendChild(errorRow);
+          return;
+        }
+
+        if (state.loading && state.entries.length === 0) {
+          const loadingRow = document.createElement("div");
+          loadingRow.className = "branch-empty";
+          loadingRow.textContent = "Loading branches";
+          list.appendChild(loadingRow);
+          return;
+        }
+
+        if (state.entries.length === 0) {
+          const emptyRow = document.createElement("div");
+          emptyRow.className = "branch-empty";
+          emptyRow.textContent = "No branches";
+          list.appendChild(emptyRow);
+          return;
+        }
+
+        for (const entry of state.entries) {
+          const row = document.createElement("div");
+          row.className = "branch-row";
+          if (state.selectedBranchName === entry.name) {
+            row.classList.add("selected");
+          }
+          const summaryParts = [];
+          if (entry.ahead || entry.behind) {
+            summaryParts.push(`↑${entry.ahead} ↓${entry.behind}`);
+          } else {
+            summaryParts.push("synced");
+          }
+          row.innerHTML = `
+            <div class="branch-main">
+              <div class="branch-name">
+                <span class="branch-name-text">${entry.name}</span>
+                ${entry.is_head ? '<span class="branch-head">HEAD</span>' : ""}
+              </div>
+              <div class="branch-upstream">${entry.upstream || "No upstream"}</div>
+              <div class="branch-date">${entry.last_commit_date || "No commit date"}</div>
+            </div>
+            <div class="branch-meta">
+              <span class="branch-scope">${entry.scope}</span>
+              <span class="branch-summary">${summaryParts.join(" · ")}</span>
+            </div>
+          `;
+          row.addEventListener("click", () => {
+            state.selectedBranchName = entry.name;
+            renderBranches(windowId);
+          });
+          row.addEventListener("dblclick", () => {
+            state.selectedBranchName = entry.name;
+            renderBranches(windowId);
+            send({
+              kind: "open_launch_wizard",
+              id: windowId,
+              branch_name: entry.name,
+            });
+          });
+          list.appendChild(row);
+        }
+      }
+
+      function mountWindowBody(windowData, element) {
+        const body = element.querySelector(".window-body");
+        body.innerHTML = "";
+        const surface = presetSurface(windowData.preset);
+        element.classList.remove(
+          "surface-terminal",
+          "surface-file-tree",
+          "surface-branches",
+          "surface-mock",
+        );
+        element.classList.add(`surface-${surface}`);
+
+        if (surface === "terminal") {
+          body.innerHTML = `
+            <div class="terminal-root"></div>
+            <div class="terminal-overlay"></div>
+          `;
+          const terminalRoot = body.querySelector(".terminal-root");
+          terminalRoot.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          terminalRoot.addEventListener("click", () => {
+            const runtime = terminalMap.get(windowData.id);
+            runtime?.terminal.focus();
+          });
+          createTerminalRuntime(windowData.id, terminalRoot);
+          return;
+        }
+
+        if (surface === "file-tree") {
+          body.innerHTML = `
+            <div class="file-tree-root">
+              <div class="file-tree-toolbar">
+                <div class="file-tree-path">Repository</div>
+                <button class="icon-button" data-action="refresh-tree" aria-label="Refresh tree">↻</button>
+              </div>
+              <div class="file-tree-scroll">
+                <div class="file-tree-list"></div>
+              </div>
+              <div class="file-tree-footer">.</div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='refresh-tree']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = ensureFileTreeState(windowData.id);
+              state.loaded.clear();
+              state.expanded.clear();
+              state.loading.clear();
+              state.error = "";
+              requestFileTree(windowData.id, "");
+              renderFileTree(windowData.id);
+            });
+          const state = ensureFileTreeState(windowData.id);
+          if (!state.loaded.has("")) {
+            requestFileTree(windowData.id, "");
+          }
+          renderFileTree(windowData.id);
+          return;
+        }
+
+        if (surface === "branches") {
+          body.innerHTML = `
+            <div class="branch-list-root">
+              <div class="branch-toolbar">
+                <div class="branch-heading">Repository branches · double-click to launch</div>
+                <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
+              </div>
+              <div class="branch-scroll">
+                <div class="branch-list"></div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='refresh-branches']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = ensureBranchListState(windowData.id);
+              state.entries = [];
+              state.loading = false;
+              state.error = "";
+              requestBranches(windowData.id);
+              renderBranches(windowData.id);
+            });
+          const state = ensureBranchListState(windowData.id);
+          if (state.entries.length === 0 && !state.loading && !state.error) {
+            requestBranches(windowData.id);
+          }
+          renderBranches(windowData.id);
+          return;
+        }
+
+        const mock = mockContentForPreset(windowData.preset);
+        body.innerHTML = `
+          <div class="mock-root">
+            <div class="mock-toolbar">
+              <div class="mock-heading">${mock.heading}</div>
+              <span class="mock-chip">${windowData.title}</span>
+            </div>
+            <div class="mock-scroll"></div>
+          </div>
+        `;
+        const scroll = body.querySelector(".mock-scroll");
+        body.addEventListener("mousedown", () => {
+          focusWindowLocally(windowData.id);
+          send({ kind: "focus_window", id: windowData.id });
+        });
+        for (const [label, value] of mock.rows) {
+          const section = document.createElement("div");
+          section.className = "mock-section";
+          section.innerHTML = `
+            <div class="mock-label">${label}</div>
+            <div class="mock-row">
+              <span>${value}</span>
+              <span class="mock-chip">ready</span>
+            </div>
+          `;
+          scroll.appendChild(section);
+        }
+      }
+
+      function ensureWindow(windowData) {
+        let element = windowMap.get(windowData.id);
+        if (!element) {
+          element = document.createElement("div");
+          element.className = "workspace-window";
+          element.dataset.id = windowData.id;
+          element.innerHTML = `
+            <div class="titlebar">
+              <div class="title">
+                <span class="title-text"></span>
+                <span class="status-chip starting">
+                  <span class="status-dot"></span>
+                  <span class="status-label">starting</span>
+                </span>
+              </div>
+              <div class="window-actions">
+                <button class="icon-button" data-action="minimize" aria-label="Minimize window">▁</button>
+                <button class="icon-button" data-action="maximize" aria-label="Maximize window">◻</button>
+                <button class="icon-button" data-action="close" aria-label="Close window">×</button>
+              </div>
+            </div>
+            <div class="window-body"></div>
+            <div class="resize-handle"></div>
+          `;
+          stage.appendChild(element);
+          windowMap.set(windowData.id, element);
+
+          const titlebar = element.querySelector(".titlebar");
+          const minimizeButton = element.querySelector("[data-action='minimize']");
+          const maximizeButton = element.querySelector("[data-action='maximize']");
+          const closeButton = element.querySelector("[data-action='close']");
+          const resizeHandle = element.querySelector(".resize-handle");
+
+          minimizeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleMinimizeWindow(windowData.id);
+          });
+
+          maximizeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleMaximizeWindow(windowData.id);
+          });
+
+          closeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_window", id: windowData.id });
+          });
+
+          titlebar.addEventListener("pointerdown", (event) => {
+            if (event.target.closest("button")) {
+              return;
+            }
+            const currentWindow = workspaceWindowById(windowData.id);
+            focusWindowRemotely(windowData.id);
+            dragState = {
+              id: windowData.id,
+              pointerId: event.pointerId,
+              startX: event.clientX,
+              startY: event.clientY,
+              left: parseNumber(element.style.left),
+              top: parseNumber(element.style.top),
+              moved: false,
+              allowMove: !currentWindow?.maximized,
+            };
+            titlebar.setPointerCapture(event.pointerId);
+          });
+
+          resizeHandle.addEventListener("pointerdown", (event) => {
+            focusWindowRemotely(windowData.id);
+            resizeState = {
+              id: windowData.id,
+              pointerId: event.pointerId,
+              startX: event.clientX,
+              startY: event.clientY,
+              width: parseNumber(element.style.width),
+              height: parseNumber(element.style.height),
+            };
+            resizeHandle.setPointerCapture(event.pointerId);
+          });
+        }
+
+        if (!element.dataset.preset || element.dataset.preset !== windowData.preset) {
+          element.dataset.preset = windowData.preset;
+          mountWindowBody(windowData, element);
+        }
+
+        element.querySelector(".title-text").textContent = windowData.title;
+        element.classList.toggle("minimized", Boolean(windowData.minimized));
+        element.classList.toggle("maximized", Boolean(windowData.maximized));
+        element.style.left = `${windowData.geometry.x}px`;
+        element.style.top = `${windowData.geometry.y}px`;
+        element.style.width = `${windowData.geometry.width}px`;
+        element.style.height = `${windowData.minimized ? 38 : windowData.geometry.height}px`;
+        element.style.zIndex = String(windowData.z_index);
+        element.querySelector(".resize-handle").hidden =
+          Boolean(windowData.minimized) || Boolean(windowData.maximized);
+        applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        if (presetSurface(windowData.preset) === "terminal" && !windowData.minimized) {
+          requestAnimationFrame(() => fitTerminal(windowData.id, false));
+        }
+      }
+
+      function renderWorkspace(workspace) {
+        viewport = {
+          x: workspace.viewport.x,
+          y: workspace.viewport.y,
+          zoom: workspace.viewport.zoom,
+        };
+        applyViewport();
+
+        const ids = new Set(workspace.windows.map((windowData) => windowData.id));
+        for (const [windowId, element] of windowMap.entries()) {
+          if (ids.has(windowId)) {
+            continue;
+          }
+          terminalMap.get(windowId)?.terminal.dispose();
+          terminalMap.delete(windowId);
+          decoderMap.delete(windowId);
+          detailMap.delete(windowId);
+          pendingOutputMap.delete(windowId);
+          pendingSnapshotMap.delete(windowId);
+          fileTreeStateMap.delete(windowId);
+          branchListStateMap.delete(windowId);
+          element.remove();
+          windowMap.delete(windowId);
+        }
+
+        for (const windowData of workspace.windows) {
+          ensureWindow(windowData);
+        }
+
+        requestAnimationFrame(syncMaximizedWindowsToViewport);
+
+        const topmostId = topmostWindowId(workspace);
+        if (topmostId && ids.has(topmostId)) {
+          focusWindowLocally(topmostId);
+          const runtime = terminalMap.get(topmostId);
+          if (runtime) {
+            runtime.terminal.focus();
+          }
+        } else {
+          focusedId = null;
+        }
+      }
+
+      function receive(event) {
+        switch (event.kind) {
+          case "workspace_state":
+            projectError = "";
+            renderAppState(event.workspace);
+            break;
+          case "window_list":
+            windowListEntries = event.windows || [];
+            renderWindowList();
+            break;
+          case "terminal_output":
+            writeOutput(event.id, event.data_base64);
+            break;
+          case "terminal_snapshot":
+            replaceTerminalSnapshot(event.id, event.data_base64);
+            break;
+          case "terminal_status":
+            applyStatus(event.id, event.status, event.detail);
+            break;
+          case "file_tree_entries": {
+            const state = ensureFileTreeState(event.id);
+            state.loaded.set(event.path, event.entries);
+            state.loading.delete(event.path);
+            state.error = "";
+            renderFileTree(event.id);
+            break;
+          }
+          case "file_tree_error": {
+            const state = ensureFileTreeState(event.id);
+            state.loading.delete(event.path);
+            state.error = event.message;
+            renderFileTree(event.id);
+            break;
+          }
+          case "branch_entries": {
+            const state = ensureBranchListState(event.id);
+            state.entries = event.entries;
+            state.loading = false;
+            state.error = "";
+            renderBranches(event.id);
+            break;
+          }
+          case "branch_error": {
+            const state = ensureBranchListState(event.id);
+            state.loading = false;
+            state.error = event.message;
+            renderBranches(event.id);
+            break;
+          }
+          case "project_open_error":
+            projectError = event.message;
+            renderProjectPicker();
+            renderProjectOnboarding(activeProjectTab());
+            break;
+          case "launch_wizard_state":
+            launchWizard = event.wizard;
+            renderLaunchWizard();
+            break;
+        }
+      }
+
+      window.addEventListener("pointermove", (event) => {
+        if (panState && panState.pointerId === event.pointerId) {
+          viewport.x = panState.x + event.clientX - panState.startX;
+          viewport.y = panState.y + event.clientY - panState.startY;
+          applyViewport();
+          return;
+        }
+
+        if (dragState && dragState.pointerId === event.pointerId) {
+          const element = windowMap.get(dragState.id);
+          if (!element) {
+            return;
+          }
+          const deltaX = (event.clientX - dragState.startX) / viewport.zoom;
+          const deltaY = (event.clientY - dragState.startY) / viewport.zoom;
+          if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+            dragState.moved = true;
+          }
+          if (!dragState.allowMove) {
+            return;
+          }
+          element.style.left = `${dragState.left + deltaX}px`;
+          element.style.top = `${dragState.top + deltaY}px`;
+          return;
+        }
+
+        if (resizeState && resizeState.pointerId === event.pointerId) {
+          const element = windowMap.get(resizeState.id);
+          if (!element) {
+            return;
+          }
+          element.style.width = `${clamp(
+            resizeState.width + (event.clientX - resizeState.startX) / viewport.zoom,
+            420,
+          )}px`;
+          element.style.height = `${clamp(
+            resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
+            260,
+          )}px`;
+          fitTerminal(resizeState.id, false);
+        }
+      });
+
+      window.addEventListener("pointerup", (event) => {
+        if (panState && panState.pointerId === event.pointerId) {
+          canvas.classList.remove("panning");
+          send({
+            kind: "update_viewport",
+            viewport,
+          });
+          panState = null;
+        }
+
+        if (dragState && dragState.pointerId === event.pointerId) {
+          if (dragState.moved) {
+            const runtime = terminalMap.get(dragState.id);
+            sendGeometry(
+              dragState.id,
+              runtime?.terminal.cols || 80,
+              runtime?.terminal.rows || 24,
+            );
+          } else {
+            handleTitlebarClick(dragState.id);
+          }
+          dragState = null;
+        }
+
+        if (resizeState && resizeState.pointerId === event.pointerId) {
+          const runtime = terminalMap.get(resizeState.id);
+          fitTerminal(resizeState.id, false);
+          sendGeometry(
+            resizeState.id,
+            runtime?.terminal.cols || 80,
+            runtime?.terminal.rows || 24,
+          );
+          resizeState = null;
+        }
+      });
+
+      canvas.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+      });
+
+      // Middle button pan: capture phase so it works over windows too.
+      document.addEventListener(
+        "pointerdown",
+        (event) => {
+          if (event.button !== 1) {
+            return;
+          }
+          if (!canvas.contains(event.target)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          panState = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            x: viewport.x,
+            y: viewport.y,
+          };
+          canvas.classList.add("panning");
+          canvas.setPointerCapture(event.pointerId);
+        },
+        { capture: true },
+      );
+
+      // Left button pan: only on empty canvas area (not over windows).
+      canvas.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) {
+          return;
+        }
+        if (event.target !== canvas && event.target !== stage) {
+          return;
+        }
+        panState = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          x: viewport.x,
+          y: viewport.y,
+        };
+        canvas.classList.add("panning");
+        canvas.setPointerCapture(event.pointerId);
+      });
+
+      // Capture phase so wheel events on child elements (windows, terminals)
+      // are intercepted before they reach xterm.js or other consumers.
+      document.addEventListener(
+        "wheel",
+        (event) => {
+          if (!canvas.contains(event.target)) {
+            return;
+          }
+          // Let terminal windows handle their own scroll (xterm.js scrollback)
+          if (
+            !event.ctrlKey &&
+            !event.metaKey &&
+            event.target.closest(".surface-terminal")
+          ) {
+            return;
+          }
+          if (event.ctrlKey || event.metaKey) {
+            // Ctrl/Cmd + wheel = zoom
+            event.preventDefault();
+            event.stopPropagation();
+            const rect = canvas.getBoundingClientRect();
+            const anchorX = event.clientX - rect.left;
+            const anchorY = event.clientY - rect.top;
+            const factor = event.deltaY < 0 ? 1.1 : 0.9;
+            zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
+          } else {
+            // Plain wheel (trackpad two-finger scroll) = pan
+            event.preventDefault();
+            event.stopPropagation();
+            viewport.x -= event.deltaX;
+            viewport.y -= event.deltaY;
+            applyViewport();
+            persistViewport();
+          }
+        },
+        { capture: true, passive: false },
+      );
+
+      window.addEventListener(
+        "keydown",
+        (event) => {
+          if (!shouldHandleFocusShortcut(event)) {
+            return;
+          }
+          event.preventDefault();
+          cycleFocus(event.key === "ArrowRight" ? "forward" : "backward");
+        },
+        true,
+      );
+
+      openProjectButton.addEventListener("click", sendOpenProjectDialog);
+      pickerOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
+      onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
+      addButton.addEventListener("click", () => {
+        if (addButton.disabled) {
+          return;
+        }
+        openModal();
+      });
+      tileButton.addEventListener("click", () => arrangeWindows("tile"));
+      stackButton.addEventListener("click", () => arrangeWindows("stack"));
+      windowListButton.addEventListener("click", toggleWindowList);
+      zoomOutButton.addEventListener("click", () => zoomCanvasByFactor(0.9));
+      zoomResetButton.addEventListener("click", resetCanvasZoom);
+      zoomInButton.addEventListener("click", () => zoomCanvasByFactor(1.1));
+      closeModalButton.addEventListener("click", closeModal);
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal) {
+          closeModal();
+        }
+      });
+      wizardCloseButton.addEventListener("click", () => {
+        sendWizardAction({ kind: "cancel" });
+      });
+      wizardCancelButton.addEventListener("click", () => {
+        sendWizardAction({ kind: "cancel" });
+      });
+      wizardSubmitButton.addEventListener("click", () => {
+        flushWizardBranchDraft();
+        sendWizardAction({ kind: "submit" });
+      });
+      wizardModal.addEventListener("click", (event) => {
+        if (event.target === wizardModal) {
+          sendWizardAction({ kind: "cancel" });
+        }
+      });
+      window.addEventListener("resize", () => {
+        renderWindowList();
+        syncMaximizedWindowsToViewport();
+      });
+      window.addEventListener("pointerdown", (event) => {
+        if (!windowListOpen) {
+          return;
+        }
+        if (
+          windowListPanel.contains(event.target) ||
+          windowListButton.contains(event.target)
+        ) {
+          return;
+        }
+        windowListOpen = false;
+        renderWindowList();
+      });
+
+      for (const button of modal.querySelectorAll("[data-preset]")) {
+        button.addEventListener("click", () => {
+          send({ kind: "create_window", preset: button.dataset.preset });
+          closeModal();
+        });
+      }
+
+      window.__POC__ = { receive };
+
+      renderAppState(appState);
+      connectSocket();
+    </script>
+  </body>
+</html>

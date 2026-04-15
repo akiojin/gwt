@@ -8,7 +8,7 @@ const https = require("https");
 
 const REPO = "akiojin/gwt";
 const BIN_DIR = path.join(__dirname, "..", "bin");
-const BINARY_NAME = os.platform() === "win32" ? "gwt-tui.exe" : "gwt-tui";
+const BINARY_NAME = os.platform() === "win32" ? "gwt.exe" : "gwt";
 
 /**
  * Detect the GitHub Release asset name for the current platform/arch.
@@ -18,11 +18,21 @@ function releaseAssetName() {
   const platform = os.platform();
   const arch = os.arch();
 
-  if (platform === "darwin" && arch === "arm64") return "gwt-macos-aarch64";
-  if (platform === "darwin" && arch === "x64") return "gwt-macos-x86_64";
-  if (platform === "linux" && arch === "x64") return "gwt-linux-x86_64";
-  if (platform === "linux" && arch === "arm64") return "gwt-linux-aarch64";
-  if (platform === "win32" && arch === "x64") return "gwt-windows-x86_64.exe";
+  if (platform === "darwin" && arch === "arm64") {
+    return "gwt-macos-aarch64";
+  }
+  if (platform === "darwin" && arch === "x64") {
+    return "gwt-macos-x86_64";
+  }
+  if (platform === "linux" && arch === "x64") {
+    return "gwt-linux-x86_64";
+  }
+  if (platform === "linux" && arch === "arm64") {
+    return "gwt-linux-aarch64";
+  }
+  if (platform === "win32" && arch === "x64") {
+    return "gwt-windows-x86_64.exe";
+  }
 
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
@@ -97,7 +107,7 @@ async function main() {
     console.log(`gwt binary installed successfully!`);
   } catch (err) {
     console.error(`gwt: failed to download binary - ${err.message}`);
-    console.error("gwt: you can build from source with: cargo build --release -p gwt-tui");
+    console.error("gwt: you can build from source with: cargo build --release -p gwt");
     process.exitCode = 0; // non-fatal so npm install does not fail
   }
 }

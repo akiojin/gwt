@@ -578,19 +578,7 @@ mod tests {
     #[test]
     fn repo_does_not_keep_claude_hook_scripts() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-
-        for relative in [
-            ".claude/hooks/scripts/gwt-forward-hook.mjs",
-            ".claude/hooks/scripts/gwt-block-file-ops.mjs",
-            ".claude/hooks/scripts/gwt-block-cd-command.mjs",
-            ".claude/hooks/scripts/gwt-block-git-branch-ops.mjs",
-            ".claude/hooks/scripts/gwt-block-git-dir-override.mjs",
-        ] {
-            assert!(
-                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
-                "unexpected retired claude hook script {relative}"
-            );
-        }
+        assert_no_gwt_hook_scripts(&workspace_root, ".claude");
     }
 
     #[test]
@@ -639,19 +627,7 @@ mod tests {
     #[test]
     fn repo_does_not_keep_codex_hook_scripts() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-
-        for relative in [
-            ".codex/hooks/scripts/gwt-forward-hook.mjs",
-            ".codex/hooks/scripts/gwt-block-file-ops.mjs",
-            ".codex/hooks/scripts/gwt-block-cd-command.mjs",
-            ".codex/hooks/scripts/gwt-block-git-branch-ops.mjs",
-            ".codex/hooks/scripts/gwt-block-git-dir-override.mjs",
-        ] {
-            assert!(
-                std::fs::symlink_metadata(workspace_root.join(relative)).is_err(),
-                "unexpected retired codex hook script {relative}"
-            );
-        }
+        assert_no_gwt_hook_scripts(&workspace_root, ".codex");
     }
 
     #[test]
@@ -1166,16 +1142,8 @@ mod tests {
                 "unexpected retired distributed asset {retired}"
             );
         }
-        assert!(
-            !wt.join(".claude/hooks/scripts/gwt-forward-hook.mjs")
-                .exists(),
-            "unexpected retired claude hook script"
-        );
-        assert!(
-            !wt.join(".codex/hooks/scripts/gwt-forward-hook.mjs")
-                .exists(),
-            "unexpected retired codex hook script"
-        );
+        assert_no_gwt_hook_scripts(&wt, ".claude");
+        assert_no_gwt_hook_scripts(&wt, ".codex");
     }
 
     // ── helpers ──
@@ -1226,6 +1194,32 @@ mod tests {
             resolved
         } else {
             worktree.join(resolved)
+        }
+    }
+
+    fn assert_no_gwt_hook_scripts(root: &std::path::Path, namespace: &str) {
+        let scripts_dir = root.join(namespace).join("hooks/scripts");
+        if !scripts_dir.exists() {
+            return;
+        }
+
+        for entry in std::fs::read_dir(&scripts_dir)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", scripts_dir.display()))
+        {
+            let entry = entry.unwrap_or_else(|err| {
+                panic!(
+                    "failed to read hook entry under {}: {err}",
+                    scripts_dir.display()
+                )
+            });
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.starts_with("gwt-"),
+                "unexpected retired hook script under {}: {}",
+                scripts_dir.display(),
+                name
+            );
         }
     }
 }

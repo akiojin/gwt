@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-echo "Running commit-time backend tests..."
-
-(
-  cd "$ROOT_DIR"
-  cargo test -p gwt-tui commands::branches::tests:: -- --nocapture
-  cargo test -p gwt-tui commands::project::tests:: -- --nocapture
-)
-
-echo "Commit-time backend tests passed."
+# Pre-commit: fast, non-IO-bound tests only.
+# Coordination/board/persistence tests share state with running gwt and may
+# fail when the app is active.  Full suite runs in pre-push / CI.
+cargo test -p gwt-core -- \
+  --skip coordination \
+  --skip repo_hash::tests::detect_repo_hash

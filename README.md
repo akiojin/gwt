@@ -2,8 +2,8 @@
 
 [日本語](README.ja.md)
 
-gwt is a terminal-based (TUI) tool for managing Git worktrees and launching
-coding agents (`Claude Code`, `Codex`, `Gemini`, `OpenCode`) on a project basis.
+gwt is a desktop GUI for managing Git worktrees and launching coding agents
+such as `Claude Code`, `Codex`, `Gemini`, and `OpenCode`.
 
 ## Install
 
@@ -12,8 +12,6 @@ Download the binary for your platform from
 your `PATH`.
 
 ### macOS
-
-Run the installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -25,11 +23,7 @@ Install a specific version:
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-### Windows
-
-Download the binary from GitHub Releases and add it to your `PATH`.
-
-### Linux
+### Windows / Linux
 
 Download the binary from GitHub Releases and add it to your `PATH`.
 
@@ -39,169 +33,130 @@ Download the binary from GitHub Releases and add it to your `PATH`.
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/uninstall.sh | bash
 ```
 
+## Requirements
+
+- `git` available in `PATH`
+- `gh auth login` completed for GitHub-backed features
+- AI provider credentials when you use agents:
+  - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
+  - `OPENAI_API_KEY`
+  - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
+- Python 3.9+ when gwt needs to bootstrap or repair the shared project index runtime
+
+Linux desktop builds also require WebKitGTK-related system packages. See
+[docs/docker-usage.md](docs/docker-usage.md) for the dependency set used in CI.
+
 ## Usage
 
-Launch the TUI in the current directory:
+Launch the native GUI:
 
 ```bash
 gwt
 ```
 
-### Terminal requirements
+At startup you can restore the previous session or open a new project
+directory. The app also starts a local HTTP/WebSocket server for the WebView
+surface and prints a URL such as `http://127.0.0.1:<port>/` to stderr. You can
+open that URL in a regular browser while the native app is running.
 
-- 256-color terminal recommended (most modern terminals support this)
-- Minimum 80x24 terminal size
-
-## First-time usage
-
-1. Run `gwt` in a Git repository.
-2. Browse branches and worktrees in the sidebar.
-3. Use branch actions to:
-   - create/list/clean worktrees
-   - launch an agent
-4. Open **Settings** to set up AI profile settings if you use Agent or
-   summary features.
-
-## Key bindings
-
-Most TUI key bindings use the `Ctrl+G` prefix. Dragging terminal text copies
-the selection immediately.
-
-| Key binding | Action |
-|---|---|
-| `Ctrl+G`, `c` | New shell tab |
-| `Ctrl+G`, `n` | New agent tab |
-| `Ctrl+G`, `1`-`9` | Switch to tab N |
-| `Ctrl+G`, `]` | Next tab |
-| `Ctrl+G`, `[` | Previous tab |
-| `Ctrl+G`, `x` | Close current tab |
-| `Ctrl+G`, `w` | Worktree list |
-| `Ctrl+G`, `s` | Settings |
-| `Ctrl+G`, `?` | Help / key binding reference |
-| `Ctrl+G`, `q` | Quit |
-
-Drag across terminal text to copy it. When the host terminal forwards the
-shortcut, the platform copy shortcut also works:
-
-- macOS: `Cmd+C`
-- Linux / Windows: `Ctrl+Shift+C`
-
-To investigate Japanese IME candidate selection in a shell or agent terminal,
-launch gwt with `GWT_INPUT_TRACE_PATH=/tmp/gwt-input-trace.jsonl`. The JSONL
-trace records raw `crossterm` key events, keybind decisions, and forwarded PTY
-bytes without adding a runtime input-mode toggle.
-
-To compare that routed trace with raw terminal input, run
-`cargo run -p gwt-tui --example keytest -- --mode raw` in the same terminal.
-The probe logs every raw `crossterm::event::Event` to
-`/tmp/gwt-crossterm-events.jsonl` by default, or to the positional output path
-you pass.
-
-To isolate redraw-related IME regressions, the same probe also supports
-`--mode redraw` and `--mode ratatui`. `redraw` repaints the same committed-text
-surface on a periodic tick using direct `crossterm` commands, while `ratatui`
-uses the same surface through ratatui on the same tick. Use `--tick-ms <N>` to
-change the redraw interval when comparing modes.
-
-gwt also requests minimal kitty keyboard enhancements during terminal startup
-(`DISAMBIGUATE_ESCAPE_CODES | REPORT_ALL_KEYS_AS_ESCAPE_CODES |
-REPORT_ALTERNATE_KEYS | REPORT_EVENT_TYPES`) and pops them on shutdown.
-Unsupported terminals fail open and continue with existing behavior. Repeated
-key events from compatible terminals now stay on the same input path as normal
-key presses, which matters when IME candidate navigation advances to another
-page. While the terminal pane owns focus, idle 100 ms ticks now avoid repainting
-the TUI unless an overlay or other explicit periodic UI surface still needs
-animation, which reduces IME candidate interruption from background redraws.
-PTY output still requests an immediate redraw, so committed text and normal
-shell output are not delayed until the next keypress.
-
-## Environment and requirements
-
-### Required
-
-- `git` command available in `PATH`.
-
-### Optional (depends on use)
-
-- AI provider keys in environment variables (or saved in gwt profile settings):
-  - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
-  - `OPENAI_API_KEY`
-  - `GOOGLE_API_KEY` or `GEMINI_API_KEY`
-- `bunx` or `npx` for local agent launch fallback.
-- Python 3.9+ on `PATH` when gwt needs to bootstrap or repair the shared project-index runtime
-  (for example during startup or repository initialization).
-  gwt bootstraps `~/.gwt/runtime/chroma-venv` automatically, then reuses that managed runtime.
-  On Windows, make sure either `python` or `py -3` works in Command Prompt or PowerShell.
-- Vector index data (SPECs / Issues / source files) is stored under `~/.gwt/index/<repo-hash>/`.
-  Issues and SPECs are repo-scoped and shared across worktrees; source files are worktree-scoped.
-  The TUI runs a per-Worktree filesystem watcher and refreshes the Issue index asynchronously
-  (15-minute TTL) at startup. The first search after a fresh install downloads the
-  `intfloat/multilingual-e5-base` embedding model (~440 MB) into `~/.cache/huggingface/`.
-  SPECs live as GitHub Issues labeled `gwt-spec` and are cached locally at
-  `~/.gwt/cache/issues/<repo-hash>/`; use `gwt issue spec <n>` to read and `gwt issue spec <n> --edit <section> -f <file>` to write.
-
-### Hook file ownership
-
-- gwt regenerates `.claude/settings.local.json` as a local machine file and manages its Git exclusion.
-- gwt creates or merges `.codex/hooks.json`, but does not add it to `.gitignore` or `info/exclude`.
-- Whether `.codex/hooks.json` is version-controlled is a repository decision. When the file already exists, gwt replaces only gwt-managed hook entries and keeps user hooks plus unrelated top-level settings.
-
-### GitHub Token (PAT) requirements
-
-gwt uses `gh` CLI for GitHub operations. Authenticate with:
+CLI subcommands run in the same binary without opening a GUI window:
 
 ```bash
-gh auth login
+gwt issue spec 1784 --section plan
+gwt pr current
+gwt board show
+gwt hook workflow-policy
 ```
 
-#### Fine-grained PAT recommended permissions
+## Main Workflow
 
-| Permission | Access | Used for |
-|---|---|---|
-| **Contents** | Read and Write | Repository browsing, branch operations, releases |
-| **Pull requests** | Read and Write | PR create / edit / merge / review |
-| **Issues** | Read and Write | Issue create / edit / comment |
-| **Metadata** | Read | Implicitly granted |
+1. Open a repository directory or restore the previous project.
+2. Use the canvas to arrange floating windows.
+3. Open `Branches`, select a branch, and double-click to open Launch Agent.
+4. Start `Shell` or `Agent` windows on the selected branch/worktree.
+5. Inspect the repository with the read-only `File Tree` window.
 
-#### Read-only minimum
+Available windows include:
 
-For browse-only usage (no PR creation or branch management):
+- `Shell`
+- `Agent`
+- `Branches`
+- `File Tree`
+- `Settings`
+- `Memo`
+- `Profile`
+- `Logs`
+- `Issue`
+- `SPEC`
+- `Board`
+- `PR`
 
-| Permission | Access |
-|---|---|
-| **Contents** | Read |
-| **Pull requests** | Read |
-| **Issues** | Read |
-| **Metadata** | Read |
+`Shell` and `Agent` are live process windows. `File Tree` is a live read-only
+tree view. The remaining windows are currently mock surfaces where production
+behavior has not been wired yet.
 
-### Optional advanced toggles
+## Canvas Operations
 
-- `GWT_AGENT_AUTO_INSTALL_DEPS` (`true` / `false`)
-- `GWT_DOCKER_FORCE_HOST` (`true` / `false`)
+- Zoom the canvas with the on-screen zoom buttons
+- Pan the canvas by dragging the background
+- Use `Tile` to arrange windows on a grid
+- Use `Stack` to cascade windows with overlap
+- Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
+  focused window is recentered
 
-### Logging and profiling
+## Managed Hooks and SPEC Cache
 
-Normal logs are stored per project as JSON Lines under `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`. Performance profiling can be enabled in **Settings > Profiling**.
-See [#1758](https://github.com/akiojin/gwt/issues/1758) for the logging specification.
+- gwt regenerates `.claude/settings.local.json` and merges `.codex/hooks.json`
+  for managed hooks
+- SPECs are stored as GitHub Issues labeled `gwt-spec`
+- Local cache path:
+  `~/.gwt/cache/issues/<repo-hash>/`
+- Read a SPEC:
+
+```bash
+gwt issue spec <number>
+```
+
+- Read one section:
+
+```bash
+gwt issue spec <number> --section spec|plan|tasks
+```
+
+## Logs
+
+- App logs:
+  `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
+- Session state:
+  `~/.gwt/session.json`
+- Project workspace state:
+  `~/.gwt/projects/<repo-hash>/workspace.json`
 
 ## Development
 
 ### Build
 
 ```bash
-cargo build -p gwt-tui
+cargo build -p gwt
 ```
 
-### Run (development)
+### Run
 
 ```bash
-cargo run -p gwt-tui
+cargo run -p gwt
+```
+
+### Build a macOS app bundle
+
+```bash
+cargo install cargo-bundle
+cargo bundle -p gwt --format osx
 ```
 
 ### Test
 
 ```bash
-cargo test -p gwt-core -p gwt-tui
+cargo test -p gwt-core -p gwt --all-features
 ```
 
 ### Lint
@@ -216,16 +171,21 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 ```
 
-## Project structure
+## Project Structure
 
 ```text
 ├── Cargo.toml          # Workspace configuration
 ├── crates/
-│   ├── gwt-core/       # Core library (Git operations, PTY management, config)
-│   ├── gwt-github/     # GitHub Issue SOT for SPEC management (SPEC-12)
-│   └── gwt-tui/        # ratatui TUI frontend + CLI dispatch (`gwt issue spec ...`)
-└── package.json        # Development scripts
+│   ├── gwt/            # Desktop GUI + WebView server + CLI dispatch
+│   ├── gwt-core/       # Core library
+│   └── gwt-github/     # GitHub Issue SPEC cache / update layer
+└── package.json        # npm package metadata and postinstall
 ```
+
+## Specs
+
+Detailed requirements live in GitHub Issues labeled `gwt-spec`. Use
+`gwt issue spec <n>` to inspect them locally through the cache-backed CLI.
 
 ## License
 

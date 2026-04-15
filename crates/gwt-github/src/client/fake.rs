@@ -117,6 +117,18 @@ impl IssueClient for FakeIssueClient {
         Ok(issue.clone())
     }
 
+    fn patch_title(&self, number: IssueNumber, new_title: &str) -> Result<IssueSnapshot, ApiError> {
+        let mut state = self.inner.lock().unwrap();
+        self.record(&mut state, "patch_title", &number.to_string());
+        let issue = state
+            .issues
+            .get_mut(&number)
+            .ok_or(ApiError::NotFound(number))?;
+        issue.title = new_title.to_string();
+        issue.updated_at = self.tick();
+        Ok(issue.clone())
+    }
+
     fn patch_comment(
         &self,
         comment_id: CommentId,

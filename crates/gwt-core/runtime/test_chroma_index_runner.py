@@ -16,7 +16,7 @@ class ChromaIndexRunnerTests(unittest.TestCase):
         self.assertEqual(runner.classify_file_bucket('.codex/skills/gwt-search/SKILL.md'), 'skip')
         self.assertEqual(runner.classify_file_bucket('specs/SPEC-9/spec.md'), 'skip')
         self.assertEqual(runner.classify_file_bucket('specs-archive/SPEC-9/spec.md'), 'docs')
-        self.assertEqual(runner.classify_file_bucket('crates/gwt-tui/tests/snapshots/view.snap'), 'skip')
+        self.assertEqual(runner.classify_file_bucket('crates/app/tests/snapshots/view.snap'), 'skip')
 
     def test_index_files_writes_code_and_docs_collections_without_embedded_assets(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -26,14 +26,14 @@ class ChromaIndexRunnerTests(unittest.TestCase):
             (root / 'docs').mkdir(parents=True)
             (root / '.claude' / 'skills' / 'foo').mkdir(parents=True)
             (root / 'specs' / 'SPEC-1').mkdir(parents=True)
-            (root / 'crates' / 'gwt-tui' / 'tests' / 'snapshots').mkdir(parents=True)
+            (root / 'crates' / 'app' / 'tests' / 'snapshots').mkdir(parents=True)
 
             (root / 'src' / 'runtime.rs').write_text('//! Runtime bootstrap manager\nfn main() {}\n')
             (root / 'README.md').write_text('# Runtime Overview\n')
             (root / 'docs' / 'search.md').write_text('# Search Guide\n')
             (root / '.claude' / 'skills' / 'foo' / 'SKILL.md').write_text('# Ignored\n')
             (root / 'specs' / 'SPEC-1' / 'spec.md').write_text('# Ignored Spec\n')
-            (root / 'crates' / 'gwt-tui' / 'tests' / 'snapshots' / 'view.snap').write_text('ignored snapshot\n')
+            (root / 'crates' / 'app' / 'tests' / 'snapshots' / 'view.snap').write_text('ignored snapshot\n')
 
             result = runner.action_index(str(root), str(db))
             self.assertTrue(result['ok'])

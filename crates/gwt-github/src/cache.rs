@@ -287,7 +287,7 @@ impl Cache {
 /// followed by `rename`.
 ///
 /// Exposed (via `cache::write_atomic`) so that other crates in the workspace
-/// — notably `gwt-tui`'s hook handlers (SPEC #1942) — can reuse the exact
+/// — notably gwt's hook handlers (SPEC #1942) — can reuse the exact
 /// same crash-safe write path for state files like `runtime-state.json`.
 /// Not part of the semver-stable surface; `#[doc(hidden)]` keeps it out of
 /// generated docs but `pub` is required so the hook code can link against it.

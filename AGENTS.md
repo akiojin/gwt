@@ -32,10 +32,11 @@
 - **非自明な変更では、実装前に「もっともシンプルでエレガントな解」を比較し、採用理由を1行で明示する。**
 - **場当たり的な修正（ワークアラウンド）を禁止する。** 必ず根本原因を特定してから修正すること。原因が不明な場合はログ・テスト・コードを調査し、推測で修正しない
 
-### 🧩 TUI ガイドライン
+### 🧩 GUI/TUI ガイドライン
 
-- デスクトップ TUI は ratatui + crossterm
-- バックエンド: Rust (gwt-core + gwt-tui)
+- デスクトップ GUI は WebView (wry + tao) + axum WebSocket サーバー
+- フロントエンド: HTML/JS/CSS (xterm.js でターミナル描画)
+- バックエンド: Rust (gwt-core + gwt)
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
 
@@ -166,9 +167,9 @@
 ### ローカル検証/実行ルール（Rust）
 
 - このリポジトリのローカル検証・実行は Cargo を使用する
-- ビルド: `cargo build -p gwt-tui`
-- 開発: `cargo run -p gwt-tui`
-- テスト: `cargo test -p gwt-core -p gwt-tui`
+- ビルド: `cargo build -p gwt`
+- 開発: `cargo run -p gwt`
+- テスト: `cargo test -p gwt-core -p gwt`
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 
@@ -239,7 +240,7 @@
 ├── crates/
 │   ├── gwt-core/       # コアライブラリ（Git操作・PTY管理・設定）
 │   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
-│   └── gwt-tui/        # ratatui TUI フロントエンド + CLI (`gwt issue spec ...`)
+│   └── gwt/            # CLI + GUI フロントエンド (`gwt issue spec ...`, WebView GUI)
 └── package.json        # 開発用スクリプト
 ```
 

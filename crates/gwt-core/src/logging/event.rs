@@ -7,7 +7,7 @@
 //! round-tripped through the pipeline.
 //!
 //! The UI forwarder layer produces `LogEvent`s directly from
-//! `tracing::Event`s. The JSONL parser in `gwt-tui` produces them from
+//! `tracing::Event`s. The JSONL parser in `gwt` produces them from
 //! file lines. Both code paths share this type so UI widgets do not need
 //! to care where the event came from.
 
