@@ -1291,20 +1291,20 @@
             };
           case "issue":
             return {
-              heading: "Assigned Issues",
+              heading: "Issue Bridge",
               rows: [
-                ["#1784", "GUI rewrite"],
-                ["#1930", "SPEC cache"],
-                ["#1974", "Shared board"],
+                ["Cache", "repo-scoped"],
+                ["Refresh", "gwt-managed"],
+                ["Launch", "issue context"],
               ],
             };
           case "spec":
             return {
-              heading: "Open Specs",
+              heading: "SPEC Bridge",
               rows: [
-                ["SPEC", "Issue-backed"],
-                ["Plan", "In progress"],
-                ["Tasks", "Tracked"],
+                ["Sections", "spec/plan/tasks"],
+                ["Refresh", "cache pull"],
+                ["Repair", "cache recovery"],
               ],
             };
           case "board":
@@ -1318,11 +1318,11 @@
             };
           case "pr":
             return {
-              heading: "Review Queue",
+              heading: "PR Bridge",
               rows: [
-                ["Draft", "1 PR"],
-                ["Review", "2 PRs"],
-                ["Merge", "0 PRs"],
+                ["Cache", "repo-scoped"],
+                ["Checks", "cache-backed"],
+                ["Workflow", "gwt-managed"],
               ],
             };
           default:
