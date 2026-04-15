@@ -23,7 +23,7 @@ use gwt::{
     list_directory_entries, load_app_state, refresh_managed_gwt_assets_for_worktree,
     resolve_launch_spec, save_app_state, workspace_state_path, BackendEvent, DockerWizardContext,
     FrontendEvent, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
-    LiveSessionEntry, NativeMenuCommand, WindowGeometry, WindowPreset, WindowProcessStatus,
+    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus,
     WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
@@ -2672,6 +2672,7 @@ fn main() -> wry::Result<()> {
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
+                use gwt::NativeMenuCommand;
                 if let Some(command) = gwt::native_menu_command_for_id(event.id.as_ref()) {
                     match command {
                         NativeMenuCommand::OpenProject => {
