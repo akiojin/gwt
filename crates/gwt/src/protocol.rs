@@ -86,6 +86,7 @@ pub enum FrontendEvent {
     OpenLaunchWizard {
         id: String,
         branch_name: String,
+        linked_issue_number: Option<u64>,
     },
     LaunchWizardAction {
         action: LaunchWizardAction,

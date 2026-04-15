@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
@@ -287,8 +288,8 @@ impl AppRuntime {
                     self.load_branches_event(&id),
                 )]
             }
-            FrontendEvent::OpenLaunchWizard { id, branch_name } => {
-                self.open_launch_wizard(&id, &branch_name)
+            FrontendEvent::OpenLaunchWizard { id, branch_name, linked_issue_number } => {
+                self.open_launch_wizard(&id, &branch_name, linked_issue_number)
             }
             FrontendEvent::LaunchWizardAction { action } => {
                 self.handle_launch_wizard_action(action)
@@ -786,7 +787,7 @@ impl AppRuntime {
         }
     }
 
-    fn open_launch_wizard(&mut self, id: &str, branch_name: &str) -> Vec<OutboundEvent> {
+    fn open_launch_wizard(&mut self, id: &str, branch_name: &str, linked_issue_number: Option<u64>) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
@@ -850,6 +851,7 @@ impl AppRuntime {
                     live_sessions,
                     docker_context,
                     docker_service_status,
+                    linked_issue_number,
                 },
                 &self.sessions_dir,
                 &default_wizard_version_cache_path(),
@@ -1176,6 +1178,45 @@ impl AppRuntime {
         gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
             .save(&runtime_path)
             .map_err(|error| error.to_string())?;
+
+        if let Some(issue_number) = config.linked_issue_number {
+            if let Some(branch) = config.branch.as_deref() {
+                let _ = {
+                    use gwt::index_worker::detect_repo_hash;
+                    use gwt_core::paths::gwt_cache_dir;
+                    use serde_json::json;
+
+                    if let Some(repo_hash) = detect_repo_hash(&worktree_path) {
+                        let cache_dir = gwt_cache_dir().join("issue-links");
+                        let _ = fs::create_dir_all(&cache_dir);
+
+                        let hash_str = repo_hash.as_str();
+                        let cache_file = cache_dir.join(format!("{}.json", hash_str));
+
+                        let mut linkage_map: serde_json::Map<String, serde_json::Value> =
+                            if cache_file.exists() {
+                                let content = fs::read_to_string(&cache_file).unwrap_or_default();
+                                serde_json::from_str(&content).unwrap_or_default()
+                            } else {
+                                serde_json::Map::new()
+                            };
+
+                        let mut branches: serde_json::Map<String, serde_json::Value> =
+                            linkage_map.get("branches")
+                                .and_then(|v| v.as_object())
+                                .cloned()
+                                .unwrap_or_default();
+
+                        branches.insert(branch.to_string(), json!(issue_number));
+                        linkage_map.insert("branches".to_string(), serde_json::Value::Object(branches));
+
+                        let json_content = serde_json::to_string_pretty(&linkage_map).unwrap_or_default();
+                        let _ = fs::write(&cache_file, json_content);
+                    }
+                    Ok::<(), String>(())
+                };
+            }
+        }
 
         self.active_agent_sessions.insert(
             window_id.clone(),
