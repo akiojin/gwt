@@ -51,6 +51,42 @@ pub struct ResolvedRunner {
     pub base_args: Vec<String>,
 }
 
+fn command_basename(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+}
+
+fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
+    match command_basename(command) {
+        "codex" => Some(0),
+        "bunx" | "npx" => {
+            let mut index = 0usize;
+            if args.get(index).is_some_and(|arg| arg == "--yes") {
+                index += 1;
+            }
+            args.get(index)
+                .is_some_and(|arg| arg.contains("@openai/codex"))
+                .then_some(index + 1)
+        }
+        _ => None,
+    }
+}
+
+pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<String>) {
+    if !matches!(agent_id, AgentId::Codex) {
+        return;
+    }
+    let Some(insert_index) = codex_runner_prefix_len(command, args) else {
+        return;
+    };
+    if args.iter().any(|arg| arg == "--no-alt-screen") {
+        return;
+    }
+    args.insert(insert_index, "--no-alt-screen".to_string());
+}
+
 /// Resolve the runner command based on version selection.
 ///
 /// - `"installed"` → use the agent's direct command (must be in PATH).
@@ -326,6 +362,8 @@ impl AgentLaunchBuilder {
 
         // Extra args at the end
         args.extend(self.extra_args);
+
+        normalize_launch_args(&self.agent_id, &runner.executable, &mut args);
 
         // Apply env overrides last (user wins)
         env_vars.extend(self.env_overrides);
@@ -811,6 +849,49 @@ mod tests {
             config.args.contains(&"--no-alt-screen".to_string()),
             "Codex should run inline so the PTY emits row scrollback instead of full-screen redraw-only history: {:?}",
             config.args
+        );
+    }
+
+    #[test]
+    fn normalize_launch_args_keeps_npx_runner_prefix_before_inserting_no_alt_screen() {
+        let mut args = vec![
+            "--yes".to_string(),
+            "@openai/codex@latest".to_string(),
+            "resume".to_string(),
+            "sess-123".to_string(),
+        ];
+
+        normalize_launch_args(&AgentId::Codex, "/opt/homebrew/bin/npx", &mut args);
+
+        assert_eq!(
+            args,
+            vec![
+                "--yes".to_string(),
+                "@openai/codex@latest".to_string(),
+                "--no-alt-screen".to_string(),
+                "resume".to_string(),
+                "sess-123".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_launch_args_ignores_non_codex_command_for_codex_agent() {
+        let mut args = vec![
+            "-c".to_string(),
+            "printf test".to_string(),
+            "sh".to_string(),
+        ];
+
+        normalize_launch_args(&AgentId::Codex, "/bin/sh", &mut args);
+
+        assert_eq!(
+            args,
+            vec![
+                "-c".to_string(),
+                "printf test".to_string(),
+                "sh".to_string(),
+            ]
         );
     }
 

@@ -11,9 +11,10 @@ const BIN_DIR = path.join(__dirname, "..", "bin");
 const BINARY_NAME = os.platform() === "win32" ? "gwt.exe" : "gwt";
 
 /**
- * Detect the GitHub Release artifact name for the current platform/arch.
+ * Detect the GitHub Release asset name for the current platform/arch.
+ * Matches the naming convention: gwt-{os}-{arch}[.exe]
  */
-function artifactName() {
+function releaseAssetName() {
   const platform = os.platform();
   const arch = os.arch();
 
@@ -30,7 +31,7 @@ function artifactName() {
     return "gwt-linux-aarch64";
   }
   if (platform === "win32" && arch === "x64") {
-    return "gwt-windows-x86_64";
+    return "gwt-windows-x86_64.exe";
   }
 
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
@@ -87,22 +88,23 @@ async function main() {
   }
 
   const version = readVersion();
-  const artifact = artifactName();
+  const asset = releaseAssetName();
   const tag = `v${version}`;
-  const binaryUrl = `https://github.com/${REPO}/releases/download/${tag}/${artifact}/${BINARY_NAME}`;
+  const binaryUrl = `https://github.com/${REPO}/releases/download/${tag}/${asset}`;
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
   const dest = path.join(BIN_DIR, BINARY_NAME);
 
-  console.log(`gwt: downloading ${tag} for ${os.platform()}-${os.arch()}...`);
+  console.log(`Downloading gwt binary for ${os.platform()}-${os.arch()}...`);
+  console.log(`Downloading from: ${binaryUrl}`);
 
   try {
     await download(binaryUrl, dest);
     if (os.platform() !== "win32") {
       fs.chmodSync(dest, 0o755);
     }
-    console.log(`gwt: installed to ${dest}`);
+    console.log(`gwt binary installed successfully!`);
   } catch (err) {
     console.error(`gwt: failed to download binary - ${err.message}`);
     console.error("gwt: you can build from source with: cargo build --release -p gwt");
