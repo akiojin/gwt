@@ -1137,7 +1137,7 @@ impl AppRuntime {
         );
         if let Ok(gwt_bin) = std::env::current_exe() {
             config.env_vars.insert(
-                gwt_agent::GWT_BIN_PATH_ENV.to_string(),
+                gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
                 gwt_bin.display().to_string(),
             );
         }
@@ -2058,7 +2058,7 @@ fn apply_docker_runtime_to_launch_config(
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     // Override GWT_BIN_PATH for Docker containers to use the mounted binary
     config.env_vars.insert(
-        gwt_agent::GWT_BIN_PATH_ENV.to_string(),
+        gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
         "/usr/local/bin/gwt".to_string(),
     );
     config.docker_service = Some(launch.service);
