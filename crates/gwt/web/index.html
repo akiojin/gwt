@@ -3423,14 +3423,38 @@
         event.preventDefault();
       });
 
+      // Middle button pan: capture phase so it works over windows too.
+      document.addEventListener(
+        "pointerdown",
+        (event) => {
+          if (event.button !== 1) {
+            return;
+          }
+          if (!canvas.contains(event.target)) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          panState = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            x: viewport.x,
+            y: viewport.y,
+          };
+          canvas.classList.add("panning");
+          canvas.setPointerCapture(event.pointerId);
+        },
+        { capture: true },
+      );
+
+      // Left button pan: only on empty canvas area (not over windows).
       canvas.addEventListener("pointerdown", (event) => {
-        // Middle button (button===1) starts pan from anywhere (including over windows)
-        const isMiddleButton = event.button === 1;
-        if (!isMiddleButton && event.target !== canvas && event.target !== stage) {
+        if (event.button !== 0) {
           return;
         }
-        if (isMiddleButton) {
-          event.preventDefault();
+        if (event.target !== canvas && event.target !== stage) {
+          return;
         }
         panState = {
           pointerId: event.pointerId,
@@ -3443,12 +3467,18 @@
         canvas.setPointerCapture(event.pointerId);
       });
 
-      canvas.addEventListener(
+      // Capture phase so wheel events on child elements (windows, terminals)
+      // are intercepted before they reach xterm.js or other consumers.
+      document.addEventListener(
         "wheel",
         (event) => {
+          if (!canvas.contains(event.target)) {
+            return;
+          }
           if (event.ctrlKey || event.metaKey) {
             // Ctrl/Cmd + wheel = zoom
             event.preventDefault();
+            event.stopPropagation();
             const rect = canvas.getBoundingClientRect();
             const anchorX = event.clientX - rect.left;
             const anchorY = event.clientY - rect.top;
@@ -3457,13 +3487,14 @@
           } else {
             // Plain wheel (trackpad two-finger scroll) = pan
             event.preventDefault();
+            event.stopPropagation();
             viewport.x -= event.deltaX;
             viewport.y -= event.deltaY;
             applyViewport();
             persistViewport();
           }
         },
-        { passive: false },
+        { capture: true, passive: false },
       );
 
       window.addEventListener(
