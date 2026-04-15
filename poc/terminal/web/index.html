@@ -706,10 +706,10 @@
       }
 
       .wizard-modal {
-        width: min(640px, calc(100vw - 32px));
+        width: min(980px, calc(100vw - 32px));
         max-height: calc(100vh - 48px);
         overflow: auto;
-        padding: 16px;
+        padding: 18px;
         border-radius: 6px;
         background: rgba(255, 255, 255, 0.98);
         border: 1px solid rgba(148, 163, 184, 0.45);
@@ -737,66 +737,237 @@
         color: #475569;
       }
 
-      .wizard-step {
-        margin-bottom: 12px;
-        font-size: 13px;
-        font-weight: 600;
-        color: #334155;
-      }
-
-      .wizard-options {
+      .wizard-summary {
         display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
         gap: 8px;
       }
 
-      .wizard-option {
-        width: 100%;
-        text-align: left;
+      .wizard-summary:empty {
+        display: none;
+      }
+
+      .wizard-summary-item {
+        min-width: 0;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        background: #f8fafc;
+        display: grid;
+        gap: 4px;
+      }
+
+      .wizard-summary-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: #64748b;
+      }
+
+      .wizard-summary-value {
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+        overflow-wrap: anywhere;
+      }
+
+      .launch-panel {
+        display: grid;
+        gap: 12px;
+      }
+
+      .launch-section {
+        display: grid;
+        gap: 12px;
         padding: 12px;
         border-radius: 6px;
         border: 1px solid rgba(148, 163, 184, 0.28);
         background: #f8fafc;
-        cursor: pointer;
       }
 
-      .wizard-option.selected {
-        border-color: rgba(37, 99, 235, 0.45);
-        background: rgba(59, 130, 246, 0.1);
+      .launch-section-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
       }
 
-      .wizard-option-label {
-        display: block;
+      .launch-section-title {
         font-size: 13px;
-        font-weight: 600;
+        font-weight: 700;
         color: #0f172a;
       }
 
-      .wizard-option-description {
-        display: block;
-        margin-top: 4px;
+      .launch-section-copy {
         font-size: 12px;
         color: #475569;
       }
 
-      .wizard-input-form {
+      .launch-form-grid {
         display: grid;
-        gap: 10px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
       }
 
-      .wizard-input-label {
+      .launch-field {
+        min-width: 0;
+        display: grid;
+        gap: 6px;
+      }
+
+      .launch-field.wide {
+        grid-column: 1 / -1;
+      }
+
+      .launch-field-label {
         font-size: 12px;
         font-weight: 600;
         color: #334155;
       }
 
-      .wizard-input {
+      .launch-select,
+      .launch-input {
         width: 100%;
-        height: 40px;
-        padding: 0 12px;
+        min-width: 0;
+        height: 38px;
+        padding: 0 10px;
         border-radius: 6px;
         border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
         font-size: 13px;
         color: #0f172a;
+      }
+
+      .launch-field-help {
+        font-size: 11px;
+        color: #64748b;
+      }
+
+      .launch-choice-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .launch-choice-button {
+        min-width: 0;
+        display: grid;
+        gap: 3px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
+        color: #0f172a;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .launch-choice-button.selected {
+        border-color: rgba(37, 99, 235, 0.45);
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .launch-choice-title {
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .launch-choice-detail {
+        font-size: 11px;
+        color: #64748b;
+      }
+
+      .quick-start-grid,
+      .live-session-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .quick-start-grid {
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+
+      .quick-start-card {
+        display: grid;
+        gap: 10px;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        background: #ffffff;
+      }
+
+      .quick-start-head {
+        display: grid;
+        gap: 4px;
+      }
+
+      .quick-start-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .quick-start-meta,
+      .quick-start-secondary,
+      .live-session-detail,
+      .launch-note {
+        font-size: 12px;
+        color: #475569;
+        overflow-wrap: anywhere;
+      }
+
+      .quick-start-secondary,
+      .launch-note {
+        font-size: 11px;
+      }
+
+      .quick-start-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .live-session-button {
+        width: 100%;
+        display: grid;
+        gap: 4px;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: #ffffff;
+        color: #0f172a;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .live-session-name {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .live-session-status {
+        font-size: 11px;
+        font-weight: 600;
+        color: #2563eb;
+      }
+
+      .launch-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .launch-inline-check {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: #334155;
+      }
+
+      .launch-inline-check input {
+        margin: 0;
       }
 
       .wizard-error {
@@ -839,6 +1010,32 @@
         background: #0f172a;
         color: #ffffff;
         border-color: #0f172a;
+      }
+
+      @media (max-width: 720px) {
+        .wizard-modal {
+          width: calc(100vw - 16px);
+          max-height: calc(100vh - 16px);
+          padding: 14px;
+        }
+
+        .wizard-footer {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .wizard-actions {
+          width: 100%;
+        }
+
+        .wizard-actions .wizard-button {
+          flex: 1 1 0;
+        }
+
+        .launch-toggle-row {
+          flex-direction: column;
+          align-items: stretch;
+        }
       }
 
       .project-picker,
@@ -1070,13 +1267,13 @@
             </div>
             <button class="wizard-button" id="wizard-close-button">Close</button>
           </div>
-          <div class="wizard-step" id="wizard-step"></div>
           <div class="wizard-error" id="wizard-error" hidden></div>
+          <div class="wizard-summary" id="wizard-summary"></div>
           <div id="wizard-body"></div>
           <div class="wizard-footer">
-            <div class="wizard-meta" id="wizard-progress"></div>
             <div class="wizard-actions">
-              <button class="wizard-button" id="wizard-back-button">Back</button>
+              <button class="wizard-button" id="wizard-cancel-button">Cancel</button>
+              <button class="wizard-button primary" id="wizard-submit-button">Launch</button>
             </div>
           </div>
         </div>
@@ -1115,12 +1312,12 @@
       const closeModalButton = document.getElementById("close-modal");
       const wizardModal = document.getElementById("wizard-modal");
       const wizardMeta = document.getElementById("wizard-meta");
-      const wizardStep = document.getElementById("wizard-step");
+      const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
       const wizardError = document.getElementById("wizard-error");
-      const wizardProgress = document.getElementById("wizard-progress");
-      const wizardBackButton = document.getElementById("wizard-back-button");
       const wizardCloseButton = document.getElementById("wizard-close-button");
+      const wizardCancelButton = document.getElementById("wizard-cancel-button");
+      const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
 
@@ -1142,6 +1339,10 @@
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
       let launchWizard = null;
+      let wizardWasOpen = false;
+      let wizardAdvancedOpen = false;
+      let wizardBranchDraft = "";
+      let wizardBranchBackendValue = "";
       let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
       let projectError = "";
 
@@ -1745,19 +1946,223 @@
         });
       }
 
-      function renderLaunchWizard() {
+      function createNode(tagName, className, textContent) {
+        const node = document.createElement(tagName);
+        if (className) {
+          node.className = className;
+        }
+        if (textContent !== undefined) {
+          node.textContent = textContent;
+        }
+        return node;
+      }
+
+      function createLaunchSection(title, copy) {
+        const section = createNode("section", "launch-section");
+        const header = createNode("div", "launch-section-header");
+        const text = createNode("div");
+        text.appendChild(createNode("div", "launch-section-title", title));
+        if (copy) {
+          text.appendChild(createNode("div", "launch-section-copy", copy));
+        }
+        header.appendChild(text);
+        section.appendChild(header);
+        return section;
+      }
+
+      function createLaunchField(label, wide = false) {
+        const field = createNode(
+          "div",
+          wide ? "launch-field wide" : "launch-field",
+        );
+        field.appendChild(createNode("div", "launch-field-label", label));
+        return field;
+      }
+
+      function createChoiceButton(option, selected, onSelect) {
+        const button = createNode("button", "launch-choice-button");
+        button.type = "button";
+        if (selected) {
+          button.classList.add("selected");
+        }
+        button.appendChild(createNode("span", "launch-choice-title", option.label));
+        if (option.description) {
+          button.appendChild(
+            createNode("span", "launch-choice-detail", option.description),
+          );
+        }
+        button.addEventListener("click", onSelect);
+        return button;
+      }
+
+      function appendChoiceField(
+        parent,
+        label,
+        options,
+        selectedValue,
+        onSelect,
+        wide = false,
+      ) {
+        const field = createLaunchField(label, wide);
+        const row = createNode("div", "launch-choice-row");
+        for (const option of options) {
+          row.appendChild(
+            createChoiceButton(option, option.value === selectedValue, () =>
+              onSelect(option.value),
+            ),
+          );
+        }
+        field.appendChild(row);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendSelectField(
+        parent,
+        label,
+        options,
+        selectedValue,
+        onChange,
+        wide = false,
+        emptyLabel = "Unavailable",
+      ) {
+        const field = createLaunchField(label, wide);
+        const select = createNode("select", "launch-select");
+        if (options.length === 0) {
+          select.disabled = true;
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = emptyLabel;
+          select.appendChild(option);
+        } else {
+          for (const item of options) {
+            const option = document.createElement("option");
+            option.value = item.value;
+            option.textContent = item.label;
+            select.appendChild(option);
+          }
+          const hasSelected = options.some((item) => item.value === selectedValue);
+          select.value = hasSelected ? selectedValue : options[0].value;
+          select.addEventListener("change", () => onChange(select.value));
+        }
+        field.appendChild(select);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function appendCheckboxField(
+        parent,
+        label,
+        copy,
+        checked,
+        onChange,
+        wide = false,
+      ) {
+        const field = createLaunchField(label, wide);
+        const checkboxLabel = createNode("label", "launch-inline-check");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = checked;
+        input.addEventListener("change", () => onChange(input.checked));
+        checkboxLabel.appendChild(input);
+        checkboxLabel.appendChild(createNode("span", "", copy));
+        field.appendChild(checkboxLabel);
+        parent.appendChild(field);
+        return field;
+      }
+
+      function runtimeTargetPayload(value) {
+        return value === "docker" ? "Docker" : "Host";
+      }
+
+      function dockerLifecyclePayload(value) {
+        switch (value) {
+          case "connect":
+            return "Connect";
+          case "start":
+            return "Start";
+          case "restart":
+            return "Restart";
+          case "recreate":
+            return "Recreate";
+          case "create_and_start":
+            return "CreateAndStart";
+          default:
+            return "Connect";
+        }
+      }
+
+      function syncWizardDraftState() {
         if (!launchWizard) {
-          wizardModal.classList.remove("open");
-          wizardBody.innerHTML = "";
+          wizardWasOpen = false;
+          wizardAdvancedOpen = false;
+          wizardBranchDraft = "";
+          wizardBranchBackendValue = "";
           return;
         }
 
+        if (!wizardWasOpen) {
+          wizardWasOpen = true;
+          wizardAdvancedOpen =
+            launchWizard.selected_runtime_target === "docker" ||
+            Boolean(launchWizard.selected_docker_service);
+          wizardBranchDraft = launchWizard.branch_name || "";
+          wizardBranchBackendValue = wizardBranchDraft;
+          return;
+        }
+
+        if ((launchWizard.branch_name || "") !== wizardBranchBackendValue) {
+          wizardBranchDraft = launchWizard.branch_name || "";
+          wizardBranchBackendValue = wizardBranchDraft;
+        }
+      }
+
+      function flushWizardBranchDraft() {
+        if (!launchWizard || launchWizard.branch_mode !== "create_new") {
+          return;
+        }
+        if (wizardBranchDraft === wizardBranchBackendValue) {
+          return;
+        }
+        wizardBranchBackendValue = wizardBranchDraft;
+        sendWizardAction({
+          kind: "set_branch_name",
+          value: wizardBranchDraft,
+        });
+      }
+
+      function renderWizardSummary() {
+        wizardSummary.innerHTML = "";
+        for (const item of launchWizard.launch_summary || []) {
+          const card = createNode("div", "wizard-summary-item");
+          card.appendChild(createNode("div", "wizard-summary-label", item.label));
+          card.appendChild(createNode("div", "wizard-summary-value", item.value));
+          wizardSummary.appendChild(card);
+        }
+      }
+
+      function renderLaunchWizard() {
+        if (!launchWizard) {
+          wizardModal.classList.remove("open");
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          wizardError.hidden = true;
+          wizardError.textContent = "";
+          wizardSubmitButton.textContent = "Launch";
+          syncWizardDraftState();
+          return;
+        }
+
+        syncWizardDraftState();
         closeModal();
         wizardModal.classList.add("open");
-        wizardMeta.textContent = launchWizard.branch_name || "Workspace";
-        wizardStep.textContent = launchWizard.title;
-        wizardProgress.textContent = `${launchWizard.step_index} / ${launchWizard.step_count}`;
-        wizardBackButton.disabled = !launchWizard.can_go_back;
+        wizardMeta.textContent = `Selected branch · ${
+          launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
+        }`;
+        wizardSubmitButton.textContent =
+          launchWizard.branch_mode === "create_new"
+            ? "Create and launch"
+            : "Launch";
 
         if (launchWizard.error) {
           wizardError.hidden = false;
@@ -1767,61 +2172,374 @@
           wizardError.textContent = "";
         }
 
+        renderWizardSummary();
         wizardBody.innerHTML = "";
+        const panel = createNode("div", "launch-panel");
 
-        if (launchWizard.input_value !== null) {
-          const form = document.createElement("form");
-          form.className = "wizard-input-form";
-          form.innerHTML = `
-            <label class="wizard-input-label">${launchWizard.input_label || "Input"}</label>
-            <input
-              class="wizard-input"
-              type="text"
-              value="${launchWizard.input_value || ""}"
-              placeholder="${launchWizard.input_placeholder || ""}"
-            />
-            <div class="wizard-actions">
-              <button class="wizard-button primary" type="submit">Continue</button>
-            </div>
-          `;
-          form.addEventListener("submit", (event) => {
-            event.preventDefault();
-            const input = form.querySelector("input");
-            sendWizardAction({
-              kind: "submit_text",
-              value: input.value,
-            });
-          });
-          wizardBody.appendChild(form);
-          requestAnimationFrame(() => {
-            form.querySelector("input")?.focus();
-          });
-          return;
-        }
+        if (
+          (launchWizard.quick_start_entries || []).length > 0 ||
+          (launchWizard.live_sessions || []).length > 0
+        ) {
+          const section = createLaunchSection(
+            "Quick start",
+            "Reuse a recent launch profile or jump to a running window.",
+          );
 
-        const options = document.createElement("div");
-        options.className = "wizard-options";
-        for (const [index, option] of (launchWizard.options || []).entries()) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "wizard-option";
-          if (index === launchWizard.selected) {
-            button.classList.add("selected");
-          }
-          button.innerHTML = `
-            <span class="wizard-option-label">${option.label}</span>
-            ${
-              option.description
-                ? `<span class="wizard-option-description">${option.description}</span>`
-                : ""
+          if ((launchWizard.quick_start_entries || []).length > 0) {
+            const quickStartGrid = createNode("div", "quick-start-grid");
+            for (const entry of launchWizard.quick_start_entries) {
+              const card = createNode("div", "quick-start-card");
+              const head = createNode("div", "quick-start-head");
+              head.appendChild(
+                createNode("div", "quick-start-title", entry.tool_label),
+              );
+              head.appendChild(
+                createNode("div", "quick-start-meta", entry.summary),
+              );
+              if (entry.resume_session_id) {
+                head.appendChild(
+                  createNode(
+                    "div",
+                    "quick-start-secondary",
+                    `Resume ID · ${entry.resume_session_id}`,
+                  ),
+                );
+              }
+              card.appendChild(head);
+
+              const actions = createNode("div", "quick-start-actions");
+              const resumeButton = createNode(
+                "button",
+                "wizard-button",
+                entry.resume_session_id ? "Resume" : "Continue",
+              );
+              resumeButton.type = "button";
+              resumeButton.addEventListener("click", () => {
+                sendWizardAction({
+                  kind: "apply_quick_start",
+                  index: entry.index,
+                  mode: "resume",
+                });
+              });
+              actions.appendChild(resumeButton);
+
+              const startNewButton = createNode(
+                "button",
+                "wizard-button primary",
+                "Start new",
+              );
+              startNewButton.type = "button";
+              startNewButton.addEventListener("click", () => {
+                sendWizardAction({
+                  kind: "apply_quick_start",
+                  index: entry.index,
+                  mode: "start_new",
+                });
+              });
+              actions.appendChild(startNewButton);
+
+              card.appendChild(actions);
+              quickStartGrid.appendChild(card);
             }
-          `;
-          button.addEventListener("click", () => {
-            sendWizardAction({ kind: "select", index });
-          });
-          options.appendChild(button);
+            section.appendChild(quickStartGrid);
+          }
+
+          if ((launchWizard.live_sessions || []).length > 0) {
+            const liveSection = createNode("div", "live-session-list");
+            for (const session of launchWizard.live_sessions) {
+              const button = createNode("button", "live-session-button");
+              button.type = "button";
+              button.appendChild(
+                createNode("div", "live-session-name", session.name),
+              );
+              button.appendChild(
+                createNode(
+                  "div",
+                  "live-session-status",
+                  session.active ? "Active window" : "Running window",
+                ),
+              );
+              if (session.detail) {
+                button.appendChild(
+                  createNode("div", "live-session-detail", session.detail),
+                );
+              }
+              button.addEventListener("click", () => {
+                sendWizardAction({
+                  kind: "focus_existing_session",
+                  index: session.index,
+                });
+              });
+              liveSection.appendChild(button);
+            }
+            section.appendChild(liveSection);
+          }
+
+          panel.appendChild(section);
         }
-        wizardBody.appendChild(options);
+
+        {
+          const section = createLaunchSection(
+            "Branch",
+            "Choose the selected branch or create a new branch from it.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          appendChoiceField(
+            grid,
+            "Branch target",
+            [
+              {
+                value: "use_selected",
+                label: "Use selected",
+                description:
+                  launchWizard.selected_branch_name || "Launch on the selected branch",
+              },
+              {
+                value: "create_new",
+                label: "Create new",
+                description: `Base · ${
+                  launchWizard.selected_branch_name || "selected branch"
+                }`,
+              },
+            ],
+            launchWizard.branch_mode,
+            (value) => {
+              sendWizardAction({
+                kind: "set_branch_mode",
+                create_new: value === "create_new",
+              });
+            },
+            true,
+          );
+
+          if (launchWizard.branch_mode === "create_new") {
+            appendChoiceField(
+              grid,
+              "Branch type",
+              launchWizard.branch_type_options || [],
+              launchWizard.selected_branch_type,
+              (value) => {
+                flushWizardBranchDraft();
+                sendWizardAction({
+                  kind: "set_branch_type",
+                  prefix: value,
+                });
+              },
+              true,
+            );
+            const field = createLaunchField("Branch name", true);
+            const input = createNode("input", "launch-input");
+            input.type = "text";
+            input.value = wizardBranchDraft;
+            input.placeholder = "feature/my-task";
+            input.addEventListener("input", () => {
+              wizardBranchDraft = input.value;
+            });
+            input.addEventListener("blur", () => {
+              flushWizardBranchDraft();
+            });
+            field.appendChild(input);
+            field.appendChild(
+              createNode(
+                "div",
+                "launch-field-help",
+                `Base branch · ${launchWizard.selected_branch_name || "selected"}`,
+              ),
+            );
+            grid.appendChild(field);
+          } else {
+            const note = createLaunchField("Resolved target", true);
+            note.appendChild(
+              createNode(
+                "div",
+                "launch-note",
+                launchWizard.selected_branch_name || launchWizard.branch_name,
+              ),
+            );
+            grid.appendChild(note);
+          }
+
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
+            "Launch",
+            "Choose the agent and default execution behavior.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          appendSelectField(
+            grid,
+            "Agent",
+            launchWizard.agent_options || [],
+            launchWizard.selected_agent_id,
+            (value) =>
+              sendWizardAction({
+                kind: "set_agent",
+                agent_id: value,
+              }),
+          );
+          if ((launchWizard.model_options || []).length > 0) {
+            appendSelectField(
+              grid,
+              "Model",
+              launchWizard.model_options || [],
+              launchWizard.selected_model,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_model",
+                  model: value,
+                }),
+            );
+          }
+          if (launchWizard.show_reasoning) {
+            appendSelectField(
+              grid,
+              "Reasoning",
+              launchWizard.reasoning_options || [],
+              launchWizard.selected_reasoning,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_reasoning",
+                  reasoning: value,
+                }),
+            );
+          }
+          appendSelectField(
+            grid,
+            "Execution mode",
+            launchWizard.execution_mode_options || [],
+            launchWizard.selected_execution_mode,
+            (value) =>
+              sendWizardAction({
+                kind: "set_execution_mode",
+                mode: value,
+              }),
+          );
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
+            "Advanced",
+            "Runtime target, versions, and launch flags.",
+          );
+          const toggleRow = createNode("div", "launch-toggle-row");
+          toggleRow.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              wizardAdvancedOpen
+                ? "Docker, version, permissions, and tool-specific flags."
+                : "Show runtime and launch flags.",
+            ),
+          );
+          const toggleButton = createNode(
+            "button",
+            "wizard-button",
+            wizardAdvancedOpen ? "Hide advanced" : "Show advanced",
+          );
+          toggleButton.type = "button";
+          toggleButton.addEventListener("click", () => {
+            wizardAdvancedOpen = !wizardAdvancedOpen;
+            renderLaunchWizard();
+          });
+          toggleRow.appendChild(toggleButton);
+          section.appendChild(toggleRow);
+
+          if (wizardAdvancedOpen) {
+            const grid = createNode("div", "launch-form-grid");
+            if (launchWizard.show_runtime_target) {
+              appendSelectField(
+                grid,
+                "Runtime target",
+                launchWizard.runtime_target_options || [],
+                launchWizard.selected_runtime_target,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_runtime_target",
+                    target: runtimeTargetPayload(value),
+                  }),
+              );
+            }
+            if (
+              launchWizard.show_docker_service &&
+              (launchWizard.docker_service_options || []).length > 0
+            ) {
+              appendSelectField(
+                grid,
+                "Docker service",
+                launchWizard.docker_service_options || [],
+                launchWizard.selected_docker_service,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_docker_service",
+                    service: value,
+                  }),
+              );
+            }
+            if (
+              launchWizard.show_docker_lifecycle &&
+              (launchWizard.docker_lifecycle_options || []).length > 0
+            ) {
+              appendSelectField(
+                grid,
+                "Docker lifecycle",
+                launchWizard.docker_lifecycle_options || [],
+                launchWizard.selected_docker_lifecycle,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_docker_lifecycle",
+                    intent: dockerLifecyclePayload(value),
+                  }),
+              );
+            }
+            if (launchWizard.show_version) {
+              appendSelectField(
+                grid,
+                "Version",
+                launchWizard.version_options || [],
+                launchWizard.selected_version,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_version",
+                    version: value,
+                  }),
+              );
+            }
+            appendCheckboxField(
+              grid,
+              "Permissions",
+              "Skip permission prompts",
+              launchWizard.skip_permissions,
+              (enabled) =>
+                sendWizardAction({
+                  kind: "set_skip_permissions",
+                  enabled,
+                }),
+            );
+            if (launchWizard.show_codex_fast_mode) {
+              appendCheckboxField(
+                grid,
+                "Codex fast mode",
+                "Use the fast service tier",
+                launchWizard.codex_fast_mode,
+                (enabled) =>
+                  sendWizardAction({
+                    kind: "set_codex_fast_mode",
+                    enabled,
+                  }),
+              );
+            }
+            section.appendChild(grid);
+          }
+
+          panel.appendChild(section);
+        }
+
+        wizardBody.appendChild(panel);
       }
 
       function renderFileTree(windowId) {
@@ -2427,11 +3145,15 @@
           closeModal();
         }
       });
-      wizardBackButton.addEventListener("click", () => {
-        sendWizardAction({ kind: "back" });
-      });
       wizardCloseButton.addEventListener("click", () => {
         sendWizardAction({ kind: "cancel" });
+      });
+      wizardCancelButton.addEventListener("click", () => {
+        sendWizardAction({ kind: "cancel" });
+      });
+      wizardSubmitButton.addEventListener("click", () => {
+        flushWizardBranchDraft();
+        sendWizardAction({ kind: "submit" });
       });
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {

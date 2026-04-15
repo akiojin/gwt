@@ -206,8 +206,8 @@ WebView を開きます。起動すると stderr に `http://127.0.0.1:<port>/` 
 
 canvas では `Shell` / `Claude` / `Codex` の terminal window と、read-only の
 `File Tree` window、そして `Branches` window を扱えます。`Branches` は
-single click で選択、double click で Launch Agent wizard を開き、quick
-start / new branch / agent / model / runtime / permissions を選べます。
+single click で選択、double click で中央表示の Launch Agent panel を開き、
+quick start / new branch / agent / model / runtime / permissions を選べます。
 `Settings` / `Memo` / `Profile` / `Logs` / `Issue` / `SPEC` / `Board` / `PR`
 は mock window として追加できます。
 

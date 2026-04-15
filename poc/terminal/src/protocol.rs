@@ -151,6 +151,6 @@ pub enum BackendEvent {
         message: String,
     },
     LaunchWizardState {
-        wizard: Option<LaunchWizardView>,
+        wizard: Option<Box<LaunchWizardView>>,
     },
 }

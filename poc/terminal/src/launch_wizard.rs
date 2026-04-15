@@ -26,47 +26,77 @@ pub enum LaunchWizardStep {
     CodexFastMode,
 }
 
-impl LaunchWizardStep {
-    fn title(self) -> &'static str {
-        match self {
-            Self::QuickStart => "Quick Start",
-            Self::FocusExistingSession => "Focus Existing Session",
-            Self::BranchAction => "Branch Action",
-            Self::BranchTypeSelect => "Branch Type",
-            Self::BranchNameInput => "Branch Name",
-            Self::AgentSelect => "Select Agent",
-            Self::ModelSelect => "Select Model",
-            Self::ReasoningLevel => "Reasoning Level",
-            Self::RuntimeTarget => "Runtime Target",
-            Self::DockerServiceSelect => "Docker Service",
-            Self::DockerLifecycle => "Docker Lifecycle",
-            Self::VersionSelect => "Select Version",
-            Self::ExecutionMode => "Execution Mode",
-            Self::SkipPermissions => "Skip Permissions",
-            Self::CodexFastMode => "Codex Fast Mode",
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardOptionView {
+    pub value: String,
     pub label: String,
     pub description: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickStartLaunchMode {
+    Resume,
+    StartNew,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardQuickStartView {
+    pub index: usize,
+    pub tool_label: String,
+    pub summary: String,
+    pub resume_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardLiveSessionView {
+    pub index: usize,
+    pub name: String,
+    pub detail: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardSummaryView {
+    pub label: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
-    pub step: LaunchWizardStep,
     pub title: String,
     pub branch_name: String,
-    pub selected: usize,
-    pub step_index: usize,
-    pub step_count: usize,
-    pub can_go_back: bool,
-    pub options: Vec<LaunchWizardOptionView>,
-    pub input_value: Option<String>,
-    pub input_label: Option<String>,
-    pub input_placeholder: Option<String>,
+    pub selected_branch_name: String,
+    pub quick_start_entries: Vec<LaunchWizardQuickStartView>,
+    pub live_sessions: Vec<LaunchWizardLiveSessionView>,
+    pub branch_mode: String,
+    pub branch_type_options: Vec<LaunchWizardOptionView>,
+    pub selected_branch_type: Option<String>,
+    pub agent_options: Vec<LaunchWizardOptionView>,
+    pub selected_agent_id: String,
+    pub model_options: Vec<LaunchWizardOptionView>,
+    pub selected_model: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub selected_reasoning: String,
+    pub runtime_target_options: Vec<LaunchWizardOptionView>,
+    pub selected_runtime_target: String,
+    pub docker_service_options: Vec<LaunchWizardOptionView>,
+    pub selected_docker_service: Option<String>,
+    pub docker_lifecycle_options: Vec<LaunchWizardOptionView>,
+    pub selected_docker_lifecycle: String,
+    pub version_options: Vec<LaunchWizardOptionView>,
+    pub selected_version: String,
+    pub execution_mode_options: Vec<LaunchWizardOptionView>,
+    pub selected_execution_mode: String,
+    pub skip_permissions: bool,
+    pub show_reasoning: bool,
+    pub show_runtime_target: bool,
+    pub show_docker_service: bool,
+    pub show_docker_lifecycle: bool,
+    pub show_version: bool,
+    pub show_codex_fast_mode: bool,
+    pub codex_fast_mode: bool,
+    pub launch_summary: Vec<LaunchWizardSummaryView>,
     pub error: Option<String>,
 }
 
@@ -131,10 +161,61 @@ pub enum LaunchWizardCompletion {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LaunchWizardAction {
-    Select { index: usize },
+    Select {
+        index: usize,
+    },
     Back,
     Cancel,
-    SubmitText { value: String },
+    SubmitText {
+        value: String,
+    },
+    ApplyQuickStart {
+        index: usize,
+        mode: QuickStartLaunchMode,
+    },
+    FocusExistingSession {
+        index: usize,
+    },
+    SetBranchMode {
+        create_new: bool,
+    },
+    SetBranchType {
+        prefix: String,
+    },
+    SetBranchName {
+        value: String,
+    },
+    SetAgent {
+        agent_id: String,
+    },
+    SetModel {
+        model: String,
+    },
+    SetReasoning {
+        reasoning: String,
+    },
+    SetRuntimeTarget {
+        target: gwt_agent::LaunchRuntimeTarget,
+    },
+    SetDockerService {
+        service: String,
+    },
+    SetDockerLifecycle {
+        intent: gwt_agent::DockerLifecycleIntent,
+    },
+    SetVersion {
+        version: String,
+    },
+    SetExecutionMode {
+        mode: String,
+    },
+    SetSkipPermissions {
+        enabled: bool,
+    },
+    SetCodexFastMode {
+        enabled: bool,
+    },
+    Submit,
 }
 
 #[derive(Debug, Clone)]
@@ -230,20 +311,45 @@ impl LaunchWizardState {
 
     pub fn view(&self) -> LaunchWizardView {
         LaunchWizardView {
-            step: self.step,
-            title: self.step_title(),
+            title: "Launch Agent".to_string(),
             branch_name: self.branch_name.clone(),
-            selected: self.selected,
-            step_index: self.visible_step_index(),
-            step_count: self.visible_step_count(),
-            can_go_back: prev_step(self.step, self).is_some(),
-            options: self.current_options(),
-            input_value: (self.step == LaunchWizardStep::BranchNameInput)
-                .then(|| self.branch_name.clone()),
-            input_label: (self.step == LaunchWizardStep::BranchNameInput)
-                .then(|| "Branch name".to_string()),
-            input_placeholder: (self.step == LaunchWizardStep::BranchNameInput)
-                .then(|| "feature/my-work".to_string()),
+            selected_branch_name: self.context.selected_branch.name.clone(),
+            quick_start_entries: self.quick_start_entries_view(),
+            live_sessions: self.live_sessions_view(),
+            branch_mode: if self.is_new_branch {
+                "create_new".to_string()
+            } else {
+                "use_selected".to_string()
+            },
+            branch_type_options: branch_type_options_view(),
+            selected_branch_type: self.selected_branch_type_prefix().map(str::to_string),
+            agent_options: self.agent_options_view(),
+            selected_agent_id: self.effective_agent_id().to_string(),
+            model_options: self.model_options_view(),
+            selected_model: self.model.clone(),
+            reasoning_options: self.reasoning_options_view(),
+            selected_reasoning: self.reasoning.clone(),
+            runtime_target_options: runtime_target_options_view(),
+            selected_runtime_target: runtime_target_value(self.runtime_target).to_string(),
+            docker_service_options: self.docker_service_options_view(),
+            selected_docker_service: self.docker_service.clone(),
+            docker_lifecycle_options: self.docker_lifecycle_options_view(),
+            selected_docker_lifecycle: docker_lifecycle_value(self.docker_lifecycle_intent)
+                .to_string(),
+            version_options: self.version_options_view(),
+            selected_version: self.version.clone(),
+            execution_mode_options: execution_mode_options_view(),
+            selected_execution_mode: self.mode.clone(),
+            skip_permissions: self.skip_permissions,
+            show_reasoning: self.agent_uses_reasoning_step(),
+            show_runtime_target: self.has_docker_workflow(),
+            show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+                && self.docker_service_prompt_required(),
+            show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker,
+            show_version: agent_has_npm_package(self.effective_agent_id()),
+            show_codex_fast_mode: self.agent_is_codex(),
+            codex_fast_mode: self.codex_fast_mode,
+            launch_summary: self.launch_summary_view(),
             error: self.error.clone(),
         }
     }
@@ -254,6 +360,54 @@ impl LaunchWizardState {
         match action {
             LaunchWizardAction::Cancel => {
                 self.completion = Some(LaunchWizardCompletion::Cancelled);
+            }
+            LaunchWizardAction::Submit => {
+                self.submit_panel();
+            }
+            LaunchWizardAction::ApplyQuickStart { index, mode } => {
+                self.apply_quick_start_action(index, mode);
+            }
+            LaunchWizardAction::FocusExistingSession { index } => {
+                self.focus_existing_session(index);
+            }
+            LaunchWizardAction::SetBranchMode { create_new } => {
+                self.set_branch_mode(create_new);
+            }
+            LaunchWizardAction::SetBranchType { prefix } => {
+                self.set_branch_type(&prefix);
+            }
+            LaunchWizardAction::SetBranchName { value } => {
+                self.branch_name = value;
+            }
+            LaunchWizardAction::SetAgent { agent_id } => {
+                self.set_agent_id(&agent_id);
+            }
+            LaunchWizardAction::SetModel { model } => {
+                self.set_model(&model);
+            }
+            LaunchWizardAction::SetReasoning { reasoning } => {
+                self.set_reasoning(&reasoning);
+            }
+            LaunchWizardAction::SetRuntimeTarget { target } => {
+                self.set_runtime_target(target);
+            }
+            LaunchWizardAction::SetDockerService { service } => {
+                self.set_docker_service(&service);
+            }
+            LaunchWizardAction::SetDockerLifecycle { intent } => {
+                self.set_docker_lifecycle(intent);
+            }
+            LaunchWizardAction::SetVersion { version } => {
+                self.set_version(&version);
+            }
+            LaunchWizardAction::SetExecutionMode { mode } => {
+                self.set_execution_mode(&mode);
+            }
+            LaunchWizardAction::SetSkipPermissions { enabled } => {
+                self.skip_permissions = enabled;
+            }
+            LaunchWizardAction::SetCodexFastMode { enabled } => {
+                self.codex_fast_mode = enabled && self.agent_is_codex();
             }
             LaunchWizardAction::Back => {
                 if let Some(prev) = prev_step(self.step, self) {
@@ -475,6 +629,381 @@ impl LaunchWizardState {
         }
     }
 
+    fn submit_panel(&mut self) {
+        if self.is_new_branch {
+            let trimmed = self.branch_name.trim();
+            if trimmed.is_empty() {
+                self.error = Some("Branch name is required".to_string());
+                return;
+            }
+            self.branch_name = trimmed.to_string();
+        }
+
+        match self.build_launch_config() {
+            Ok(config) => {
+                self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
+            }
+            Err(error) => {
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn apply_quick_start_action(&mut self, index: usize, mode: QuickStartLaunchMode) {
+        let Some(entry) = self.quick_start_entries.get(index).cloned() else {
+            self.error = Some("Quick start entry is unavailable".to_string());
+            return;
+        };
+
+        self.agent_id = entry.agent_id.clone();
+        self.sync_selected_agent_options();
+        if let Some(model) = entry.model {
+            self.model = model;
+        }
+        if let Some(reasoning) = entry.reasoning {
+            self.reasoning = reasoning;
+        }
+        if let Some(version) = entry.version {
+            self.version = version;
+        }
+        self.skip_permissions = entry.skip_permissions;
+        self.codex_fast_mode = entry.codex_fast_mode && self.agent_is_codex();
+        self.runtime_target = entry.runtime_target;
+        self.docker_service = entry.docker_service.clone();
+        self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
+        match mode {
+            QuickStartLaunchMode::Resume => {
+                if let Some(resume_session_id) = entry.resume_session_id {
+                    self.mode = "resume".to_string();
+                    self.resume_session_id = Some(resume_session_id);
+                } else {
+                    self.mode = "continue".to_string();
+                    self.resume_session_id = None;
+                }
+            }
+            QuickStartLaunchMode::StartNew => {
+                self.mode = "normal".to_string();
+                self.resume_session_id = None;
+            }
+        }
+        self.sync_docker_lifecycle_default();
+    }
+
+    fn focus_existing_session(&mut self, index: usize) {
+        if let Some(entry) = self.context.live_sessions.get(index) {
+            self.completion = Some(LaunchWizardCompletion::FocusWindow {
+                window_id: entry.window_id.clone(),
+            });
+        } else {
+            self.error = Some("No running session is available".to_string());
+        }
+    }
+
+    fn set_branch_mode(&mut self, create_new: bool) {
+        self.is_new_branch = create_new;
+        if create_new {
+            self.base_branch_name = Some(self.context.normalized_branch_name.clone());
+            if self.branch_name.is_empty()
+                || self.branch_name == self.context.normalized_branch_name
+            {
+                self.branch_name = BRANCH_TYPE_PREFIXES[0].to_string();
+            }
+        } else {
+            self.base_branch_name = None;
+            self.branch_name = self.context.normalized_branch_name.clone();
+        }
+    }
+
+    fn set_branch_type(&mut self, prefix: &str) {
+        if !BRANCH_TYPE_PREFIXES
+            .iter()
+            .any(|candidate| candidate == &prefix)
+        {
+            self.error = Some("Branch type is unavailable".to_string());
+            return;
+        }
+        let seed = if self.branch_name.is_empty() {
+            prefix.to_string()
+        } else {
+            self.branch_name.clone()
+        };
+        self.branch_name = apply_branch_prefix(&seed, prefix);
+    }
+
+    fn set_agent_id(&mut self, agent_id: &str) {
+        if self
+            .detected_agents
+            .iter()
+            .any(|candidate| candidate.id == agent_id)
+        {
+            self.agent_id = agent_id.to_string();
+            self.sync_selected_agent_options();
+        } else {
+            self.error = Some("Agent option is unavailable".to_string());
+        }
+    }
+
+    fn set_model(&mut self, model: &str) {
+        if current_model_options(self.effective_agent_id())
+            .iter()
+            .any(|candidate| candidate == &model)
+        {
+            self.model = model.to_string();
+            self.sync_reasoning_state();
+        } else if model.is_empty() && !self.agent_has_models() {
+            self.model.clear();
+        } else {
+            self.error = Some("Model option is unavailable".to_string());
+        }
+    }
+
+    fn set_reasoning(&mut self, reasoning: &str) {
+        if self
+            .current_reasoning_options()
+            .iter()
+            .any(|option| option.stored_value == reasoning)
+        {
+            self.reasoning = reasoning.to_string();
+        } else {
+            self.error = Some("Reasoning option is unavailable".to_string());
+        }
+    }
+
+    fn set_runtime_target(&mut self, target: gwt_agent::LaunchRuntimeTarget) {
+        self.runtime_target = target;
+        if self.runtime_target == gwt_agent::LaunchRuntimeTarget::Host {
+            self.docker_service = None;
+        } else if self.docker_service.is_none() {
+            self.docker_service = self.preferred_docker_service().map(str::to_string);
+        }
+        self.sync_docker_lifecycle_default();
+    }
+
+    fn set_docker_service(&mut self, service: &str) {
+        if self
+            .docker_service_options()
+            .iter()
+            .any(|candidate| candidate == service)
+        {
+            self.docker_service = Some(service.to_string());
+            self.sync_docker_lifecycle_default();
+        } else {
+            self.error = Some("Docker service is unavailable".to_string());
+        }
+    }
+
+    fn set_docker_lifecycle(&mut self, intent: gwt_agent::DockerLifecycleIntent) {
+        if self
+            .docker_lifecycle_options()
+            .iter()
+            .any(|option| option.intent == intent)
+        {
+            self.docker_lifecycle_intent = intent;
+        } else {
+            self.error = Some("Docker lifecycle option is unavailable".to_string());
+        }
+    }
+
+    fn set_version(&mut self, version: &str) {
+        if self
+            .current_version_options()
+            .iter()
+            .any(|option| option.value == version)
+        {
+            self.version = version.to_string();
+        } else {
+            self.error = Some("Version option is unavailable".to_string());
+        }
+    }
+
+    fn set_execution_mode(&mut self, mode: &str) {
+        if EXECUTION_MODE_OPTIONS
+            .iter()
+            .any(|option| option.value == mode)
+        {
+            self.mode = mode.to_string();
+            if self.mode != "resume" {
+                self.resume_session_id = None;
+            }
+        } else {
+            self.error = Some("Execution mode is unavailable".to_string());
+        }
+    }
+
+    fn quick_start_entries_view(&self) -> Vec<LaunchWizardQuickStartView> {
+        self.quick_start_entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| LaunchWizardQuickStartView {
+                index,
+                tool_label: entry.tool_label.clone(),
+                summary: quick_start_summary(entry),
+                resume_session_id: entry.resume_session_id.clone(),
+            })
+            .collect()
+    }
+
+    fn live_sessions_view(&self) -> Vec<LaunchWizardLiveSessionView> {
+        self.context
+            .live_sessions
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| LaunchWizardLiveSessionView {
+                index,
+                name: entry.name.clone(),
+                detail: entry.detail.clone(),
+                active: entry.active,
+            })
+            .collect()
+    }
+
+    fn agent_options_view(&self) -> Vec<LaunchWizardOptionView> {
+        self.detected_agents
+            .iter()
+            .map(|agent| LaunchWizardOptionView {
+                value: agent.id.clone(),
+                label: agent.name.clone(),
+                description: Some(agent_description(agent)),
+            })
+            .collect()
+    }
+
+    fn model_options_view(&self) -> Vec<LaunchWizardOptionView> {
+        model_display_options(self.effective_agent_id())
+            .iter()
+            .map(|option| LaunchWizardOptionView {
+                value: option.label.to_string(),
+                label: option.label.to_string(),
+                description: Some(option.description.to_string()),
+            })
+            .collect()
+    }
+
+    fn reasoning_options_view(&self) -> Vec<LaunchWizardOptionView> {
+        self.current_reasoning_options()
+            .iter()
+            .map(|option| LaunchWizardOptionView {
+                value: option.stored_value.to_string(),
+                label: option.label.to_string(),
+                description: Some(option.description.to_string()),
+            })
+            .collect()
+    }
+
+    fn docker_service_options_view(&self) -> Vec<LaunchWizardOptionView> {
+        self.docker_service_options()
+            .into_iter()
+            .map(|service| LaunchWizardOptionView {
+                value: service.clone(),
+                label: service,
+                description: Some("Docker Compose service".to_string()),
+            })
+            .collect()
+    }
+
+    fn docker_lifecycle_options_view(&self) -> Vec<LaunchWizardOptionView> {
+        self.docker_lifecycle_options()
+            .iter()
+            .map(|option| LaunchWizardOptionView {
+                value: docker_lifecycle_value(option.intent).to_string(),
+                label: option.label.to_string(),
+                description: Some(option.description.to_string()),
+            })
+            .collect()
+    }
+
+    fn version_options_view(&self) -> Vec<LaunchWizardOptionView> {
+        self.current_version_options()
+            .into_iter()
+            .map(|option| LaunchWizardOptionView {
+                value: option.value,
+                label: option.label,
+                description: Some("Tool version".to_string()),
+            })
+            .collect()
+    }
+
+    fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
+        let mut summary = vec![
+            LaunchWizardSummaryView {
+                label: "Branch".to_string(),
+                value: self.branch_name.clone(),
+            },
+            LaunchWizardSummaryView {
+                label: "Agent".to_string(),
+                value: self
+                    .selected_agent()
+                    .map(|agent| agent.name.clone())
+                    .unwrap_or_else(|| "Unavailable".to_string()),
+            },
+        ];
+
+        if is_explicit_model_selection(&self.model) {
+            summary.push(LaunchWizardSummaryView {
+                label: "Model".to_string(),
+                value: self.model.clone(),
+            });
+        }
+        if let Some(reasoning) = self.reasoning_level_for_launch() {
+            summary.push(LaunchWizardSummaryView {
+                label: if self.agent_is_codex() {
+                    "Reasoning".to_string()
+                } else {
+                    "Effort".to_string()
+                },
+                value: reasoning.to_string(),
+            });
+        }
+        if !self.version.is_empty() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Version".to_string(),
+                value: self.version.clone(),
+            });
+        }
+        summary.push(LaunchWizardSummaryView {
+            label: "Mode".to_string(),
+            value: self.mode.clone(),
+        });
+        summary.push(LaunchWizardSummaryView {
+            label: "Runtime".to_string(),
+            value: if self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                self.docker_service
+                    .as_ref()
+                    .map(|service| format!("docker:{service}"))
+                    .unwrap_or_else(|| "docker".to_string())
+            } else {
+                "host".to_string()
+            },
+        });
+        summary.push(LaunchWizardSummaryView {
+            label: "Permissions".to_string(),
+            value: if self.skip_permissions {
+                "skip".to_string()
+            } else {
+                "prompt".to_string()
+            },
+        });
+        if self.agent_is_codex() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Fast mode".to_string(),
+                value: if self.codex_fast_mode {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                },
+            });
+        }
+
+        summary
+    }
+
+    fn selected_branch_type_prefix(&self) -> Option<&'static str> {
+        BRANCH_TYPE_PREFIXES
+            .iter()
+            .find(|prefix| self.branch_name.starts_with(**prefix))
+            .copied()
+    }
+
     fn sync_selected_agent_options(&mut self) {
         let Some(agent) = self.selected_agent().cloned() else {
             return;
@@ -555,21 +1084,6 @@ impl LaunchWizardState {
                 Some(self.reasoning.as_str())
             }
             _ => None,
-        }
-    }
-
-    fn step_title(&self) -> String {
-        match self.step {
-            LaunchWizardStep::ReasoningLevel => {
-                if self.agent_is_codex() {
-                    "Select Reasoning Level".to_string()
-                } else if self.effective_agent_id() == "claude" {
-                    "Select Effort Level".to_string()
-                } else {
-                    self.step.title().to_string()
-                }
-            }
-            _ => self.step.title().to_string(),
         }
     }
 
@@ -785,37 +1299,6 @@ impl LaunchWizardState {
         }
     }
 
-    fn visible_step_count(&self) -> usize {
-        let mut count = 0;
-        let mut step = Some(self.flow_start_step());
-        while let Some(current) = step {
-            count += 1;
-            step = next_step(current, self);
-        }
-        count
-    }
-
-    fn visible_step_index(&self) -> usize {
-        let mut index = 0;
-        let mut step = Some(self.flow_start_step());
-        while let Some(current) = step {
-            index += 1;
-            if current == self.step {
-                return index;
-            }
-            step = next_step(current, self);
-        }
-        index
-    }
-
-    fn flow_start_step(&self) -> LaunchWizardStep {
-        if !self.quick_start_entries.is_empty() || !self.context.live_sessions.is_empty() {
-            LaunchWizardStep::QuickStart
-        } else {
-            LaunchWizardStep::BranchAction
-        }
-    }
-
     fn current_options(&self) -> Vec<LaunchWizardOptionView> {
         match self.step {
             LaunchWizardStep::QuickStart => {
@@ -823,21 +1306,25 @@ impl LaunchWizardState {
                 for entry in &self.quick_start_entries {
                     let summary = quick_start_summary(entry);
                     options.push(LaunchWizardOptionView {
+                        value: format!("resume:{index}", index = options.len() / 2),
                         label: format!("Resume {}", entry.tool_label),
                         description: Some(summary.clone()),
                     });
                     options.push(LaunchWizardOptionView {
+                        value: format!("start_new:{index}", index = options.len() / 2),
                         label: format!("Start new with {}", entry.tool_label),
                         description: Some(summary),
                     });
                 }
                 if !self.context.live_sessions.is_empty() {
                     options.push(LaunchWizardOptionView {
+                        value: "focus_existing".to_string(),
                         label: "Focus existing session".to_string(),
                         description: Some("Jump to a running window on this branch".to_string()),
                     });
                 }
                 options.push(LaunchWizardOptionView {
+                    value: "choose_different".to_string(),
                     label: "Choose different".to_string(),
                     description: Some("Open the full launch wizard".to_string()),
                 });
@@ -848,16 +1335,19 @@ impl LaunchWizardState {
                 .live_sessions
                 .iter()
                 .map(|entry| LaunchWizardOptionView {
+                    value: entry.window_id.clone(),
                     label: entry.name.clone(),
                     description: entry.detail.clone(),
                 })
                 .collect(),
             LaunchWizardStep::BranchAction => vec![
                 LaunchWizardOptionView {
+                    value: "use_selected".to_string(),
                     label: "Use selected branch".to_string(),
                     description: Some("Launch on the selected branch".to_string()),
                 },
                 LaunchWizardOptionView {
+                    value: "create_new".to_string(),
                     label: "Create new from selected".to_string(),
                     description: Some(
                         "Create a new branch based on the selected branch".to_string(),
@@ -867,6 +1357,7 @@ impl LaunchWizardState {
             LaunchWizardStep::BranchTypeSelect => BRANCH_TYPE_PREFIXES
                 .iter()
                 .map(|prefix| LaunchWizardOptionView {
+                    value: (*prefix).to_string(),
                     label: (*prefix).to_string(),
                     description: Some(format!(
                         "Use {} as the branch prefix",
@@ -878,6 +1369,7 @@ impl LaunchWizardState {
                 .detected_agents
                 .iter()
                 .map(|agent| LaunchWizardOptionView {
+                    value: agent.id.clone(),
                     label: agent.name.clone(),
                     description: Some(agent_description(agent)),
                 })
@@ -885,6 +1377,7 @@ impl LaunchWizardState {
             LaunchWizardStep::ModelSelect => model_display_options(self.effective_agent_id())
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.label.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -893,6 +1386,7 @@ impl LaunchWizardState {
                 .current_reasoning_options()
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.stored_value.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -900,6 +1394,7 @@ impl LaunchWizardState {
             LaunchWizardStep::RuntimeTarget => RUNTIME_TARGET_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.label.to_ascii_lowercase(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -908,6 +1403,7 @@ impl LaunchWizardState {
                 .docker_service_options()
                 .into_iter()
                 .map(|service| LaunchWizardOptionView {
+                    value: service.clone(),
                     label: service,
                     description: Some("Docker Compose service".to_string()),
                 })
@@ -916,6 +1412,7 @@ impl LaunchWizardState {
                 .docker_lifecycle_options()
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: docker_lifecycle_value(option.intent).to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -924,6 +1421,7 @@ impl LaunchWizardState {
                 .current_version_options()
                 .into_iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.value,
                     label: option.label,
                     description: Some("Tool version".to_string()),
                 })
@@ -931,6 +1429,7 @@ impl LaunchWizardState {
             LaunchWizardStep::ExecutionMode => EXECUTION_MODE_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.value.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -938,6 +1437,7 @@ impl LaunchWizardState {
             LaunchWizardStep::SkipPermissions => YES_NO_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.label.to_ascii_lowercase(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -945,6 +1445,7 @@ impl LaunchWizardState {
             LaunchWizardStep::CodexFastMode => FAST_MODE_OPTIONS
                 .iter()
                 .map(|option| LaunchWizardOptionView {
+                    value: option.label.to_ascii_lowercase(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
                 })
@@ -1477,6 +1978,59 @@ fn quick_start_summary(entry: &QuickStartEntry) -> String {
     parts.join(" · ")
 }
 
+fn branch_type_options_view() -> Vec<LaunchWizardOptionView> {
+    BRANCH_TYPE_PREFIXES
+        .iter()
+        .map(|prefix| LaunchWizardOptionView {
+            value: (*prefix).to_string(),
+            label: (*prefix).to_string(),
+            description: Some(format!(
+                "Use {} as the branch prefix",
+                prefix.trim_end_matches('/')
+            )),
+        })
+        .collect()
+}
+
+fn runtime_target_options_view() -> Vec<LaunchWizardOptionView> {
+    RUNTIME_TARGET_OPTIONS
+        .iter()
+        .map(|option| LaunchWizardOptionView {
+            value: option.label.to_ascii_lowercase(),
+            label: option.label.to_string(),
+            description: Some(option.description.to_string()),
+        })
+        .collect()
+}
+
+fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
+    EXECUTION_MODE_OPTIONS
+        .iter()
+        .map(|option| LaunchWizardOptionView {
+            value: option.value.to_string(),
+            label: option.label.to_string(),
+            description: Some(option.description.to_string()),
+        })
+        .collect()
+}
+
+fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str {
+    match target {
+        gwt_agent::LaunchRuntimeTarget::Host => "host",
+        gwt_agent::LaunchRuntimeTarget::Docker => "docker",
+    }
+}
+
+fn docker_lifecycle_value(intent: gwt_agent::DockerLifecycleIntent) -> &'static str {
+    match intent {
+        gwt_agent::DockerLifecycleIntent::Connect => "connect",
+        gwt_agent::DockerLifecycleIntent::Start => "start",
+        gwt_agent::DockerLifecycleIntent::Restart => "restart",
+        gwt_agent::DockerLifecycleIntent::Recreate => "recreate",
+        gwt_agent::DockerLifecycleIntent::CreateAndStart => "create_and_start",
+    }
+}
+
 fn apply_branch_prefix(seed: &str, prefix: &str) -> String {
     let trimmed = seed.trim();
     let suffix = BRANCH_TYPE_PREFIXES
@@ -1806,5 +2360,106 @@ mod tests {
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
         assert!(config.skip_permissions);
         assert!(config.codex_fast_mode);
+    }
+
+    #[test]
+    fn panel_quick_start_resume_populates_launch_state() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        assert_eq!(state.agent_id, "codex");
+        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.reasoning, "high");
+        assert_eq!(state.version, "0.110.0");
+        assert_eq!(state.mode, "resume");
+        assert_eq!(state.resume_session_id.as_deref(), Some("resume-1"));
+        assert_eq!(state.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+        assert_eq!(state.docker_service.as_deref(), Some("gwt"));
+        assert!(state.skip_permissions);
+        assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn panel_submit_requires_branch_name_for_new_branch() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
+        state.apply(LaunchWizardAction::SetBranchName {
+            value: "".to_string(),
+        });
+        state.apply(LaunchWizardAction::Submit);
+
+        assert!(state.completion.is_none());
+        assert_eq!(state.error.as_deref(), Some("Branch name is required"));
+    }
+
+    #[test]
+    fn panel_view_exposes_selected_values_and_summary() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetModel {
+            model: "gpt-5.4".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetReasoning {
+            reasoning: "high".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetRuntimeTarget {
+            target: gwt_agent::LaunchRuntimeTarget::Host,
+        });
+        state.apply(LaunchWizardAction::SetVersion {
+            version: "0.110.0".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetSkipPermissions { enabled: true });
+        state.apply(LaunchWizardAction::SetCodexFastMode { enabled: true });
+
+        let view = state.view();
+
+        assert_eq!(view.branch_mode, "use_selected");
+        assert_eq!(view.selected_agent_id, "codex");
+        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_reasoning, "high");
+        assert_eq!(view.selected_runtime_target, "host");
+        assert_eq!(view.selected_version, "0.110.0");
+        assert!(view.show_reasoning);
+        assert!(view.show_version);
+        assert!(view.show_codex_fast_mode);
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Agent" && item.value == "Codex"));
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Fast mode" && item.value == "on"));
     }
 }

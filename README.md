@@ -210,8 +210,8 @@ open the same URL in a regular browser while the native app is running.
 
 The canvas supports floating `Shell`, `Claude`, `Codex`, a read-only
 `File Tree` window, and a `Branches` window. Single-click selects a branch and
-double-click opens a Launch Agent wizard with quick start, branch creation,
-agent/model/runtime selection, and permission options. `Settings`, `Memo`,
+double-click opens a centered Launch Agent panel with quick start, branch
+creation, agent/model/runtime selection, and permission options. `Settings`, `Memo`,
 `Profile`, `Logs`, `Issue`, `SPEC`, `Board`, and `PR` are also available as
 mock workspace windows.
 

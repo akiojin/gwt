@@ -321,7 +321,7 @@ impl AppRuntime {
             events.push(OutboundEvent::reply(
                 client_id,
                 BackendEvent::LaunchWizardState {
-                    wizard: Some(wizard.wizard.view()),
+                    wizard: Some(Box::new(wizard.wizard.view())),
                 },
             ));
         }
@@ -1274,7 +1274,7 @@ impl AppRuntime {
             wizard: self
                 .launch_wizard
                 .as_ref()
-                .map(|wizard| wizard.wizard.view()),
+                .map(|wizard| Box::new(wizard.wizard.view())),
         })
     }
 
@@ -1282,7 +1282,9 @@ impl AppRuntime {
         &self,
         wizard: Option<poc_terminal::LaunchWizardView>,
     ) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState { wizard })
+        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
+            wizard: wizard.map(Box::new),
+        })
     }
 
     fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
