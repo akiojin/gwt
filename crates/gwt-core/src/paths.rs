@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
-use crate::repo_hash::{compute_path_hash, detect_repo_hash, RepoHash};
+use crate::{
+    error::Result,
+    repo_hash::{compute_path_hash, detect_repo_hash, RepoHash},
+};
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
@@ -289,8 +290,8 @@ impl AppRuntime {
                     self.load_branches_event(&id),
                 )]
             }
-            FrontendEvent::OpenLaunchWizard { id, branch_name } => {
-                self.open_launch_wizard(&id, &branch_name)
+            FrontendEvent::OpenLaunchWizard { id, branch_name, linked_issue_number } => {
+                self.open_launch_wizard(&id, &branch_name, linked_issue_number)
             }
             FrontendEvent::LaunchWizardAction { action, bounds } => {
                 self.handle_launch_wizard_action(action, bounds)
@@ -796,7 +797,7 @@ impl AppRuntime {
         }
     }
 
-    fn open_launch_wizard(&mut self, id: &str, branch_name: &str) -> Vec<OutboundEvent> {
+    fn open_launch_wizard(&mut self, id: &str, branch_name: &str, linked_issue_number: Option<u64>) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
@@ -860,6 +861,7 @@ impl AppRuntime {
                     live_sessions,
                     docker_context,
                     docker_service_status,
+                    linked_issue_number,
                 },
                 &self.sessions_dir,
                 &default_wizard_version_cache_path(),
@@ -1147,6 +1149,12 @@ impl AppRuntime {
             gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
             runtime_path.display().to_string(),
         );
+        if let Ok(gwt_bin) = std::env::current_exe() {
+            config.env_vars.insert(
+                gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
+                gwt_bin.display().to_string(),
+            );
+        }
         config
             .env_vars
             .entry("COLORTERM".to_string())
@@ -1194,6 +1202,45 @@ impl AppRuntime {
         gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
             .save(&runtime_path)
             .map_err(|error| error.to_string())?;
+
+        if let Some(issue_number) = config.linked_issue_number {
+            if let Some(branch) = config.branch.as_deref() {
+                let _ = {
+                    use gwt::index_worker::detect_repo_hash;
+                    use gwt_core::paths::gwt_cache_dir;
+                    use serde_json::json;
+
+                    if let Some(repo_hash) = detect_repo_hash(&worktree_path) {
+                        let cache_dir = gwt_cache_dir().join("issue-links");
+                        let _ = fs::create_dir_all(&cache_dir);
+
+                        let hash_str = repo_hash.as_str();
+                        let cache_file = cache_dir.join(format!("{}.json", hash_str));
+
+                        let mut linkage_map: serde_json::Map<String, serde_json::Value> =
+                            if cache_file.exists() {
+                                let content = fs::read_to_string(&cache_file).unwrap_or_default();
+                                serde_json::from_str(&content).unwrap_or_default()
+                            } else {
+                                serde_json::Map::new()
+                            };
+
+                        let mut branches: serde_json::Map<String, serde_json::Value> =
+                            linkage_map.get("branches")
+                                .and_then(|v| v.as_object())
+                                .cloned()
+                                .unwrap_or_default();
+
+                        branches.insert(branch.to_string(), json!(issue_number));
+                        linkage_map.insert("branches".to_string(), serde_json::Value::Object(branches));
+
+                        let json_content = serde_json::to_string_pretty(&linkage_map).unwrap_or_default();
+                        let _ = fs::write(&cache_file, json_content);
+                    }
+                    Ok::<(), String>(())
+                };
+            }
+        }
 
         self.active_agent_sessions.insert(
             window_id.clone(),
@@ -1533,10 +1580,12 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_project_target, should_auto_start_restored_window};
-    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
     use std::{fs, process::Command};
+
+    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
     use tempfile::tempdir;
+
+    use super::{resolve_project_target, should_auto_start_restored_window};
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -2046,6 +2095,7 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    ensure_docker_gwt_binary_setup(&worktree)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
 
@@ -2067,6 +2117,11 @@ fn apply_docker_runtime_to_launch_config(
     config
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    // Override GWT_BIN_PATH for Docker containers to use the mounted binary
+    config.env_vars.insert(
+        gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
+        "/usr/local/bin/gwt".to_string(),
+    );
     config.docker_service = Some(launch.service);
     Ok(())
 }
@@ -2081,6 +2136,58 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     if !gwt_docker::daemon_running() {
         return Err("Docker daemon is not running".to_string());
     }
+    Ok(())
+}
+
+fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
+    use std::{fs, path::PathBuf};
+
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE")
+    } else {
+        std::env::var("HOME")
+    }
+    .map(PathBuf::from)
+    .map_err(|_| "Could not determine home directory".to_string())?;
+
+    let gwt_bin_dir = home.join(".gwt").join("bin");
+    let gwt_linux = gwt_bin_dir.join("gwt-linux");
+
+    // Check if Linux gwt binary exists
+    if !gwt_linux.exists() {
+        // TODO: Download Linux gwt binary from GitHub Release
+        // For now, create a note for the user
+        let override_path = repo_path.join("docker-compose.override.yml");
+        if !override_path.exists() {
+            eprintln!(
+                "Note: Linux gwt binary not found at ~/.gwt/bin/gwt-linux\n\
+                 This is required for Docker agent support.\n\
+                 You can either:\n\
+                 1. Download gwt-linux-x86_64 from GitHub Releases and place it at ~/.gwt/bin/gwt-linux\n\
+                 2. Run 'gwt setup docker' to set up Docker integration automatically"
+            );
+        }
+    }
+
+    // Ensure docker-compose.override.yml exists with gwt volume mount
+    let override_path = repo_path.join("docker-compose.override.yml");
+    if !override_path.exists() {
+        let override_content = "# Auto-generated docker-compose override for gwt binary mounting\n\
+                                version: '3.8'\n\
+                                services:\n\
+                                  # Add your service name and uncomment the volumes section\n\
+                                  # <service>:\n\
+                                  #   volumes:\n\
+                                  #     - ~/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro\n";
+        fs::write(&override_path, override_content).map_err(|err| {
+            format!(
+                "Failed to create docker-compose.override.yml: {err}\n\
+                 Manually create {} with gwt volume mount",
+                override_path.display()
+            )
+        })?;
+    }
+
     Ok(())
 }
 

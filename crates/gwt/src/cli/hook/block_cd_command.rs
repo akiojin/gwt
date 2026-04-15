@@ -5,8 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::segments::split_command_segments;
-use super::{BlockDecision, HookError, HookEvent};
+use super::{segments::split_command_segments, BlockDecision, HookError, HookEvent};
 
 /// Pure evaluation: given a raw Bash command and the worktree root,
 /// return `Some(BlockDecision)` if any segment `cd`s outside the root.

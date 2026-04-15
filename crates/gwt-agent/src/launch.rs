@@ -1,10 +1,14 @@
 //! Agent launch builder: construct launch configurations for coding agents.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use crate::session::GWT_SESSION_RUNTIME_PATH_ENV;
-use crate::types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode};
+use crate::{
+    session::GWT_SESSION_RUNTIME_PATH_ENV,
+    types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
+};
 
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
@@ -204,6 +208,7 @@ pub struct AgentLaunchBuilder {
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
     docker_lifecycle_intent: DockerLifecycleIntent,
+    linked_issue_number: Option<u64>,
 }
 
 impl AgentLaunchBuilder {
@@ -226,6 +231,7 @@ impl AgentLaunchBuilder {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            linked_issue_number: None,
         }
     }
 
@@ -307,6 +313,11 @@ impl AgentLaunchBuilder {
 
     pub fn docker_lifecycle_intent(mut self, intent: DockerLifecycleIntent) -> Self {
         self.docker_lifecycle_intent = intent;
+        self
+    }
+
+    pub fn linked_issue_number(mut self, n: u64) -> Self {
+        self.linked_issue_number = Some(n);
         self
     }
 
@@ -406,7 +417,7 @@ impl AgentLaunchBuilder {
             runtime_target: self.runtime_target,
             docker_service: self.docker_service,
             docker_lifecycle_intent: self.docker_lifecycle_intent,
-            linked_issue_number: None,
+            linked_issue_number: self.linked_issue_number,
         }
     }
 

@@ -1,11 +1,14 @@
-use crate::branch_list::BranchListEntry;
-use crate::file_tree::FileTreeEntry;
-use crate::launch_wizard::{LaunchWizardAction, LaunchWizardView};
-use crate::persistence::{
-    CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
-};
-use crate::preset::WindowPreset;
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    branch_list::BranchListEntry,
+    file_tree::FileTreeEntry,
+    launch_wizard::{LaunchWizardAction, LaunchWizardView},
+    persistence::{
+        CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
+    },
+    preset::WindowPreset,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -88,6 +91,7 @@ pub enum FrontendEvent {
     OpenLaunchWizard {
         id: String,
         branch_name: String,
+        linked_issue_number: Option<u64>,
     },
     LaunchWizardAction {
         action: LaunchWizardAction,

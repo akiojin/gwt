@@ -24,17 +24,19 @@
 //! All writes use a tmp-then-rename pattern so concurrent readers never see a
 //! half-written file. Directories are created on demand.
 
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::body::{ParseError, SpecBody, SpecMeta};
-use crate::client::{
-    CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+use crate::{
+    body::{ParseError, SpecBody, SpecMeta},
+    client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+    sections::SectionName,
 };
-use crate::sections::SectionName;
 
 /// Errors reported by cache operations.
 #[derive(Debug, thiserror::Error)]

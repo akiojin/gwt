@@ -1,15 +1,17 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::launch::normalize_launch_args;
-use crate::types::{
-    AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass,
+use crate::{
+    launch::normalize_launch_args,
+    types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass},
 };
 
 /// Idle duration (in seconds) after which a session is considered stopped.
@@ -21,6 +23,9 @@ pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
 /// Environment variable injected into agent PTYs so hooks can write the
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
+/// Environment variable injected into agent PTYs so skills can locate the
+/// gwt binary for calling gwt CLI (GitHub operations, etc.).
+pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
 
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]

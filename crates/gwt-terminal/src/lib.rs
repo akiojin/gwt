@@ -22,7 +22,6 @@ pub use manager::PaneManager;
 pub use pane::{Pane, PaneStatus};
 pub use pty::PtyHandle;
 pub use scrollback::ScrollbackStorage;
-
 use thiserror::Error;
 
 /// Errors from the gwt-terminal subsystem.

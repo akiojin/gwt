@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-use std::io;
-use std::path::Path;
+use std::{io, path::Path};
 
 use gwt_agent::PendingDiscussionResume;
 

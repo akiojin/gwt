@@ -1,10 +1,14 @@
 //! Phase 8: integration tests for `gwt_core::index::runtime::refresh_issues_if_stale`.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use gwt_core::index::runtime::{refresh_issues_if_stale, RefreshIssuesOptions, RunnerSpawner};
-use gwt_core::repo_hash::compute_repo_hash;
+use gwt_core::{
+    index::runtime::{refresh_issues_if_stale, RefreshIssuesOptions, RunnerSpawner},
+    repo_hash::compute_repo_hash,
+};
 
 /// A test double that records calls instead of actually spawning the python runner.
 #[derive(Clone, Default)]

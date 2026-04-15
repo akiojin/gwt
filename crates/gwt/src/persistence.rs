@@ -1,6 +1,8 @@
-use crate::preset::WindowPreset;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::preset::WindowPreset;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
@@ -323,8 +325,9 @@ pub fn project_title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn empty_workspace_contains_no_windows() {
