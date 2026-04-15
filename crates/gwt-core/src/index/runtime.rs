@@ -194,7 +194,7 @@ fn read_issue_meta(path: &Path) -> Option<IssueMetadata> {
 // =====================================================================
 
 /// Default `RunnerSpawner` that fires the real Python runner in a detached
-/// tokio task. Used by gwt-tui in production; tests prefer a recording
+/// tokio task. Used by the desktop app in production; tests prefer a recording
 /// double.
 #[derive(Debug, Clone)]
 pub struct PythonRunnerSpawner {

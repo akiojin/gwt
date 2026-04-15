@@ -62,7 +62,7 @@ impl LoggingHandles {
 /// Apply a `LogLevel` to a tracing-subscriber reload handle.
 ///
 /// Shared by [`LoggingHandles::set_level`] and any caller that holds
-/// only a cloned `ReloadHandle` (for example `gwt_tui::model::Model`,
+/// only a cloned `ReloadHandle` (for example GUI app state,
 /// which receives the handle via `set_log_reload_handle` and does not
 /// own the rest of the `LoggingHandles` struct).
 ///

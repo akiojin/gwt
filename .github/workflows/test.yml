@@ -13,7 +13,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test -p gwt-core -p gwt-tui --all-features
+        run: cargo test -p gwt-core -p gwt --all-features
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         run: |

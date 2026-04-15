@@ -1,16 +1,16 @@
 {
   "name": "@akiojin/gwt",
   "version": "9.0.1",
-  "description": "TUI for Git worktree management and coding agent launch",
+  "description": "Desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
   "bin": {
-    "gwt": "bin/gwt-tui"
+    "gwt": "bin/gwt"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "dev": "cargo run -p gwt-tui",
-    "build": "cargo build --release -p gwt-tui",
-    "test": "cargo test -p gwt-core -p gwt-tui --all-features",
+    "dev": "cargo run -p gwt",
+    "build": "cargo build --release -p gwt",
+    "test": "cargo test -p gwt-core -p gwt --all-features",
     "test:all": "bash scripts/test-all.sh",
     "prepare": "test -n \"$CI\" || bunx husky install",
     "lint:skills": "bash scripts/validate-skill-frontmatter.sh",

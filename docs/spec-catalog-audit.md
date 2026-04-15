@@ -134,7 +134,7 @@
 | `SPEC-1647` | プロジェクト管理（旧仕様） | closed / superseded | `1787` に superseded であることを先頭に明記し、履歴 `SPEC` として凍結する |
 | `SPEC-1650` | プロジェクトファイルインデックス | open / tasks 完了 | close 候補。`1784` からは files search 正本として参照する |
 | `SPEC-1651` | 通知とエラーバス | open / `TBD` plan / outdated | Tauri/OS 通知前提を除去し、TUI notification/log bus に再定義する |
-| `SPEC-1652` | ビルドと配布 | open / `TBD` plan / outdated | Tauri build 記述を削除し、`gwt-tui` の release pipeline に全面更新する |
+| `SPEC-1652` | ビルドと配布 | open / `TBD` plan / outdated | 旧 GUI/TUI 向け build 記述を削除し、`gwt` の release pipeline に全面更新する |
 | `SPEC-1656` | プロファイル設定 TOML 後方互換性 | open / tasks 完了 | close 候補。関連する設定正本への参照だけ残す |
 | `SPEC-1714` | Worktree と Issue のリンク・ローカルキャッシュ | open / tasks 完了 | close 候補。`1643` / `1354` から参照のみ残す |
 | `SPEC-1775` | gwt-pr-check 統合ステータスレポート | open / spec-only | `1643` の子 `SPEC` として plan/tasks を追加し、スキル実装との差分を埋める |

@@ -14,7 +14,7 @@ const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
 /// generated managed hook command regardless of which binary path is
 /// embedded at the front. Detection by suffix avoids coupling the
 /// managed-command recogniser to `current_exe()`'s filename, which
-/// may be `gwt`, `gwt-tui`, `gwt.exe`, or even a `cargo test` binary
+/// may be `gwt`, `gwt.exe`, or even a `cargo test` binary
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook runtime-state ",
@@ -323,11 +323,11 @@ const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 /// Resolution order:
 ///
 /// 1. `$GWT_HOOK_BIN` environment variable (explicit override, used
-///    by the regenerate-settings example when it knows the gwt-tui
+///    by the regenerate-settings example when it knows the gwt
 ///    binary path but its own `current_exe()` points elsewhere).
 /// 2. `std::env::current_exe()` — the running binary's path. When
-///    gwt-tui itself calls `generate_settings_local` at startup this
-///    returns `/path/to/gwt-tui` (or the bun symlink on macOS), which
+///    gwt itself calls `generate_settings_local` at startup this
+///    returns `/path/to/gwt` (or the bun symlink on macOS), which
 ///    is exactly what we want.
 /// 3. Literal `"gwt"` fallback (legacy PATH-dependent behaviour).
 ///
@@ -709,7 +709,7 @@ mod tests {
                             "matcher": "Bash",
                             "hooks": [
                                 {
-                                    "command": "'/tmp/gwt-tui' hook block-bash-policy",
+                                    "command": "'/tmp/gwt' hook block-bash-policy",
                                     "type": "command"
                                 }
                             ]
@@ -1322,7 +1322,7 @@ mod tests {
     // SPEC #1942 T-083: the inline POSIX shell JSON writer has been
     // replaced by a single `gwt hook runtime-state <event>` CLI call.
     // The sidecar-write behaviour is now covered end-to-end by
-    // `crates/gwt-tui/tests/hook_runtime_state_test.rs`, which exercises
+    // `crates/gwt/tests/hook_runtime_state_test.rs`, which exercises
     // the Rust implementation directly without requiring `gwt` to be on
     // PATH at test time.
     #[test]
