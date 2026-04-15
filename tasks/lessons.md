@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-15 — fix: GUI binary から hook/CLI 実体を `current_exe()` で逆算しない
+
+### 事象
+
+GUI PoC から managed hooks を再生成すると `.claude/settings.local.json` /
+`.codex/hooks.json` が `poc-terminal hook ...` を埋め込み、Claude/Codex hook
+発火時に追加の GUI window が起動した。
+
+### 原因
+
+- hook generator の binary 解決が `current_exe()` 前提で、GUI 起動時は GUI binary
+  自身を canonical CLI と誤認した。
+- GUI binary 側にも CLI verb の early dispatch がなく、`hook` / `issue` でも
+  WebView 起動経路へ入っていた。
+
+### 再発防止策
+
+1. GUI から managed hooks を生成するときは、canonical CLI binary を明示的に解決して
+   `GWT_HOOK_BIN` へ注入する。
+2. GUI binary は起動直後に CLI verb を判定し、window を作る前に delegate する。
+3. hook / launch path の修正では、「生成された hook command が GUI binary を指さない」
+   と「GUI binary に CLI verb を渡しても window を開かない」の両方を回帰テストまたは実行確認で固定する。
+
 ## 2026-04-15 — fix: GUI workspace restore では process window を自動再 spawn しない
 
 ### 事象

@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 
 use tempfile::tempdir;
 
@@ -8,6 +11,11 @@ use poc_terminal::refresh_managed_gwt_assets_for_worktree;
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwt");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_CLI_BIN", &cli_bin);
 
     refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
 
@@ -25,6 +33,15 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
         .exists());
     assert!(dir.path().join(".claude/settings.local.json").exists());
     assert!(dir.path().join(".codex/hooks.json").exists());
+    let claude_settings = std::fs::read_to_string(dir.path().join(".claude/settings.local.json"))
+        .expect("read claude");
+    let codex_hooks =
+        std::fs::read_to_string(dir.path().join(".codex/hooks.json")).expect("read codex");
+    let cli_bin_text = cli_bin.display().to_string();
+    assert!(claude_settings.contains(&cli_bin_text));
+    assert!(codex_hooks.contains(&cli_bin_text));
+    assert!(!claude_settings.contains("poc-terminal"));
+    assert!(!codex_hooks.contains("poc-terminal"));
 
     let exclude_path = dir.path().join(".git/info/exclude");
     let exclude = std::fs::read_to_string(&exclude_path).expect("read exclude");
@@ -59,4 +76,34 @@ fn run_git(repo: &Path, args: &[&str]) {
         args,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock")
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
 }

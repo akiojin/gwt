@@ -1,4 +1,5 @@
 pub mod branch_list;
+pub mod cli_delegate;
 pub mod file_tree;
 pub mod launch_wizard;
 pub mod managed_assets;
@@ -9,6 +10,10 @@ pub mod protocol;
 pub mod workspace;
 
 pub use branch_list::{list_branch_entries, BranchListEntry, BranchScope};
+pub use cli_delegate::{
+    build_cli_delegate_invocation_from, resolve_canonical_cli_bin_from,
+    run_cli_delegate_invocation, should_delegate_cli_argv, CliDelegateInvocation,
+};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use launch_wizard::{
     build_builtin_agent_options, default_wizard_version_cache_path, AgentOption,

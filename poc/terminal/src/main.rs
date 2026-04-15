@@ -2415,6 +2415,29 @@ fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
 }
 
 fn main() -> wry::Result<()> {
+    let argv: Vec<String> = std::env::args().collect();
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("poc-terminal"));
+    let invocation = match poc_terminal::build_cli_delegate_invocation_from(&argv, &current_exe) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            eprintln!("poc-terminal CLI delegate resolution failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(invocation) = invocation {
+        let exit_code = match poc_terminal::run_cli_delegate_invocation(&invocation) {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!(
+                    "poc-terminal CLI delegate run failed for {}: {error}",
+                    invocation.program.display()
+                );
+                1
+            }
+        };
+        std::process::exit(exit_code);
+    }
+
     let runtime = Runtime::new().expect("tokio runtime");
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
