@@ -151,6 +151,7 @@ pub struct LaunchWizardContext {
     pub live_sessions: Vec<LiveSessionEntry>,
     pub docker_context: Option<DockerWizardContext>,
     pub docker_service_status: gwt_docker::ComposeServiceStatus,
+    pub linked_issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +244,7 @@ pub struct LaunchWizardState {
     pub branch_name: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
+    pub linked_issue_number: Option<u64>,
 }
 
 impl LaunchWizardState {
@@ -270,7 +272,7 @@ impl LaunchWizardState {
         };
 
         let mut state = Self {
-            context,
+            context: context.clone(),
             step,
             selected: 0,
             detected_agents: agent_options,
@@ -291,6 +293,7 @@ impl LaunchWizardState {
             branch_name: String::new(),
             completion: None,
             error: None,
+            linked_issue_number: context.linked_issue_number,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -497,6 +500,10 @@ impl LaunchWizardState {
             "resume" => builder.session_mode(gwt_agent::SessionMode::Continue),
             _ => builder.session_mode(gwt_agent::SessionMode::Normal),
         };
+
+        if let Some(n) = self.linked_issue_number {
+            builder = builder.linked_issue_number(n);
+        }
 
         let mut config = builder.build();
         if !self.version.is_empty() {
@@ -2226,6 +2233,7 @@ mod tests {
             live_sessions: Vec::new(),
             docker_context: None,
             docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            linked_issue_number: None,
         }
     }
 
@@ -2464,5 +2472,21 @@ mod tests {
             .launch_summary
             .iter()
             .any(|item| item.label == "Fast mode" && item.value == "on"));
+    }
+
+    #[test]
+    fn build_launch_config_preserves_linked_issue_number() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.linked_issue_number = Some(1234);
+
+        let state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let config = state.build_launch_config().expect("config");
+
+        assert_eq!(config.linked_issue_number, Some(1234));
     }
 }

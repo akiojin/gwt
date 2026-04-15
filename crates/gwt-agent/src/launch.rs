@@ -208,6 +208,7 @@ pub struct AgentLaunchBuilder {
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
     docker_lifecycle_intent: DockerLifecycleIntent,
+    linked_issue_number: Option<u64>,
 }
 
 impl AgentLaunchBuilder {
@@ -230,6 +231,7 @@ impl AgentLaunchBuilder {
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            linked_issue_number: None,
         }
     }
 
@@ -311,6 +313,11 @@ impl AgentLaunchBuilder {
 
     pub fn docker_lifecycle_intent(mut self, intent: DockerLifecycleIntent) -> Self {
         self.docker_lifecycle_intent = intent;
+        self
+    }
+
+    pub fn linked_issue_number(mut self, n: u64) -> Self {
+        self.linked_issue_number = Some(n);
         self
     }
 
@@ -410,7 +417,7 @@ impl AgentLaunchBuilder {
             runtime_target: self.runtime_target,
             docker_service: self.docker_service,
             docker_lifecycle_intent: self.docker_lifecycle_intent,
-            linked_issue_number: None,
+            linked_issue_number: self.linked_issue_number,
         }
     }
 
