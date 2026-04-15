@@ -16,37 +16,18 @@ Rules:
 - Update tasks.md after each task slice is verified, not before.
 - Do not mark tasks complete until the implementation passes verification.
 - Do not batch-mark multiple tasks; update incrementally.
-- Use `.claude/scripts/spec_artifact.py` for artifact operations.
+- アーティファクト操作には `gwt issue spec <N> --edit tasks -f <file>` を使用する。
 
-## progress.md template
+## 進捗追跡
 
-Append entries to `specs/SPEC-{id}/progress.md` after each verified task slice.
+tasks セクションのチェックボックスを `gwt issue spec <N> --edit tasks -f <file>` で更新する。
 
-### Entry format
+### ルール
 
-```markdown
-## YYYY-MM-DD HH:MM — <brief summary>
-
-**Progress:**
-- <what was accomplished in this slice>
-- <specific files changed>
-
-**Done:**
-- <verification results: test pass/fail, lint, build>
-- <task IDs completed>
-
-**Next:**
-- <next task to execute>
-- <any blockers or decisions needed>
-```
-
-### Rules
-
-- Keep entries factual and incremental.
-- Do not claim completion that the code does not support.
-- Include verification command output (pass/fail counts).
-- Reference specific task IDs from `tasks.md`.
-- Append new entries; do not overwrite previous entries.
+- 事実に基づき、インクリメンタルに更新する。
+- コードで裏付けられていない完了を主張しない。
+- 検証コマンドの出力（pass/fail カウント）を含める。
+- `tasks.md` の具体的なタスク ID を参照する。
 
 ## Completion markers
 
@@ -73,8 +54,8 @@ Do not mark the SPEC complete during progress tracking; that is the gate's respo
 Watch for these signals that indicate premature completion claims:
 
 - Tasks marked `[x]` but related tests are not in the codebase
-- `progress.md` claims "all tests pass" but `cargo test` output shows failures
-- `checklists/acceptance.md` says "accepted" but the behavior is not implemented
+- tasks セクションが "all tests pass" と主張しているが `cargo test` の出力が失敗を示している
+- tasks セクションの受け入れチェックが "accepted" だが動作が未実装
 - Task marked complete but the file listed in the task was not modified
 
 If any of these are detected, revert the completion marker and return to implementation.
