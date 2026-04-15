@@ -20,10 +20,12 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
     default_wizard_version_cache_path, detect_shell_program, list_branch_entries,
-    list_directory_entries, load_app_state, refresh_managed_gwt_assets_for_worktree,
-    resolve_launch_spec, save_app_state, workspace_state_path, BackendEvent, DockerWizardContext,
-    FrontendEvent, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
-    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    list_directory_entries, load_restored_workspace_state, load_session_state,
+    migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
+    save_session_state, save_workspace_state, workspace_state_path, BackendEvent,
+    DockerWizardContext, FrontendEvent, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -146,7 +148,7 @@ struct AppRuntime {
     runtimes: HashMap<String, WindowRuntime>,
     window_details: HashMap<String, String>,
     window_lookup: HashMap<String, WindowAddress>,
-    state_path: PathBuf,
+    session_state_path: PathBuf,
     proxy: EventLoopProxy<UserEvent>,
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
@@ -154,31 +156,41 @@ struct AppRuntime {
 }
 
 impl ProjectTabRuntime {
-    fn from_persisted(tab: gwt::PersistedProjectTabState) -> Self {
+    fn from_persisted(
+        tab: gwt::PersistedSessionTabState,
+        workspace: gwt::PersistedWorkspaceState,
+    ) -> Self {
         Self {
             id: tab.id,
             title: tab.title,
             project_root: tab.project_root,
             kind: tab.kind,
-            workspace: WorkspaceState::from_persisted(tab.workspace),
+            workspace: WorkspaceState::from_persisted(workspace),
         }
     }
 }
 
 impl AppRuntime {
     fn new(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<Self> {
-        let state_path = workspace_state_path();
+        let session_state_path = gwt_core::paths::gwt_session_state_path();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
-        let mut persisted =
-            load_app_state(&state_path, &legacy_target.project_root, legacy_target.kind)?;
-        gwt::pause_process_windows_for_restore(&mut persisted);
+        migrate_legacy_workspace_state(
+            &gwt::legacy_workspace_state_path(),
+            &session_state_path,
+            &legacy_target.project_root,
+            legacy_target.kind,
+        )?;
+        let persisted = load_session_state(&session_state_path)?;
         let tabs = persisted
             .tabs
             .into_iter()
-            .map(ProjectTabRuntime::from_persisted)
-            .collect::<Vec<_>>();
+            .map(|tab| {
+                let workspace = load_restored_workspace_state(&tab.project_root)?;
+                Ok(ProjectTabRuntime::from_persisted(tab, workspace))
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
         let active_tab_id = normalize_active_tab_id(&tabs, persisted.active_tab_id);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
@@ -190,7 +202,7 @@ impl AppRuntime {
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
-            state_path,
+            session_state_path,
             proxy,
             sessions_dir,
             launch_wizard: None,
@@ -379,7 +391,10 @@ impl AppRuntime {
             title: target.title.clone(),
             project_root: target.project_root.clone(),
             kind: target.kind,
-            workspace: WorkspaceState::from_persisted(gwt::empty_workspace_state()),
+            workspace: WorkspaceState::from_persisted({
+                load_restored_workspace_state(&target.project_root)
+                    .map_err(|error| error.to_string())?
+            }),
         });
         self.active_tab_id = Some(tab_id);
         self.remember_recent_project(&target);
@@ -1457,24 +1472,32 @@ impl AppRuntime {
     }
 
     fn persist(&self) -> std::io::Result<()> {
-        save_app_state(
-            &self.state_path,
-            &gwt::PersistedAppState {
+        save_session_state(
+            &self.session_state_path,
+            &gwt::PersistedSessionState {
                 tabs: self
                     .tabs
                     .iter()
-                    .map(|tab| gwt::PersistedProjectTabState {
+                    .map(|tab| gwt::PersistedSessionTabState {
                         id: tab.id.clone(),
                         title: tab.title.clone(),
                         project_root: tab.project_root.clone(),
                         kind: tab.kind,
-                        workspace: tab.workspace.persistable_state(),
                     })
                     .collect(),
                 active_tab_id: normalize_active_tab_id(&self.tabs, self.active_tab_id.clone()),
                 recent_projects: self.recent_projects.clone(),
             },
-        )
+        )?;
+
+        for tab in &self.tabs {
+            save_workspace_state(
+                &workspace_state_path(&tab.project_root),
+                &tab.workspace.persistable_state(),
+            )?;
+        }
+
+        Ok(())
     }
 }
 

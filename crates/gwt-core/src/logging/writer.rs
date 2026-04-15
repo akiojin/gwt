@@ -97,8 +97,9 @@ fn tighten_log_dir_permissions(log_dir: &Path) {
 #[cfg(not(unix))]
 fn tighten_log_dir_permissions(_log_dir: &Path) {
     // Windows ACLs default to user-only access for files under
-    // `%USERPROFILE%`, which already covers `~/.gwt/logs/`. No
-    // additional hardening is required.
+    // `%USERPROFILE%`, which already covers the project-scoped
+    // `~/.gwt/projects/<repo-hash>/logs/` directory. No additional
+    // hardening is required.
 }
 
 #[cfg(test)]

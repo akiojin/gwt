@@ -97,6 +97,17 @@ pub fn compute_repo_hash(origin_url: &str) -> RepoHash {
     RepoHash(hex_full[..HASH_HEX_LEN].to_string())
 }
 
+/// Compute a deterministic fallback hash from a canonical filesystem path.
+pub fn compute_path_hash(path: &Path) -> RepoHash {
+    let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = canonical.to_string_lossy().replace('\\', "/");
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    let digest = hasher.finalize();
+    let hex_full = hex::encode(digest);
+    RepoHash(hex_full[..HASH_HEX_LEN].to_string())
+}
+
 /// Detect a `RepoHash` from the `origin` remote configured for `repo_root`.
 pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
     let output = std::process::Command::new("git")
@@ -204,6 +215,14 @@ mod tests {
         let repo_hash = detect_repo_hash(&repo).expect("repo hash");
         let wt_hash = detect_repo_hash(&wt).expect("worktree hash");
         assert_eq!(repo_hash.as_str(), wt_hash.as_str());
+    }
+
+    #[test]
+    fn compute_path_hash_is_deterministic_for_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = compute_path_hash(dir.path());
+        let b = compute_path_hash(dir.path());
+        assert_eq!(a.as_str(), b.as_str());
     }
 
     fn init_git_repo(path: &Path) {

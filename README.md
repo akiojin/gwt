@@ -126,9 +126,11 @@ gwt issue spec <number> --section spec|plan|tasks
 ## Logs
 
 - App logs:
-  `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`
-- Workspace state:
-  `~/.gwt/workspace-state.json`
+  `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
+- Session state:
+  `~/.gwt/session.json`
+- Project workspace state:
+  `~/.gwt/projects/<repo-hash>/workspace.json`
 
 ## Development
 

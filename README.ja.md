@@ -122,9 +122,11 @@ gwt issue spec <number> --section spec|plan|tasks
 ## ログ
 
 - アプリログ:
-  `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD`
-- GUI 状態:
-  `~/.gwt/workspace-state.json`
+  `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
+- セッション状態:
+  `~/.gwt/session.json`
+- プロジェクト単位のワークスペース状態:
+  `~/.gwt/projects/<repo-hash>/workspace.json`
 
 ## 開発
 
