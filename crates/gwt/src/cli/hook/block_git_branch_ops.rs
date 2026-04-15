@@ -1,7 +1,7 @@
 //! `gwt hook block-git-branch-ops` — PreToolUse hook that forbids
 //! branch-altering git commands inside a worktree.
 //!
-//! Ported 1:1 from `.claude/hooks/scripts/gwt-block-git-branch-ops.mjs`.
+//! Ported 1:1 from the retired external branch-policy hook.
 //! The pure evaluation logic ([`evaluate_bash_command`]) takes a raw
 //! Bash command string and returns `Some(BlockDecision)` when the hook
 //! must veto the tool call, or `None` when it should allow. The CLI

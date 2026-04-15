@@ -230,7 +230,7 @@ pub enum CliCommand {
     },
     /// `gwt hook <name> [args...]` — dispatch to an in-binary hook handler.
     ///
-    /// See SPEC #1942 (CORE-CLI) — replaces `.claude/hooks/scripts/gwt-*.mjs`
+    /// See SPEC #1942 (CORE-CLI) — replaces retired external hook scripts
     /// and inline shell hooks in `.claude/settings.local.json`.
     Hook { name: String, rest: Vec<String> },
 }

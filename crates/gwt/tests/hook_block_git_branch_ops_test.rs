@@ -1,7 +1,6 @@
 //! T-030 (SPEC #1942) — block-git-branch-ops golden tests.
 //!
-//! Translated from the parity test matrix in
-//! `.claude/hooks/scripts/gwt-block-git-branch-ops.mjs`. Each case is a
+//! Translated from the retired branch-policy parity matrix. Each case is a
 //! (command, expected_decision) tuple. `Block` means the hook MUST return
 //! a `BlockDecision`; `Allow` means it MUST return `None`.
 

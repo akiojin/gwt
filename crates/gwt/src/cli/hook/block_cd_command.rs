@@ -1,7 +1,7 @@
 //! `gwt hook block-cd-command` — PreToolUse hook that forbids `cd` into
 //! paths outside the current worktree root.
 //!
-//! Ported from `.claude/hooks/scripts/gwt-block-cd-command.mjs`.
+//! Ported from the retired external `cd` policy hook.
 
 use std::path::{Path, PathBuf};
 
@@ -80,7 +80,7 @@ fn strip_prefix_word<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     s.strip_prefix(prefix)
 }
 
-/// Match `.claude/hooks/scripts/gwt-block-cd-command.mjs::isWithinWorktree`.
+/// Match the legacy `isWithinWorktree` helper semantics.
 ///
 /// - empty target or `~` → NOT within (force block, mirroring Node)
 /// - absolute target → compare directly

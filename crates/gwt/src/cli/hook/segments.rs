@@ -1,7 +1,7 @@
 //! Shared Bash command segmentation used by every block hook.
 //!
-//! Translated 1:1 from the Node `splitCommandSegments` helper that
-//! `.claude/hooks/scripts/gwt-block-*.mjs` shared. The goal is **not** to
+//! Translated 1:1 from the legacy Node `splitCommandSegments` helper shared
+//! by the retired block hooks. The goal is **not** to
 //! be a general-purpose shell parser — only to approximate shell control
 //! operators well enough that an adversarial command like
 //! `echo hello && git rebase -i origin/main` is not allowed to hide a

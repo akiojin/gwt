@@ -2,7 +2,7 @@
 //! overriding `GIT_DIR` or `GIT_WORK_TREE` via the Bash command the
 //! agent is about to run.
 //!
-//! Ported from `.claude/hooks/scripts/gwt-block-git-dir-override.mjs`.
+//! Ported from the retired external git-dir policy hook.
 
 use std::sync::OnceLock;
 

@@ -1,7 +1,7 @@
 //! `gwt hook block-file-ops` — PreToolUse hook that forbids file-system
 //! mutations outside the current worktree.
 //!
-//! Ported from `.claude/hooks/scripts/gwt-block-file-ops.mjs`.
+//! Ported from the retired external file-op policy hook.
 
 use std::path::{Path, PathBuf};
 

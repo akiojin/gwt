@@ -6,10 +6,9 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const GWT_FORWARD_SCRIPT: &str = "gwt-forward-hook.mjs";
-const GWT_BLOCK_SCRIPT_PREFIX: &str = "gwt-block-";
 const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
 const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
+const LEGACY_GWT_HOOK_SCRIPT_SEGMENT: &str = "hooks/scripts/gwt-";
 /// SPEC #1942 amendment: distinctive subcommand suffixes that mark a
 /// generated managed hook command regardless of which binary path is
 /// embedded at the front. Detection by suffix avoids coupling the
@@ -221,8 +220,7 @@ fn existing_user_hooks(existing: Option<&Value>) -> Map<String, Value> {
 }
 
 fn is_gwt_managed_command(command: &str) -> bool {
-    command.contains(GWT_FORWARD_SCRIPT)
-        || command.contains(GWT_BLOCK_SCRIPT_PREFIX)
+    command.contains(LEGACY_GWT_HOOK_SCRIPT_SEGMENT)
         || command.contains(GWT_MANAGED_RUNTIME_MARKER)
         || command.contains(GWT_HOOK_CLI_PREFIX)
         || contains_gwt_hook_subcmd(command)
@@ -493,7 +491,7 @@ mod tests {
 
     // T-080 / T-082 (SPEC #1942): the Claude settings.local.json must
     // dispatch every managed hook through the `gwt hook ...` CLI surface,
-    // not through `node .../gwt-*.mjs`.
+    // not through retired Node hook scripts under `hooks/scripts/gwt-*`.
     #[test]
     fn managed_hooks_dispatch_through_gwt_hook_cli_not_node_scripts() {
         let dir = tempfile::tempdir().unwrap();
@@ -509,8 +507,8 @@ mod tests {
             "settings.local.json must not reference Node block scripts, got: {content}"
         );
         assert!(
-            !content.contains(".mjs"),
-            "settings.local.json must not reference any .mjs file, got: {content}"
+            !content.contains("hooks/scripts/gwt-"),
+            "settings.local.json must not reference retired hook scripts, got: {content}"
         );
 
         let value: Value = serde_json::from_str(&content).unwrap();
@@ -600,7 +598,7 @@ mod tests {
     //    has to recognise the new form as managed so the generator
     //    replaces instead of appending.
     // 2. An existing `.codex/hooks.json` that still has legacy
-    //    `node .../gwt-block-*.mjs` entries must be merged into the
+    //    `node .../hooks/scripts/gwt-*` entries must be merged into the
     //    new hook CLI form on the next regeneration pass.
     // 3. An existing `.codex/hooks.json` with the legacy
     //    `GWT_MANAGED_HOOK=runtime-state sh -lc '...'` inline runtime
@@ -654,7 +652,7 @@ mod tests {
                             "matcher": "Bash",
                             "hooks": [
                                 {
-                                    "command": "node .codex/hooks/scripts/gwt-block-git-branch-ops.mjs",
+                                    "command": "node .codex/hooks/scripts/gwt-block-git-branch-ops.js",
                                     "type": "command"
                                 }
                             ]
@@ -685,7 +683,7 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(
-            !content.contains("gwt-block-git-branch-ops.mjs"),
+            !content.contains("hooks/scripts/gwt-"),
             "tracked legacy node bash blocker must be migrated away, got: {content}"
         );
         assert!(
@@ -1056,8 +1054,14 @@ mod tests {
         assert_eq!(value["custom_setting"], Value::Bool(true));
     }
 
+    fn legacy_node_forward_hook_command(event: &str) -> String {
+        format!(
+            "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-legacy-forward.js\" {event}"
+        )
+    }
+
     #[test]
-    fn generate_codex_hooks_migrates_tracked_legacy_runtime_hooks_without_node() {
+    fn generate_codex_hooks_migrates_tracked_legacy_forward_hooks_without_node() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1070,7 +1074,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" SessionStart",
+                                    "command": legacy_node_forward_hook_command("SessionStart"),
                                     "type": "command"
                                 }
                             ]
@@ -1081,7 +1085,7 @@ mod tests {
                             "matcher": "*",
                             "hooks": [
                                 {
-                                    "command": "node \"$(git rev-parse --show-toplevel)/.codex/hooks/scripts/gwt-forward-hook.mjs\" PreToolUse",
+                                    "command": legacy_node_forward_hook_command("PreToolUse"),
                                     "type": "command"
                                 },
                                 {
@@ -1129,7 +1133,7 @@ mod tests {
 
         assert!(session_start_command.contains(" hook runtime-state SessionStart"));
         assert!(!session_start_command.contains("GWT_MANAGED_HOOK"));
-        assert!(!content.contains("gwt-forward-hook.mjs"));
+        assert!(!content.contains("hooks/scripts/gwt-"));
         assert!(!session_start_command.contains("node"));
         assert!(pre_tool_commands.contains(&"my-custom-hook"));
         assert!(pre_tool_commands

@@ -2,8 +2,8 @@
 //! tells the Branches tab whether the agent session is currently running
 //! or waiting for user input.
 //!
-//! Translated from `.claude/hooks/scripts/gwt-runtime-state.mjs` and now
-//! used as the managed runtime hook implementation wired from settings.
+//! Ported from the retired external runtime hook and now used as the
+//! managed runtime hook implementation wired from settings.
 
 use std::io;
 use std::path::{Path, PathBuf};
