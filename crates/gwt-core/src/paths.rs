@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::repo_hash::{detect_repo_hash, RepoHash};
+use crate::repo_hash::{compute_path_hash, detect_repo_hash, RepoHash};
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {
@@ -27,19 +27,45 @@ pub fn gwt_cache_dir() -> PathBuf {
     gwt_home().join("cache")
 }
 
-/// Return the logs directory (`~/.gwt/logs/`).
+/// Return the project data root (`~/.gwt/projects/`).
+pub fn gwt_projects_dir() -> PathBuf {
+    gwt_home().join("projects")
+}
+
+/// Return the project data directory for a repository hash.
+pub fn gwt_project_dir(repo_hash: &RepoHash) -> PathBuf {
+    gwt_projects_dir().join(repo_hash.as_str())
+}
+
+/// Return the project scope hash for a repository path.
+pub fn project_scope_hash(repo_path: &Path) -> RepoHash {
+    detect_repo_hash(repo_path).unwrap_or_else(|| compute_path_hash(repo_path))
+}
+
+/// Return the project data directory for a repository path.
+pub fn gwt_project_dir_for_repo_path(repo_path: &Path) -> PathBuf {
+    let repo_hash = project_scope_hash(repo_path);
+    gwt_project_dir(&repo_hash)
+}
+
+/// Return the global session state path (`~/.gwt/session.json`).
+pub fn gwt_session_state_path() -> PathBuf {
+    gwt_home().join("session.json")
+}
+
+/// Return the legacy logs root (`~/.gwt/logs/`).
 pub fn gwt_logs_dir() -> PathBuf {
     gwt_home().join("logs")
 }
 
-/// Return the coordination root (`~/.gwt/coordination/`).
+/// Return the legacy coordination root (`~/.gwt/coordination/`).
 pub fn gwt_coordination_root() -> PathBuf {
     gwt_home().join("coordination")
 }
 
 /// Return the coordination directory for a repository hash.
 pub fn gwt_coordination_dir(repo_hash: &RepoHash) -> PathBuf {
-    gwt_coordination_root().join(repo_hash.as_str())
+    gwt_project_dir(repo_hash).join("coordination")
 }
 
 /// Return the coordination directory for a repository path, if `origin` exists.
@@ -49,7 +75,7 @@ pub fn gwt_coordination_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
 
 /// Return the structured-log directory for a repository hash.
 pub fn gwt_project_logs_dir(repo_hash: &RepoHash) -> PathBuf {
-    gwt_logs_dir().join(repo_hash.as_str())
+    gwt_project_dir(repo_hash).join("logs")
 }
 
 /// Return the structured-log directory for a repository path, if `origin` exists.
@@ -124,6 +150,39 @@ mod tests {
     }
 
     #[test]
+    fn gwt_projects_dir_is_under_home() {
+        let p = gwt_projects_dir();
+        assert!(p.starts_with(gwt_home()));
+        assert!(p.ends_with("projects"));
+    }
+
+    #[test]
+    fn gwt_project_dir_scopes_by_repo_hash() {
+        let repo_hash = compute_repo_hash("https://github.com/example/project.git");
+        let p = gwt_project_dir(&repo_hash);
+        assert!(p.starts_with(gwt_projects_dir()));
+        assert!(p.ends_with(format!("projects/{}", repo_hash.as_str())));
+    }
+
+    #[test]
+    fn gwt_session_state_path_is_under_home() {
+        let p = gwt_session_state_path();
+        assert!(p.starts_with(gwt_home()));
+        assert!(p.ends_with("session.json"));
+    }
+
+    #[test]
+    fn project_scope_hash_falls_back_for_non_repo_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hash = project_scope_hash(tmp.path());
+        assert_eq!(hash.as_str().len(), 16);
+        assert!(hash
+            .as_str()
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
     fn gwt_logs_dir_is_under_home() {
         let p = gwt_logs_dir();
         assert!(p.starts_with(gwt_home()));
@@ -134,16 +193,16 @@ mod tests {
     fn gwt_project_logs_dir_scopes_by_repo_hash() {
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_project_logs_dir(&repo_hash);
-        assert!(p.starts_with(gwt_logs_dir()));
-        assert!(p.ends_with(format!("logs/{}", repo_hash.as_str())));
+        assert!(p.starts_with(gwt_project_dir(&repo_hash)));
+        assert!(p.ends_with(format!("projects/{}/logs", repo_hash.as_str())));
     }
 
     #[test]
     fn gwt_coordination_dir_scopes_by_repo_hash() {
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_coordination_dir(&repo_hash);
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with(format!("coordination/{}", repo_hash.as_str())));
+        assert!(p.starts_with(gwt_project_dir(&repo_hash)));
+        assert!(p.ends_with(format!("projects/{}/coordination", repo_hash.as_str())));
     }
 
     #[test]

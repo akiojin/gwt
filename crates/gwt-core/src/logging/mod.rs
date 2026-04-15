@@ -5,7 +5,7 @@
 //!
 //! 1. A reloadable `EnvFilter` (level control via `reload::Handle`)
 //! 2. A JSONL formatting layer writing to
-//!    `~/.gwt/logs/<repo-hash>/gwt.log.YYYY-MM-DD` via a non-blocking,
+//!    `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD` via a non-blocking,
 //!    daily-rolling appender (`tracing_appender`)
 //! 3. A UI forwarder layer that sends `LogEvent`s to an
 //!    `UnboundedSender<LogEvent>` so that TUI surfaces (toasts, error
