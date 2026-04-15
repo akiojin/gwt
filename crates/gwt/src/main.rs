@@ -80,6 +80,7 @@ struct ProcessLaunch {
 struct ActiveAgentSession {
     window_id: String,
     session_id: String,
+    agent_id: String,
     branch_name: String,
     display_name: String,
     worktree_path: PathBuf,
@@ -288,9 +289,11 @@ impl AppRuntime {
                     self.load_branches_event(&id),
                 )]
             }
-            FrontendEvent::OpenLaunchWizard { id, branch_name, linked_issue_number } => {
-                self.open_launch_wizard(&id, &branch_name, linked_issue_number)
-            }
+            FrontendEvent::OpenLaunchWizard {
+                id,
+                branch_name,
+                linked_issue_number,
+            } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
             FrontendEvent::LaunchWizardAction { action } => {
                 self.handle_launch_wizard_action(action)
             }
@@ -787,7 +790,12 @@ impl AppRuntime {
         }
     }
 
-    fn open_launch_wizard(&mut self, id: &str, branch_name: &str, linked_issue_number: Option<u64>) -> Vec<OutboundEvent> {
+    fn open_launch_wizard(
+        &mut self,
+        id: &str,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
@@ -925,6 +933,7 @@ impl AppRuntime {
             .map(|session| LiveSessionEntry {
                 session_id: session.session_id.clone(),
                 window_id: session.window_id.clone(),
+                agent_id: session.agent_id.clone(),
                 kind: "agent".to_string(),
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
@@ -1207,16 +1216,18 @@ impl AppRuntime {
                                 serde_json::Map::new()
                             };
 
-                        let mut branches: serde_json::Map<String, serde_json::Value> =
-                            linkage_map.get("branches")
-                                .and_then(|v| v.as_object())
-                                .cloned()
-                                .unwrap_or_default();
+                        let mut branches: serde_json::Map<String, serde_json::Value> = linkage_map
+                            .get("branches")
+                            .and_then(|v| v.as_object())
+                            .cloned()
+                            .unwrap_or_default();
 
                         branches.insert(branch.to_string(), json!(issue_number));
-                        linkage_map.insert("branches".to_string(), serde_json::Value::Object(branches));
+                        linkage_map
+                            .insert("branches".to_string(), serde_json::Value::Object(branches));
 
-                        let json_content = serde_json::to_string_pretty(&linkage_map).unwrap_or_default();
+                        let json_content =
+                            serde_json::to_string_pretty(&linkage_map).unwrap_or_default();
                         let _ = fs::write(&cache_file, json_content);
                     }
                     Ok::<(), String>(())
@@ -1229,6 +1240,7 @@ impl AppRuntime {
             ActiveAgentSession {
                 window_id: window_id.clone(),
                 session_id: session.id.clone(),
+                agent_id: config.agent_id.command().to_string(),
                 branch_name,
                 display_name: config.display_name.clone(),
                 worktree_path,
