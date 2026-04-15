@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "9.0.4",
+  "version": "9.1.0",
   "description": "Desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
   "bin": {
