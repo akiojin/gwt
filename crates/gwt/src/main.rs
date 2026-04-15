@@ -1157,7 +1157,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(tab_id) else {
                 return Err("Project tab not found".to_string());
             };
-            let b = bounds.unwrap_or_else(|| WindowGeometry {
+            let b = bounds.unwrap_or(WindowGeometry {
                 x: 0.0,
                 y: 0.0,
                 width: 1200.0,
