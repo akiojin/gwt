@@ -282,7 +282,7 @@ mod tests {
             project_root: &Path,
             respect_ttl: bool,
         ) -> std::io::Result<()> {
-            self.calls.lock().unwrap().push(format!(
+            self.calls.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
                 "{}|{}|{}",
                 repo_hash,
                 project_root.display(),
@@ -304,7 +304,7 @@ mod tests {
             ttl: Duration::from_secs(15 * 60),
         };
         refresh_issues_if_stale(&opts, &spawner).await.unwrap();
-        assert_eq!(spawner.calls.lock().unwrap().len(), 1);
+        assert_eq!(spawner.calls.lock().unwrap_or_else(|p| p.into_inner()).len(), 1);
     }
 
     #[test]
