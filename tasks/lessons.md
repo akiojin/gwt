@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-15 — fix: build.rs の skill frontmatter 検証で repo 管理外 skill を読まない
+
+### 事象
+
+Windows 環境で `cargo build -p gwt` を実行すると、`.claude/skills/` 配下に残っていた
+repo 管理外の旧 skill `gwt-spec-plan/SKILL.md` の壊れた YAML frontmatter を
+`crates/gwt-core/build.rs` が読んで panic し、ビルド全体が失敗した。
+
+### 原因
+
+- build script が `.claude/skills/*/SKILL.md` をディレクトリ走査で無差別に検証していた。
+- retired / untracked / ローカル作業用 skill まで build-time validation の対象に入っていた。
+
+### 再発防止策
+
+1. build-time validation は repo 管理下の `SKILL.md` のみに限定する。
+2. `git ls-files` が使える環境では tracked files を起点に検証し、ローカル残骸で build を壊さない。
+3. skill 配布名の改名・retire を行った変更では、旧 skill ディレクトリがローカルに残っていても build できることを一度確認する。
+
 ## 2026-04-15 — fix: GUI binary から hook/CLI 実体を `current_exe()` で逆算しない
 
 ### 事象
