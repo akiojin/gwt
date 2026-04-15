@@ -15,7 +15,7 @@ pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<Bloc
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_git_dir_override::evaluate_bash_command(command))
-        .or_else(|| evaluate_github_issue_cli(command))
+        .or_else(|| evaluate_github_workflow_cli(command))
 }
 
 pub fn evaluate(
@@ -39,7 +39,7 @@ pub fn handle() -> Result<Option<BlockDecision>, HookError> {
     evaluate(&event, &root)
 }
 
-fn evaluate_github_issue_cli(command: &str) -> Option<BlockDecision> {
+fn evaluate_github_workflow_cli(command: &str) -> Option<BlockDecision> {
     for segment in super::segments::split_command_segments(command) {
         let tokens = command_tokens(&segment);
         let Some(command_name) = tokens.first().copied() else {
@@ -51,11 +51,18 @@ fn evaluate_github_issue_cli(command: &str) -> Option<BlockDecision> {
 
         if let Some(subcommand) = tokens.get(1).copied() {
             match subcommand {
+                "auth" | "repo" | "release" => continue,
                 "issue" if is_blocked_issue_subcommand(tokens.get(2).copied()) => {
-                    return Some(github_issue_block_decision(command));
+                    return Some(github_workflow_block_decision(command));
                 }
-                "api" if is_issue_api_command(&segment, &tokens) => {
-                    return Some(github_issue_block_decision(command));
+                "pr" if is_blocked_pr_subcommand(tokens.get(2).copied()) => {
+                    return Some(github_workflow_block_decision(command));
+                }
+                "run" if is_blocked_run_subcommand(tokens.get(2).copied()) => {
+                    return Some(github_workflow_block_decision(command));
+                }
+                "api" if is_workflow_api_command(&segment, &tokens) => {
+                    return Some(github_workflow_block_decision(command));
                 }
                 _ => {}
             }
@@ -68,14 +75,28 @@ fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
     matches!(subcommand, Some("view" | "create" | "comment"))
 }
 
-fn github_issue_block_decision(command: &str) -> BlockDecision {
+fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
+    matches!(
+        subcommand,
+        Some("view" | "create" | "edit" | "comment" | "checks" | "reviews" | "review-threads")
+    )
+}
+
+fn is_blocked_run_subcommand(subcommand: Option<&str>) -> bool {
+    matches!(subcommand, Some("view"))
+}
+
+fn github_workflow_block_decision(command: &str) -> BlockDecision {
     BlockDecision::new(
-        "\u{1F6AB} Direct GitHub Issue CLI commands are not allowed",
+        "\u{1F6AB} Direct GitHub workflow CLI commands are not allowed",
         format!(
-            "Use the gwt Issue surface instead of direct `gh issue` / issue-focused `gh api` commands.\n\n\
+            "Use the gwt workflow surfaces instead of direct `gh issue`, `gh pr`, `gh run`, or workflow-focused `gh api` commands.\n\n\
 Recommended alternatives:\n\
 - read: `gwt issue view <number>`, `gwt issue comments <number>`, `gwt issue linked-prs <number>`\n\
 - write: `gwt issue create --title ... -f <file>`, `gwt issue comment <number> -f <file>`\n\
+- PR workflow: `gwt pr current`, `gwt pr view <number>`, `gwt pr comment <number> -f <file>`, `gwt pr checks <number>`\n\
+- PR reviews: `gwt pr reviews <number>`, `gwt pr review-threads <number>`, `gwt pr review-threads reply-and-resolve <number> -f <file>`\n\
+- Actions logs: `gwt actions logs --run <id>`, `gwt actions job-logs --job <id>`\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),
@@ -107,7 +128,7 @@ fn is_env_assignment(token: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn is_issue_api_command(segment: &str, tokens: &[&str]) -> bool {
+fn is_workflow_api_command(segment: &str, tokens: &[&str]) -> bool {
     let Some(target) = gh_api_target(tokens) else {
         return false;
     };
@@ -118,11 +139,26 @@ fn is_issue_api_command(segment: &str, tokens: &[&str]) -> bool {
             || lowered.contains("issues(")
             || lowered.contains("updateissue")
             || lowered.contains("closeissue")
-            || lowered.contains("reopenissue");
+            || lowered.contains("reopenissue")
+            || lowered.contains("pullrequest(")
+            || lowered.contains("pullrequests(")
+            || lowered.contains("reviews(")
+            || lowered.contains("reviewthreads")
+            || lowered.contains("workflowrun")
+            || lowered.contains("workflowruns")
+            || lowered.contains("checkrun")
+            || lowered.contains("checkruns")
+            || lowered.contains("checksuite")
+            || lowered.contains("checksuites");
     }
 
     let lowered = target.to_ascii_lowercase();
     lowered.contains("/issues")
+        || lowered.contains("/pulls")
+        || lowered.contains("/actions/runs")
+        || lowered.contains("/actions/jobs")
+        || lowered.contains("/check-runs")
+        || lowered.contains("/check-suites")
 }
 
 fn gh_api_target<'a>(tokens: &'a [&'a str]) -> Option<&'a str> {
