@@ -1,13 +1,15 @@
-use std::collections::HashMap;
-use std::fs;
-use std::io::{self};
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    fs,
+    io::{self},
+    path::PathBuf,
+};
 
 use gwt_git::PrStatus;
-use gwt_github::client::fake::FakeIssueClient;
-use gwt_github::client::http::HttpIssueClient;
-use gwt_github::client::IssueClient;
-use gwt_github::{IssueNumber, SpecListFilter};
+use gwt_github::{
+    client::{fake::FakeIssueClient, http::HttpIssueClient, IssueClient},
+    IssueNumber, SpecListFilter,
+};
 
 use super::{
     parse_actions_args, parse_board_args, parse_hook_args, parse_issue_args, parse_pr_args, run,

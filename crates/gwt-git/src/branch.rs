@@ -1,7 +1,6 @@
 //! Branch information and tracking
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};

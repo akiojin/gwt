@@ -5,9 +5,13 @@
 //! patterns. It is intentionally minimal — just enough to exercise the
 //! [`IssueClient`] contract in a predictable, deterministic way.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 
 use crate::client::{
     ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,

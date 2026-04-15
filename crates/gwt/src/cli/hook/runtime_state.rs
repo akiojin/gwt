@@ -5,13 +5,14 @@
 //! Ported from the retired external runtime hook and now used as the
 //! managed runtime hook implementation wired from settings.
 
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use chrono::{SecondsFormat, Utc};
-use serde::Serialize;
-
 use gwt_agent::{PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
+use serde::Serialize;
 
 use super::HookError;
 use crate::discussion_resume::load_pending_resume;
@@ -114,9 +115,10 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gwt_agent::{AgentId, Session};
     use gwt_core::coordination::load_snapshot;
+
+    use super::*;
 
     #[test]
     fn pending_discussion_for_session_reads_active_discussion_candidate() {

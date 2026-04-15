@@ -1,6 +1,6 @@
+use std::{cmp::Ordering, path::Path};
+
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

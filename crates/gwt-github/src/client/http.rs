@@ -16,8 +16,7 @@
 //! so one network round-trip covers "issue body + every comment"; mutations
 //! go through the REST endpoints.
 
-use std::process::Command;
-use std::sync::Mutex;
+use std::{process::Command, sync::Mutex};
 
 use serde_json::{json, Value};
 

@@ -1,11 +1,12 @@
 //! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
-use crate::pty::{PtyHandle, SpawnConfig};
-use crate::scrollback::{ScrollbackLine, ScrollbackStorage};
-use crate::TerminalError;
+use crate::{
+    pty::{PtyHandle, SpawnConfig},
+    scrollback::{ScrollbackLine, ScrollbackStorage},
+    TerminalError,
+};
 
 /// Status of a pane's child process.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,9 +160,10 @@ impl Pane {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::test_util::{lock_pty_test, read_with_timeout};
-    use std::time::Duration;
 
     #[test]
     fn test_pane_creation() {

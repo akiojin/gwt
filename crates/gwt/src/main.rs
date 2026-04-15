@@ -1521,10 +1521,12 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_project_target, should_auto_start_restored_window};
-    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
     use std::{fs, process::Command};
+
+    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
     use tempfile::tempdir;
+
+    use super::{resolve_project_target, should_auto_start_restored_window};
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -2079,8 +2081,7 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
 }
 
 fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
-    use std::fs;
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE")

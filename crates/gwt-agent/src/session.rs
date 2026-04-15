@@ -1,15 +1,17 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::launch::normalize_launch_args;
-use crate::types::{
-    AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass,
+use crate::{
+    launch::normalize_launch_args,
+    types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass},
 };
 
 /// Idle duration (in seconds) after which a session is considered stopped.

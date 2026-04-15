@@ -8,8 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::body::SectionLocation;
-use crate::sections::SectionName;
+use crate::{body::SectionLocation, sections::SectionName};
 
 /// A section is auto-promoted to comment placement once its serialized size
 /// exceeds this threshold.

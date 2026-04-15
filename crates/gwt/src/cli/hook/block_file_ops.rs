@@ -5,8 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::segments::split_command_segments;
-use super::{BlockDecision, HookError, HookEvent};
+use super::{segments::split_command_segments, BlockDecision, HookError, HookEvent};
 
 const FILE_OPS: &[&str] = &["mkdir", "rmdir", "rm", "touch", "cp", "mv"];
 

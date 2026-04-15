@@ -1,16 +1,17 @@
 //! Repo-local coordination storage for a shared board chat timeline.
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::paths::gwt_coordination_dir_for_repo_path;
-use crate::{GwtError, Result};
+use crate::{paths::gwt_coordination_dir_for_repo_path, GwtError, Result};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -647,10 +648,11 @@ fn json_error(err: serde_json::Error) -> GwtError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{sync::Arc, thread};
+
     use chrono::TimeZone;
-    use std::sync::Arc;
-    use std::thread;
+
+    use super::*;
 
     #[test]
     fn load_snapshot_bootstraps_empty_files() {

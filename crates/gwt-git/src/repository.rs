@@ -1,8 +1,10 @@
 //! Git repository discovery and inspection
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use gwt_core::{GwtError, Result};
 
