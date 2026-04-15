@@ -1234,7 +1234,7 @@
           <div class="hint">
             <span class="connection-dot" id="connection-dot"></span>
             <span id="connection-label">Connecting</span>
-            <span>Drag windows | Drag empty canvas to pan | Use +/- buttons or Ctrl/Cmd + wheel to zoom</span>
+            <span>Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
           </div>
           <div class="canvas" id="canvas">
             <div class="canvas-stage" id="canvas-stage"></div>
@@ -3420,8 +3420,13 @@
       });
 
       canvas.addEventListener("pointerdown", (event) => {
-        if (event.target !== canvas && event.target !== stage) {
+        // Middle button (button===1) starts pan from anywhere (including over windows)
+        const isMiddleButton = event.button === 1;
+        if (!isMiddleButton && event.target !== canvas && event.target !== stage) {
           return;
+        }
+        if (isMiddleButton) {
+          event.preventDefault();
         }
         panState = {
           pointerId: event.pointerId,
@@ -3437,15 +3442,22 @@
       canvas.addEventListener(
         "wheel",
         (event) => {
-          if (!event.ctrlKey && !event.metaKey) {
-            return;
+          if (event.ctrlKey || event.metaKey) {
+            // Ctrl/Cmd + wheel = zoom
+            event.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const anchorX = event.clientX - rect.left;
+            const anchorY = event.clientY - rect.top;
+            const factor = event.deltaY < 0 ? 1.1 : 0.9;
+            zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
+          } else {
+            // Plain wheel (trackpad two-finger scroll) = pan
+            event.preventDefault();
+            viewport.x -= event.deltaX;
+            viewport.y -= event.deltaY;
+            applyViewport();
+            persistViewport();
           }
-          event.preventDefault();
-          const rect = canvas.getBoundingClientRect();
-          const anchorX = event.clientX - rect.left;
-          const anchorY = event.clientY - rect.top;
-          const factor = event.deltaY < 0 ? 1.1 : 0.9;
-          zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
         },
         { passive: false },
       );
