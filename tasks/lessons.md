@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-04-15 — fix: Quick Start の resume は struct やテストではなく実 session TOML への保存実態で確認する
+
+### 事象
+
+Launch Agent の Quick Start で `Continue` を押すと、既に起動済みの agent window を
+再利用せず、新しい window を重ねて起動していた。
+あわせて `~/.gwt/sessions/*.toml` を実確認すると、`Session.agent_session_id` field は
+コード上に存在するのに、実ファイルには `agent_session_id` が1件も保存されていなかった。
+
+### 原因
+
+- Quick Start 側が `--continue` 的な新規起動経路へ寄っており、live window focus と
+  saved session resume を分けて扱っていなかった。
+- hook runtime が受け取る Codex/Agent 側の `session_id` を、gwt session TOML へ
+  書き戻す production path が存在しなかった。
+- struct 定義と unit test があることで、「保存されているはず」という前提を
+  実ファイル確認なしに置きやすい状態だった。
+
+### 再発防止策
+
+1. resume/continue 系の不具合では、まず `~/.gwt/sessions/*.toml` を直接確認し、
+   必要な key が実際に保存されているかを事実ベースで確認する。
+2. Quick Start の reuse は「live window があるなら focus」「保存済み session id が
+   あるなら resume」「どちらもなければボタン非表示」を明示的に分けて実装・テストする。
+3. session metadata を UI が参照する変更では、struct や fixture だけでなく
+   production hook/runtime から persistence まで通る回帰テストを必ず追加する。
+
 ## 2026-04-15 — fix: build.rs の skill frontmatter 検証で repo 管理外 skill を読まない
 
 ### 事象

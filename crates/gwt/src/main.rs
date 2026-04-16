@@ -80,6 +80,7 @@ struct ProcessLaunch {
 struct ActiveAgentSession {
     window_id: String,
     session_id: String,
+    agent_id: String,
     branch_name: String,
     display_name: String,
     worktree_path: PathBuf,
@@ -932,6 +933,7 @@ impl AppRuntime {
             .map(|session| LiveSessionEntry {
                 session_id: session.session_id.clone(),
                 window_id: session.window_id.clone(),
+                agent_id: session.agent_id.clone(),
                 kind: "agent".to_string(),
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
@@ -1238,6 +1240,7 @@ impl AppRuntime {
             ActiveAgentSession {
                 window_id: window_id.clone(),
                 session_id: session.id.clone(),
+                agent_id: config.agent_id.command().to_string(),
                 branch_name,
                 display_name: config.display_name.clone(),
                 worktree_path,

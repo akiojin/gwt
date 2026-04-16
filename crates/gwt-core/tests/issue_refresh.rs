@@ -23,12 +23,15 @@ impl RunnerSpawner for RecordingSpawner {
         project_root: &std::path::Path,
         respect_ttl: bool,
     ) -> std::io::Result<()> {
-        self.calls.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
-            "{}|{}|{}",
-            repo_hash,
-            project_root.display(),
-            respect_ttl
-        ));
+        self.calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(format!(
+                "{}|{}|{}",
+                repo_hash,
+                project_root.display(),
+                respect_ttl
+            ));
         Ok(())
     }
 }

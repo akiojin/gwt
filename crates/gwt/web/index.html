@@ -2504,20 +2504,22 @@
               card.appendChild(head);
 
               const actions = createNode("div", "quick-start-actions");
-              const resumeButton = createNode(
-                "button",
-                "wizard-button",
-                entry.resume_session_id ? "Resume" : "Continue",
-              );
-              resumeButton.type = "button";
-              resumeButton.addEventListener("click", () => {
-                sendWizardAction({
-                  kind: "apply_quick_start",
-                  index: entry.index,
-                  mode: "resume",
+              if (entry.reuse_action_label) {
+                const reuseButton = createNode(
+                  "button",
+                  "wizard-button",
+                  entry.reuse_action_label,
+                );
+                reuseButton.type = "button";
+                reuseButton.addEventListener("click", () => {
+                  sendWizardAction({
+                    kind: "apply_quick_start",
+                    index: entry.index,
+                    mode: "resume",
+                  });
                 });
-              });
-              actions.appendChild(resumeButton);
+                actions.appendChild(reuseButton);
+              }
 
               const startNewButton = createNode(
                 "button",
