@@ -1,0 +1,22 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - button "gwt Close gwt" [ref=e30] [cursor=pointer]:
+        - generic [ref=e31]: gwt
+        - button "Close gwt" [ref=e32]: ×
+      - button "llmlb Close llmlb" [ref=e33] [cursor=pointer]:
+        - generic [ref=e34]: llmlb
+        - button "Close llmlb" [ref=e35]: ×
+    - button "Open project" [ref=e13] [cursor=pointer]: Open Project
+  - generic [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e17]: Connected
+      - generic [ref=e18]: Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom
+    - generic [ref=e21]:
+      - button "Tile windows" [ref=e22] [cursor=pointer]: Tile
+      - button "Stack windows" [ref=e23] [cursor=pointer]: Stack
+      - button "List windows" [ref=e25] [cursor=pointer]: Windows
+      - button "Zoom out" [ref=e26] [cursor=pointer]: "-"
+      - button "Reset zoom" [ref=e27] [cursor=pointer]: 100%
+      - button "Zoom in" [ref=e28] [cursor=pointer]: +
+      - button "Add window" [ref=e29] [cursor=pointer]: +
