@@ -1665,7 +1665,7 @@
           row.addEventListener("click", () => {
             windowListOpen = false;
             renderWindowList();
-            focusWindowRemotely(entry.id);
+            focusWindowRemotely(entry.id, { center: true });
             if (entry.minimized) {
               send({ kind: "restore_window", id: entry.id });
             }
@@ -2030,9 +2030,11 @@
         }
       }
 
-      function focusWindowRemotely(windowId) {
+      function focusWindowRemotely(windowId, { center = false } = {}) {
         focusWindowLocally(windowId);
-        send({ kind: "focus_window", id: windowId });
+        const payload = { kind: "focus_window", id: windowId };
+        if (center) payload.bounds = visibleBounds();
+        send(payload);
       }
 
       function toggleMinimizeWindow(windowId) {
@@ -2314,10 +2316,14 @@
       }
 
       function sendWizardAction(action) {
-        send({
+        const payload = {
           kind: "launch_wizard_action",
           action,
-        });
+        };
+        if (action.kind === "submit") {
+          payload.bounds = visibleBounds();
+        }
+        send(payload);
       }
 
       function createNode(tagName, className, textContent) {
@@ -2793,6 +2799,37 @@
                 mode: value,
               }),
           );
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
+            "Linked issue",
+            "Optional: Link an issue to this launch session.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          const field = createLaunchField("Issue number", false);
+          const input = createNode("input", "launch-input");
+          input.type = "number";
+          input.min = "1";
+          input.value = launchWizard.linked_issue_number
+            ? launchWizard.linked_issue_number.toString()
+            : "";
+          input.placeholder = "e.g., 1938";
+          input.addEventListener("change", () => {
+            const value = input.value.trim();
+            if (value) {
+              sendWizardAction({
+                kind: "set_linked_issue",
+                issue_number: parseInt(value, 10),
+              });
+            } else {
+              sendWizardAction({ kind: "clear_linked_issue" });
+            }
+          });
+          field.appendChild(input);
+          grid.appendChild(field);
           section.appendChild(grid);
           panel.appendChild(section);
         }
@@ -3702,7 +3739,7 @@
 
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
-          send({ kind: "create_window", preset: button.dataset.preset });
+          send({ kind: "create_window", preset: button.dataset.preset, bounds: visibleBounds() });
           closeModal();
         });
       }
