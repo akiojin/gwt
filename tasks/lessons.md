@@ -1,5 +1,53 @@
 # Lessons Learned
 
+## 2026-04-16 — fix: read-only CLI は eager GitHub auth を起動時に解決しない
+
+### 事象
+
+`gwt pr current` が無応答に見えた。実際には `pr current` 本体ではなく、
+`DefaultCliEnv::new()` が command dispatch 前に
+`HttpIssueClient::from_gh_auth()` を通して `gh auth token` を同期実行していたことと、
+`cargo run -q` の無音ビルド待ちが重なって原因切り分けを難しくしていた。
+
+### 原因
+
+- read-only CLI と write-capable GitHub Issue client の初期化が分離されていなかった。
+- `gwt pr current` は `gh pr view` だけで成立するのに、起動時に Issue client auth を先に解決していた。
+- 外部 `gh` 呼び出しとビルド待ちに progress/timeout の観測点がなく、体感上は「固まった」ように見えた。
+
+### 再発防止策
+
+1. read-only command path では GitHub Issue client を lazy init し、`env.client()` を触るまで auth を発火させない。
+2. `PrCurrent` のような read-only command で Issue client を使っていないことをテストで固定する。
+3. CLI 無応答調査では、cargo build 待ちと外部 command 待ちを別々に計測してから原因を特定する。
+
+## 2026-04-15 — fix: Quick Start の resume は struct やテストではなく実 session TOML への保存実態で確認する
+
+### 事象
+
+Launch Agent の Quick Start で `Continue` を押すと、既に起動済みの agent window を
+再利用せず、新しい window を重ねて起動していた。
+あわせて `~/.gwt/sessions/*.toml` を実確認すると、`Session.agent_session_id` field は
+コード上に存在するのに、実ファイルには `agent_session_id` が1件も保存されていなかった。
+
+### 原因
+
+- Quick Start 側が `--continue` 的な新規起動経路へ寄っており、live window focus と
+  saved session resume を分けて扱っていなかった。
+- hook runtime が受け取る Codex/Agent 側の `session_id` を、gwt session TOML へ
+  書き戻す production path が存在しなかった。
+- struct 定義と unit test があることで、「保存されているはず」という前提を
+  実ファイル確認なしに置きやすい状態だった。
+
+### 再発防止策
+
+1. resume/continue 系の不具合では、まず `~/.gwt/sessions/*.toml` を直接確認し、
+   必要な key が実際に保存されているかを事実ベースで確認する。
+2. Quick Start の reuse は「live window があるなら focus」「保存済み session id が
+   あるなら resume」「どちらもなければボタン非表示」を明示的に分けて実装・テストする。
+3. session metadata を UI が参照する変更では、struct や fixture だけでなく
+   production hook/runtime から persistence まで通る回帰テストを必ず追加する。
+
 ## 2026-04-15 — fix: build.rs の skill frontmatter 検証で repo 管理外 skill を読まない
 
 ### 事象

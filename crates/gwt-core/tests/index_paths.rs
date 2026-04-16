@@ -17,9 +17,12 @@ fn gwt_index_root_ends_with_index() {
 fn issue_db_path_omits_worktree_hash() {
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
     let path = gwt_index_db_path(&repo, None, Scope::Issues).unwrap();
-    let expected_suffix = format!(".gwt/index/{}/issues", repo.as_str());
-    assert!(
-        path.to_string_lossy().ends_with(&expected_suffix),
+    assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("issues"));
+    assert_eq!(
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|s| s.to_str()),
+        Some(repo.as_str()),
         "got {}",
         path.display()
     );
@@ -29,9 +32,12 @@ fn issue_db_path_omits_worktree_hash() {
 fn specs_db_path_is_repo_scoped() {
     let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
     let path = gwt_index_db_path(&repo, None, Scope::Specs).unwrap();
-    let expected_suffix = format!(".gwt/index/{}/specs", repo.as_str());
-    assert!(
-        path.to_string_lossy().ends_with(&expected_suffix),
+    assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("specs"));
+    assert_eq!(
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|s| s.to_str()),
+        Some(repo.as_str()),
         "got {}",
         path.display()
     );
@@ -43,9 +49,20 @@ fn files_code_db_path_under_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     let wt = compute_worktree_hash(tmp.path()).unwrap();
     let path = gwt_index_db_path(&repo, Some(&wt), Scope::FilesCode).unwrap();
-    assert!(path
-        .to_string_lossy()
-        .ends_with(&format!("/worktrees/{}/files", wt.as_str())));
+    assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("files"));
+    assert_eq!(
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|s| s.to_str()),
+        Some(wt.as_str())
+    );
+    assert_eq!(
+        path.parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.file_name())
+            .and_then(|s| s.to_str()),
+        Some("worktrees")
+    );
 }
 
 #[test]
@@ -54,9 +71,23 @@ fn files_docs_db_path_under_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     let wt = compute_worktree_hash(tmp.path()).unwrap();
     let path = gwt_index_db_path(&repo, Some(&wt), Scope::FilesDocs).unwrap();
-    assert!(path
-        .to_string_lossy()
-        .ends_with(&format!("/worktrees/{}/files-docs", wt.as_str())));
+    assert_eq!(
+        path.file_name().and_then(|s| s.to_str()),
+        Some("files-docs")
+    );
+    assert_eq!(
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|s| s.to_str()),
+        Some(wt.as_str())
+    );
+    assert_eq!(
+        path.parent()
+            .and_then(|parent| parent.parent())
+            .and_then(|parent| parent.file_name())
+            .and_then(|s| s.to_str()),
+        Some("worktrees")
+    );
 }
 
 #[test]

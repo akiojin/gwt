@@ -48,6 +48,7 @@ pub struct LaunchWizardQuickStartView {
     pub tool_label: String,
     pub summary: String,
     pub resume_session_id: Option<String>,
+    pub reuse_action_label: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -113,12 +114,14 @@ pub struct AgentOption {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickStartEntry {
+    pub session_id: String,
     pub agent_id: String,
     pub tool_label: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
     pub version: Option<String>,
     pub resume_session_id: Option<String>,
+    pub live_window_id: Option<String>,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
@@ -130,10 +133,27 @@ pub struct QuickStartEntry {
 pub struct LiveSessionEntry {
     pub session_id: String,
     pub window_id: String,
+    pub agent_id: String,
     pub kind: String,
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+}
+
+impl QuickStartEntry {
+    fn reuse_action_label(&self) -> Option<&'static str> {
+        if self.live_window_id.is_some() {
+            Some("Continue")
+        } else if self.resume_session_id.is_some() {
+            Some("Resume")
+        } else {
+            None
+        }
+    }
+
+    fn can_reuse(&self) -> bool {
+        self.reuse_action_label().is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -151,6 +171,7 @@ pub struct LaunchWizardContext {
     pub live_sessions: Vec<LiveSessionEntry>,
     pub docker_context: Option<DockerWizardContext>,
     pub docker_service_status: gwt_docker::ComposeServiceStatus,
+    pub linked_issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,14 +264,28 @@ pub struct LaunchWizardState {
     pub branch_name: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
+    pub linked_issue_number: Option<u64>,
 }
 
 impl LaunchWizardState {
     pub fn open_with(
         context: LaunchWizardContext,
         agent_options: Vec<AgentOption>,
-        quick_start_entries: Vec<QuickStartEntry>,
+        mut quick_start_entries: Vec<QuickStartEntry>,
     ) -> Self {
+        for entry in &mut quick_start_entries {
+            entry.live_window_id = context
+                .live_sessions
+                .iter()
+                .find(|session| session.session_id == entry.session_id)
+                .or_else(|| {
+                    context
+                        .live_sessions
+                        .iter()
+                        .find(|session| session.agent_id == entry.agent_id)
+                })
+                .map(|session| session.window_id.clone());
+        }
         let runtime_target = if context.docker_context.is_some() {
             gwt_agent::LaunchRuntimeTarget::Docker
         } else {
@@ -270,7 +305,7 @@ impl LaunchWizardState {
         };
 
         let mut state = Self {
-            context,
+            context: context.clone(),
             step,
             selected: 0,
             detected_agents: agent_options,
@@ -291,6 +326,7 @@ impl LaunchWizardState {
             branch_name: String::new(),
             completion: None,
             error: None,
+            linked_issue_number: context.linked_issue_number,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -498,6 +534,10 @@ impl LaunchWizardState {
             _ => builder.session_mode(gwt_agent::SessionMode::Normal),
         };
 
+        if let Some(n) = self.linked_issue_number {
+            builder = builder.linked_issue_number(n);
+        }
+
         let mut config = builder.build();
         if !self.version.is_empty() {
             config.tool_version = Some(self.version.clone());
@@ -532,7 +572,7 @@ impl LaunchWizardState {
     fn apply_selection(&mut self) {
         match self.step {
             LaunchWizardStep::QuickStart => match self.selected_quick_start_action() {
-                QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
+                QuickStartAction::ReuseEntry { .. } | QuickStartAction::StartNewEntry { .. } => {
                     self.apply_quick_start_selection();
                     self.sync_docker_lifecycle_default();
                 }
@@ -675,12 +715,13 @@ impl LaunchWizardState {
         self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
         match mode {
             QuickStartLaunchMode::Resume => {
-                if let Some(resume_session_id) = entry.resume_session_id {
+                if let Some(window_id) = entry.live_window_id {
+                    self.completion = Some(LaunchWizardCompletion::FocusWindow { window_id });
+                } else if let Some(resume_session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
                 } else {
-                    self.mode = "continue".to_string();
-                    self.resume_session_id = None;
+                    self.error = Some("No saved session is available".to_string());
                 }
             }
             QuickStartLaunchMode::StartNew => {
@@ -841,6 +882,7 @@ impl LaunchWizardState {
                 tool_label: entry.tool_label.clone(),
                 summary: quick_start_summary(entry),
                 resume_session_id: entry.resume_session_id.clone(),
+                reuse_action_label: entry.reuse_action_label().map(str::to_string),
             })
             .collect()
     }
@@ -1225,32 +1267,34 @@ impl LaunchWizardState {
     }
 
     fn selected_quick_start_action(&self) -> QuickStartAction {
-        let choose_different_index = self.quick_start_choose_different_index();
-        if self.selected >= choose_different_index {
-            QuickStartAction::ChooseDifferent
-        } else if self.selected < self.quick_start_entries.len() * 2
-            && self.selected.is_multiple_of(2)
-        {
-            QuickStartAction::ResumeWithPrevious
-        } else if self.selected < self.quick_start_entries.len() * 2 {
-            QuickStartAction::StartNewWithPrevious
-        } else {
-            QuickStartAction::FocusExistingSession
-        }
+        self.quick_start_actions()
+            .get(self.selected)
+            .copied()
+            .unwrap_or(QuickStartAction::ChooseDifferent)
     }
 
     fn selected_quick_start_entry(&self) -> Option<&QuickStartEntry> {
-        if self.quick_start_entries.is_empty()
-            || self.selected >= self.quick_start_entries.len() * 2
-        {
-            None
-        } else {
-            self.quick_start_entries.get(self.selected / 2)
+        match self.selected_quick_start_action() {
+            QuickStartAction::ReuseEntry { index } | QuickStartAction::StartNewEntry { index } => {
+                self.quick_start_entries.get(index)
+            }
+            QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => None,
         }
     }
 
-    fn quick_start_choose_different_index(&self) -> usize {
-        self.quick_start_entries.len() * 2 + usize::from(!self.context.live_sessions.is_empty())
+    fn quick_start_actions(&self) -> Vec<QuickStartAction> {
+        let mut actions = Vec::new();
+        for (index, entry) in self.quick_start_entries.iter().enumerate() {
+            if entry.can_reuse() {
+                actions.push(QuickStartAction::ReuseEntry { index });
+            }
+            actions.push(QuickStartAction::StartNewEntry { index });
+        }
+        if !self.context.live_sessions.is_empty() {
+            actions.push(QuickStartAction::FocusExistingSession);
+        }
+        actions.push(QuickStartAction::ChooseDifferent);
+        actions
     }
 
     fn apply_quick_start_selection(&mut self) {
@@ -1284,16 +1328,17 @@ impl LaunchWizardState {
         self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
 
         match self.selected_quick_start_action() {
-            QuickStartAction::ResumeWithPrevious => {
-                if let Some(resume_session_id) = entry.resume_session_id {
+            QuickStartAction::ReuseEntry { .. } => {
+                if let Some(window_id) = entry.live_window_id {
+                    self.completion = Some(LaunchWizardCompletion::FocusWindow { window_id });
+                } else if let Some(resume_session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
                 } else {
-                    self.mode = "continue".to_string();
-                    self.resume_session_id = None;
+                    self.error = Some("No saved session is available".to_string());
                 }
             }
-            QuickStartAction::StartNewWithPrevious => {
+            QuickStartAction::StartNewEntry { .. } => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
             }
@@ -1305,15 +1350,17 @@ impl LaunchWizardState {
         match self.step {
             LaunchWizardStep::QuickStart => {
                 let mut options = Vec::new();
-                for entry in &self.quick_start_entries {
+                for (index, entry) in self.quick_start_entries.iter().enumerate() {
                     let summary = quick_start_summary(entry);
+                    if let Some(reuse_action_label) = entry.reuse_action_label() {
+                        options.push(LaunchWizardOptionView {
+                            value: format!("reuse:{index}"),
+                            label: format!("{reuse_action_label} {}", entry.tool_label),
+                            description: Some(summary.clone()),
+                        });
+                    }
                     options.push(LaunchWizardOptionView {
-                        value: format!("resume:{index}", index = options.len() / 2),
-                        label: format!("Resume {}", entry.tool_label),
-                        description: Some(summary.clone()),
-                    });
-                    options.push(LaunchWizardOptionView {
-                        value: format!("start_new:{index}", index = options.len() / 2),
+                        value: format!("start_new:{index}"),
                         label: format!("Start new with {}", entry.tool_label),
                         description: Some(summary),
                     });
@@ -1493,8 +1540,8 @@ struct DockerLifecycleOption {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuickStartAction {
-    ResumeWithPrevious,
-    StartNewWithPrevious,
+    ReuseEntry { index: usize },
+    StartNewEntry { index: usize },
     FocusExistingSession,
     ChooseDifferent,
 }
@@ -1721,7 +1768,7 @@ fn next_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<Lau
         LaunchWizardStep::QuickStart => match state.selected_quick_start_action() {
             QuickStartAction::ChooseDifferent => Some(LaunchWizardStep::BranchAction),
             QuickStartAction::FocusExistingSession => Some(LaunchWizardStep::FocusExistingSession),
-            QuickStartAction::ResumeWithPrevious | QuickStartAction::StartNewWithPrevious => {
+            QuickStartAction::ReuseEntry { .. } | QuickStartAction::StartNewEntry { .. } => {
                 Some(LaunchWizardStep::SkipPermissions)
             }
         },
@@ -2159,6 +2206,7 @@ pub fn load_quick_start_entries(
     sessions
         .into_iter()
         .map(|session| QuickStartEntry {
+            session_id: session.id.clone(),
             agent_id: session.agent_id.command().to_string(),
             tool_label: session.display_name.clone(),
             model: session.model.clone(),
@@ -2170,6 +2218,7 @@ pub fn load_quick_start_entries(
                     .map(|_| "installed".to_string())
             }),
             resume_session_id: session.agent_session_id.clone(),
+            live_window_id: None,
             skip_permissions: session.skip_permissions,
             codex_fast_mode: session.codex_fast_mode,
             runtime_target: session.runtime_target,
@@ -2226,6 +2275,7 @@ mod tests {
             live_sessions: Vec::new(),
             docker_context: None,
             docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            linked_issue_number: None,
         }
     }
 
@@ -2273,12 +2323,14 @@ mod tests {
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
             vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.4".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
@@ -2371,12 +2423,14 @@ mod tests {
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
             vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
                 model: Some("gpt-5.4".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
@@ -2400,6 +2454,84 @@ mod tests {
         assert_eq!(state.docker_service.as_deref(), Some("gwt"));
         assert!(state.skip_permissions);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_reuse_prefers_live_window_focus() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "gwt-session-1".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+        }];
+
+        let mut state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        let view = state.view();
+        assert_eq!(
+            view.quick_start_entries[0].reuse_action_label.as_deref(),
+            Some("Continue")
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
+                assert_eq!(window_id, "window-1");
+            }
+            other => panic!("expected focus completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_start_view_hides_reuse_action_without_live_or_saved_session() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: None,
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        let view = state.view();
+        assert!(view.quick_start_entries[0].reuse_action_label.is_none());
     }
 
     #[test]
@@ -2464,5 +2596,17 @@ mod tests {
             .launch_summary
             .iter()
             .any(|item| item.label == "Fast mode" && item.value == "on"));
+    }
+
+    #[test]
+    fn build_launch_config_preserves_linked_issue_number() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.linked_issue_number = Some(1234);
+
+        let state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        let config = state.build_launch_config().expect("config");
+
+        assert_eq!(config.linked_issue_number, Some(1234));
     }
 }

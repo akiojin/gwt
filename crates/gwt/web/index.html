@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>gwt terminal poc</title>
+    <title>gwt</title>
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
@@ -2504,20 +2504,22 @@
               card.appendChild(head);
 
               const actions = createNode("div", "quick-start-actions");
-              const resumeButton = createNode(
-                "button",
-                "wizard-button",
-                entry.resume_session_id ? "Resume" : "Continue",
-              );
-              resumeButton.type = "button";
-              resumeButton.addEventListener("click", () => {
-                sendWizardAction({
-                  kind: "apply_quick_start",
-                  index: entry.index,
-                  mode: "resume",
+              if (entry.reuse_action_label) {
+                const reuseButton = createNode(
+                  "button",
+                  "wizard-button",
+                  entry.reuse_action_label,
+                );
+                reuseButton.type = "button";
+                reuseButton.addEventListener("click", () => {
+                  sendWizardAction({
+                    kind: "apply_quick_start",
+                    index: entry.index,
+                    mode: "resume",
+                  });
                 });
-              });
-              actions.appendChild(resumeButton);
+                actions.appendChild(reuseButton);
+              }
 
               const startNewButton = createNode(
                 "button",
