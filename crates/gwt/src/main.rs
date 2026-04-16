@@ -60,6 +60,7 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -155,6 +156,8 @@ struct AppRuntime {
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Cached update state so late-connecting WebView clients get the toast.
+    pending_update: Option<gwt_core::update::UpdateState>,
 }
 
 impl ProjectTabRuntime {
@@ -209,6 +212,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            pending_update: None,
         };
         app.rebuild_window_lookup();
         app.seed_restored_window_details();
@@ -297,6 +301,10 @@ impl AppRuntime {
             FrontendEvent::LaunchWizardAction { action } => {
                 self.handle_launch_wizard_action(action)
             }
+            FrontendEvent::ApplyUpdate => {
+                std::thread::spawn(apply_update_and_exit);
+                vec![]
+            }
         }
     }
 
@@ -346,6 +354,14 @@ impl AppRuntime {
                 BackendEvent::LaunchWizardState {
                     wizard: Some(Box::new(wizard.wizard.view())),
                 },
+            ));
+        }
+
+        // Replay any pending update notification so late-connecting WebView clients see the toast.
+        if let Some(state) = self.pending_update.clone() {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateState(state),
             ));
         }
 
@@ -2735,6 +2751,54 @@ fn main() -> wry::Result<()> {
         EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
     eprintln!("gwt browser URL: {}", server.url());
 
+    // Startup update check (T-031): runs in background; broadcasts UpdateState::Available if a
+    // newer release is found. Silent on failure and in CI environments.
+    {
+        let clients = clients.clone();
+        let update_proxy = proxy.clone();
+        runtime.spawn(async move {
+            if gwt_core::update::is_ci() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            let current_exe = std::env::current_exe().ok();
+            for attempt in 0..3u32 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+                }
+                let exe = current_exe.clone();
+                let state = match tokio::task::spawn_blocking(move || {
+                    gwt_core::update::UpdateManager::new()
+                        .check_for_executable(false, exe.as_deref())
+                })
+                .await
+                {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                match &state {
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: Some(_), ..
+                    } => {
+                        // Notify main thread to cache the state for reconnecting clients.
+                        let _ = update_proxy.send_event(UserEvent::UpdateAvailable(state.clone()));
+                        clients.dispatch(vec![OutboundEvent::broadcast(
+                            BackendEvent::UpdateState(state),
+                        )]);
+                        return;
+                    }
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: None, ..
+                    }
+                    | gwt_core::update::UpdateState::UpToDate { .. } => return,
+                    gwt_core::update::UpdateState::Failed { .. } => {
+                        // retry on next iteration
+                    }
+                }
+            }
+        });
+    }
+
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
         .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
@@ -2796,6 +2860,9 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_runtime_status(id, status, detail);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
+                app.pending_update = Some(state);
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::NativeMenuCommand;
@@ -2819,4 +2886,75 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+/// Download and apply a pending update, then exit.
+///
+/// Called from a background thread so the GUI remains responsive during download.
+/// On success, this function calls `std::process::exit(0)` and never returns.
+/// On any failure, it returns silently.
+fn apply_update_and_exit() {
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mgr = gwt_core::update::UpdateManager::new();
+    // Use force=false to read from the TTL cache rather than forcing a new network round-trip.
+    // The startup check already confirmed the update; a second network call here could flip the
+    // result to Failed if connectivity was lost between discovery and user confirmation.
+    let state = mgr.check_for_executable(false, Some(&current_exe));
+    let (latest, asset_url) = match state {
+        gwt_core::update::UpdateState::Available {
+            latest,
+            asset_url: Some(asset_url),
+            ..
+        } => (latest, asset_url),
+        _ => return,
+    };
+    let payload = match mgr.prepare_update(&latest, &asset_url) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let args_file = match &payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path }
+        | gwt_core::update::PreparedPayload::Installer { path, .. } => {
+            path.parent().map(|d| d.join("restart-args.json"))
+        }
+    };
+    let Some(args_file) = args_file else {
+        return;
+    };
+    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    if mgr
+        .write_restart_args_file(&args_file, restart_args)
+        .is_err()
+    {
+        return;
+    }
+    let helper_exe = if cfg!(windows) {
+        match mgr.make_helper_copy(&current_exe, &latest) {
+            Ok(p) => p,
+            Err(_) => return,
+        }
+    } else {
+        current_exe.clone()
+    };
+    let old_pid = std::process::id();
+    let result = match payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path } => {
+            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)
+        }
+        gwt_core::update::PreparedPayload::Installer { path, kind } => mgr
+            .spawn_internal_run_installer(
+                &helper_exe,
+                old_pid,
+                &current_exe,
+                &path,
+                kind,
+                &args_file,
+            ),
+    };
+    if result.is_ok() {
+        std::process::exit(0);
+    }
 }
