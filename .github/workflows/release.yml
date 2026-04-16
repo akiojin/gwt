@@ -92,26 +92,31 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: gwt
             release_name: gwt-linux-x86_64
+            archive_name: gwt-linux-x86_64.tar.gz
           - platform: linux-aarch64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary: gwt
             release_name: gwt-linux-aarch64
+            archive_name: gwt-linux-aarch64.tar.gz
           - platform: macos-x86_64
             os: macos-latest
             target: x86_64-apple-darwin
             binary: gwt
             release_name: gwt-macos-x86_64
+            archive_name: gwt-macos-x86_64.tar.gz
           - platform: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
             binary: gwt
-            release_name: gwt-macos-aarch64
+            release_name: gwt-macos-arm64
+            archive_name: gwt-macos-arm64.tar.gz
           - platform: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: gwt.exe
-            release_name: gwt-windows-x86_64.exe
+            release_name: gwt-windows-x86_64
+            archive_name: gwt-windows-x86_64.zip
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -131,16 +136,93 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/${{ matrix.release_name }}
+          cd dist
+          cp ../target/${{ matrix.target }}/release/${{ matrix.binary }} .
+          case "${{ matrix.platform }}" in
+            windows-*)
+              zip -q ${{ matrix.archive_name }} ${{ matrix.binary }}
+              rm ${{ matrix.binary }}
+              ;;
+            *)
+              tar -czf ${{ matrix.archive_name }} ${{ matrix.binary }}
+              rm ${{ matrix.binary }}
+              ;;
+          esac
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.release_name }}
-          path: dist/${{ matrix.release_name }}
+          name: ${{ matrix.archive_name }}
+          path: dist/${{ matrix.archive_name }}
+
+  build-msi:
+    name: Build MSI installer (Windows)
+    needs: create-tag
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gwt-msi
+      - name: Install WiX Toolset
+        run: |
+          dotnet tool install --global WiX
+      - name: Build gwt binary
+        run: cargo build --release -p gwt --target x86_64-pc-windows-msvc
+      - name: Build MSI
+        run: |
+          wix build -o dist/ -arch x64 -cultures en-US wix/main.wxs
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gwt-windows-x86_64.msi
+          path: dist/gwt-windows-x86_64.msi
+
+  build-dmg:
+    name: Build DMG installer (macOS)
+    needs: create-tag
+    runs-on: macos-latest
+    env:
+      RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gwt-dmg
+      - name: Build gwt for aarch64
+        run: cargo build --release -p gwt --target aarch64-apple-darwin
+      - name: Build gwt for x86_64
+        run: cargo build --release -p gwt --target x86_64-apple-darwin
+      - name: Create universal binary
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/gwt \
+            target/x86_64-apple-darwin/release/gwt \
+            -output dist/gwt
+      - name: Create DMG
+        run: |
+          mkdir -p dmg_temp/GWT
+          cp dist/gwt dmg_temp/GWT/
+          mkdir dmg_temp/GWT/.background
+          ln -s /Applications dmg_temp/GWT/Applications
+          hdiutil create -volname GWT -srcfolder dmg_temp -ov -format UDZO dist/gwt-macos-universal.dmg
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: gwt-macos-universal.dmg
+          path: dist/gwt-macos-universal.dmg
 
   upload-release:
     name: Upload to GitHub Release
-    needs: [create-tag, build-gwt]
+    needs: [create-tag, build-gwt, build-msi, build-dmg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
