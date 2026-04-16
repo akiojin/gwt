@@ -175,5 +175,9 @@ pub enum BackendEvent {
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
     },
+    LaunchProgress {
+        id: String,
+        message: String,
+    },
     UpdateState(gwt_core::update::UpdateState),
 }
