@@ -2719,6 +2719,37 @@
 
         {
           const section = createLaunchSection(
+            "Linked issue",
+            "Optional: Link an issue to this launch session.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          const field = createLaunchField("Issue number", false);
+          const input = createNode("input", "launch-input");
+          input.type = "number";
+          input.min = "1";
+          input.value = launchWizard.linked_issue_number
+            ? launchWizard.linked_issue_number.toString()
+            : "";
+          input.placeholder = "e.g., 1938";
+          input.addEventListener("change", () => {
+            const value = input.value.trim();
+            if (value) {
+              sendWizardAction({
+                kind: "set_linked_issue",
+                issue_number: parseInt(value, 10),
+              });
+            } else {
+              sendWizardAction({ kind: "clear_linked_issue" });
+            }
+          });
+          field.appendChild(input);
+          grid.appendChild(field);
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
             "Advanced",
             "Runtime target, versions, and launch flags.",
           );
