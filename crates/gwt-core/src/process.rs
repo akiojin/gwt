@@ -54,21 +54,66 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn echo_command(text: &str) -> (String, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), format!("echo {text}")],
+            )
+        } else {
+            (
+                "printf".to_string(),
+                vec!["%s\\n".to_string(), text.to_string()],
+            )
+        }
+    }
+
+    fn failing_command() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "exit 1".to_string()],
+            )
+        } else {
+            ("false".to_string(), Vec::new())
+        }
+    }
+
+    fn env_echo_command(var_name: &str) -> (String, Vec<String>) {
+        if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), format!("echo %{var_name}%")],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), format!("echo ${var_name}")],
+            )
+        }
+    }
+
     #[test]
     fn run_command_captures_stdout() {
-        let result = run_command("echo", &["hello"]).unwrap();
+        let (cmd, args) = echo_command("hello");
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = run_command(&cmd, &arg_refs).unwrap();
         assert_eq!(result, "hello");
     }
 
     #[test]
     fn run_command_trims_output() {
-        let result = run_command("echo", &["  padded  "]).unwrap();
+        let (cmd, args) = echo_command("  padded  ");
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = run_command(&cmd, &arg_refs).unwrap();
         assert_eq!(result, "padded");
     }
 
     #[test]
     fn run_command_returns_error_on_failure() {
-        let result = run_command("false", &[]);
+        let (cmd, args) = failing_command();
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = run_command(&cmd, &arg_refs);
         assert!(result.is_err());
     }
 
@@ -80,9 +125,11 @@ mod tests {
 
     #[test]
     fn run_command_with_env_passes_env_vars() {
+        let (cmd, args) = env_echo_command("GWT_TEST_VAR");
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let result = run_command_with_env(
-            "sh",
-            &["-c", "echo $GWT_TEST_VAR"],
+            &cmd,
+            &arg_refs,
             &[("GWT_TEST_VAR".into(), "hello_env".into())],
         )
         .unwrap();
@@ -91,13 +138,15 @@ mod tests {
 
     #[test]
     fn run_command_with_env_returns_error_on_failure() {
-        let result = run_command_with_env("false", &[], &[]);
+        let (cmd, args) = failing_command();
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result = run_command_with_env(&cmd, &arg_refs, &[]);
         assert!(result.is_err());
     }
 
     #[test]
     fn command_exists_finds_echo() {
-        assert!(command_exists("echo"));
+        assert!(command_exists("git"));
     }
 
     #[test]

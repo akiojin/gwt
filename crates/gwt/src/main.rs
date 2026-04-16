@@ -81,6 +81,7 @@ struct ProcessLaunch {
 struct ActiveAgentSession {
     window_id: String,
     session_id: String,
+    agent_id: String,
     branch_name: String,
     display_name: String,
     worktree_path: PathBuf,
@@ -948,6 +949,7 @@ impl AppRuntime {
             .map(|session| LiveSessionEntry {
                 session_id: session.session_id.clone(),
                 window_id: session.window_id.clone(),
+                agent_id: session.agent_id.clone(),
                 kind: "agent".to_string(),
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
@@ -1254,6 +1256,7 @@ impl AppRuntime {
             ActiveAgentSession {
                 window_id: window_id.clone(),
                 session_id: session.id.clone(),
+                agent_id: config.agent_id.command().to_string(),
                 branch_name,
                 display_name: config.display_name.clone(),
                 worktree_path,
@@ -2673,26 +2676,11 @@ fn run_cli(argv: &[String]) -> io::Result<()> {
                 std::process::exit(2);
             }
         };
-        let mut env = match gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path) {
-            Ok(env) => env,
-            Err(error) => {
-                eprintln!(
-                    "gwt {}: {error}",
-                    argv.get(1).map(String::as_str).unwrap_or("issue")
-                );
-                std::process::exit(1);
-            }
-        };
+        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         std::process::exit(gwt::cli::dispatch(&mut env, argv));
     }
 
-    let mut env = match gwt::cli::DefaultCliEnv::new_for_hooks() {
-        Ok(env) => env,
-        Err(error) => {
-            eprintln!("gwt hook: {error}");
-            std::process::exit(1);
-        }
-    };
+    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
     std::process::exit(gwt::cli::dispatch(&mut env, argv));
 }
 

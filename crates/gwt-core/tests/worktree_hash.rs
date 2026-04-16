@@ -30,7 +30,16 @@ fn compute_worktree_hash_canonicalizes_symlinks() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real, &link).unwrap();
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+    match std::os::windows::fs::symlink_dir(&real, &link) {
+        Ok(()) => {}
+        Err(err)
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.raw_os_error() == Some(1314) =>
+        {
+            return;
+        }
+        Err(err) => panic!("failed to create symlink: {err}"),
+    }
 
     let real_hash = compute_worktree_hash(&real).unwrap();
     let link_hash = compute_worktree_hash(&link).unwrap();
