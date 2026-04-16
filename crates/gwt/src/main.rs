@@ -2660,26 +2660,11 @@ fn run_cli(argv: &[String]) -> io::Result<()> {
                 std::process::exit(2);
             }
         };
-        let mut env = match gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path) {
-            Ok(env) => env,
-            Err(error) => {
-                eprintln!(
-                    "gwt {}: {error}",
-                    argv.get(1).map(String::as_str).unwrap_or("issue")
-                );
-                std::process::exit(1);
-            }
-        };
+        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         std::process::exit(gwt::cli::dispatch(&mut env, argv));
     }
 
-    let mut env = match gwt::cli::DefaultCliEnv::new_for_hooks() {
-        Ok(env) => env,
-        Err(error) => {
-            eprintln!("gwt hook: {error}");
-            std::process::exit(1);
-        }
-    };
+    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
     std::process::exit(gwt::cli::dispatch(&mut env, argv));
 }
 

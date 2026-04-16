@@ -296,5 +296,6 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("#7 [OPEN] CLI family split"));
         assert_eq!(env.pr_current_call_count, 1);
+        assert!(env.client.call_log().is_empty());
     }
 }
