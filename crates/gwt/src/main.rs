@@ -60,6 +60,7 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -154,6 +155,8 @@ struct AppRuntime {
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Cached update state so late-connecting WebView clients get the toast.
+    pending_update: Option<gwt_core::update::UpdateState>,
 }
 
 impl ProjectTabRuntime {
@@ -208,6 +211,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            pending_update: None,
         };
         app.rebuild_window_lookup();
         app.seed_restored_window_details();
@@ -349,6 +353,14 @@ impl AppRuntime {
                 BackendEvent::LaunchWizardState {
                     wizard: Some(Box::new(wizard.wizard.view())),
                 },
+            ));
+        }
+
+        // Replay any pending update notification so late-connecting WebView clients see the toast.
+        if let Some(state) = self.pending_update.clone() {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateState(state),
             ));
         }
 
@@ -2755,6 +2767,7 @@ fn main() -> wry::Result<()> {
     // newer release is found. Silent on failure and in CI environments.
     {
         let clients = clients.clone();
+        let update_proxy = proxy.clone();
         runtime.spawn(async move {
             if gwt_core::update::is_ci() {
                 return;
@@ -2775,14 +2788,21 @@ fn main() -> wry::Result<()> {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                match state {
-                    gwt_core::update::UpdateState::Available { .. } => {
+                match &state {
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: Some(_), ..
+                    } => {
+                        // Notify main thread to cache the state for reconnecting clients.
+                        let _ = update_proxy.send_event(UserEvent::UpdateAvailable(state.clone()));
                         clients.dispatch(vec![OutboundEvent::broadcast(
                             BackendEvent::UpdateState(state),
                         )]);
                         return;
                     }
-                    gwt_core::update::UpdateState::UpToDate { .. } => return,
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: None, ..
+                    }
+                    | gwt_core::update::UpdateState::UpToDate { .. } => return,
                     gwt_core::update::UpdateState::Failed { .. } => {
                         // retry on next iteration
                     }
@@ -2852,6 +2872,9 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_runtime_status(id, status, detail);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
+                app.pending_update = Some(state);
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::NativeMenuCommand;
@@ -2888,7 +2911,10 @@ fn apply_update_and_exit() {
         Err(_) => return,
     };
     let mgr = gwt_core::update::UpdateManager::new();
-    let state = mgr.check_for_executable(true, Some(&current_exe));
+    // Use force=false to read from the TTL cache rather than forcing a new network round-trip.
+    // The startup check already confirmed the update; a second network call here could flip the
+    // result to Failed if connectivity was lost between discovery and user confirmation.
+    let state = mgr.check_for_executable(false, Some(&current_exe));
     let (latest, asset_url) = match state {
         gwt_core::update::UpdateState::Available {
             latest,

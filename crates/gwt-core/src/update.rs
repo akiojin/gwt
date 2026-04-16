@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub fn is_ci() -> bool {
-    std::env::var("CI").is_ok()
+    std::env::var("CI")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
 }
 
 const DEFAULT_OWNER: &str = "akiojin";
@@ -679,6 +681,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     ));
     let bytes = serde_json::to_vec(value).map_err(|e| io::Error::other(e.to_string()))?;
     fs::write(&tmp, bytes)?;
+    let _ = fs::remove_file(path); // Remove existing file first (needed on Windows)
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -1183,11 +1186,18 @@ fn replace_executable(target_exe: &Path, source_exe: &Path) -> Result<(), String
 }
 
 fn replace_paths(target_exe: &Path, backup_path: &Path, tmp_path: &Path) -> io::Result<()> {
-    if target_exe.exists() {
+    let had_target = target_exe.exists();
+    if had_target {
         let _ = fs::remove_file(backup_path);
         fs::rename(target_exe, backup_path)?;
     }
-    fs::rename(tmp_path, target_exe)?;
+    if let Err(err) = fs::rename(tmp_path, target_exe) {
+        // Roll back: restore the original so the app is not left without an executable.
+        if had_target && !target_exe.exists() && backup_path.exists() {
+            let _ = fs::rename(backup_path, target_exe);
+        }
+        return Err(err);
+    }
     Ok(())
 }
 

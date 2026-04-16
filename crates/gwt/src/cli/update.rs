@@ -231,7 +231,12 @@ fn parse_flag_path(args: &[String], flag: &str) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    // Mutex to serialize tests that mutate the process-global CI environment variable.
+    static CI_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_args_defaults_to_apply() {
@@ -259,8 +264,7 @@ mod tests {
 
     #[test]
     fn run_check_only_returns_zero_in_ci() {
-        // Set CI env var to simulate a CI environment.
-        // The is_ci() guard must short-circuit and return 0 without network access.
+        let _guard = CI_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("CI", "true");
         let code = run(UpdateCommand::CheckOnly);
         std::env::remove_var("CI");
@@ -269,6 +273,7 @@ mod tests {
 
     #[test]
     fn run_apply_returns_zero_in_ci() {
+        let _guard = CI_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("CI", "true");
         let code = run(UpdateCommand::Apply);
         std::env::remove_var("CI");
