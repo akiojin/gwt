@@ -1637,7 +1637,7 @@
           row.addEventListener("click", () => {
             windowListOpen = false;
             renderWindowList();
-            focusWindowRemotely(entry.id);
+            focusWindowRemotely(entry.id, { center: true });
             if (entry.minimized) {
               send({ kind: "restore_window", id: entry.id });
             }
@@ -1973,9 +1973,11 @@
         }
       }
 
-      function focusWindowRemotely(windowId) {
+      function focusWindowRemotely(windowId, { center = false } = {}) {
         focusWindowLocally(windowId);
-        send({ kind: "focus_window", id: windowId });
+        const payload = { kind: "focus_window", id: windowId };
+        if (center) payload.bounds = visibleBounds();
+        send(payload);
       }
 
       function toggleMinimizeWindow(windowId) {
@@ -2257,10 +2259,14 @@
       }
 
       function sendWizardAction(action) {
-        send({
+        const payload = {
           kind: "launch_wizard_action",
           action,
-        });
+        };
+        if (action.kind === "submit") {
+          payload.bounds = visibleBounds();
+        }
+        send(payload);
       }
 
       function createNode(tagName, className, textContent) {
@@ -3626,7 +3632,7 @@
 
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
-          send({ kind: "create_window", preset: button.dataset.preset });
+          send({ kind: "create_window", preset: button.dataset.preset, bounds: visibleBounds() });
           closeModal();
         });
       }
