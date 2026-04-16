@@ -60,6 +60,7 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -80,6 +81,7 @@ struct ProcessLaunch {
 struct ActiveAgentSession {
     window_id: String,
     session_id: String,
+    agent_id: String,
     branch_name: String,
     display_name: String,
     worktree_path: PathBuf,
@@ -154,6 +156,8 @@ struct AppRuntime {
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Cached update state so late-connecting WebView clients get the toast.
+    pending_update: Option<gwt_core::update::UpdateState>,
 }
 
 impl ProjectTabRuntime {
@@ -208,6 +212,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            pending_update: None,
         };
         app.rebuild_window_lookup();
         app.seed_restored_window_details();
@@ -250,8 +255,10 @@ impl AppRuntime {
             }
             FrontendEvent::SelectProjectTab { tab_id } => self.select_project_tab_events(&tab_id),
             FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
-            FrontendEvent::CreateWindow { preset } => self.create_window_events(preset),
-            FrontendEvent::FocusWindow { id } => self.focus_window_events(&id),
+            FrontendEvent::CreateWindow { preset, bounds } => {
+                self.create_window_events(preset, bounds)
+            }
+            FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(direction, bounds)
             }
@@ -293,8 +300,12 @@ impl AppRuntime {
                 branch_name,
                 linked_issue_number,
             } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
-            FrontendEvent::LaunchWizardAction { action } => {
-                self.handle_launch_wizard_action(action)
+            FrontendEvent::LaunchWizardAction { action, bounds } => {
+                self.handle_launch_wizard_action(action, bounds)
+            }
+            FrontendEvent::ApplyUpdate => {
+                std::thread::spawn(apply_update_and_exit);
+                vec![]
             }
         }
     }
@@ -345,6 +356,14 @@ impl AppRuntime {
                 BackendEvent::LaunchWizardState {
                     wizard: Some(Box::new(wizard.wizard.view())),
                 },
+            ));
+        }
+
+        // Replay any pending update notification so late-connecting WebView clients see the toast.
+        if let Some(state) = self.pending_update.clone() {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateState(state),
             ));
         }
 
@@ -481,7 +500,11 @@ impl AppRuntime {
         events
     }
 
-    fn create_window_events(&mut self, preset: WindowPreset) -> Vec<OutboundEvent> {
+    fn create_window_events(
+        &mut self,
+        preset: WindowPreset,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
@@ -489,7 +512,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset)
+            tab.workspace.add_window(preset, bounds)
         };
         self.register_window(&tab_id, &window.id);
         let runtime_event = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -501,14 +524,18 @@ impl AppRuntime {
         events
     }
 
-    fn focus_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+    fn focus_window_events(
+        &mut self,
+        id: &str,
+        bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        if !tab.workspace.focus_window(&address.raw_id) {
+        if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
         }
         self.active_tab_id = Some(address.tab_id);
@@ -871,6 +898,7 @@ impl AppRuntime {
     fn handle_launch_wizard_action(
         &mut self,
         action: gwt::LaunchWizardAction,
+        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
         let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
@@ -891,7 +919,7 @@ impl AppRuntime {
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
                     return Vec::new();
                 };
-                if !tab.workspace.focus_window(&address.raw_id) {
+                if !tab.workspace.focus_window(&address.raw_id, bounds) {
                     session.wizard.error =
                         Some("The selected session window is no longer available".to_string());
                     self.launch_wizard = Some(session);
@@ -905,7 +933,7 @@ impl AppRuntime {
                 ]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
-                match self.spawn_agent_window(&session.tab_id, *config) {
+                match self.spawn_agent_window(&session.tab_id, *config, bounds) {
                     Ok(mut events) => {
                         events.push(self.launch_wizard_state_broadcast(None));
                         events
@@ -932,6 +960,7 @@ impl AppRuntime {
             .map(|session| LiveSessionEntry {
                 session_id: session.session_id.clone(),
                 window_id: session.window_id.clone(),
+                agent_id: session.agent_id.clone(),
                 kind: "agent".to_string(),
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
@@ -1100,6 +1129,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         mut config: gwt_agent::LaunchConfig,
+        bounds: Option<WindowGeometry>,
     ) -> Result<Vec<OutboundEvent>, String> {
         let project_root = self
             .tab(tab_id)
@@ -1160,8 +1190,14 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(tab_id) else {
                 return Err("Project tab not found".to_string());
             };
+            let b = bounds.unwrap_or(WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 1200.0,
+                height: 800.0,
+            });
             tab.workspace
-                .add_window_with_title(WindowPreset::Agent, title, false)
+                .add_window_with_title(WindowPreset::Agent, title, false, b)
         };
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
@@ -1238,6 +1274,7 @@ impl AppRuntime {
             ActiveAgentSession {
                 window_id: window_id.clone(),
                 session_id: session.id.clone(),
+                agent_id: config.agent_id.command().to_string(),
                 branch_name,
                 display_name: config.display_name.clone(),
                 worktree_path,
@@ -2657,26 +2694,11 @@ fn run_cli(argv: &[String]) -> io::Result<()> {
                 std::process::exit(2);
             }
         };
-        let mut env = match gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path) {
-            Ok(env) => env,
-            Err(error) => {
-                eprintln!(
-                    "gwt {}: {error}",
-                    argv.get(1).map(String::as_str).unwrap_or("issue")
-                );
-                std::process::exit(1);
-            }
-        };
+        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         std::process::exit(gwt::cli::dispatch(&mut env, argv));
     }
 
-    let mut env = match gwt::cli::DefaultCliEnv::new_for_hooks() {
-        Ok(env) => env,
-        Err(error) => {
-            eprintln!("gwt hook: {error}");
-            std::process::exit(1);
-        }
-    };
+    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
     std::process::exit(gwt::cli::dispatch(&mut env, argv));
 }
 
@@ -2747,6 +2769,54 @@ fn main() -> wry::Result<()> {
         EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
     eprintln!("gwt browser URL: {}", server.url());
 
+    // Startup update check (T-031): runs in background; broadcasts UpdateState::Available if a
+    // newer release is found. Silent on failure and in CI environments.
+    {
+        let clients = clients.clone();
+        let update_proxy = proxy.clone();
+        runtime.spawn(async move {
+            if gwt_core::update::is_ci() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            let current_exe = std::env::current_exe().ok();
+            for attempt in 0..3u32 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+                }
+                let exe = current_exe.clone();
+                let state = match tokio::task::spawn_blocking(move || {
+                    gwt_core::update::UpdateManager::new()
+                        .check_for_executable(false, exe.as_deref())
+                })
+                .await
+                {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                match &state {
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: Some(_), ..
+                    } => {
+                        // Notify main thread to cache the state for reconnecting clients.
+                        let _ = update_proxy.send_event(UserEvent::UpdateAvailable(state.clone()));
+                        clients.dispatch(vec![OutboundEvent::broadcast(
+                            BackendEvent::UpdateState(state),
+                        )]);
+                        return;
+                    }
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: None, ..
+                    }
+                    | gwt_core::update::UpdateState::UpToDate { .. } => return,
+                    gwt_core::update::UpdateState::Failed { .. } => {
+                        // retry on next iteration
+                    }
+                }
+            }
+        });
+    }
+
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
         .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
@@ -2808,6 +2878,9 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_runtime_status(id, status, detail);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
+                app.pending_update = Some(state);
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::NativeMenuCommand;
@@ -2831,4 +2904,75 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+/// Download and apply a pending update, then exit.
+///
+/// Called from a background thread so the GUI remains responsive during download.
+/// On success, this function calls `std::process::exit(0)` and never returns.
+/// On any failure, it returns silently.
+fn apply_update_and_exit() {
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mgr = gwt_core::update::UpdateManager::new();
+    // Use force=false to read from the TTL cache rather than forcing a new network round-trip.
+    // The startup check already confirmed the update; a second network call here could flip the
+    // result to Failed if connectivity was lost between discovery and user confirmation.
+    let state = mgr.check_for_executable(false, Some(&current_exe));
+    let (latest, asset_url) = match state {
+        gwt_core::update::UpdateState::Available {
+            latest,
+            asset_url: Some(asset_url),
+            ..
+        } => (latest, asset_url),
+        _ => return,
+    };
+    let payload = match mgr.prepare_update(&latest, &asset_url) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let args_file = match &payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path }
+        | gwt_core::update::PreparedPayload::Installer { path, .. } => {
+            path.parent().map(|d| d.join("restart-args.json"))
+        }
+    };
+    let Some(args_file) = args_file else {
+        return;
+    };
+    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    if mgr
+        .write_restart_args_file(&args_file, restart_args)
+        .is_err()
+    {
+        return;
+    }
+    let helper_exe = if cfg!(windows) {
+        match mgr.make_helper_copy(&current_exe, &latest) {
+            Ok(p) => p,
+            Err(_) => return,
+        }
+    } else {
+        current_exe.clone()
+    };
+    let old_pid = std::process::id();
+    let result = match payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path } => {
+            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)
+        }
+        gwt_core::update::PreparedPayload::Installer { path, kind } => mgr
+            .spawn_internal_run_installer(
+                &helper_exe,
+                old_pid,
+                &current_exe,
+                &path,
+                kind,
+                &args_file,
+            ),
+    };
+    if result.is_ok() {
+        std::process::exit(0);
+    }
 }
