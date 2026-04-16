@@ -1,10 +1,8 @@
 //! Pane manager: manages multiple terminal panes.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
-use crate::pane::Pane;
-use crate::TerminalError;
+use crate::{pane::Pane, TerminalError};
 
 /// Configuration for launching an agent pane.
 pub struct LaunchConfig {

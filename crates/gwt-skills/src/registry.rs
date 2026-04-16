@@ -1,7 +1,8 @@
 //! Skill registry for embedded skill management.
 
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// A single embedded skill definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

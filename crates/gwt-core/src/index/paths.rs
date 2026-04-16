@@ -24,10 +24,12 @@
 
 use std::path::PathBuf;
 
-use crate::error::{GwtError, Result};
-use crate::paths::gwt_home;
-use crate::repo_hash::RepoHash;
-use crate::worktree_hash::WorktreeHash;
+use crate::{
+    error::{GwtError, Result},
+    paths::gwt_home,
+    repo_hash::RepoHash,
+    worktree_hash::WorktreeHash,
+};
 
 /// Index scope discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,8 +102,7 @@ pub fn gwt_index_db_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo_hash::compute_repo_hash;
-    use crate::worktree_hash::compute_worktree_hash;
+    use crate::{repo_hash::compute_repo_hash, worktree_hash::compute_worktree_hash};
 
     #[test]
     fn issue_scope_resolution() {
@@ -122,8 +123,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let wt = compute_worktree_hash(tmp.path()).unwrap();
         let p = gwt_index_db_path(&repo, Some(&wt), Scope::FilesCode).unwrap();
-        let s = p.to_string_lossy();
-        assert!(s.contains("worktrees"));
-        assert!(s.ends_with(&format!("{}/files", wt.as_str())));
+        assert!(p
+            .components()
+            .any(|component| component.as_os_str() == "worktrees"));
+        assert_eq!(p.file_name().and_then(|name| name.to_str()), Some("files"));
+        assert_eq!(
+            p.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some(wt.as_str())
+        );
     }
 }

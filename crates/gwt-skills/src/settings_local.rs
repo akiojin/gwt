@@ -1,10 +1,12 @@
 //! Generate `.claude/settings.local.json` with gwt-managed Claude hooks.
 
+use std::{
+    fs, io,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
 use serde_json::{json, Map, Value};
-use std::fs;
-use std::io;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 
 const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
 const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
@@ -449,8 +451,9 @@ fn powershell_coordination_hook_command(event: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::process::Command;
+
+    use super::*;
 
     #[test]
     fn creates_settings_local_with_managed_hooks() {

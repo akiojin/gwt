@@ -14,8 +14,9 @@ pub mod session;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::cell::RefCell;
+
+    use super::*;
 
     #[test]
     fn noop_backend_is_not_available() {

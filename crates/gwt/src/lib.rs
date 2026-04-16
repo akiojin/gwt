@@ -2,7 +2,7 @@ pub mod branch_list;
 pub mod cli;
 mod discussion_resume;
 pub mod file_tree;
-mod index_worker;
+pub mod index_worker;
 mod issue_cache;
 pub mod launch_wizard;
 pub mod managed_assets;

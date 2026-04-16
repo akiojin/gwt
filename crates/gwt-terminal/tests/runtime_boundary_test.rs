@@ -3,12 +3,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
 };
-use gwt_terminal::protocol::{
-    build_paste_input_bytes, key_event_to_bytes, screen_requests_bracketed_paste,
-};
-use gwt_terminal::runtime::{
-    next_tick_deadline, terminal_enter_commands_ansi, terminal_leave_commands_ansi,
-    translate_crossterm_event, InputNormalizer, TerminalEvent, ESCAPE_SEQUENCE_TIMEOUT,
+use gwt_terminal::{
+    protocol::{build_paste_input_bytes, key_event_to_bytes, screen_requests_bracketed_paste},
+    runtime::{
+        next_tick_deadline, terminal_enter_commands_ansi, terminal_leave_commands_ansi,
+        translate_crossterm_event, InputNormalizer, TerminalEvent, ESCAPE_SEQUENCE_TIMEOUT,
+    },
 };
 
 fn key(code: KeyCode) -> KeyEvent {

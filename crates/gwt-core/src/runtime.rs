@@ -1,9 +1,10 @@
 //! Bootstrap and repair the shared project-index runtime under `~/.gwt/runtime`.
 
-use std::fs;
-use std::path::Component;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
 
 use crate::{GwtError, Result};
 
@@ -495,10 +496,12 @@ fn run_checked(command: &mut Command, label: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::cell::{Cell, RefCell};
-    use std::fs;
+    use std::{
+        cell::{Cell, RefCell},
+        fs,
+    };
 
+    use super::*;
     use crate::paths::{gwt_project_index_venv_dir_from, gwt_runtime_runner_path_from};
 
     #[derive(Default)]

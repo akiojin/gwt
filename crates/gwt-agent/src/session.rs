@@ -1,15 +1,17 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::launch::normalize_launch_args;
-use crate::types::{
-    AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass,
+use crate::{
+    launch::normalize_launch_args,
+    types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass},
 };
 
 /// Idle duration (in seconds) after which a session is considered stopped.
@@ -21,6 +23,9 @@ pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
 /// Environment variable injected into agent PTYs so hooks can write the
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
+/// Environment variable injected into agent PTYs so skills can locate the
+/// gwt binary for calling gwt CLI (GitHub operations, etc.).
+pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
 
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +269,28 @@ pub fn persist_session_status(
     SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
 }
 
+/// Persist the backing agent session id into the session TOML so quick-start
+/// flows can resume a concrete prior conversation instead of falling back to
+/// a tool-global "last session" lookup.
+pub fn persist_agent_session_id(
+    sessions_dir: &Path,
+    session_id: &str,
+    agent_session_id: &str,
+) -> std::io::Result<()> {
+    let agent_session_id = agent_session_id.trim();
+    if agent_session_id.is_empty() {
+        return Ok(());
+    }
+
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let mut session = Session::load(&session_path)?;
+    if session.agent_session_id.as_deref() == Some(agent_session_id) {
+        return Ok(());
+    }
+    session.agent_session_id = Some(agent_session_id.to_string());
+    session.save(sessions_dir)
+}
+
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
     match event {
         "SessionStart" | "Stop" => Some(AgentStatus::WaitingInput),
@@ -453,6 +480,19 @@ mod tests {
         assert!(loaded.launch_command.is_empty());
         assert!(loaded.launch_args.is_empty());
         assert!(loaded.workflow_bypass.is_none());
+    }
+
+    #[test]
+    fn persist_agent_session_id_updates_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(dir.path()).unwrap();
+
+        persist_agent_session_id(dir.path(), &session_id, "agent-123").unwrap();
+
+        let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
     }
 
     #[test]

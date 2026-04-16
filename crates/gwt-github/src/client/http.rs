@@ -16,8 +16,7 @@
 //! so one network round-trip covers "issue body + every comment"; mutations
 //! go through the REST endpoints.
 
-use std::process::Command;
-use std::sync::Mutex;
+use std::{process::Command, sync::Mutex};
 
 use serde_json::{json, Value};
 
@@ -102,12 +101,20 @@ impl FakeTransport {
 
     /// Queue a response to be returned by the next `execute` call.
     pub fn enqueue(&self, response: HttpResponse) {
-        self.state.lock().unwrap().canned.push_back(response);
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .canned
+            .push_back(response);
     }
 
     /// Snapshot of every recorded request so far.
     pub fn recorded(&self) -> Vec<HttpRequest> {
-        self.state.lock().unwrap().recorded.clone()
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recorded
+            .clone()
     }
 }
 
@@ -119,7 +126,7 @@ impl Default for FakeTransport {
 
 impl HttpTransport for FakeTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.recorded.push(request);
         state
             .canned

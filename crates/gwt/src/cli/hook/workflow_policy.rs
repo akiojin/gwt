@@ -8,11 +8,12 @@
 //!   sections before code implementation proceeds
 //! - allow read-only investigation and docs/chore-style edits
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
-use gwt_agent::session::{Session, GWT_SESSION_ID_ENV};
-use gwt_agent::types::WorkflowBypass;
+use gwt_agent::{
+    session::{Session, GWT_SESSION_ID_ENV},
+    types::WorkflowBypass,
+};
 use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;

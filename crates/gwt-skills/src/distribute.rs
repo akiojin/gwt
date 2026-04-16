@@ -1,12 +1,15 @@
 //! Distribute bundled skill assets to a target worktree.
 
-use crate::assets::{CLAUDE_COMMANDS, CLAUDE_SKILLS};
+use std::{
+    collections::HashSet,
+    fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
 use include_dir::Dir;
-use std::collections::HashSet;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use crate::assets::{CLAUDE_COMMANDS, CLAUDE_SKILLS};
 
 const TRACKED_ROOTS: &[&str] = &[".claude/skills", ".claude/commands", ".codex/skills"];
 

@@ -3,8 +3,7 @@
 //! These tests exercise the debounce-and-batch behavior of the per-Worktree
 //! filesystem watcher. They use the real `notify` crate against a tempdir.
 
-use std::fs;
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use gwt_core::index::watcher::{start_watcher, WatcherConfig};
 

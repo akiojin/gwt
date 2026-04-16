@@ -2,9 +2,11 @@
 
 use std::fs;
 
-use gwt_core::index::runtime::{reconcile_repo, ReconcileOptions};
-use gwt_core::repo_hash::compute_repo_hash;
-use gwt_core::worktree_hash::compute_worktree_hash;
+use gwt_core::{
+    index::runtime::{reconcile_repo, ReconcileOptions},
+    repo_hash::compute_repo_hash,
+    worktree_hash::compute_worktree_hash,
+};
 
 #[test]
 fn orphan_worktree_directory_is_removed() {

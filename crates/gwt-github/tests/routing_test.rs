@@ -2,9 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use gwt_github::body::SectionLocation;
-use gwt_github::routing::{decide_routing, ROUTING_PROMOTE_THRESHOLD_BYTES};
-use gwt_github::sections::SectionName;
+use gwt_github::{
+    body::SectionLocation,
+    routing::{decide_routing, ROUTING_PROMOTE_THRESHOLD_BYTES},
+    sections::SectionName,
+};
 
 fn n(s: &str) -> SectionName {
     SectionName(s.to_string())

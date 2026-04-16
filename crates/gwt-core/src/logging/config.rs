@@ -1,7 +1,6 @@
 //! Logging configuration: level resolution from env / config / default.
 
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -142,8 +141,9 @@ impl LoggingConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
+
+    use super::*;
 
     // Serialize all tests that mutate RUST_LOG so they do not stomp on
     // each other. `cargo test` runs tests in parallel by default.

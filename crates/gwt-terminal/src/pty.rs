@@ -160,9 +160,10 @@ impl PtyHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::test_util::{lock_pty_test, read_with_timeout};
-    use std::time::Duration;
 
     fn echo_config(msg: &str) -> SpawnConfig {
         SpawnConfig {

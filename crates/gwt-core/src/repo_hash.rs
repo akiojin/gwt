@@ -4,8 +4,7 @@
 //! upstream repository (HTTPS clone, SSH clone, second worktree) always
 //! resolves to the same `RepoHash`.
 
-use std::fmt;
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use sha2::{Digest, Sha256};
 
@@ -127,8 +126,9 @@ pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
+    use super::*;
 
     #[test]
     fn normalizes_https_https_form() {

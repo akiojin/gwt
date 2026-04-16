@@ -1,10 +1,14 @@
 //! Phase 8: integration tests for `gwt_core::index::runtime::refresh_issues_if_stale`.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use gwt_core::index::runtime::{refresh_issues_if_stale, RefreshIssuesOptions, RunnerSpawner};
-use gwt_core::repo_hash::compute_repo_hash;
+use gwt_core::{
+    index::runtime::{refresh_issues_if_stale, RefreshIssuesOptions, RunnerSpawner},
+    repo_hash::compute_repo_hash,
+};
 
 /// A test double that records calls instead of actually spawning the python runner.
 #[derive(Clone, Default)]
@@ -19,12 +23,15 @@ impl RunnerSpawner for RecordingSpawner {
         project_root: &std::path::Path,
         respect_ttl: bool,
     ) -> std::io::Result<()> {
-        self.calls.lock().unwrap().push(format!(
-            "{}|{}|{}",
-            repo_hash,
-            project_root.display(),
-            respect_ttl
-        ));
+        self.calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(format!(
+                "{}|{}|{}",
+                repo_hash,
+                project_root.display(),
+                respect_ttl
+            ));
         Ok(())
     }
 }
@@ -57,7 +64,7 @@ async fn refresh_kicks_runner_when_ttl_expired() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap();
+    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(calls.len(), 1, "expected one runner spawn call");
 }
 
@@ -77,7 +84,7 @@ async fn refresh_skipped_within_ttl() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap();
+    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(calls.len(), 0, "must not spawn runner within TTL window");
 }
 
@@ -95,7 +102,7 @@ async fn refresh_kicks_runner_when_meta_missing() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap();
+    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(calls.len(), 1, "missing meta means stale");
 }
 

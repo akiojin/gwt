@@ -26,21 +26,23 @@ pub mod hook;
 mod issue;
 mod issue_spec;
 mod pr;
+pub mod update;
 
-use std::fs;
-use std::io::{self};
-use std::path::PathBuf;
-use std::process::Command;
-
-use gwt_git::PrStatus;
-use gwt_github::{
-    cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
-    SpecOpsError,
+use std::{
+    fs,
+    io::{self},
+    path::PathBuf,
+    process::Command,
 };
 
 pub(crate) use board::parse as parse_board_args;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
+use gwt_git::PrStatus;
+use gwt_github::{
+    cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
+    SpecOpsError,
+};
 
 /// Compact linked PR summary used by `gwt issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -233,6 +235,12 @@ pub enum CliCommand {
     /// See SPEC #1942 (CORE-CLI) — replaces retired external hook scripts
     /// and inline shell hooks in `.claude/settings.local.json`.
     Hook { name: String, rest: Vec<String> },
+    /// `gwt update [--check]` — check for a new gwt release and optionally apply it.
+    Update { check_only: bool },
+    /// `gwt __internal apply-update ...` — internal helper: replace the binary then restart.
+    InternalApplyUpdate { rest: Vec<String> },
+    /// `gwt __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
+    InternalRunInstaller { rest: Vec<String> },
 }
 
 /// Errors surfaced by argv parsing.
@@ -266,7 +274,12 @@ impl std::error::Error for CliParseError {}
 /// legacy behaviour (positional repo path) for any other shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
     args.get(1)
-        .map(|s| matches!(s.as_str(), "issue" | "pr" | "actions" | "board" | "hook"))
+        .map(|s| {
+            matches!(
+                s.as_str(),
+                "issue" | "pr" | "actions" | "board" | "hook" | "update" | "__internal"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -372,6 +385,20 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         }
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
+        }
+        CliCommand::Update { check_only } => {
+            let cmd = if check_only {
+                update::UpdateCommand::CheckOnly
+            } else {
+                update::UpdateCommand::Apply
+            };
+            std::process::exit(update::run(cmd));
+        }
+        CliCommand::InternalApplyUpdate { rest } => {
+            std::process::exit(update::run_internal_apply_update(&rest));
+        }
+        CliCommand::InternalRunInstaller { rest } => {
+            std::process::exit(update::run_internal_run_installer(&rest));
         }
     };
     let _ = env.stdout().write_all(out.as_bytes());

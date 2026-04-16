@@ -1,7 +1,9 @@
 //! Contract tests for the `body` module (SPEC-12 tdd.md Layer 2).
 
-use gwt_github::body::{Comment, ParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
-use gwt_github::sections::SectionName;
+use gwt_github::{
+    body::{Comment, ParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
+    sections::SectionName,
+};
 
 fn n(s: &str) -> SectionName {
     SectionName(s.to_string())

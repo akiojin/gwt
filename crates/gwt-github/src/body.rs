@@ -5,8 +5,7 @@
 //! routing index map, and each section's raw markdown content (regardless of
 //! whether the content physically lives in the body or a comment).
 
-use std::collections::BTreeMap;
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use regex::Regex;
 

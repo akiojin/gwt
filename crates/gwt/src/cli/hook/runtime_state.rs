@@ -5,15 +5,16 @@
 //! Ported from the retired external runtime hook and now used as the
 //! managed runtime hook implementation wired from settings.
 
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use chrono::{SecondsFormat, Utc};
+use gwt_agent::{persist_agent_session_id, PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
 use serde::Serialize;
 
-use gwt_agent::{PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
-
-use super::HookError;
+use super::{HookError, HookEvent};
 use crate::discussion_resume::load_pending_resume;
 
 /// The JSON shape the Branches tab polls from `$GWT_SESSION_RUNTIME_PATH`.
@@ -97,6 +98,20 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
     Session::load(&path).map(Some)
 }
 
+fn sync_agent_session_id(
+    sessions_dir: &Path,
+    gwt_session_id: Option<&str>,
+    agent_session_id: Option<&str>,
+) -> io::Result<()> {
+    let Some(gwt_session_id) = gwt_session_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    let Some(agent_session_id) = agent_session_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    persist_agent_session_id(sessions_dir, gwt_session_id, agent_session_id)
+}
+
 #[cfg(test)]
 fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 
@@ -105,6 +120,14 @@ fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 /// sessions launched outside of gwt (e.g. a raw `claude` invocation) are
 /// not broken by a hook we shipped.
 pub fn handle(event: &str) -> Result<(), HookError> {
+    let hook_event = HookEvent::read_from_stdin()?;
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
+    let agent_session_id = hook_event
+        .as_ref()
+        .and_then(|event| event.session_id.as_deref());
+    sync_agent_session_id(&sessions_dir, gwt_session_id.as_deref(), agent_session_id)?;
+
     let Some(path) = std::env::var_os("GWT_SESSION_RUNTIME_PATH") else {
         return Ok(());
     };
@@ -114,9 +137,10 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gwt_agent::{AgentId, Session};
     use gwt_core::coordination::load_snapshot;
+
+    use super::*;
 
     #[test]
     fn pending_discussion_for_session_reads_active_discussion_candidate() {
@@ -242,5 +266,19 @@ mod tests {
         let events =
             std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
         assert_eq!(events.lines().count(), 0);
+    }
+
+    #[test]
+    fn sync_agent_session_id_persists_value_into_session_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+
+        sync_agent_session_id(&sessions_dir, Some(&session_id), Some("agent-123")).unwrap();
+
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
     }
 }

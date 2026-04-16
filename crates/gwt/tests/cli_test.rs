@@ -6,10 +6,10 @@ use gwt::cli::{
     PrReview, PrReviewThread, PrReviewThreadComment, TestEnv,
 };
 use gwt_git::PrStatus;
-use gwt_github::client::{
-    CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+use gwt_github::{
+    client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+    Cache, SectionName,
 };
-use gwt_github::{Cache, SectionName};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {

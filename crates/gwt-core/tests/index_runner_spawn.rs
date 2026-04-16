@@ -5,12 +5,9 @@
 //! run (~440 MB) and runs much slower than unit tests. CI invokes it with
 //! `cargo test -- --ignored` after restoring the HuggingFace cache.
 
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::{fs, path::PathBuf, process::Command};
 
-use gwt_core::repo_hash::compute_repo_hash;
-use gwt_core::worktree_hash::compute_worktree_hash;
+use gwt_core::{repo_hash::compute_repo_hash, worktree_hash::compute_worktree_hash};
 
 fn runner_python() -> PathBuf {
     let home = dirs::home_dir().expect("home");

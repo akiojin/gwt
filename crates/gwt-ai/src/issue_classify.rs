@@ -3,8 +3,10 @@
 //! Determines the branch-type category prefix for a GitHub issue
 //! (feature, bugfix, hotfix, or release) based on title and body.
 
-use crate::client::{AIClient, ChatMessage};
-use crate::error::AIError;
+use crate::{
+    client::{AIClient, ChatMessage},
+    error::AIError,
+};
 
 const SYSTEM_PROMPT: &str = "\
 You are a branch prefix classifier for GitHub issues. Based on the issue title \

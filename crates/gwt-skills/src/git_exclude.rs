@@ -1,9 +1,10 @@
 //! Manage `.git/info/exclude` entries for gwt-distributed assets.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";

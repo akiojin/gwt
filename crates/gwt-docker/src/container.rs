@@ -3,13 +3,16 @@
 //! Provides data structures for representing Docker containers and functions
 //! to list, start, stop, and restart them via the Docker CLI.
 
+use std::{
+    ffi::OsString,
+    io::{BufRead, BufReader, Read},
+    process::{Command, Output, Stdio},
+    sync::mpsc::{self, RecvTimeoutError},
+    thread,
+    time::{Duration, Instant},
+};
+
 use gwt_core::{GwtError, Result};
-use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read};
-use std::process::{Command, Output, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
-use std::time::{Duration, Instant};
 use tracing::debug;
 
 /// Status of a Docker container.
@@ -675,12 +678,11 @@ pub fn restart(id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::fs;
-    use std::io::Write;
-    use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::{fs, io::Write, path::PathBuf, sync::Mutex};
+
     use tempfile::TempDir;
+
+    use super::*;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 

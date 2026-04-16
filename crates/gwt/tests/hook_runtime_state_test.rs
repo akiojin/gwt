@@ -14,8 +14,10 @@
 
 use std::fs;
 
-use gwt::cli::hook::runtime_state::{self, RuntimeState};
-use gwt::cli::hook::HookError;
+use gwt::cli::hook::{
+    runtime_state::{self, RuntimeState},
+    HookError,
+};
 
 #[test]
 fn write_for_event_pretooluse_maps_to_running() {

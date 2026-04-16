@@ -2,8 +2,7 @@
 //! `block-file-ops`. Shells out to `git rev-parse --show-toplevel`
 //! exactly like the Node helpers did.
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 
 /// Return the worktree root as reported by `git rev-parse
 /// --show-toplevel`. Falls back to the current process cwd if git is

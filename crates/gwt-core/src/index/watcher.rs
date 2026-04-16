@@ -9,8 +9,10 @@
 //! drain `WatcherHandle::recv_batch()` and dispatch the appropriate
 //! `runner index-* --mode incremental` job per batch.
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::RecursiveMode;

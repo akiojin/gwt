@@ -1,14 +1,13 @@
 //! Contract tests for the `cache` module (SPEC-12 tdd.md Layer 6).
 
-use std::collections::BTreeMap;
-use std::fs;
+use std::{collections::BTreeMap, fs};
 
-use gwt_github::body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
-use gwt_github::cache::{Cache, CacheEntry};
-use gwt_github::client::{
-    CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+use gwt_github::{
+    body::{Comment, SectionLocation, SectionsIndex, SpecBody, SpecMeta},
+    cache::{Cache, CacheEntry},
+    client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+    sections::SectionName,
 };
-use gwt_github::sections::SectionName;
 use tempfile::TempDir;
 
 fn n(s: &str) -> SectionName {

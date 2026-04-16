@@ -1,7 +1,9 @@
 //! Extract file paths from the system clipboard.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// Parsed clipboard paste payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,8 +195,7 @@ pub(crate) fn run_command(cmd: &str, args: &[&str]) -> Result<String, ClipboardE
 
 /// Pipe text into a command's stdin.
 fn pipe_to_command(cmd: &str, args: &[&str], text: &str) -> Result<(), ClipboardError> {
-    use std::io::Write;
-    use std::process::Stdio;
+    use std::{io::Write, process::Stdio};
 
     let mut child = Command::new(cmd)
         .args(args)

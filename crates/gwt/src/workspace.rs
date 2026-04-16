@@ -1,9 +1,11 @@
-use crate::persistence::{
-    CanvasViewport, PersistedWindowState, PersistedWorkspaceState, WindowGeometry,
-    WindowProcessStatus,
+use crate::{
+    persistence::{
+        CanvasViewport, PersistedWindowState, PersistedWorkspaceState, WindowGeometry,
+        WindowProcessStatus,
+    },
+    preset::WindowPreset,
+    protocol::{ArrangeMode, FocusCycleDirection},
 };
-use crate::preset::WindowPreset;
-use crate::protocol::{ArrangeMode, FocusCycleDirection};
 
 const ARRANGE_PADDING: f64 = 24.0;
 const STACK_OFFSET_X: f64 = 28.0;
@@ -348,8 +350,10 @@ impl WorkspaceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::{default_workspace_state, WindowProcessStatus};
-    use crate::protocol::FocusCycleDirection;
+    use crate::{
+        persistence::{default_workspace_state, WindowProcessStatus},
+        protocol::FocusCycleDirection,
+    };
 
     fn arrange_bounds() -> WindowGeometry {
         WindowGeometry {

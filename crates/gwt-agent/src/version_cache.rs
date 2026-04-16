@@ -1,8 +1,10 @@
 //! Agent version cache: caches detected versions with a 24-hour TTL.
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use semver::Version;

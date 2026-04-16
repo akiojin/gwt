@@ -1,7 +1,9 @@
 //! Startup housekeeping: delete rotated log files older than the retention window.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{NaiveDate, Utc};
 

@@ -11,8 +11,9 @@ pub use text::ClipboardText;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn parse_clipboard_paste_returns_file_paths_when_every_line_is_absolute() {

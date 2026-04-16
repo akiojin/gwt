@@ -1,7 +1,9 @@
 //! Stateful voice session orchestration.
 
-use crate::backend::{VoiceBackend, VoiceError};
-use crate::config::VoiceState;
+use crate::{
+    backend::{VoiceBackend, VoiceError},
+    config::VoiceState,
+};
 
 /// A voice session that coordinates backend start/stop/transcription.
 pub struct VoiceSession<B: VoiceBackend> {
@@ -127,8 +129,9 @@ impl<B: VoiceBackend> VoiceSession<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::cell::Cell;
+
+    use super::*;
 
     #[derive(Default)]
     struct FakeBackend {

@@ -1,8 +1,11 @@
+use std::{
+    cmp::Ordering,
+    io,
+    path::{Component, Path, PathBuf},
+};
+
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::io;
-use std::path::{Component, Path, PathBuf};
 
 const BUILTIN_SKIP_PREFIXES: &[&str] = &[
     ".git",

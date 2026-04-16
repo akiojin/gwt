@@ -1,7 +1,6 @@
 //! Worktree identification via canonicalized absolute path hashing.
 
-use std::fmt;
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use sha2::{Digest, Sha256};
 

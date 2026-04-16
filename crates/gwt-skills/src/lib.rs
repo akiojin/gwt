@@ -19,9 +19,11 @@ pub use settings_local::{generate_codex_hooks, generate_settings_local};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use fs2::FileExt;
     use std::path::PathBuf;
+
+    use fs2::FileExt;
+
+    use super::*;
 
     // ── SkillRegistry tests ──
 

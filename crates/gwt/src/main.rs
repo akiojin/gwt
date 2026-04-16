@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
@@ -67,6 +68,7 @@ enum UserEvent {
         window_id: String,
         result: Result<(ProcessLaunch, String, String, String, PathBuf), String>,
     },
+    UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -87,6 +89,7 @@ struct ProcessLaunch {
 struct ActiveAgentSession {
     window_id: String,
     session_id: String,
+    agent_id: String,
     branch_name: String,
     display_name: String,
     worktree_path: PathBuf,
@@ -161,6 +164,8 @@ struct AppRuntime {
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// Cached update state so late-connecting WebView clients get the toast.
+    pending_update: Option<gwt_core::update::UpdateState>,
 }
 
 impl ProjectTabRuntime {
@@ -215,6 +220,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            pending_update: None,
         };
         app.rebuild_window_lookup();
         app.seed_restored_window_details();
@@ -295,11 +301,17 @@ impl AppRuntime {
                     self.load_branches_event(&id),
                 )]
             }
-            FrontendEvent::OpenLaunchWizard { id, branch_name } => {
-                self.open_launch_wizard(&id, &branch_name)
-            }
+            FrontendEvent::OpenLaunchWizard {
+                id,
+                branch_name,
+                linked_issue_number,
+            } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
             FrontendEvent::LaunchWizardAction { action } => {
                 self.handle_launch_wizard_action(action)
+            }
+            FrontendEvent::ApplyUpdate => {
+                std::thread::spawn(apply_update_and_exit);
+                vec![]
             }
         }
     }
@@ -350,6 +362,14 @@ impl AppRuntime {
                 BackendEvent::LaunchWizardState {
                     wizard: Some(Box::new(wizard.wizard.view())),
                 },
+            ));
+        }
+
+        // Replay any pending update notification so late-connecting WebView clients see the toast.
+        if let Some(state) = self.pending_update.clone() {
+            events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateState(state),
             ));
         }
 
@@ -794,7 +814,12 @@ impl AppRuntime {
         }
     }
 
-    fn open_launch_wizard(&mut self, id: &str, branch_name: &str) -> Vec<OutboundEvent> {
+    fn open_launch_wizard(
+        &mut self,
+        id: &str,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
@@ -858,6 +883,7 @@ impl AppRuntime {
                     live_sessions,
                     docker_context,
                     docker_service_status,
+                    linked_issue_number,
                 },
                 &self.sessions_dir,
                 &default_wizard_version_cache_path(),
@@ -931,6 +957,7 @@ impl AppRuntime {
             .map(|session| LiveSessionEntry {
                 session_id: session.session_id.clone(),
                 window_id: session.window_id.clone(),
+                agent_id: session.agent_id.clone(),
                 kind: "agent".to_string(),
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
@@ -1619,10 +1646,12 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_project_target, should_auto_start_restored_window};
-    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
     use std::{fs, process::Command};
+
+    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
     use tempfile::tempdir;
+
+    use super::{resolve_project_target, should_auto_start_restored_window};
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -1774,7 +1803,7 @@ impl ClientHub {
         let (tx, rx) = mpsc::unbounded_channel();
         self.clients
             .lock()
-            .expect("client hub lock")
+            .unwrap_or_else(|p| p.into_inner())
             .insert(client_id, tx);
         rx
     }
@@ -1782,12 +1811,12 @@ impl ClientHub {
     fn unregister(&self, client_id: &str) {
         self.clients
             .lock()
-            .expect("client hub lock")
+            .unwrap_or_else(|p| p.into_inner())
             .remove(client_id);
     }
 
     fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let clients = self.clients.lock().expect("client hub lock");
+        let clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
         for outbound in events {
             let payload = serde_json::to_string(&outbound.event).expect("backend event json");
             match outbound.target {
@@ -2132,6 +2161,7 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    ensure_docker_gwt_binary_setup(&worktree)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
 
@@ -2153,6 +2183,11 @@ fn apply_docker_runtime_to_launch_config(
     config
         .env_vars
         .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    // Override GWT_BIN_PATH for Docker containers to use the mounted binary
+    config.env_vars.insert(
+        gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
+        "/usr/local/bin/gwt".to_string(),
+    );
     config.docker_service = Some(launch.service);
     Ok(())
 }
@@ -2167,6 +2202,58 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     if !gwt_docker::daemon_running() {
         return Err("Docker daemon is not running".to_string());
     }
+    Ok(())
+}
+
+fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
+    use std::{fs, path::PathBuf};
+
+    let home = if cfg!(windows) {
+        std::env::var("USERPROFILE")
+    } else {
+        std::env::var("HOME")
+    }
+    .map(PathBuf::from)
+    .map_err(|_| "Could not determine home directory".to_string())?;
+
+    let gwt_bin_dir = home.join(".gwt").join("bin");
+    let gwt_linux = gwt_bin_dir.join("gwt-linux");
+
+    // Check if Linux gwt binary exists
+    if !gwt_linux.exists() {
+        // TODO: Download Linux gwt binary from GitHub Release
+        // For now, create a note for the user
+        let override_path = repo_path.join("docker-compose.override.yml");
+        if !override_path.exists() {
+            eprintln!(
+                "Note: Linux gwt binary not found at ~/.gwt/bin/gwt-linux\n\
+                 This is required for Docker agent support.\n\
+                 You can either:\n\
+                 1. Download gwt-linux-x86_64 from GitHub Releases and place it at ~/.gwt/bin/gwt-linux\n\
+                 2. Run 'gwt setup docker' to set up Docker integration automatically"
+            );
+        }
+    }
+
+    // Ensure docker-compose.override.yml exists with gwt volume mount
+    let override_path = repo_path.join("docker-compose.override.yml");
+    if !override_path.exists() {
+        let override_content = "# Auto-generated docker-compose override for gwt binary mounting\n\
+                                version: '3.8'\n\
+                                services:\n\
+                                  # Add your service name and uncomment the volumes section\n\
+                                  # <service>:\n\
+                                  #   volumes:\n\
+                                  #     - ~/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro\n";
+        fs::write(&override_path, override_content).map_err(|err| {
+            format!(
+                "Failed to create docker-compose.override.yml: {err}\n\
+                 Manually create {} with gwt volume mount",
+                override_path.display()
+            )
+        })?;
+    }
+
     Ok(())
 }
 
@@ -2645,26 +2732,11 @@ fn run_cli(argv: &[String]) -> io::Result<()> {
                 std::process::exit(2);
             }
         };
-        let mut env = match gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path) {
-            Ok(env) => env,
-            Err(error) => {
-                eprintln!(
-                    "gwt {}: {error}",
-                    argv.get(1).map(String::as_str).unwrap_or("issue")
-                );
-                std::process::exit(1);
-            }
-        };
+        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
         std::process::exit(gwt::cli::dispatch(&mut env, argv));
     }
 
-    let mut env = match gwt::cli::DefaultCliEnv::new_for_hooks() {
-        Ok(env) => env,
-        Err(error) => {
-            eprintln!("gwt hook: {error}");
-            std::process::exit(1);
-        }
-    };
+    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
     std::process::exit(gwt::cli::dispatch(&mut env, argv));
 }
 
@@ -2734,6 +2806,54 @@ fn main() -> wry::Result<()> {
     let mut server =
         EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
     eprintln!("gwt browser URL: {}", server.url());
+
+    // Startup update check (T-031): runs in background; broadcasts UpdateState::Available if a
+    // newer release is found. Silent on failure and in CI environments.
+    {
+        let clients = clients.clone();
+        let update_proxy = proxy.clone();
+        runtime.spawn(async move {
+            if gwt_core::update::is_ci() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+            let current_exe = std::env::current_exe().ok();
+            for attempt in 0..3u32 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+                }
+                let exe = current_exe.clone();
+                let state = match tokio::task::spawn_blocking(move || {
+                    gwt_core::update::UpdateManager::new()
+                        .check_for_executable(false, exe.as_deref())
+                })
+                .await
+                {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                match &state {
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: Some(_), ..
+                    } => {
+                        // Notify main thread to cache the state for reconnecting clients.
+                        let _ = update_proxy.send_event(UserEvent::UpdateAvailable(state.clone()));
+                        clients.dispatch(vec![OutboundEvent::broadcast(
+                            BackendEvent::UpdateState(state),
+                        )]);
+                        return;
+                    }
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: None, ..
+                    }
+                    | gwt_core::update::UpdateState::UpToDate { .. } => return,
+                    gwt_core::update::UpdateState::Failed { .. } => {
+                        // retry on next iteration
+                    }
+                }
+            }
+        });
+    }
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -2805,6 +2925,9 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_launch_complete(window_id, result);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
+                app.pending_update = Some(state);
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
                 use gwt::NativeMenuCommand;
@@ -2828,4 +2951,75 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+/// Download and apply a pending update, then exit.
+///
+/// Called from a background thread so the GUI remains responsive during download.
+/// On success, this function calls `std::process::exit(0)` and never returns.
+/// On any failure, it returns silently.
+fn apply_update_and_exit() {
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let mgr = gwt_core::update::UpdateManager::new();
+    // Use force=false to read from the TTL cache rather than forcing a new network round-trip.
+    // The startup check already confirmed the update; a second network call here could flip the
+    // result to Failed if connectivity was lost between discovery and user confirmation.
+    let state = mgr.check_for_executable(false, Some(&current_exe));
+    let (latest, asset_url) = match state {
+        gwt_core::update::UpdateState::Available {
+            latest,
+            asset_url: Some(asset_url),
+            ..
+        } => (latest, asset_url),
+        _ => return,
+    };
+    let payload = match mgr.prepare_update(&latest, &asset_url) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let args_file = match &payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path }
+        | gwt_core::update::PreparedPayload::Installer { path, .. } => {
+            path.parent().map(|d| d.join("restart-args.json"))
+        }
+    };
+    let Some(args_file) = args_file else {
+        return;
+    };
+    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    if mgr
+        .write_restart_args_file(&args_file, restart_args)
+        .is_err()
+    {
+        return;
+    }
+    let helper_exe = if cfg!(windows) {
+        match mgr.make_helper_copy(&current_exe, &latest) {
+            Ok(p) => p,
+            Err(_) => return,
+        }
+    } else {
+        current_exe.clone()
+    };
+    let old_pid = std::process::id();
+    let result = match payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path } => {
+            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)
+        }
+        gwt_core::update::PreparedPayload::Installer { path, kind } => mgr
+            .spawn_internal_run_installer(
+                &helper_exe,
+                old_pid,
+                &current_exe,
+                &path,
+                kind,
+                &args_file,
+            ),
+    };
+    if result.is_ok() {
+        std::process::exit(0);
+    }
 }

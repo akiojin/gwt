@@ -1,9 +1,11 @@
 //! `gwt hook coordination-event <event>` — append meaningful coordination
 //! summaries to the shared Board timeline.
 
-use std::collections::HashMap;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    io,
+    path::{Path, PathBuf},
+};
 
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::{
@@ -193,13 +195,14 @@ fn coordination_as_hook_error(err: gwt_core::GwtError) -> HookError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::TimeZone;
     use gwt_agent::{AgentId, Session};
     use gwt_core::coordination::{
         coordination_events_path, load_snapshot, BoardEntry, BoardEntryKind,
     };
     use gwt_github::{CommentSnapshot, IssueSnapshot, IssueState, UpdatedAt};
+
+    use super::*;
 
     fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSnapshot {
         IssueSnapshot {

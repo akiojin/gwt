@@ -1,16 +1,17 @@
 //! Repo-local coordination storage for a shared board chat timeline.
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::paths::gwt_coordination_dir_for_repo_path;
-use crate::{GwtError, Result};
+use crate::{paths::gwt_coordination_dir_for_repo_path, GwtError, Result};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -597,7 +598,11 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
         file.sync_all()?;
     }
     if cfg!(windows) && path.exists() {
-        std::fs::remove_file(path)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
@@ -635,7 +640,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all()?;
     }
     if cfg!(windows) && path.exists() {
-        std::fs::remove_file(path)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
@@ -647,10 +656,11 @@ fn json_error(err: serde_json::Error) -> GwtError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{sync::Arc, thread};
+
     use chrono::TimeZone;
-    use std::sync::Arc;
-    use std::thread;
+
+    use super::*;
 
     #[test]
     fn load_snapshot_bootstraps_empty_files() {

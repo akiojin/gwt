@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
-use crate::repo_hash::{compute_path_hash, detect_repo_hash, RepoHash};
+use crate::{
+    error::Result,
+    repo_hash::{compute_path_hash, detect_repo_hash, RepoHash},
+};
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {
@@ -81,6 +83,16 @@ pub fn gwt_project_logs_dir(repo_hash: &RepoHash) -> PathBuf {
 /// Return the structured-log directory for a repository path, if `origin` exists.
 pub fn gwt_project_logs_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
     detect_repo_hash(repo_path).map(|repo_hash| gwt_project_logs_dir(&repo_hash))
+}
+
+/// Return the update check cache path (`~/.gwt/cache/update-check.json`).
+pub fn gwt_update_cache_path() -> PathBuf {
+    gwt_cache_dir().join("update-check.json")
+}
+
+/// Return the updates staging directory (`~/.gwt/updates/`).
+pub fn gwt_updates_dir() -> PathBuf {
+    gwt_home().join("updates")
 }
 
 /// Return the shared runtime directory (`~/.gwt/runtime/`).

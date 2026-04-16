@@ -3,9 +3,9 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use tempfile::tempdir;
-
 use gwt::refresh_managed_gwt_assets_for_worktree;
+use serde_json::Value;
+use tempfile::tempdir;
 
 #[test]
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
@@ -38,8 +38,12 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let codex_hooks =
         std::fs::read_to_string(dir.path().join(".codex/hooks.json")).expect("read codex");
     let cli_bin_text = cli_bin.display().to_string();
-    assert!(claude_settings.contains(&cli_bin_text));
-    assert!(codex_hooks.contains(&cli_bin_text));
+    assert!(json_commands(&claude_settings)
+        .iter()
+        .any(|command| command.contains(&cli_bin_text)));
+    assert!(json_commands(&codex_hooks)
+        .iter()
+        .any(|command| command.contains(&cli_bin_text)));
 
     let exclude_path = dir.path().join(".git/info/exclude");
     let exclude = std::fs::read_to_string(&exclude_path).expect("read exclude");
@@ -80,7 +84,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("env lock")
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 struct ScopedEnvVar {
@@ -104,4 +108,30 @@ impl Drop for ScopedEnvVar {
             std::env::remove_var(self.key);
         }
     }
+}
+
+fn json_commands(raw: &str) -> Vec<String> {
+    fn collect(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(command) = map.get("command").and_then(Value::as_str) {
+                    out.push(command.to_string());
+                }
+                for value in map.values() {
+                    collect(value, out);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    collect(value, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let value: Value = serde_json::from_str(raw).expect("valid json");
+    let mut out = Vec::new();
+    collect(&value, &mut out);
+    out
 }

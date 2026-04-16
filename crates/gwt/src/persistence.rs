@@ -1,6 +1,8 @@
-use crate::preset::WindowPreset;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::preset::WindowPreset;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowGeometry {
@@ -323,8 +325,9 @@ pub fn project_title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn empty_workspace_contains_no_windows() {
@@ -568,6 +571,10 @@ mod tests {
         let session_path = dir.path().join("session.json");
         let project_one = dir.path().join("project-one");
         let project_two = dir.path().join("project-two");
+        let project_one_json =
+            serde_json::to_string(&project_one.display().to_string()).expect("project one json");
+        let project_two_json =
+            serde_json::to_string(&project_two.display().to_string()).expect("project two json");
         std::fs::create_dir_all(&project_one).expect("project one dir");
         std::fs::create_dir_all(&project_two).expect("project two dir");
         std::fs::write(
@@ -578,7 +585,7 @@ mod tests {
     {{
       "id": "project-1",
       "title": "project-one",
-      "project_root": "{}",
+      "project_root": {},
       "kind": "git",
       "workspace": {{
         "viewport": {{ "x": 12.0, "y": -8.0, "zoom": 1.1 }},
@@ -589,7 +596,7 @@ mod tests {
     {{
       "id": "project-2",
       "title": "project-two",
-      "project_root": "{}",
+      "project_root": {},
       "kind": "non_repo",
       "workspace": {{
         "viewport": {{ "x": 0.0, "y": 0.0, "zoom": 1.0 }},
@@ -600,12 +607,10 @@ mod tests {
   ],
   "active_tab_id": "project-2",
   "recent_projects": [
-    {{ "path": "{}", "title": "project-two", "kind": "non_repo" }}
+    {{ "path": {}, "title": "project-two", "kind": "non_repo" }}
   ]
 }}"#,
-                project_one.display(),
-                project_two.display(),
-                project_two.display()
+                project_one_json, project_two_json, project_two_json
             ),
         )
         .expect("legacy workspace write");
@@ -667,6 +672,8 @@ mod tests {
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("project");
+        let project_root_json =
+            serde_json::to_string(&project_root.display().to_string()).expect("project root json");
         std::fs::create_dir_all(&project_root).expect("project dir");
         std::fs::write(
             &legacy_path,
@@ -676,7 +683,7 @@ mod tests {
     {{
       "id": "project-1",
       "title": "project",
-      "project_root": "{}",
+      "project_root": {},
       "kind": "git",
       "workspace": {{
         "viewport": {{ "x": 99.0, "y": 0.0, "zoom": 1.0 }},
@@ -688,7 +695,7 @@ mod tests {
   "active_tab_id": "project-1",
   "recent_projects": []
 }}"#,
-                project_root.display()
+                project_root_json
             ),
         )
         .expect("legacy workspace write");

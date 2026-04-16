@@ -1,18 +1,21 @@
 //! Host terminal lifecycle and crossterm event normalization.
 
-use std::collections::VecDeque;
-use std::io;
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    io,
+    time::{Duration, Instant},
+};
 
-use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+use crossterm::{
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    Command,
 };
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use crossterm::{execute, Command};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
 pub const ESCAPE_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(120);
@@ -129,8 +132,7 @@ fn disable_keyboard_enhancements(writer: &mut impl io::Write) {
 }
 
 fn stdin_was_initially_terminal() -> bool {
-    use std::io::IsTerminal;
-    use std::sync::OnceLock;
+    use std::{io::IsTerminal, sync::OnceLock};
 
     static WAS_TERMINAL: OnceLock<bool> = OnceLock::new();
     *WAS_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
