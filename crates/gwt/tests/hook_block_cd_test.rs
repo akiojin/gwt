@@ -1,21 +1,30 @@
 //! T-040 (SPEC #1942) — block-cd-command golden tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gwt::cli::hook::block_cd_command;
 
 fn root() -> PathBuf {
-    // Use the tempdir's parent as a synthetic worktree root so that
-    // `/tmp/<worktree>/subdir` is considered inside and anything else
-    // is considered outside. We deliberately use a path that definitely
-    // exists so that component-wise comparisons are stable.
-    PathBuf::from("/tmp/gwt-test-worktree")
+    std::env::temp_dir().join("gwt-test-worktree")
+}
+
+fn outside_root() -> PathBuf {
+    root()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("gwt-test-outside")
 }
 
 #[test]
 fn cd_to_absolute_path_outside_worktree_is_blocked() {
-    let decision = block_cd_command::evaluate_bash_command("cd /etc", &root());
-    assert!(decision.is_some(), "cd /etc should be blocked");
+    let decision = block_cd_command::evaluate_bash_command(
+        &format!("cd {}", outside_root().display()),
+        &root(),
+    );
+    assert!(
+        decision.is_some(),
+        "cd outside the worktree should be blocked"
+    );
 }
 
 #[test]
@@ -26,8 +35,10 @@ fn cd_to_home_shortcut_is_blocked() {
 
 #[test]
 fn cd_to_absolute_path_inside_worktree_is_allowed() {
-    let decision =
-        block_cd_command::evaluate_bash_command("cd /tmp/gwt-test-worktree/subdir", &root());
+    let decision = block_cd_command::evaluate_bash_command(
+        &format!("cd {}/subdir", root().display()),
+        &root(),
+    );
     assert!(
         decision.is_none(),
         "cd into a path strictly under the root should be allowed, got {decision:?}"
@@ -36,7 +47,8 @@ fn cd_to_absolute_path_inside_worktree_is_allowed() {
 
 #[test]
 fn cd_to_worktree_root_itself_is_allowed() {
-    let decision = block_cd_command::evaluate_bash_command("cd /tmp/gwt-test-worktree", &root());
+    let decision =
+        block_cd_command::evaluate_bash_command(&format!("cd {}", root().display()), &root());
     assert!(
         decision.is_none(),
         "cd to the root itself should be allowed"
@@ -45,7 +57,10 @@ fn cd_to_worktree_root_itself_is_allowed() {
 
 #[test]
 fn non_cd_command_is_not_examined() {
-    let decision = block_cd_command::evaluate_bash_command("echo cd /etc", &root());
+    let decision = block_cd_command::evaluate_bash_command(
+        &format!("echo cd {}", outside_root().display()),
+        &root(),
+    );
     assert!(
         decision.is_none(),
         "echo cd is not a cd command, must not be blocked"
@@ -63,9 +78,12 @@ fn grep_mentioning_cd_is_not_blocked() {
 
 #[test]
 fn adversarial_segment_after_innocuous_prefix_is_blocked() {
-    let decision = block_cd_command::evaluate_bash_command("echo hello && cd /etc", &root());
+    let decision = block_cd_command::evaluate_bash_command(
+        &format!("echo hello && cd {}", outside_root().display()),
+        &root(),
+    );
     assert!(
         decision.is_some(),
-        "cd /etc after an innocuous prefix must still be blocked"
+        "cd outside the worktree after an innocuous prefix must still be blocked"
     );
 }

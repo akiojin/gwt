@@ -1,6 +1,47 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.3.0] - 2026-04-16
+
+### Bug Fixes
+
+- **update:** Address CodeRabbit review feedback
+
+### Documentation
+
+- **AGENTS.md:** Remove release workflow section
+- **lessons:** V9.2.0 リリース時の Step 9.2 スキップ (AI 実行エラー) に関する教訓を記録
+
+### Features
+
+- Add self-update system (SPEC-2041)
+
+## [9.2.0] - 2026-04-16
+
+### Bug Fixes
+
+- Release workflow に Linux WebView 依存パッケージを追加 by @bhanuprasad14
+- Vt100 v0.16.2 API 変更に対応し release workflow に Linux WebView 依存を追加 by @bhanuprasad14
+- Linux-aarch64 ビルドをネイティブ ARM64 ランナーに切り替え by @bhanuprasad14
+- **agent:** Export GWT_BIN_PATH_ENV constant from gwt-agent crate by @akiojin
+- Implement issue linkage for launch wizard agents
+- Reuse live or saved quick start sessions
+- Harden windows path and file race handling
+- Prevent poisoned lock cascades by recovering from panic poison
+- Defer github auth for read-only cli
+
+### Features
+
+- **agent:** Inject GWT_BIN_PATH env var at PTY and Docker session startup by @akiojin
+
+### Miscellaneous Tasks
+
+- Cargo fmt (nightly imports_granularity = Crate) by @bhanuprasad14
+- Update browser tab title from 'gwt terminal poc' to 'gwt'
+- Remove nightly-only rustfmt options for stable Rust compatibility
+- Format code to comply with rustfmt
+- Format merged files after develop sync
+
 ## [9.1.0] - 2026-04-15
 
 ### Bug Fixes

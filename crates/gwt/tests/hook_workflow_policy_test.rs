@@ -21,7 +21,14 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 fn root() -> PathBuf {
-    PathBuf::from("/tmp/gwt-test-worktree")
+    std::env::temp_dir().join("gwt-test-worktree")
+}
+
+fn outside_root() -> PathBuf {
+    root()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("gwt-test-outside")
 }
 
 fn event(tool_name: &str, tool_input: serde_json::Value) -> HookEvent {
@@ -41,7 +48,7 @@ fn evaluate(
 }
 
 fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
-    let _guard = env_lock().lock().expect("env lock");
+    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = tempfile::tempdir().expect("temp home");
     let previous_home = std::env::var_os("HOME");
     let previous_session_id = std::env::var_os(GWT_SESSION_ID_ENV);
@@ -285,7 +292,7 @@ fn allows_verification_bash_even_without_owner() {
 fn allows_worktree_touch_bash_without_owner() {
     let event = event(
         "Bash",
-        json!({ "command": "touch /tmp/gwt-test-worktree/src/lib.rs" }),
+        json!({ "command": format!("touch {}/src/lib.rs", root().display()) }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
     assert!(
@@ -298,7 +305,7 @@ fn allows_worktree_touch_bash_without_owner() {
 fn allows_worktree_rm_bash_without_owner() {
     let event = event(
         "Bash",
-        json!({ "command": "rm -f /tmp/gwt-test-worktree/.gwt/memory/constitution.md" }),
+        json!({ "command": format!("rm -f {}/.gwt/memory/constitution.md", root().display()) }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
     assert!(
@@ -398,7 +405,10 @@ fn allows_git_push_in_chained_command() {
 
 #[test]
 fn worktree_external_file_op_is_blocked_before_owner_gate() {
-    let event = event("Bash", json!({ "command": "rm -rf /tmp/outside" }));
+    let event = event(
+        "Bash",
+        json!({ "command": format!("rm -rf {}", outside_root().display()) }),
+    );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
         .expect("out-of-worktree file ops must be blocked");
     assert!(decision.reason.contains("outside worktree"));

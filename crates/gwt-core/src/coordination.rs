@@ -598,7 +598,11 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
         file.sync_all()?;
     }
     if cfg!(windows) && path.exists() {
-        std::fs::remove_file(path)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
@@ -636,7 +640,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all()?;
     }
     if cfg!(windows) && path.exists() {
-        std::fs::remove_file(path)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())

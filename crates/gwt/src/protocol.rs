@@ -97,6 +97,7 @@ pub enum FrontendEvent {
         action: LaunchWizardAction,
         bounds: Option<WindowGeometry>,
     },
+    ApplyUpdate,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,4 +175,5 @@ pub enum BackendEvent {
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
     },
+    UpdateState(gwt_core::update::UpdateState),
 }

@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
+    sync::{Arc, OnceLock},
 };
 
 use gwt_git::PrStatus;
@@ -16,6 +17,9 @@ use super::{
     CliParseError, LinkedPrSummary, PrChecksSummary, PrCreateCall, PrEditCall, PrReview,
     PrReviewThread,
 };
+
+type IssueClientFactory =
+    dyn Fn(&str, &str) -> Result<HttpIssueClient, gwt_github::client::ApiError> + Send + Sync;
 
 /// High-level runtime environment for the CLI. Kept as a trait so tests can
 /// inject a [`FakeIssueClient`] instead of spinning up real HTTP.
@@ -135,10 +139,117 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
 // DefaultCliEnv: production runtime wiring
 // ---------------------------------------------------------------------------
 
-/// Default production [`CliEnv`] that uses an [`HttpIssueClient`] with
-/// credentials from `gh auth token` and the user's home cache directory.
+#[doc(hidden)]
+pub struct LazyIssueClient {
+    owner: String,
+    repo: String,
+    factory: Arc<IssueClientFactory>,
+    resolved: OnceLock<HttpIssueClient>,
+}
+
+impl LazyIssueClient {
+    fn new_with_factory(owner: &str, repo: &str, factory: Arc<IssueClientFactory>) -> Self {
+        Self {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            factory,
+            resolved: OnceLock::new(),
+        }
+    }
+
+    fn resolve(&self) -> Result<&HttpIssueClient, gwt_github::client::ApiError> {
+        if let Some(client) = self.resolved.get() {
+            return Ok(client);
+        }
+
+        let client = (self.factory)(&self.owner, &self.repo)?;
+        let _ = self.resolved.set(client);
+        self.resolved.get().ok_or_else(|| {
+            gwt_github::client::ApiError::Unexpected(
+                "lazy issue client failed to initialize".to_string(),
+            )
+        })
+    }
+}
+
+impl IssueClient for LazyIssueClient {
+    fn fetch(
+        &self,
+        number: IssueNumber,
+        since: Option<&gwt_github::client::UpdatedAt>,
+    ) -> Result<gwt_github::client::FetchResult, gwt_github::client::ApiError> {
+        self.resolve()?.fetch(number, since)
+    }
+
+    fn patch_body(
+        &self,
+        number: IssueNumber,
+        new_body: &str,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.patch_body(number, new_body)
+    }
+
+    fn patch_title(
+        &self,
+        number: IssueNumber,
+        new_title: &str,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.patch_title(number, new_title)
+    }
+
+    fn patch_comment(
+        &self,
+        comment_id: gwt_github::client::CommentId,
+        new_body: &str,
+    ) -> Result<gwt_github::client::CommentSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.patch_comment(comment_id, new_body)
+    }
+
+    fn create_comment(
+        &self,
+        number: IssueNumber,
+        body: &str,
+    ) -> Result<gwt_github::client::CommentSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.create_comment(number, body)
+    }
+
+    fn create_issue(
+        &self,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.create_issue(title, body, labels)
+    }
+
+    fn set_labels(
+        &self,
+        number: IssueNumber,
+        labels: &[String],
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.set_labels(number, labels)
+    }
+
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: gwt_github::client::IssueState,
+    ) -> Result<gwt_github::client::IssueSnapshot, gwt_github::client::ApiError> {
+        self.resolve()?.set_state(number, state)
+    }
+
+    fn list_spec_issues(
+        &self,
+        filter: &SpecListFilter,
+    ) -> Result<Vec<gwt_github::client::SpecSummary>, gwt_github::client::ApiError> {
+        self.resolve()?.list_spec_issues(filter)
+    }
+}
+
+/// Default production [`CliEnv`] that defers GitHub auth until a command
+/// actually needs the issue client and uses the user's home cache directory.
 pub struct DefaultCliEnv {
-    client: HttpIssueClient,
+    client: LazyIssueClient,
     cache_root: PathBuf,
     repo_path: PathBuf,
     owner: String,
@@ -148,23 +259,42 @@ pub struct DefaultCliEnv {
 }
 
 impl DefaultCliEnv {
-    pub fn new(
+    pub fn new(owner: &str, repo: &str, repo_path: PathBuf) -> Self {
+        Self::new_with_client_factory(
+            owner,
+            repo,
+            repo_path,
+            Arc::new(HttpIssueClient::from_gh_auth),
+        )
+    }
+
+    fn new_with_client_factory(
         owner: &str,
         repo: &str,
         repo_path: PathBuf,
-    ) -> Result<Self, gwt_github::client::ApiError> {
-        let client = HttpIssueClient::from_gh_auth(owner, repo)?;
+        factory: Arc<IssueClientFactory>,
+    ) -> Self {
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(&repo_path)
             .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
-        Ok(DefaultCliEnv {
-            client,
+        Self::new_with_client_factory_and_cache_root(owner, repo, repo_path, cache_root, factory)
+    }
+
+    fn new_with_client_factory_and_cache_root(
+        owner: &str,
+        repo: &str,
+        repo_path: PathBuf,
+        cache_root: PathBuf,
+        factory: Arc<IssueClientFactory>,
+    ) -> Self {
+        DefaultCliEnv {
+            client: LazyIssueClient::new_with_factory(owner, repo, factory),
             cache_root,
             repo_path,
             owner: owner.to_string(),
             repo: repo.to_string(),
             stdout: io::stdout(),
             stderr: io::stderr(),
-        })
+        }
     }
 
     /// Build an env for hook dispatch that deliberately skips
@@ -176,24 +306,28 @@ impl DefaultCliEnv {
     /// and empty owner/repo strings; any attempt to actually call it
     /// would fail (which is fine — the hook code paths go through
     /// `run_hook`, not the SPEC issue client).
-    pub fn new_for_hooks() -> Result<Self, gwt_github::client::ApiError> {
-        let transport = gwt_github::client::http::ReqwestTransport::new()
-            .map_err(|e| gwt_github::client::ApiError::Network(e.to_string()))?;
-        let client = HttpIssueClient::with_transport(transport, String::new(), "", "");
-        Ok(DefaultCliEnv {
-            client,
-            cache_root: crate::issue_cache::detached_issue_cache_root(),
-            repo_path: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            owner: String::new(),
-            repo: String::new(),
-            stdout: io::stdout(),
-            stderr: io::stderr(),
-        })
+    pub fn new_for_hooks() -> Self {
+        Self::new_with_client_factory_and_cache_root(
+            "",
+            "",
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            crate::issue_cache::detached_issue_cache_root(),
+            Arc::new(|_, _| {
+                let transport = gwt_github::client::http::ReqwestTransport::new()
+                    .map_err(|e| gwt_github::client::ApiError::Network(e.to_string()))?;
+                Ok(HttpIssueClient::with_transport(
+                    transport,
+                    String::new(),
+                    "",
+                    "",
+                ))
+            }),
+        )
     }
 }
 
 impl CliEnv for DefaultCliEnv {
-    type Client = HttpIssueClient;
+    type Client = LazyIssueClient;
 
     fn client(&self) -> &Self::Client {
         &self.client
@@ -314,6 +448,21 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
         "hook" => parse_hook_args(&rest),
+        "update" => Ok(super::CliCommand::Update {
+            check_only: rest.iter().any(|a| a == "--check"),
+        }),
+        "__internal" => match rest.first().map(String::as_str) {
+            Some("apply-update") => Ok(super::CliCommand::InternalApplyUpdate {
+                rest: rest[1..].to_vec(),
+            }),
+            Some("run-installer") => Ok(super::CliCommand::InternalRunInstaller {
+                rest: rest[1..].to_vec(),
+            }),
+            other => Err(CliParseError::UnknownSubcommand(format!(
+                "__internal {}",
+                other.unwrap_or("")
+            ))),
+        },
         _ => Err(CliParseError::UnknownSubcommand(top_verb.to_string())),
     };
 
@@ -583,5 +732,65 @@ impl CliEnv for TestEnv {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no job log: {job_id}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn failing_factory(counter: Arc<AtomicUsize>) -> Arc<IssueClientFactory> {
+        Arc::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Err(gwt_github::client::ApiError::Unauthorized)
+        })
+    }
+
+    #[test]
+    fn lazy_issue_client_defers_resolution_until_first_issue_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client =
+            LazyIssueClient::new_with_factory("akiojin", "gwt", failing_factory(calls.clone()));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let result = client.list_spec_issues(&SpecListFilter::default());
+        assert!(matches!(
+            result,
+            Err(gwt_github::client::ApiError::Unauthorized)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn default_cli_env_construction_does_not_touch_issue_client_factory() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = DefaultCliEnv::new_with_client_factory(
+            "akiojin",
+            "gwt",
+            PathBuf::from("."),
+            failing_factory(calls.clone()),
+        );
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let result = env.client().list_spec_issues(&SpecListFilter::default());
+        assert!(matches!(
+            result,
+            Err(gwt_github::client::ApiError::Unauthorized)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn new_for_hooks_keeps_detached_cache_root() {
+        let env = DefaultCliEnv::new_for_hooks();
+
+        assert_eq!(
+            env.cache_root(),
+            crate::issue_cache::detached_issue_cache_root()
+        );
     }
 }
