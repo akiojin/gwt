@@ -1,11 +1,18 @@
 //! T-035 (SPEC #1942 amendment) — block-bash-policy golden tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gwt::cli::hook::block_bash_policy;
 
 fn root() -> PathBuf {
-    PathBuf::from("/tmp/gwt-test-worktree")
+    std::env::temp_dir().join("gwt-test-worktree")
+}
+
+fn outside_root() -> PathBuf {
+    root()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("gwt-test-outside")
 }
 
 fn block(command: &str) {
@@ -30,13 +37,17 @@ fn blocks_branch_policy_commands() {
 
 #[test]
 fn blocks_cd_outside_worktree() {
-    block("cd /etc");
+    block(&format!("cd {}", outside_root().display()));
 }
 
 #[test]
 fn blocks_file_ops_outside_worktree() {
     block("rm -rf /");
-    block("cp /tmp/gwt-test-worktree/foo.txt /etc/foo.txt");
+    block(&format!(
+        "cp {}/foo.txt {}/foo.txt",
+        root().display(),
+        outside_root().display()
+    ));
 }
 
 #[test]
@@ -78,7 +89,7 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
 fn allows_read_only_and_in_worktree_commands() {
     allow("git branch --list");
     allow("git checkout HEAD -- foo.rs");
-    allow("mkdir /tmp/gwt-test-worktree/new-dir");
+    allow(&format!("mkdir {}/new-dir", root().display()));
 }
 
 #[test]

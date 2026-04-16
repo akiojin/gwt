@@ -123,8 +123,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let wt = compute_worktree_hash(tmp.path()).unwrap();
         let p = gwt_index_db_path(&repo, Some(&wt), Scope::FilesCode).unwrap();
-        let s = p.to_string_lossy();
-        assert!(s.contains("worktrees"));
-        assert!(s.ends_with(&format!("{}/files", wt.as_str())));
+        assert!(p
+            .components()
+            .any(|component| component.as_os_str() == "worktrees"));
+        assert_eq!(p.file_name().and_then(|name| name.to_str()), Some("files"));
+        assert_eq!(
+            p.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some(wt.as_str())
+        );
     }
 }
