@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-16 — fix: read-only CLI は eager GitHub auth を起動時に解決しない
+
+### 事象
+
+`gwt pr current` が無応答に見えた。実際には `pr current` 本体ではなく、
+`DefaultCliEnv::new()` が command dispatch 前に
+`HttpIssueClient::from_gh_auth()` を通して `gh auth token` を同期実行していたことと、
+`cargo run -q` の無音ビルド待ちが重なって原因切り分けを難しくしていた。
+
+### 原因
+
+- read-only CLI と write-capable GitHub Issue client の初期化が分離されていなかった。
+- `gwt pr current` は `gh pr view` だけで成立するのに、起動時に Issue client auth を先に解決していた。
+- 外部 `gh` 呼び出しとビルド待ちに progress/timeout の観測点がなく、体感上は「固まった」ように見えた。
+
+### 再発防止策
+
+1. read-only command path では GitHub Issue client を lazy init し、`env.client()` を触るまで auth を発火させない。
+2. `PrCurrent` のような read-only command で Issue client を使っていないことをテストで固定する。
+3. CLI 無応答調査では、cargo build 待ちと外部 command 待ちを別々に計測してから原因を特定する。
+
 ## 2026-04-15 — fix: Quick Start の resume は struct やテストではなく実 session TOML への保存実態で確認する
 
 ### 事象
