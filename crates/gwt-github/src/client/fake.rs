@@ -66,7 +66,11 @@ impl FakeIssueClient {
 
     /// Snapshot of the recorded call log.
     pub fn call_log(&self) -> Vec<String> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).call_log.clone()
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .call_log
+            .clone()
     }
 
     fn record(&self, state: &mut FakeState, op: &str, target: &str) {

@@ -1217,6 +1217,27 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+
+      .update-toast {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        padding: 10px 16px;
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px solid rgba(59, 130, 246, 0.4);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+        backdrop-filter: blur(8px);
+        font-size: 13px;
+        color: #1e40af;
+        cursor: pointer;
+        z-index: 9999;
+        transition: opacity 0.3s;
+      }
+
+      .update-toast:hover {
+        background: rgba(239, 246, 255, 0.98);
+      }
     </style>
   </head>
   <body>
@@ -3337,7 +3358,37 @@
             launchWizard = event.wizard;
             renderLaunchWizard();
             break;
+          case "update_state":
+            if (event.state === "available") {
+              showUpdateToast(event.latest);
+            }
+            break;
         }
+      }
+
+      let updateToastTimer = null;
+
+      function showUpdateToast(version) {
+        let toast = document.getElementById("update-toast");
+        if (!toast) {
+          toast = document.createElement("div");
+          toast.id = "update-toast";
+          toast.className = "update-toast";
+          document.body.appendChild(toast);
+        }
+        toast.textContent = `\u{1F4E6} Update available: v${version} \u2014 click to apply`;
+        toast.style.opacity = "1";
+        toast.onclick = () => {
+          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
+            send({ kind: "apply_update" });
+          }
+        };
+        clearTimeout(updateToastTimer);
+        updateToastTimer = setTimeout(() => {
+          toast.style.opacity = "0";
+          setTimeout(() => toast.remove(), 300);
+          updateToastTimer = null;
+        }, 8000);
       }
 
       window.addEventListener("pointermove", (event) => {

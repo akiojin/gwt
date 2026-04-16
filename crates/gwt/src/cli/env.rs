@@ -314,6 +314,21 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
         "hook" => parse_hook_args(&rest),
+        "update" => Ok(super::CliCommand::Update {
+            check_only: rest.iter().any(|a| a == "--check"),
+        }),
+        "__internal" => match rest.first().map(String::as_str) {
+            Some("apply-update") => Ok(super::CliCommand::InternalApplyUpdate {
+                rest: rest[1..].to_vec(),
+            }),
+            Some("run-installer") => Ok(super::CliCommand::InternalRunInstaller {
+                rest: rest[1..].to_vec(),
+            }),
+            other => Err(CliParseError::UnknownSubcommand(format!(
+                "__internal {}",
+                other.unwrap_or("")
+            ))),
+        },
         _ => Err(CliParseError::UnknownSubcommand(top_verb.to_string())),
     };
 

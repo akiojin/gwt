@@ -12,6 +12,7 @@ pub mod paths;
 pub mod process;
 pub mod repo_hash;
 pub mod runtime;
+pub mod update;
 pub mod worktree_hash;
 
 pub use error::{GwtError, Result};

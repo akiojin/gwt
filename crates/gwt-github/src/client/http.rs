@@ -101,12 +101,20 @@ impl FakeTransport {
 
     /// Queue a response to be returned by the next `execute` call.
     pub fn enqueue(&self, response: HttpResponse) {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).canned.push_back(response);
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .canned
+            .push_back(response);
     }
 
     /// Snapshot of every recorded request so far.
     pub fn recorded(&self) -> Vec<HttpRequest> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).recorded.clone()
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .recorded
+            .clone()
     }
 }
 
