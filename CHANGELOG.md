@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.3.0] - 2026-04-16
+
+### Bug Fixes
+
+- **update:** Address CodeRabbit review feedback
+
+### Documentation
+
+- **AGENTS.md:** Remove release workflow section
+- **lessons:** V9.2.0 リリース時の Step 9.2 スキップ (AI 実行エラー) に関する教訓を記録
+
+### Features
+
+- Add self-update system (SPEC-2041)
+
 ## [9.2.0] - 2026-04-16
 
 ### Bug Fixes

@@ -10,6 +10,11 @@ dirs = "6"
 which = "8"
 sha2 = { workspace = true }
 hex = { workspace = true }
+reqwest = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
+semver = { workspace = true }
 fs2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
