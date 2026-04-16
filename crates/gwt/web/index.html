@@ -1496,6 +1496,7 @@
       let titlebarClickState = null;
       let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
       let projectError = "";
+      const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
       function presetSurface(preset) {
         if (
@@ -2096,6 +2097,159 @@
         return Uint8Array.from(atob(base64), (value) => value.charCodeAt(0));
       }
 
+      function isMacPlatform() {
+        const platform = navigator.userAgentData?.platform || navigator.platform || "";
+        return /mac|iphone|ipad|ipod/i.test(platform);
+      }
+
+      function isTerminalCopyShortcut(event) {
+        if (isMacPlatform()) {
+          return false;
+        }
+        const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+        return (
+          event.ctrlKey &&
+          event.shiftKey &&
+          !event.altKey &&
+          !event.metaKey &&
+          key === "c"
+        );
+      }
+
+      async function writeClipboardText(text) {
+        if (!text) {
+          return false;
+        }
+        if (navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(text);
+            return true;
+          } catch (_error) {
+            // Fall back to a temporary textarea when the async clipboard API is unavailable.
+          }
+        }
+
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.top = "-1000px";
+        textarea.style.left = "-1000px";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+
+        try {
+          return document.execCommand("copy");
+        } catch (_error) {
+          return false;
+        } finally {
+          textarea.remove();
+        }
+      }
+
+      async function copyTerminalSelection(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || !runtime.terminal.hasSelection()) {
+          return false;
+        }
+        const selection = runtime.terminal.getSelection();
+        if (!selection) {
+          return false;
+        }
+        return writeClipboardText(selection);
+      }
+
+      function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {
+        const copyState = {
+          mouseDown: false,
+          dragged: false,
+          startX: 0,
+          startY: 0,
+        };
+
+        function resetCopyState() {
+          copyState.mouseDown = false;
+          copyState.dragged = false;
+          copyState.startX = 0;
+          copyState.startY = 0;
+        }
+
+        const handleMouseDown = (event) => {
+          if (event.button !== 0) {
+            return;
+          }
+          copyState.mouseDown = true;
+          copyState.dragged = false;
+          copyState.startX = event.clientX;
+          copyState.startY = event.clientY;
+        };
+
+        const handleMouseMove = (event) => {
+          if (!copyState.mouseDown || copyState.dragged) {
+            return;
+          }
+          const movedX = Math.abs(event.clientX - copyState.startX);
+          const movedY = Math.abs(event.clientY - copyState.startY);
+          if (
+            movedX >= TERMINAL_SELECTION_DRAG_THRESHOLD ||
+            movedY >= TERMINAL_SELECTION_DRAG_THRESHOLD
+          ) {
+            copyState.dragged = true;
+          }
+        };
+
+        const handleMouseUp = (event) => {
+          if (!copyState.mouseDown) {
+            return;
+          }
+          const shouldCopy = event.button === 0 && copyState.dragged;
+          resetCopyState();
+          if (!shouldCopy) {
+            return;
+          }
+          requestAnimationFrame(() => {
+            if (!terminal.hasSelection()) {
+              return;
+            }
+            void copyTerminalSelection(windowId);
+          });
+        };
+
+        const handleWindowBlur = () => {
+          resetCopyState();
+        };
+
+        terminal.attachCustomKeyEventHandler((event) => {
+          if (!isTerminalCopyShortcut(event)) {
+            return true;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (!terminal.hasSelection()) {
+            return false;
+          }
+          void copyTerminalSelection(windowId);
+          return false;
+        });
+
+        terminalRoot.addEventListener("mousedown", handleMouseDown);
+        terminalRoot.addEventListener("mouseup", handleMouseUp);
+        window.addEventListener("mousemove", handleMouseMove, true);
+        window.addEventListener("mouseup", handleMouseUp, true);
+        window.addEventListener("blur", handleWindowBlur);
+
+        return () => {
+          terminal.attachCustomKeyEventHandler(() => true);
+          terminalRoot.removeEventListener("mousedown", handleMouseDown);
+          terminalRoot.removeEventListener("mouseup", handleMouseUp);
+          window.removeEventListener("mousemove", handleMouseMove, true);
+          window.removeEventListener("mouseup", handleMouseUp, true);
+          window.removeEventListener("blur", handleWindowBlur);
+        };
+      }
+
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
@@ -2133,10 +2287,11 @@
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
+        const cleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         terminal.onData((data) => {
           send({ kind: "terminal_input", id: windowId, data });
         });
-        terminalMap.set(windowId, { terminal, fitAddon });
+        terminalMap.set(windowId, { terminal, fitAddon, cleanup });
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
 
@@ -3375,7 +3530,9 @@
           if (ids.has(windowId)) {
             continue;
           }
-          terminalMap.get(windowId)?.terminal.dispose();
+          const runtime = terminalMap.get(windowId);
+          runtime?.cleanup?.();
+          runtime?.terminal.dispose();
           terminalMap.delete(windowId);
           decoderMap.delete(windowId);
           detailMap.delete(windowId);

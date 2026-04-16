@@ -1788,6 +1788,50 @@ mod tests {
             dunce::canonicalize(&repo).expect("canonical repo root"),
         );
     }
+
+    #[test]
+    fn embedded_web_terminal_copy_shortcut_uses_ctrl_shift_c() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("function installTerminalCopyHandlers"),
+            "expected web terminal copy handler bootstrap in embedded html",
+        );
+        assert!(
+            html.contains("terminal.attachCustomKeyEventHandler"),
+            "expected xterm custom key handler for copy shortcut",
+        );
+        assert!(
+            html.contains("event.ctrlKey"),
+            "expected Ctrl modifier handling in embedded html",
+        );
+        assert!(
+            html.contains("event.shiftKey"),
+            "expected Shift modifier handling in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_drag_selection_copies_on_mouseup() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("terminalRoot.addEventListener(\"mousedown\""),
+            "expected drag selection tracking in embedded html",
+        );
+        assert!(
+            html.contains("terminalRoot.addEventListener(\"mouseup\""),
+            "expected mouse release copy handling in embedded html",
+        );
+        assert!(
+            html.contains("function copyTerminalSelection"),
+            "expected clipboard copy helper in embedded html",
+        );
+        assert!(
+            html.contains("navigator.clipboard.writeText"),
+            "expected clipboard write path in embedded html",
+        );
+    }
 }
 
 fn normalize_active_tab_id(
