@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.4.0] - 2026-04-16
+
+### Bug Fixes
+
+- Prevent main thread blocking during Launch Agent startup
+- 非同期エージェント起動で agent_id をActiveAgentSessionに渡す
+- Use unwrap_or instead of unnecessary unwrap_or_else
+- Adapt to WindowGeometry API changes from merge
+- **update:** Harden macOS installer flow
+
+### Features
+
+- Add issue selection field to launch wizard UI
+- Center windows in viewport on creation and focus
+
 ## [9.3.0] - 2026-04-16
 
 ### Bug Fixes
