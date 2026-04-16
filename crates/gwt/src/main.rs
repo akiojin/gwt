@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fs,
     io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
@@ -66,7 +65,17 @@ enum UserEvent {
     },
     LaunchComplete {
         window_id: String,
-        result: Result<(ProcessLaunch, String, String, String, PathBuf), String>,
+        result: Result<
+            (
+                ProcessLaunch,
+                String,
+                String,
+                String,
+                PathBuf,
+                gwt_agent::AgentId,
+            ),
+            String,
+        >,
     },
     UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
@@ -1019,10 +1028,27 @@ impl AppRuntime {
     fn handle_launch_complete(
         &mut self,
         window_id: String,
-        result: Result<(ProcessLaunch, String, String, String, PathBuf), String>,
+        result: Result<
+            (
+                ProcessLaunch,
+                String,
+                String,
+                String,
+                PathBuf,
+                gwt_agent::AgentId,
+            ),
+            String,
+        >,
     ) -> Vec<OutboundEvent> {
         match result {
-            Ok((process_launch, session_id, branch_name, display_name, worktree_path)) => {
+            Ok((
+                process_launch,
+                session_id,
+                branch_name,
+                display_name,
+                worktree_path,
+                agent_id,
+            )) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
                         id: window_id,
@@ -1051,6 +1077,7 @@ impl AppRuntime {
                     ActiveAgentSession {
                         window_id: window_id.clone(),
                         session_id,
+                        agent_id: agent_id.to_string(),
                         branch_name,
                         display_name,
                         worktree_path,
@@ -1195,7 +1222,11 @@ impl AppRuntime {
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let project_root = tab.project_root.display().to_string();
-        let title = format!("{} · {}", config.display_name, config.branch.as_ref().unwrap_or(&"workspace".to_string()));
+        let title = format!(
+            "{} · {}",
+            config.display_name,
+            config.branch.as_ref().unwrap_or(&"workspace".to_string())
+        );
         let window = tab
             .workspace
             .add_window_with_title(WindowPreset::Agent, title.clone(), false);
@@ -1215,13 +1246,7 @@ impl AppRuntime {
         let sessions_dir = self.sessions_dir.clone();
 
         thread::spawn(move || {
-            Self::spawn_agent_window_async(
-                proxy,
-                sessions_dir,
-                project_root,
-                window_id,
-                config,
-            )
+            Self::spawn_agent_window_async(proxy, sessions_dir, project_root, window_id, config)
         });
 
         Ok(events)
@@ -1263,8 +1288,9 @@ impl AppRuntime {
                 .clone()
                 .unwrap_or_else(|| "workspace".to_string());
 
+            let agent_id = config.agent_id.clone();
             let mut session =
-                gwt_agent::Session::new(&worktree_path, branch_name.clone(), config.agent_id.clone());
+                gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
             session.display_name = config.display_name.clone();
             session.tool_version = config.tool_version.clone();
             session.model = config.model.clone();
@@ -1308,14 +1334,35 @@ impl AppRuntime {
                 cwd: config.working_dir.clone(),
             };
 
-            Ok((process_launch, session_id, branch_name, config.display_name, worktree_path))
+            Ok((
+                process_launch,
+                session_id,
+                branch_name,
+                config.display_name,
+                worktree_path,
+                agent_id,
+            ))
         })();
 
         match result {
-            Ok((process_launch, session_id, branch_name, display_name, worktree_path)) => {
+            Ok((
+                process_launch,
+                session_id,
+                branch_name,
+                display_name,
+                worktree_path,
+                agent_id,
+            )) => {
                 let _ = proxy.send_event(UserEvent::LaunchComplete {
                     window_id,
-                    result: Ok((process_launch, session_id, branch_name, display_name, worktree_path)),
+                    result: Ok((
+                        process_launch,
+                        session_id,
+                        branch_name,
+                        display_name,
+                        worktree_path,
+                        agent_id,
+                    )),
                 });
             }
             Err(error) => {
@@ -2918,7 +2965,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
                 clients.dispatch(vec![OutboundEvent::broadcast(
-                    BackendEvent::LaunchProgress { id: window_id, message },
+                    BackendEvent::LaunchProgress {
+                        id: window_id,
+                        message,
+                    },
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
