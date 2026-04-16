@@ -474,7 +474,35 @@
       }
 
       .terminal-overlay.visible {
-        display: block;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: rgba(15, 23, 42, 0.95);
+      }
+
+      .overlay-spinner {
+        font-size: 24px;
+        line-height: 1;
+        display: inline-block;
+        animation: spin-text 0.8s steps(8) infinite;
+      }
+
+      .overlay-message {
+        font-size: 13px;
+        color: #bfdbfe;
+      }
+
+      @keyframes spin-text {
+        0% { content: "⣾"; }
+        12.5% { content: "⣽"; }
+        25% { content: "⣻"; }
+        37.5% { content: "⢿"; }
+        50% { content: "⡿"; }
+        62.5% { content: "⣟"; }
+        75% { content: "⣯"; }
+        87.5% { content: "⣷"; }
       }
 
       .file-tree-root,
@@ -1637,7 +1665,7 @@
           row.addEventListener("click", () => {
             windowListOpen = false;
             renderWindowList();
-            focusWindowRemotely(entry.id);
+            focusWindowRemotely(entry.id, { center: true });
             if (entry.minimized) {
               send({ kind: "restore_window", id: entry.id });
             }
@@ -1958,12 +1986,41 @@
         label.textContent = status;
         const effectiveDetail = detailMap.get(windowId);
         if (overlay) {
-          overlay.textContent = effectiveDetail || "";
+          const messageEl = overlay.querySelector(".overlay-message");
+          if (messageEl) {
+            messageEl.textContent = effectiveDetail || "";
+          } else {
+            overlay.textContent = effectiveDetail || "";
+          }
           overlay.classList.toggle(
             "visible",
-            status === "error" || status === "exited",
+            status === "starting" || status === "error" || status === "exited",
           );
+          if (status === "starting") {
+            startSpinnerAnimation(overlay);
+          }
         }
+      }
+
+      function startSpinnerAnimation(overlay) {
+        const spinner = overlay.querySelector(".overlay-spinner");
+        if (!spinner) return;
+        const chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+        let index = 0;
+        const interval = setInterval(() => {
+          spinner.textContent = chars[index % chars.length];
+          index++;
+        }, 100);
+        const cleanup = () => {
+          clearInterval(interval);
+          overlay.removeEventListener("visibilitychange", cleanup);
+        };
+        const observer = new MutationObserver(() => {
+          if (!overlay.classList.contains("visible")) {
+            cleanup();
+          }
+        });
+        observer.observe(overlay, { attributes: true });
       }
 
       function focusWindowLocally(windowId) {
@@ -1973,9 +2030,11 @@
         }
       }
 
-      function focusWindowRemotely(windowId) {
+      function focusWindowRemotely(windowId, { center = false } = {}) {
         focusWindowLocally(windowId);
-        send({ kind: "focus_window", id: windowId });
+        const payload = { kind: "focus_window", id: windowId };
+        if (center) payload.bounds = visibleBounds();
+        send(payload);
       }
 
       function toggleMinimizeWindow(windowId) {
@@ -2257,10 +2316,14 @@
       }
 
       function sendWizardAction(action) {
-        send({
+        const payload = {
           kind: "launch_wizard_action",
           action,
-        });
+        };
+        if (action.kind === "submit") {
+          payload.bounds = visibleBounds();
+        }
+        send(payload);
       }
 
       function createNode(tagName, className, textContent) {
@@ -2742,6 +2805,37 @@
 
         {
           const section = createLaunchSection(
+            "Linked issue",
+            "Optional: Link an issue to this launch session.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          const field = createLaunchField("Issue number", false);
+          const input = createNode("input", "launch-input");
+          input.type = "number";
+          input.min = "1";
+          input.value = launchWizard.linked_issue_number
+            ? launchWizard.linked_issue_number.toString()
+            : "";
+          input.placeholder = "e.g., 1938";
+          input.addEventListener("change", () => {
+            const value = input.value.trim();
+            if (value) {
+              sendWizardAction({
+                kind: "set_linked_issue",
+                issue_number: parseInt(value, 10),
+              });
+            } else {
+              sendWizardAction({ kind: "clear_linked_issue" });
+            }
+          });
+          field.appendChild(input);
+          grid.appendChild(field);
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        {
+          const section = createLaunchSection(
             "Advanced",
             "Runtime target, versions, and launch flags.",
           );
@@ -3044,6 +3138,15 @@
             <div class="terminal-overlay"></div>
           `;
           const terminalRoot = body.querySelector(".terminal-root");
+          const overlay = body.querySelector(".terminal-overlay");
+          const spinner = document.createElement("div");
+          spinner.className = "overlay-spinner";
+          spinner.textContent = "⣾";
+          const message = document.createElement("div");
+          message.className = "overlay-message";
+          message.textContent = "Launching...";
+          overlay.appendChild(spinner);
+          overlay.appendChild(message);
           terminalRoot.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
             send({ kind: "focus_window", id: windowData.id });
@@ -3321,6 +3424,16 @@
           case "terminal_status":
             applyStatus(event.id, event.status, event.detail);
             break;
+          case "launch_progress": {
+            const element = windowMap.get(event.id);
+            if (element) {
+              const messageEl = element.querySelector(".terminal-overlay .overlay-message");
+              if (messageEl) {
+                messageEl.textContent = event.message;
+              }
+            }
+            break;
+          }
           case "file_tree_entries": {
             const state = ensureFileTreeState(event.id);
             state.loaded.set(event.path, event.entries);
@@ -3626,7 +3739,7 @@
 
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
-          send({ kind: "create_window", preset: button.dataset.preset });
+          send({ kind: "create_window", preset: button.dataset.preset, bounds: visibleBounds() });
           closeModal();
         });
       }

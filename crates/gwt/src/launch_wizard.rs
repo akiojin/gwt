@@ -232,6 +232,10 @@ pub enum LaunchWizardAction {
     SetExecutionMode {
         mode: String,
     },
+    SetLinkedIssue {
+        issue_number: u64,
+    },
+    ClearLinkedIssue,
     SetSkipPermissions {
         enabled: bool,
     },
@@ -443,6 +447,12 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetSkipPermissions { enabled } => {
                 self.skip_permissions = enabled;
+            }
+            LaunchWizardAction::SetLinkedIssue { issue_number } => {
+                self.linked_issue_number = Some(issue_number);
+            }
+            LaunchWizardAction::ClearLinkedIssue => {
+                self.linked_issue_number = None;
             }
             LaunchWizardAction::SetCodexFastMode { enabled } => {
                 self.codex_fast_mode = enabled && self.agent_is_codex();

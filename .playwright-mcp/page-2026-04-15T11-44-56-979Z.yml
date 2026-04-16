@@ -1,0 +1,622 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - button "gwt Close gwt" [ref=e86] [cursor=pointer]:
+        - generic [ref=e87]: gwt
+        - button "Close gwt" [ref=e88]: ×
+      - button "llmlb Close llmlb" [ref=e89] [cursor=pointer]:
+        - generic [ref=e90]: llmlb
+        - button "Close llmlb" [ref=e91]: ×
+    - button "Open project" [ref=e13] [cursor=pointer]: Open Project
+  - generic [ref=e14]:
+    - generic [ref=e15]:
+      - generic [ref=e17]: Connected
+      - generic [ref=e18]: Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom
+    - generic [ref=e92]:
+      - generic [ref=e93]:
+        - generic [ref=e94]:
+          - generic [ref=e95]: Branches
+          - generic [ref=e98]: ready
+        - generic [ref=e99]:
+          - button "Minimize window" [ref=e100] [cursor=pointer]: ▁
+          - button "Maximize window" [ref=e101] [cursor=pointer]: ◻
+          - button "Close window" [ref=e102] [cursor=pointer]: ×
+      - generic [ref=e104]:
+        - generic [ref=e105]:
+          - generic [ref=e106]: Repository branches · double-click to launch
+          - button "Refresh branches" [ref=e107] [cursor=pointer]: ↻
+        - generic [ref=e109]:
+          - generic [ref=e110] [cursor=pointer]:
+            - generic [ref=e111]:
+              - generic [ref=e112]:
+                - generic [ref=e113]: develop
+                - generic [ref=e114]: HEAD
+              - generic [ref=e115]: origin/develop
+              - generic [ref=e116]: 2026-04-15 20:37:50 +0900
+            - generic [ref=e117]:
+              - generic [ref=e118]: local
+              - generic [ref=e119]: synced
+          - generic [ref=e120] [cursor=pointer]:
+            - generic [ref=e121]:
+              - generic [ref=e123]: bugfix/issue-1265
+              - generic [ref=e124]: origin/bugfix/issue-1265
+              - generic [ref=e125]: 2026-03-03 06:12:58 +0000
+            - generic [ref=e126]:
+              - generic [ref=e127]: local
+              - generic [ref=e128]: synced
+          - generic [ref=e129] [cursor=pointer]:
+            - generic [ref=e130]:
+              - generic [ref=e132]: bugfix/issue-1693
+              - generic [ref=e133]: origin/bugfix/issue-1693
+              - generic [ref=e134]: 2026-03-18 20:47:50 +0900
+            - generic [ref=e135]:
+              - generic [ref=e136]: local
+              - generic [ref=e137]: synced
+          - generic [ref=e138] [cursor=pointer]:
+            - generic [ref=e139]:
+              - generic [ref=e141]: bugfix/launch-agent-issue
+              - generic [ref=e142]: origin/bugfix/launch-agent-issue
+              - generic [ref=e143]: 2026-04-15 20:31:02 +0900
+            - generic [ref=e144]:
+              - generic [ref=e145]: local
+              - generic [ref=e146]: synced
+          - generic [ref=e147] [cursor=pointer]:
+            - generic [ref=e148]:
+              - generic [ref=e150]: bugfix/launch-stop
+              - generic [ref=e151]: origin/bugfix/launch-stop
+              - generic [ref=e152]: 2026-04-15 20:02:23 +0900
+            - generic [ref=e153]:
+              - generic [ref=e154]: local
+              - generic [ref=e155]: synced
+          - generic [ref=e156] [cursor=pointer]:
+            - generic [ref=e157]:
+              - generic [ref=e159]: bugfix/poisoned-lock
+              - generic [ref=e160]: origin/bugfix/poisoned-lock
+              - generic [ref=e161]: 2026-04-15 19:21:28 +0900
+            - generic [ref=e162]:
+              - generic [ref=e163]: local
+              - generic [ref=e164]: synced
+          - generic [ref=e165] [cursor=pointer]:
+            - generic [ref=e166]:
+              - generic [ref=e168]: dependabot/cargo/develop/tracing-subscriber-0.3.23
+              - generic [ref=e169]: origin/dependabot/cargo/develop/tracing-subscriber-0.3.23
+              - generic [ref=e170]: 2026-03-16 01:03:06 +0000
+            - generic [ref=e171]:
+              - generic [ref=e172]: local
+              - generic [ref=e173]: synced
+          - generic [ref=e174] [cursor=pointer]:
+            - generic [ref=e175]:
+              - generic [ref=e177]: dependabot/cargo/develop/whisper-rs-0.16.0
+              - generic [ref=e178]: origin/dependabot/cargo/develop/whisper-rs-0.16.0
+              - generic [ref=e179]: 2026-03-16 10:01:09 +0900
+            - generic [ref=e180]:
+              - generic [ref=e181]: local
+              - generic [ref=e182]: synced
+          - generic [ref=e183] [cursor=pointer]:
+            - generic [ref=e184]:
+              - generic [ref=e186]: feature/assistant-mode
+              - generic [ref=e187]: origin/feature/assistant-mode
+              - generic [ref=e188]: 2026-03-16 22:53:17 +0900
+            - generic [ref=e189]:
+              - generic [ref=e190]: local
+              - generic [ref=e191]: synced
+          - generic [ref=e192] [cursor=pointer]:
+            - generic [ref=e193]:
+              - generic [ref=e195]: feature/issue-1489
+              - generic [ref=e196]: origin/feature/issue-1489
+              - generic [ref=e197]: 2026-03-18 20:38:12 +0900
+            - generic [ref=e198]:
+              - generic [ref=e199]: local
+              - generic [ref=e200]: synced
+          - generic [ref=e201] [cursor=pointer]:
+            - generic [ref=e202]:
+              - generic [ref=e204]: feature/issue-1579
+              - generic [ref=e205]: origin/feature/issue-1579
+              - generic [ref=e206]: 2026-03-18 18:29:37 +0900
+            - generic [ref=e207]:
+              - generic [ref=e208]: local
+              - generic [ref=e209]: synced
+          - generic [ref=e210] [cursor=pointer]:
+            - generic [ref=e211]:
+              - generic [ref=e213]: feature/issue-1636
+              - generic [ref=e214]: origin/feature/issue-1636
+              - generic [ref=e215]: 2026-03-18 21:13:47 +0900
+            - generic [ref=e216]:
+              - generic [ref=e217]: local
+              - generic [ref=e218]: ↑0 ↓31
+          - generic [ref=e219] [cursor=pointer]:
+            - generic [ref=e220]:
+              - generic [ref=e222]: feature/issue-1644
+              - generic [ref=e223]: origin/feature/issue-1644
+              - generic [ref=e224]: 2026-03-18 21:24:58 +0900
+            - generic [ref=e225]:
+              - generic [ref=e226]: local
+              - generic [ref=e227]: synced
+          - generic [ref=e228] [cursor=pointer]:
+            - generic [ref=e229]:
+              - generic [ref=e231]: feature/maximum-window
+              - generic [ref=e232]: origin/feature/maximum-window
+              - generic [ref=e233]: 2026-04-15 18:02:40 +0900
+            - generic [ref=e234]:
+              - generic [ref=e235]: local
+              - generic [ref=e236]: synced
+          - generic [ref=e237] [cursor=pointer]:
+            - generic [ref=e238]:
+              - generic [ref=e240]: feature/migrate-specmd-to-issue
+              - generic [ref=e241]: origin/feature/migrate-specmd-to-issue
+              - generic [ref=e242]: 2026-03-03 21:24:26 +0900
+            - generic [ref=e243]:
+              - generic [ref=e244]: local
+              - generic [ref=e245]: synced
+          - generic [ref=e246] [cursor=pointer]:
+            - generic [ref=e247]:
+              - generic [ref=e249]: feature/poc-terminal
+              - generic [ref=e250]: origin/feature/poc-terminal
+              - generic [ref=e251]: 2026-04-15 14:28:03 +0900
+            - generic [ref=e252]:
+              - generic [ref=e253]: local
+              - generic [ref=e254]: ↑0 ↓36
+          - generic [ref=e255] [cursor=pointer]:
+            - generic [ref=e256]:
+              - generic [ref=e258]: feature/window-focus
+              - generic [ref=e259]: origin/feature/window-focus
+              - generic [ref=e260]: 2026-04-15 20:42:28 +0900
+            - generic [ref=e261]:
+              - generic [ref=e262]: local
+              - generic [ref=e263]: synced
+          - generic [ref=e264] [cursor=pointer]:
+            - generic [ref=e265]:
+              - generic [ref=e267]: worktree-agent-a2fe010f
+              - generic [ref=e268]: origin/main
+              - generic [ref=e269]: 2026-03-13 23:08:33 +0000
+            - generic [ref=e270]:
+              - generic [ref=e271]: local
+              - generic [ref=e272]: ↑0 ↓1750
+          - generic [ref=e273] [cursor=pointer]:
+            - generic [ref=e274]:
+              - generic [ref=e276]: worktree-agent-afc8faf9
+              - generic [ref=e277]: origin/main
+              - generic [ref=e278]: 2026-03-13 23:08:33 +0000
+            - generic [ref=e279]:
+              - generic [ref=e280]: local
+              - generic [ref=e281]: ↑0 ↓1750
+          - generic [ref=e282] [cursor=pointer]:
+            - generic [ref=e283]:
+              - generic [ref=e285]: origin
+              - generic [ref=e286]: No upstream
+              - generic [ref=e287]: 2026-04-15 20:07:05 +0900
+            - generic [ref=e288]:
+              - generic [ref=e289]: remote
+              - generic [ref=e290]: synced
+          - generic [ref=e291] [cursor=pointer]:
+            - generic [ref=e292]:
+              - generic [ref=e294]: origin/bugfix/agent-startup-error
+              - generic [ref=e295]: No upstream
+              - generic [ref=e296]: 2026-03-10 19:02:50 +0900
+            - generic [ref=e297]:
+              - generic [ref=e298]: remote
+              - generic [ref=e299]: synced
+          - generic [ref=e300] [cursor=pointer]:
+            - generic [ref=e301]:
+              - generic [ref=e303]: origin/bugfix/ai-branch-suggestion
+              - generic [ref=e304]: No upstream
+              - generic [ref=e305]: 2026-04-06 17:28:55 +0900
+            - generic [ref=e306]:
+              - generic [ref=e307]: remote
+              - generic [ref=e308]: synced
+          - generic [ref=e309] [cursor=pointer]:
+            - generic [ref=e310]:
+              - generic [ref=e312]: origin/bugfix/claude-code-auto-mode
+              - generic [ref=e313]: No upstream
+              - generic [ref=e314]: 2026-04-06 18:27:04 +0900
+            - generic [ref=e315]:
+              - generic [ref=e316]: remote
+              - generic [ref=e317]: synced
+          - generic [ref=e318] [cursor=pointer]:
+            - generic [ref=e319]:
+              - generic [ref=e321]: origin/bugfix/error-dialog
+              - generic [ref=e322]: No upstream
+              - generic [ref=e323]: 2026-04-14 20:22:41 +0900
+            - generic [ref=e324]:
+              - generic [ref=e325]: remote
+              - generic [ref=e326]: synced
+          - generic [ref=e327] [cursor=pointer]:
+            - generic [ref=e328]:
+              - generic [ref=e330]: origin/bugfix/hooks
+              - generic [ref=e331]: No upstream
+              - generic [ref=e332]: 2026-04-14 20:02:28 +0900
+            - generic [ref=e333]:
+              - generic [ref=e334]: remote
+              - generic [ref=e335]: synced
+          - generic [ref=e336] [cursor=pointer]:
+            - generic [ref=e337]:
+              - generic [ref=e339]: origin/bugfix/issue-1265
+              - generic [ref=e340]: No upstream
+              - generic [ref=e341]: 2026-03-03 06:12:58 +0000
+            - generic [ref=e342]:
+              - generic [ref=e343]: remote
+              - generic [ref=e344]: synced
+          - generic [ref=e345] [cursor=pointer]:
+            - generic [ref=e346]:
+              - generic [ref=e348]: origin/bugfix/issue-1472
+              - generic [ref=e349]: No upstream
+              - generic [ref=e350]: 2026-03-06 03:18:35 +0000
+            - generic [ref=e351]:
+              - generic [ref=e352]: remote
+              - generic [ref=e353]: synced
+          - generic [ref=e354] [cursor=pointer]:
+            - generic [ref=e355]:
+              - generic [ref=e357]: origin/bugfix/issue-1693
+              - generic [ref=e358]: No upstream
+              - generic [ref=e359]: 2026-03-18 20:47:50 +0900
+            - generic [ref=e360]:
+              - generic [ref=e361]: remote
+              - generic [ref=e362]: synced
+          - generic [ref=e363] [cursor=pointer]:
+            - generic [ref=e364]:
+              - generic [ref=e366]: origin/bugfix/issue-1712
+              - generic [ref=e367]: No upstream
+              - generic [ref=e368]: 2026-03-22 18:21:14 +0900
+            - generic [ref=e369]:
+              - generic [ref=e370]: remote
+              - generic [ref=e371]: synced
+          - generic [ref=e372] [cursor=pointer]:
+            - generic [ref=e373]:
+              - generic [ref=e375]: origin/bugfix/issue-1720
+              - generic [ref=e376]: No upstream
+              - generic [ref=e377]: 2026-03-19 23:19:14 +0900
+            - generic [ref=e378]:
+              - generic [ref=e379]: remote
+              - generic [ref=e380]: synced
+          - generic [ref=e381] [cursor=pointer]:
+            - generic [ref=e382]:
+              - generic [ref=e384]: origin/bugfix/issue-launch-agent
+              - generic [ref=e385]: No upstream
+              - generic [ref=e386]: 2026-04-07 09:13:08 +0900
+            - generic [ref=e387]:
+              - generic [ref=e388]: remote
+              - generic [ref=e389]: synced
+          - generic [ref=e390] [cursor=pointer]:
+            - generic [ref=e391]:
+              - generic [ref=e393]: origin/bugfix/japanese
+              - generic [ref=e394]: No upstream
+              - generic [ref=e395]: 2026-04-09 02:26:26 +0900
+            - generic [ref=e396]:
+              - generic [ref=e397]: remote
+              - generic [ref=e398]: synced
+          - generic [ref=e399] [cursor=pointer]:
+            - generic [ref=e400]:
+              - generic [ref=e402]: origin/bugfix/launch-agent-issue
+              - generic [ref=e403]: No upstream
+              - generic [ref=e404]: 2026-04-15 20:31:02 +0900
+            - generic [ref=e405]:
+              - generic [ref=e406]: remote
+              - generic [ref=e407]: synced
+          - generic [ref=e408] [cursor=pointer]:
+            - generic [ref=e409]:
+              - generic [ref=e411]: origin/bugfix/launch-stop
+              - generic [ref=e412]: No upstream
+              - generic [ref=e413]: 2026-04-15 20:02:23 +0900
+            - generic [ref=e414]:
+              - generic [ref=e415]: remote
+              - generic [ref=e416]: synced
+          - generic [ref=e417] [cursor=pointer]:
+            - generic [ref=e418]:
+              - generic [ref=e420]: origin/bugfix/not-work-paste
+              - generic [ref=e421]: No upstream
+              - generic [ref=e422]: 2026-04-06 20:16:27 +0900
+            - generic [ref=e423]:
+              - generic [ref=e424]: remote
+              - generic [ref=e425]: synced
+          - generic [ref=e426] [cursor=pointer]:
+            - generic [ref=e427]:
+              - generic [ref=e429]: origin/bugfix/poisoned-lock
+              - generic [ref=e430]: No upstream
+              - generic [ref=e431]: 2026-04-15 19:21:28 +0900
+            - generic [ref=e432]:
+              - generic [ref=e433]: remote
+              - generic [ref=e434]: synced
+          - generic [ref=e435] [cursor=pointer]:
+            - generic [ref=e436]:
+              - generic [ref=e438]: origin/bugfix/scroll
+              - generic [ref=e439]: No upstream
+              - generic [ref=e440]: 2026-04-14 20:27:54 +0900
+            - generic [ref=e441]:
+              - generic [ref=e442]: remote
+              - generic [ref=e443]: synced
+          - generic [ref=e444] [cursor=pointer]:
+            - generic [ref=e445]:
+              - generic [ref=e447]: origin/bugfix/terminal-scroll
+              - generic [ref=e448]: No upstream
+              - generic [ref=e449]: 2026-04-08 10:08:01 +0900
+            - generic [ref=e450]:
+              - generic [ref=e451]: remote
+              - generic [ref=e452]: synced
+          - generic [ref=e453] [cursor=pointer]:
+            - generic [ref=e454]:
+              - generic [ref=e456]: origin/bugfix/unavailable-auto-mode
+              - generic [ref=e457]: No upstream
+              - generic [ref=e458]: 2026-04-07 18:57:24 +0900
+            - generic [ref=e459]:
+              - generic [ref=e460]: remote
+              - generic [ref=e461]: synced
+          - generic [ref=e462] [cursor=pointer]:
+            - generic [ref=e463]:
+              - generic [ref=e465]: origin/dependabot/cargo/cargo-2cb957d483
+              - generic [ref=e466]: No upstream
+              - generic [ref=e467]: 2026-04-15 11:08:19 +0000
+            - generic [ref=e468]:
+              - generic [ref=e469]: remote
+              - generic [ref=e470]: synced
+          - generic [ref=e471] [cursor=pointer]:
+            - generic [ref=e472]:
+              - generic [ref=e474]: origin/dependabot/cargo/develop/libc-0.2.185
+              - generic [ref=e475]: No upstream
+              - generic [ref=e476]: 2026-04-15 11:08:26 +0000
+            - generic [ref=e477]:
+              - generic [ref=e478]: remote
+              - generic [ref=e479]: synced
+          - generic [ref=e480] [cursor=pointer]:
+            - generic [ref=e481]:
+              - generic [ref=e483]: origin/dependabot/cargo/develop/rfd-0.17.2
+              - generic [ref=e484]: No upstream
+              - generic [ref=e485]: 2026-04-15 11:08:13 +0000
+            - generic [ref=e486]:
+              - generic [ref=e487]: remote
+              - generic [ref=e488]: synced
+          - generic [ref=e489] [cursor=pointer]:
+            - generic [ref=e490]:
+              - generic [ref=e492]: origin/dependabot/cargo/develop/tokio-1.52.0
+              - generic [ref=e493]: No upstream
+              - generic [ref=e494]: 2026-04-15 11:08:48 +0000
+            - generic [ref=e495]:
+              - generic [ref=e496]: remote
+              - generic [ref=e497]: synced
+          - generic [ref=e498] [cursor=pointer]:
+            - generic [ref=e499]:
+              - generic [ref=e501]: origin/dependabot/cargo/develop/vt100-0.16.2
+              - generic [ref=e502]: No upstream
+              - generic [ref=e503]: 2026-04-15 11:08:58 +0000
+            - generic [ref=e504]:
+              - generic [ref=e505]: remote
+              - generic [ref=e506]: synced
+          - generic [ref=e507] [cursor=pointer]:
+            - generic [ref=e508]:
+              - generic [ref=e510]: origin/develop
+              - generic [ref=e511]: No upstream
+              - generic [ref=e512]: 2026-04-15 20:37:50 +0900
+            - generic [ref=e513]:
+              - generic [ref=e514]: remote
+              - generic [ref=e515]: synced
+          - generic [ref=e516] [cursor=pointer]:
+            - generic [ref=e517]:
+              - generic [ref=e519]: origin/feature/agent-tabs
+              - generic [ref=e520]: No upstream
+              - generic [ref=e521]: 2026-04-07 00:08:01 +0900
+            - generic [ref=e522]:
+              - generic [ref=e523]: remote
+              - generic [ref=e524]: synced
+          - generic [ref=e525] [cursor=pointer]:
+            - generic [ref=e526]:
+              - generic [ref=e528]: origin/feature/ai-summary-improvement
+              - generic [ref=e529]: No upstream
+              - generic [ref=e530]: 2026-03-02 10:26:29 +0000
+            - generic [ref=e531]:
+              - generic [ref=e532]: remote
+              - generic [ref=e533]: synced
+          - generic [ref=e534] [cursor=pointer]:
+            - generic [ref=e535]:
+              - generic [ref=e537]: origin/feature/assistant-mode
+              - generic [ref=e538]: No upstream
+              - generic [ref=e539]: 2026-03-16 22:53:17 +0900
+            - generic [ref=e540]:
+              - generic [ref=e541]: remote
+              - generic [ref=e542]: synced
+          - generic [ref=e543] [cursor=pointer]:
+            - generic [ref=e544]:
+              - generic [ref=e546]: origin/feature/branches
+              - generic [ref=e547]: No upstream
+              - generic [ref=e548]: 2026-04-07 09:29:35 +0900
+            - generic [ref=e549]:
+              - generic [ref=e550]: remote
+              - generic [ref=e551]: synced
+          - generic [ref=e552] [cursor=pointer]:
+            - generic [ref=e553]:
+              - generic [ref=e555]: origin/feature/cleanup
+              - generic [ref=e556]: No upstream
+              - generic [ref=e557]: 2026-04-08 01:33:14 +0900
+            - generic [ref=e558]:
+              - generic [ref=e559]: remote
+              - generic [ref=e560]: synced
+          - generic [ref=e561] [cursor=pointer]:
+            - generic [ref=e562]:
+              - generic [ref=e564]: origin/feature/codex-hooks
+              - generic [ref=e565]: No upstream
+              - generic [ref=e566]: 2026-04-07 23:06:17 +0900
+            - generic [ref=e567]:
+              - generic [ref=e568]: remote
+              - generic [ref=e569]: synced
+          - generic [ref=e570] [cursor=pointer]:
+            - generic [ref=e571]:
+              - generic [ref=e573]: origin/feature/feature-1787
+              - generic [ref=e574]: No upstream
+              - generic [ref=e575]: 2026-04-02 02:44:57 +0900
+            - generic [ref=e576]:
+              - generic [ref=e577]: remote
+              - generic [ref=e578]: synced
+          - generic [ref=e579] [cursor=pointer]:
+            - generic [ref=e580]:
+              - generic [ref=e582]: origin/feature/issue-1159
+              - generic [ref=e583]: No upstream
+              - generic [ref=e584]: 2026-02-20 20:30:15 +0900
+            - generic [ref=e585]:
+              - generic [ref=e586]: remote
+              - generic [ref=e587]: synced
+          - generic [ref=e588] [cursor=pointer]:
+            - generic [ref=e589]:
+              - generic [ref=e591]: origin/feature/issue-1489
+              - generic [ref=e592]: No upstream
+              - generic [ref=e593]: 2026-03-18 20:38:12 +0900
+            - generic [ref=e594]:
+              - generic [ref=e595]: remote
+              - generic [ref=e596]: synced
+          - generic [ref=e597] [cursor=pointer]:
+            - generic [ref=e598]:
+              - generic [ref=e600]: origin/feature/issue-1636
+              - generic [ref=e601]: No upstream
+              - generic [ref=e602]: 2026-03-19 14:09:55 +0900
+            - generic [ref=e603]:
+              - generic [ref=e604]: remote
+              - generic [ref=e605]: synced
+          - generic [ref=e606] [cursor=pointer]:
+            - generic [ref=e607]:
+              - generic [ref=e609]: origin/feature/issue-1641
+              - generic [ref=e610]: No upstream
+              - generic [ref=e611]: 2026-03-18 14:05:16 +0900
+            - generic [ref=e612]:
+              - generic [ref=e613]: remote
+              - generic [ref=e614]: synced
+          - generic [ref=e615] [cursor=pointer]:
+            - generic [ref=e616]:
+              - generic [ref=e618]: origin/feature/issue-1684
+              - generic [ref=e619]: No upstream
+              - generic [ref=e620]: 2026-03-18 20:06:28 +0900
+            - generic [ref=e621]:
+              - generic [ref=e622]: remote
+              - generic [ref=e623]: synced
+          - generic [ref=e624] [cursor=pointer]:
+            - generic [ref=e625]:
+              - generic [ref=e627]: origin/feature/issue-1692
+              - generic [ref=e628]: No upstream
+              - generic [ref=e629]: 2026-03-18 21:32:33 +0900
+            - generic [ref=e630]:
+              - generic [ref=e631]: remote
+              - generic [ref=e632]: synced
+          - generic [ref=e633] [cursor=pointer]:
+            - generic [ref=e634]:
+              - generic [ref=e636]: origin/feature/issue-1705
+              - generic [ref=e637]: No upstream
+              - generic [ref=e638]: 2026-03-24 02:22:10 +0900
+            - generic [ref=e639]:
+              - generic [ref=e640]: remote
+              - generic [ref=e641]: synced
+          - generic [ref=e642] [cursor=pointer]:
+            - generic [ref=e643]:
+              - generic [ref=e645]: origin/feature/logging
+              - generic [ref=e646]: No upstream
+              - generic [ref=e647]: 2026-04-08 11:33:56 +0900
+            - generic [ref=e648]:
+              - generic [ref=e649]: remote
+              - generic [ref=e650]: synced
+          - generic [ref=e651] [cursor=pointer]:
+            - generic [ref=e652]:
+              - generic [ref=e654]: origin/feature/managed-skills
+              - generic [ref=e655]: No upstream
+              - generic [ref=e656]: 2026-04-06 19:33:00 +0900
+            - generic [ref=e657]:
+              - generic [ref=e658]: remote
+              - generic [ref=e659]: synced
+          - generic [ref=e660] [cursor=pointer]:
+            - generic [ref=e661]:
+              - generic [ref=e663]: origin/feature/maximum-window
+              - generic [ref=e664]: No upstream
+              - generic [ref=e665]: 2026-04-15 18:02:40 +0900
+            - generic [ref=e666]:
+              - generic [ref=e667]: remote
+              - generic [ref=e668]: synced
+          - generic [ref=e669] [cursor=pointer]:
+            - generic [ref=e670]:
+              - generic [ref=e672]: origin/feature/models
+              - generic [ref=e673]: No upstream
+              - generic [ref=e674]: 2026-04-06 20:06:28 +0900
+            - generic [ref=e675]:
+              - generic [ref=e676]: remote
+              - generic [ref=e677]: synced
+          - generic [ref=e678] [cursor=pointer]:
+            - generic [ref=e679]:
+              - generic [ref=e681]: origin/feature/optimize-file-index
+              - generic [ref=e682]: No upstream
+              - generic [ref=e683]: 2026-04-07 17:31:56 +0900
+            - generic [ref=e684]:
+              - generic [ref=e685]: remote
+              - generic [ref=e686]: synced
+          - generic [ref=e687] [cursor=pointer]:
+            - generic [ref=e688]:
+              - generic [ref=e690]: origin/feature/performance
+              - generic [ref=e691]: No upstream
+              - generic [ref=e692]: 2026-04-08 23:23:46 +0900
+            - generic [ref=e693]:
+              - generic [ref=e694]: remote
+              - generic [ref=e695]: synced
+          - generic [ref=e696] [cursor=pointer]:
+            - generic [ref=e697]:
+              - generic [ref=e699]: origin/feature/poc-terminal
+              - generic [ref=e700]: No upstream
+              - generic [ref=e701]: 2026-04-15 18:17:04 +0900
+            - generic [ref=e702]:
+              - generic [ref=e703]: remote
+              - generic [ref=e704]: synced
+          - generic [ref=e705] [cursor=pointer]:
+            - generic [ref=e706]:
+              - generic [ref=e708]: origin/feature/spec-1939
+              - generic [ref=e709]: No upstream
+              - generic [ref=e710]: 2026-04-15 19:37:41 +0900
+            - generic [ref=e711]:
+              - generic [ref=e712]: remote
+              - generic [ref=e713]: synced
+          - generic [ref=e714] [cursor=pointer]:
+            - generic [ref=e715]:
+              - generic [ref=e717]: origin/feature/test
+              - generic [ref=e718]: No upstream
+              - generic [ref=e719]: 2026-04-14 22:45:52 +0900
+            - generic [ref=e720]:
+              - generic [ref=e721]: remote
+              - generic [ref=e722]: synced
+          - generic [ref=e723] [cursor=pointer]:
+            - generic [ref=e724]:
+              - generic [ref=e726]: origin/feature/tui-design
+              - generic [ref=e727]: No upstream
+              - generic [ref=e728]: 2026-04-06 18:42:01 +0900
+            - generic [ref=e729]:
+              - generic [ref=e730]: remote
+              - generic [ref=e731]: synced
+          - generic [ref=e732] [cursor=pointer]:
+            - generic [ref=e733]:
+              - generic [ref=e735]: origin/feature/webui
+              - generic [ref=e736]: No upstream
+              - generic [ref=e737]: 2025-12-21 13:21:07 +0900
+            - generic [ref=e738]:
+              - generic [ref=e739]: remote
+              - generic [ref=e740]: synced
+          - generic [ref=e741] [cursor=pointer]:
+            - generic [ref=e742]:
+              - generic [ref=e744]: origin/feature/window-focus
+              - generic [ref=e745]: No upstream
+              - generic [ref=e746]: 2026-04-15 20:42:28 +0900
+            - generic [ref=e747]:
+              - generic [ref=e748]: remote
+              - generic [ref=e749]: synced
+          - generic [ref=e750] [cursor=pointer]:
+            - generic [ref=e751]:
+              - generic [ref=e753]: origin/feature/worktree-detail-merge-logic
+              - generic [ref=e754]: No upstream
+              - generic [ref=e755]: 2026-03-01 13:48:05 +0900
+            - generic [ref=e756]:
+              - generic [ref=e757]: remote
+              - generic [ref=e758]: synced
+          - generic [ref=e759] [cursor=pointer]:
+            - generic [ref=e760]:
+              - generic [ref=e762]: origin/main
+              - generic [ref=e763]: No upstream
+              - generic [ref=e764]: 2026-04-15 20:07:05 +0900
+            - generic [ref=e765]:
+              - generic [ref=e766]: remote
+              - generic [ref=e767]: synced
+    - generic [ref=e21]:
+      - button "Tile windows" [ref=e22] [cursor=pointer]: Tile
+      - button "Stack windows" [ref=e23] [cursor=pointer]: Stack
+      - button "List windows" [ref=e25] [cursor=pointer]: Windows
+      - button "Zoom out" [ref=e26] [cursor=pointer]: "-"
+      - button "Reset zoom" [ref=e27] [cursor=pointer]: 100%
+      - button "Zoom in" [ref=e28] [cursor=pointer]: +
+      - button "Add window" [ref=e29] [cursor=pointer]: +

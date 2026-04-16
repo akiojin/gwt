@@ -40,9 +40,11 @@ pub enum FrontendEvent {
     },
     CreateWindow {
         preset: WindowPreset,
+        bounds: WindowGeometry,
     },
     FocusWindow {
         id: String,
+        bounds: Option<WindowGeometry>,
     },
     CycleFocus {
         direction: FocusCycleDirection,
@@ -93,6 +95,7 @@ pub enum FrontendEvent {
     },
     LaunchWizardAction {
         action: LaunchWizardAction,
+        bounds: Option<WindowGeometry>,
     },
     ApplyUpdate,
 }
@@ -171,6 +174,10 @@ pub enum BackendEvent {
     },
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
+    },
+    LaunchProgress {
+        id: String,
+        message: String,
     },
     UpdateState(gwt_core::update::UpdateState),
 }
