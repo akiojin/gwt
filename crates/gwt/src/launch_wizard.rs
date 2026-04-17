@@ -1130,10 +1130,7 @@ impl LaunchWizardState {
             "codex" if !self.reasoning.is_empty() => Some(self.reasoning.as_str()),
             "claude"
                 if !self.reasoning.is_empty()
-                    && matches!(
-                        self.model.as_str(),
-                        "Default (Opus 4.7)" | "opus" | "sonnet"
-                    ) =>
+                    && is_claude_effort_capable_model(self.model.as_str()) =>
             {
                 Some(self.reasoning.as_str())
             }
@@ -1172,11 +1169,7 @@ impl LaunchWizardState {
         if self.agent_is_codex() {
             return true;
         }
-        self.effective_agent_id() == "claude"
-            && matches!(
-                self.model.as_str(),
-                "Default (Opus 4.7)" | "opus" | "sonnet"
-            )
+        self.effective_agent_id() == "claude" && is_claude_effort_capable_model(self.model.as_str())
     }
 
     fn has_docker_workflow(&self) -> bool {
@@ -1265,8 +1258,7 @@ impl LaunchWizardState {
     fn current_reasoning_options(&self) -> &'static [ReasoningDisplayOption] {
         if self.agent_is_codex() {
             &CODEX_REASONING_OPTIONS
-        } else if self.effective_agent_id() == "claude"
-            && matches!(self.model.as_str(), "Default (Opus 4.7)" | "opus")
+        } else if self.effective_agent_id() == "claude" && is_claude_opus_model(self.model.as_str())
         {
             &CLAUDE_OPUS_REASONING_OPTIONS
         } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
@@ -1556,9 +1548,19 @@ enum QuickStartAction {
     ChooseDifferent,
 }
 
+const CLAUDE_DEFAULT_MODEL_LABEL: &str = "Default (Opus 4.7)";
+
+fn is_claude_opus_model(model: &str) -> bool {
+    model == CLAUDE_DEFAULT_MODEL_LABEL || model == "opus"
+}
+
+fn is_claude_effort_capable_model(model: &str) -> bool {
+    is_claude_opus_model(model) || model == "sonnet"
+}
+
 const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     ModelDisplayOption {
-        label: "Default (Opus 4.7)",
+        label: CLAUDE_DEFAULT_MODEL_LABEL,
         description: "Most capable for complex work",
     },
     ModelDisplayOption {
