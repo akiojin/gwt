@@ -3,8 +3,9 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
-    thread,
+    sync::{mpsc as std_mpsc, Arc, Mutex},
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use axum::{
@@ -84,6 +85,10 @@ enum UserEvent {
 
 struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
+    /// Handle to the background reader thread that forwards PTY output.
+    /// Taken and joined during `stop_window_runtime` so the reader releases
+    /// its Arc clone of `pane` before the runtime is fully torn down.
+    output_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1207,7 +1212,7 @@ impl AppRuntime {
         .map_err(|error| error.to_string())?;
         let pane = Arc::new(Mutex::new(pane));
 
-        self.spawn_output_thread(id.to_string(), pane.clone());
+        let output_thread = self.spawn_output_thread(id.to_string(), pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.set_window_status(
                 &address.tab_id,
@@ -1216,7 +1221,13 @@ impl AppRuntime {
             );
         }
         self.window_details.remove(id);
-        self.runtimes.insert(id.to_string(), WindowRuntime { pane });
+        self.runtimes.insert(
+            id.to_string(),
+            WindowRuntime {
+                pane,
+                output_thread: Some(output_thread),
+            },
+        );
         Ok(BackendEvent::TerminalStatus {
             id: id.to_string(),
             status: WindowProcessStatus::Running,
@@ -1408,15 +1419,43 @@ impl AppRuntime {
 
     fn stop_window_runtime(&mut self, window_id: &str) {
         self.mark_agent_session_stopped(window_id);
-        if let Some(runtime) = self.runtimes.remove(window_id) {
+        if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
+            }
+            if let Some(handle) = runtime.output_thread.take() {
+                // PTY and its process group were already terminated by
+                // `pane.kill()`, so the reader should see EOF quickly. Cap
+                // the wait anyway so shutdown never stalls the event loop
+                // if a stuck syscall keeps the reader in `read`. If the
+                // timeout elapses the reader thread is detached; its Arc
+                // clone of the Pane will still be released when the thread
+                // does finally observe EOF.
+                let (tx, rx) = std_mpsc::channel();
+                thread::spawn(move || {
+                    let _ = handle.join();
+                    let _ = tx.send(());
+                });
+                if rx.recv_timeout(Duration::from_millis(500)).is_err() {
+                    eprintln!(
+                        "output reader thread for window {window_id} did not exit within 500ms; detaching"
+                    );
+                }
             }
         }
         self.window_details.remove(window_id);
     }
 
-    fn spawn_output_thread(&self, id: String, pane: Arc<Mutex<Pane>>) {
+    /// Stop every active window runtime. Called from the application shutdown
+    /// paths so no PTY / agent process outlives the GUI.
+    fn stop_all_runtimes(&mut self) {
+        let ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        for id in ids {
+            self.stop_window_runtime(&id);
+        }
+    }
+
+    fn spawn_output_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let reader = match pane
@@ -1493,7 +1532,7 @@ impl AppRuntime {
                     });
                 }
             }
-        });
+        })
     }
 
     fn app_state_view(&self) -> gwt::AppStateView {
@@ -1786,6 +1825,65 @@ mod tests {
         assert_eq!(
             target.project_root,
             dunce::canonicalize(&repo).expect("canonical repo root"),
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_copy_shortcut_uses_ctrl_shift_c() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("function installTerminalCopyHandlers"),
+            "expected web terminal copy handler bootstrap in embedded html",
+        );
+        assert!(
+            html.contains("terminal.attachCustomKeyEventHandler"),
+            "expected xterm custom key handler for copy shortcut",
+        );
+        assert!(
+            html.contains("event.ctrlKey"),
+            "expected Ctrl modifier handling in embedded html",
+        );
+        assert!(
+            html.contains("event.shiftKey"),
+            "expected Shift modifier handling in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_drag_selection_copies_on_mouseup() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("terminalRoot.addEventListener(\"mousedown\""),
+            "expected drag selection tracking in embedded html",
+        );
+        assert!(
+            html.contains("window.addEventListener(\"mouseup\"") && html.contains("handleMouseUp"),
+            "expected mouse release copy handling in embedded html",
+        );
+        assert!(
+            html.contains("function copyTerminalSelection"),
+            "expected clipboard copy helper in embedded html",
+        );
+        assert!(
+            html.contains("navigator.clipboard.writeText"),
+            "expected clipboard write path in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_clipboard_fallback_restores_terminal_focus() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("restoreFocus"),
+            "expected clipboard fallback to invoke restoreFocus after textarea copy",
+        );
+        assert!(
+            html.contains("writeClipboardText(selection")
+                && html.contains("runtime.terminal.focus()"),
+            "expected selection copy path to pass terminal focus restoration",
         );
     }
 }
@@ -2969,6 +3067,9 @@ fn main() -> wry::Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                // Kill every PTY / agent before the event loop exits so no
+                // child process outlives the window.
+                app.stop_all_runtimes();
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
@@ -3017,6 +3118,9 @@ fn main() -> wry::Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                // Belt-and-suspenders: if the event loop is torn down via a
+                // path other than CloseRequested, still release PTY children.
+                app.stop_all_runtimes();
                 server.shutdown();
             }
             _ => {}

@@ -5,12 +5,16 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use tracing::instrument;
 
 use crate::TerminalError;
+
+mod process_group;
+use process_group::ProcessGroup;
 
 /// Configuration for spawning a PTY process.
 pub struct SpawnConfig {
@@ -33,10 +37,16 @@ pub struct SpawnConfig {
 /// Handle to a spawned PTY process.
 ///
 /// Provides methods for I/O, resize, and process lifecycle management.
+/// Dropping a `PtyHandle` terminates the child and any descendants that were
+/// attached to its process group / Job Object.
 pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    // Wrapped so `kill` (which takes `&self`) can synchronously terminate the
+    // group without waiting for `Drop`. Declared last so that when `Drop` runs
+    // the direct child has already been signaled above.
+    process_group: Mutex<ProcessGroup>,
 }
 
 impl PtyHandle {
@@ -81,10 +91,16 @@ impl PtyHandle {
                 reason: format!("take_writer: {e}"),
             })?;
 
+        let process_group = child
+            .process_id()
+            .map(ProcessGroup::attach)
+            .unwrap_or_default();
+
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
+            process_group: Mutex::new(process_group),
         })
     }
 
@@ -121,14 +137,37 @@ impl PtyHandle {
             })
     }
 
-    /// Terminate the child process.
+    /// Terminate the child process and every descendant in its process group.
+    ///
+    /// Terminating the group is required so that grandchildren cannot keep
+    /// the PTY slave open after the direct child exits. While the slave stays
+    /// open the master reader does not observe EOF, which would otherwise
+    /// strand the reader thread (and its `Arc<Mutex<Pane>>`) and prevent the
+    /// Drop chain from running.
     pub fn kill(&self) -> Result<(), TerminalError> {
         let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        child.kill().map_err(|e| TerminalError::PtyIoError {
+        let kill_result = child.kill();
+        drop(child);
+
+        // Always sweep descendants, even if the direct kill failed: the group
+        // terminate is idempotent and uses an independent kernel path.
+        let mut group = match self.process_group.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group.terminate();
+        drop(group);
+
+        kill_result.map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })
+    }
+
+    /// Returns the OS process id of the spawned child, if available.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|c| c.process_id())
     }
 
     /// Returns a reader for the PTY output.
@@ -155,6 +194,35 @@ impl PtyHandle {
         child.try_wait().map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })
+    }
+}
+
+impl Drop for PtyHandle {
+    fn drop(&mut self) {
+        // Best-effort termination: must never panic from Drop and must not
+        // block the caller for long. Tolerate poisoned mutexes.
+        let mut guard = match self.child.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = guard.kill();
+
+        // Short reap loop so subsequent try_wait callers observe the exit.
+        // Capped at ~500ms so Drop never stalls the UI thread.
+        for _ in 0..20 {
+            match guard.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+        drop(guard);
+
+        // Belt-and-suspenders: explicitly terminate the group in case `kill`
+        // was never called (e.g. the handle was dropped without going through
+        // stop_window_runtime). ProcessGroup::terminate is idempotent.
+        if let Ok(mut group) = self.process_group.lock() {
+            group.terminate();
+        }
     }
 }
 
