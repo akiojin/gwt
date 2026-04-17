@@ -1,5 +1,48 @@
 # Lessons Learned
 
+## 2026-04-17 — fix: CI lint 再現は workflow と同じ package / feature 範囲で実行する
+
+### 事象
+
+PR #2052 の `Clippy & Rustfmt` が CI で失敗したが、手元では直前に `cargo clippy` を
+通したつもりだった。実際の失敗箇所は `crates/gwt-github/src/client/fake.rs` の
+`unnecessary_sort_by` で、`gwt` の feature 経由で lint 対象に入っていた。
+
+### 原因
+
+- 手元の確認で、workflow に書かれている package 指定と同じコマンドを厳密に再現していなかった。
+- 「workspace 全体を見ているはず」という前提で済ませ、CI job 定義をその場で確認しなかった。
+- transitive dependency / feature 経由で lint 対象になる crate を、変更ファイルだけ見て外していた。
+
+### 再発防止策
+
+1. CI 失敗の再現では、先に `.github/workflows/*.yml` の実コマンドを確認し、そのまま手元で実行する。
+2. `-p` 指定の lint/test でも、feature 経由で別 crate が対象に入る前提でログを確認する。
+3. 「ローカルで通った」は抽象化せず、最終報告では実行した正確なコマンド列を残す。
+
+## 2026-04-17 — fix: embedded WebView JS の回帰確認は整形文字列ではなく契約と対称性を見る
+
+### 事象
+
+Web terminal copy 修正の PR で、CodeRabbit から 3 件の follow-up 指摘が出た。
+`include_str!` ベースの HTML 回帰テストが単一行の exact string に依存していて
+整形変更に弱かったこと、`createTerminalRuntime()` の新規作成 path だけ返り値に
+`cleanup` を含めていなかったこと、copy 用の `mouseup` listener が capture/bubble の
+二重登録になっていたことが原因だった。
+
+### 原因
+
+- 埋め込み HTML の契約テストで、挙動ではなくフォーマット済み文字列そのものを固定していた。
+- JS helper の reuse path と create path の返り値形状を並べて確認していなかった。
+- event listener の追加/削除を対で見ず、window capture listener と terminalRoot listener の
+  役割重複を残していた。
+
+### 再発防止策
+
+1. `include_str!` で埋め込む HTML/JS の回帰テストは exact snippet ではなく、必要な token や契約を構造的に確認する。
+2. factory/helper 関数を変更するときは、既存再利用 path と新規作成 path の返り値 shape を揃えて確認する。
+3. DOM event handler 変更では、登録と cleanup を対で確認し、capture/bubble の重複 listener が本当に必要かを見直す。
+
 ## 2026-04-16 — fix: read-only CLI は eager GitHub auth を起動時に解決しない
 
 ### 事象
@@ -2779,3 +2822,26 @@ v9.2.0 リリース実行中に `/release` コマンドの Step 9.2（`scripts/r
 3. Release PR の Closing Issues セクション生成時に「自動クローズ対象があるか」をユーザーに明示し、空の場合は明確に `None` と記載する
 4. release.md の Step 9 冒頭に「GitHub 自動クローズは Issue のみが対象であり、PR 番号は無視される」と注釈を追加し、PR/Issue 分類の重要性を強調する
 5. `tasks/lessons.md` にこの教訓を記録し、同種の長時間手順コマンド設計時の参考にする
+
+## 2026-04-17 — fix: clipboard fallback は focus を奪ったら必ず terminal へ戻す
+
+### 事象
+
+Web terminal の copy 実装で `navigator.clipboard.writeText()` が使えない環境では、
+hidden `textarea` + `document.execCommand("copy")` fallback を使っていたが、copy 後に
+terminal input focus が戻らず、次のキー入力が shell / agent に届かなくなった。
+
+### 原因
+
+- fallback 実装が clipboard 書き込み成功だけを見ており、focus ownership の回復を考慮していなかった。
+- async clipboard API が使える通常経路だけを前提にして、permission-restricted WebView の
+  fallback 実機セマンティクスをテストで固定していなかった。
+
+### 再発防止策
+
+1. hidden input / textarea を使う clipboard fallback では、cleanup 時に元の interactive surface
+   へ focus を戻す処理を必須で入れる。
+2. WebView の permission 差分がありうる API は、正常経路だけでなく fallback 後の focus /
+   input routing 契約も埋め込みテストで固定する。
+3. terminal copy UX の変更では、copy success だけでなく「直後の次キー入力が terminal へ届くか」
+   を review 観点に含める。
