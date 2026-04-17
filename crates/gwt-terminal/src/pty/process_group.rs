@@ -74,10 +74,11 @@ mod imp {
                 Self { job: Some(job) }
             }
         }
-    }
 
-    impl Drop for ProcessGroup {
-        fn drop(&mut self) {
+        /// Synchronously terminate every process in the group.
+        ///
+        /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
+        pub fn terminate(&mut self) {
             if let Some(job) = self.job.take() {
                 // Closing the last handle to a Job configured with
                 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every process
@@ -86,6 +87,12 @@ mod imp {
                     let _ = CloseHandle(job);
                 }
             }
+        }
+    }
+
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            self.terminate();
         }
     }
 }
@@ -113,10 +120,11 @@ mod imp {
                 pgid: Some(Pid::from_raw(pid as i32)),
             }
         }
-    }
 
-    impl Drop for ProcessGroup {
-        fn drop(&mut self) {
+        /// Synchronously signal every process in the group.
+        ///
+        /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
+        pub fn terminate(&mut self) {
             let Some(pgid) = self.pgid.take() else {
                 return;
             };
@@ -130,6 +138,12 @@ mod imp {
                 Ok(()) | Err(Errno::ESRCH) => {}
                 Err(error) => tracing::debug!(?pgid, %error, "killpg SIGKILL failed"),
             }
+        }
+    }
+
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            self.terminate();
         }
     }
 }

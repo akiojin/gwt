@@ -1424,15 +1424,23 @@ impl AppRuntime {
                 let _ = pane.kill();
             }
             if let Some(handle) = runtime.output_thread.take() {
-                // PTY has been killed; reader should observe EOF quickly.
-                // Cap the wait so shutdown never stalls the event loop if a
-                // stuck syscall prevents the reader from returning.
+                // PTY and its process group were already terminated by
+                // `pane.kill()`, so the reader should see EOF quickly. Cap
+                // the wait anyway so shutdown never stalls the event loop
+                // if a stuck syscall keeps the reader in `read`. If the
+                // timeout elapses the reader thread is detached; its Arc
+                // clone of the Pane will still be released when the thread
+                // does finally observe EOF.
                 let (tx, rx) = std_mpsc::channel();
                 thread::spawn(move || {
                     let _ = handle.join();
                     let _ = tx.send(());
                 });
-                let _ = rx.recv_timeout(Duration::from_millis(500));
+                if rx.recv_timeout(Duration::from_millis(500)).is_err() {
+                    eprintln!(
+                        "output reader thread for window {window_id} did not exit within 500ms; detaching"
+                    );
+                }
             }
         }
         self.window_details.remove(window_id);

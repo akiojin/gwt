@@ -43,11 +43,10 @@ pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    // Declared last so it is dropped after `child`, ensuring the direct child
-    // is signaled before the group-level termination runs. Held purely for
-    // its Drop side effect.
-    #[allow(dead_code)]
-    process_group: ProcessGroup,
+    // Wrapped so `kill` (which takes `&self`) can synchronously terminate the
+    // group without waiting for `Drop`. Declared last so that when `Drop` runs
+    // the direct child has already been signaled above.
+    process_group: Mutex<ProcessGroup>,
 }
 
 impl PtyHandle {
@@ -101,7 +100,7 @@ impl PtyHandle {
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
-            process_group,
+            process_group: Mutex::new(process_group),
         })
     }
 
@@ -138,12 +137,30 @@ impl PtyHandle {
             })
     }
 
-    /// Terminate the child process.
+    /// Terminate the child process and every descendant in its process group.
+    ///
+    /// Terminating the group is required so that grandchildren cannot keep
+    /// the PTY slave open after the direct child exits. While the slave stays
+    /// open the master reader does not observe EOF, which would otherwise
+    /// strand the reader thread (and its `Arc<Mutex<Pane>>`) and prevent the
+    /// Drop chain from running.
     pub fn kill(&self) -> Result<(), TerminalError> {
         let mut child = self.child.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        child.kill().map_err(|e| TerminalError::PtyIoError {
+        let kill_result = child.kill();
+        drop(child);
+
+        // Always sweep descendants, even if the direct kill failed: the group
+        // terminate is idempotent and uses an independent kernel path.
+        let mut group = match self.process_group.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        group.terminate();
+        drop(group);
+
+        kill_result.map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })
     }
@@ -200,8 +217,12 @@ impl Drop for PtyHandle {
         }
         drop(guard);
 
-        // `process_group` drops next (declared last in the struct), sweeping
-        // any descendants via Job Object on Windows or killpg on Unix.
+        // Belt-and-suspenders: explicitly terminate the group in case `kill`
+        // was never called (e.g. the handle was dropped without going through
+        // stop_window_runtime). ProcessGroup::terminate is idempotent.
+        if let Ok(mut group) = self.process_group.lock() {
+            group.terminate();
+        }
     }
 }
 
