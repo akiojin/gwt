@@ -2116,7 +2116,7 @@
         );
       }
 
-      async function writeClipboardText(text) {
+      async function writeClipboardText(text, restoreFocus = null) {
         if (!text) {
           return false;
         }
@@ -2146,6 +2146,7 @@
           return false;
         } finally {
           textarea.remove();
+          restoreFocus?.();
         }
       }
 
@@ -2158,7 +2159,7 @@
         if (!selection) {
           return false;
         }
-        return writeClipboardText(selection);
+        return writeClipboardText(selection, () => runtime.terminal.focus());
       }
 
       function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {

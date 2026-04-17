@@ -1832,6 +1832,20 @@ mod tests {
             "expected clipboard write path in embedded html",
         );
     }
+
+    #[test]
+    fn embedded_web_terminal_clipboard_fallback_restores_terminal_focus() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("restoreFocus?.();"),
+            "expected clipboard fallback to restore terminal focus after textarea copy",
+        );
+        assert!(
+            html.contains("writeClipboardText(selection, () => runtime.terminal.focus())"),
+            "expected selection copy path to pass terminal focus restoration",
+        );
+    }
 }
 
 fn normalize_active_tab_id(

@@ -2779,3 +2779,26 @@ v9.2.0 リリース実行中に `/release` コマンドの Step 9.2（`scripts/r
 3. Release PR の Closing Issues セクション生成時に「自動クローズ対象があるか」をユーザーに明示し、空の場合は明確に `None` と記載する
 4. release.md の Step 9 冒頭に「GitHub 自動クローズは Issue のみが対象であり、PR 番号は無視される」と注釈を追加し、PR/Issue 分類の重要性を強調する
 5. `tasks/lessons.md` にこの教訓を記録し、同種の長時間手順コマンド設計時の参考にする
+
+## 2026-04-17 — fix: clipboard fallback は focus を奪ったら必ず terminal へ戻す
+
+### 事象
+
+Web terminal の copy 実装で `navigator.clipboard.writeText()` が使えない環境では、
+hidden `textarea` + `document.execCommand("copy")` fallback を使っていたが、copy 後に
+terminal input focus が戻らず、次のキー入力が shell / agent に届かなくなった。
+
+### 原因
+
+- fallback 実装が clipboard 書き込み成功だけを見ており、focus ownership の回復を考慮していなかった。
+- async clipboard API が使える通常経路だけを前提にして、permission-restricted WebView の
+  fallback 実機セマンティクスをテストで固定していなかった。
+
+### 再発防止策
+
+1. hidden input / textarea を使う clipboard fallback では、cleanup 時に元の interactive surface
+   へ focus を戻す処理を必須で入れる。
+2. WebView の permission 差分がありうる API は、正常経路だけでなく fallback 後の focus /
+   input routing 契約も埋め込みテストで固定する。
+3. terminal copy UX の変更では、copy success だけでなく「直後の次キー入力が terminal へ届くか」
+   を review 観点に含める。
