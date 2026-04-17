@@ -15,7 +15,6 @@ tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 vt100 = "0.16"
-crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
