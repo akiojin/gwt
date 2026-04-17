@@ -1820,7 +1820,7 @@ mod tests {
             "expected drag selection tracking in embedded html",
         );
         assert!(
-            html.contains("terminalRoot.addEventListener(\"mouseup\""),
+            html.contains("window.addEventListener(\"mouseup\"") && html.contains("handleMouseUp"),
             "expected mouse release copy handling in embedded html",
         );
         assert!(
@@ -1838,11 +1838,12 @@ mod tests {
         let html = include_str!("../web/index.html");
 
         assert!(
-            html.contains("restoreFocus?.();"),
-            "expected clipboard fallback to restore terminal focus after textarea copy",
+            html.contains("restoreFocus"),
+            "expected clipboard fallback to invoke restoreFocus after textarea copy",
         );
         assert!(
-            html.contains("writeClipboardText(selection, () => runtime.terminal.focus())"),
+            html.contains("writeClipboardText(selection")
+                && html.contains("runtime.terminal.focus()"),
             "expected selection copy path to pass terminal focus restoration",
         );
     }

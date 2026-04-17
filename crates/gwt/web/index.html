@@ -2236,7 +2236,6 @@
         });
 
         terminalRoot.addEventListener("mousedown", handleMouseDown);
-        terminalRoot.addEventListener("mouseup", handleMouseUp);
         window.addEventListener("mousemove", handleMouseMove, true);
         window.addEventListener("mouseup", handleMouseUp, true);
         window.addEventListener("blur", handleWindowBlur);
@@ -2244,7 +2243,6 @@
         return () => {
           terminal.attachCustomKeyEventHandler(() => true);
           terminalRoot.removeEventListener("mousedown", handleMouseDown);
-          terminalRoot.removeEventListener("mouseup", handleMouseUp);
           window.removeEventListener("mousemove", handleMouseMove, true);
           window.removeEventListener("mouseup", handleMouseUp, true);
           window.removeEventListener("blur", handleWindowBlur);
@@ -2292,7 +2290,8 @@
         terminal.onData((data) => {
           send({ kind: "terminal_input", id: windowId, data });
         });
-        terminalMap.set(windowId, { terminal, fitAddon, cleanup });
+        const runtime = { terminal, fitAddon, cleanup };
+        terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
 
@@ -2309,7 +2308,7 @@
           }
           pendingOutputMap.delete(windowId);
         }
-        return { terminal, fitAddon };
+        return runtime;
       }
 
       function writeOutput(windowId, base64) {

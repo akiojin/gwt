@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-17 — fix: embedded WebView JS の回帰確認は整形文字列ではなく契約と対称性を見る
+
+### 事象
+
+Web terminal copy 修正の PR で、CodeRabbit から 3 件の follow-up 指摘が出た。
+`include_str!` ベースの HTML 回帰テストが単一行の exact string に依存していて
+整形変更に弱かったこと、`createTerminalRuntime()` の新規作成 path だけ返り値に
+`cleanup` を含めていなかったこと、copy 用の `mouseup` listener が capture/bubble の
+二重登録になっていたことが原因だった。
+
+### 原因
+
+- 埋め込み HTML の契約テストで、挙動ではなくフォーマット済み文字列そのものを固定していた。
+- JS helper の reuse path と create path の返り値形状を並べて確認していなかった。
+- event listener の追加/削除を対で見ず、window capture listener と terminalRoot listener の
+  役割重複を残していた。
+
+### 再発防止策
+
+1. `include_str!` で埋め込む HTML/JS の回帰テストは exact snippet ではなく、必要な token や契約を構造的に確認する。
+2. factory/helper 関数を変更するときは、既存再利用 path と新規作成 path の返り値 shape を揃えて確認する。
+3. DOM event handler 変更では、登録と cleanup を対で確認し、capture/bubble の重複 listener が本当に必要かを見直す。
+
 ## 2026-04-16 — fix: read-only CLI は eager GitHub auth を起動時に解決しない
 
 ### 事象
