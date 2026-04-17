@@ -19,6 +19,15 @@ crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+nix = { version = "0.29", features = ["signal"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

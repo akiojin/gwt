@@ -5,12 +5,16 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use tracing::instrument;
 
 use crate::TerminalError;
+
+mod process_group;
+use process_group::ProcessGroup;
 
 /// Configuration for spawning a PTY process.
 pub struct SpawnConfig {
@@ -33,10 +37,17 @@ pub struct SpawnConfig {
 /// Handle to a spawned PTY process.
 ///
 /// Provides methods for I/O, resize, and process lifecycle management.
+/// Dropping a `PtyHandle` terminates the child and any descendants that were
+/// attached to its process group / Job Object.
 pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    // Declared last so it is dropped after `child`, ensuring the direct child
+    // is signaled before the group-level termination runs. Held purely for
+    // its Drop side effect.
+    #[allow(dead_code)]
+    process_group: ProcessGroup,
 }
 
 impl PtyHandle {
@@ -81,10 +92,16 @@ impl PtyHandle {
                 reason: format!("take_writer: {e}"),
             })?;
 
+        let process_group = child
+            .process_id()
+            .map(ProcessGroup::attach)
+            .unwrap_or_default();
+
         Ok(Self {
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
+            process_group,
         })
     }
 
@@ -131,6 +148,11 @@ impl PtyHandle {
         })
     }
 
+    /// Returns the OS process id of the spawned child, if available.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|c| c.process_id())
+    }
+
     /// Returns a reader for the PTY output.
     ///
     /// The reader can be used in a separate thread/task to read output asynchronously.
@@ -155,6 +177,31 @@ impl PtyHandle {
         child.try_wait().map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })
+    }
+}
+
+impl Drop for PtyHandle {
+    fn drop(&mut self) {
+        // Best-effort termination: must never panic from Drop and must not
+        // block the caller for long. Tolerate poisoned mutexes.
+        let mut guard = match self.child.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = guard.kill();
+
+        // Short reap loop so subsequent try_wait callers observe the exit.
+        // Capped at ~500ms so Drop never stalls the UI thread.
+        for _ in 0..20 {
+            match guard.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            }
+        }
+        drop(guard);
+
+        // `process_group` drops next (declared last in the struct), sweeping
+        // any descendants via Job Object on Windows or killpg on Unix.
     }
 }
 
