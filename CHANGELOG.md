@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.4.1] - 2026-04-16
+
+### Bug Fixes
+
+- **ci:** Pin macOS version to macos-14 to resolve Sequoia compatibility issues
+
 ## [9.4.0] - 2026-04-16
 
 ### Bug Fixes
