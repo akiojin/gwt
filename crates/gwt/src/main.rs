@@ -1890,24 +1890,31 @@ mod tests {
     #[test]
     fn embedded_web_repo_browser_scroll_surfaces_bypass_canvas_pan() {
         let html = include_str!("../web/index.html");
+        let scroll_gate = regex::Regex::new(
+            r"nativeWheelScrollSurface\s*&&\s*canScrollSurfaceConsumeWheelDelta\(\s*nativeWheelScrollSurface,\s*event\s*\)",
+        )
+        .expect("valid regex");
 
         assert!(
             html.contains("function findNativeWheelScrollSurface"),
             "expected embedded html to define a repo browser wheel routing helper",
         );
         assert!(
+            html.contains("function canScrollSurfaceConsumeWheelDelta"),
+            "expected embedded html to gate native scrolling on actual scrollability",
+        );
+        assert!(
             html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
             "expected embedded html to reference repo browser scroll containers",
         );
         assert!(
-            html.contains(
-                "const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);"
-            ),
-            "expected wheel handler to consult the repo browser scroll helper",
+            html.contains("surface.scrollHeight > surface.clientHeight")
+                && html.contains("surface.scrollWidth > surface.clientWidth"),
+            "expected wheel helper to inspect vertical and horizontal overflow before bypassing canvas pan",
         );
         assert!(
-            html.contains("if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface)"),
-            "expected plain wheel input on repo browser scroll surfaces to skip canvas pan",
+            scroll_gate.is_match(html),
+            "expected plain wheel input to bypass canvas pan only when the repo browser surface can consume the delta",
         );
     }
 }
