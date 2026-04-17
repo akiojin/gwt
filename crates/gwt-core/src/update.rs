@@ -1201,7 +1201,7 @@ fn run_macos_dmg_installer_with_privileges(
         return Err(format!("hdiutil attach exited with {attach_status}"));
     }
 
-    let install_result = (|| {
+    let install_result: Result<PathBuf, String> = (|| {
         let source_app = find_first_app_bundle(&mount_dir)?
             .ok_or_else(|| "Mounted dmg does not contain an .app bundle".to_string())?;
         let source_name = source_app
