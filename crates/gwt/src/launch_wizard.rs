@@ -1641,7 +1641,46 @@ const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 6] = [
     },
 ];
 
-const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 5] = [
+const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 6] = [
+    ReasoningDisplayOption {
+        label: "Auto",
+        stored_value: "auto",
+        description: "Let the model choose the effort",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Low",
+        stored_value: "low",
+        description: "Fast responses for simple work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Medium",
+        stored_value: "medium",
+        description: "Balanced reasoning for everyday work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "High",
+        stored_value: "high",
+        description: "Deeper reasoning for complex work",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "xHigh",
+        stored_value: "xhigh",
+        description: "Best results for most coding tasks (Opus 4.7 default)",
+        is_default: true,
+    },
+    ReasoningDisplayOption {
+        label: "Max",
+        stored_value: "max",
+        description: "Deepest reasoning with no token-spending constraint",
+        is_default: false,
+    },
+];
+
+const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
     ReasoningDisplayOption {
         label: "Auto",
         stored_value: "auto",
@@ -1666,19 +1705,6 @@ const CLAUDE_OPUS_REASONING_OPTIONS: [ReasoningDisplayOption; 5] = [
         description: "Deeper reasoning for complex work",
         is_default: false,
     },
-    ReasoningDisplayOption {
-        label: "Max",
-        stored_value: "max",
-        description: "Deepest reasoning",
-        is_default: false,
-    },
-];
-
-const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
-    CLAUDE_OPUS_REASONING_OPTIONS[0],
-    CLAUDE_OPUS_REASONING_OPTIONS[1],
-    CLAUDE_OPUS_REASONING_OPTIONS[2],
-    CLAUDE_OPUS_REASONING_OPTIONS[3],
 ];
 
 const CODEX_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
@@ -2618,5 +2644,43 @@ mod tests {
         let config = state.build_launch_config().expect("config");
 
         assert_eq!(config.linked_issue_number, Some(1234));
+    }
+
+    #[test]
+    fn claude_opus_reasoning_options_include_xhigh() {
+        let values: Vec<&str> = super::CLAUDE_OPUS_REASONING_OPTIONS
+            .iter()
+            .map(|option| option.stored_value)
+            .collect();
+        assert_eq!(values, ["auto", "low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
+    fn claude_opus_reasoning_default_is_xhigh() {
+        let default = super::CLAUDE_OPUS_REASONING_OPTIONS
+            .iter()
+            .find(|option| option.is_default)
+            .expect("Opus reasoning options must have a default row");
+        assert_eq!(default.stored_value, "xhigh");
+    }
+
+    #[test]
+    fn claude_sonnet_reasoning_options_exclude_xhigh_and_max() {
+        let values: Vec<&str> = super::CLAUDE_SONNET_REASONING_OPTIONS
+            .iter()
+            .map(|option| option.stored_value)
+            .collect();
+        assert_eq!(values, ["auto", "low", "medium", "high"]);
+        assert!(!values.contains(&"xhigh"));
+        assert!(!values.contains(&"max"));
+    }
+
+    #[test]
+    fn claude_sonnet_reasoning_default_is_medium() {
+        let default = super::CLAUDE_SONNET_REASONING_OPTIONS
+            .iter()
+            .find(|option| option.is_default)
+            .expect("Sonnet reasoning options must have a default row");
+        assert_eq!(default.stored_value, "medium");
     }
 }
