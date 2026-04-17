@@ -1132,7 +1132,7 @@ impl LaunchWizardState {
                 if !self.reasoning.is_empty()
                     && matches!(
                         self.model.as_str(),
-                        "Default (Opus 4.6)" | "opus" | "sonnet"
+                        "Default (Opus 4.7)" | "opus" | "sonnet"
                     ) =>
             {
                 Some(self.reasoning.as_str())
@@ -1175,7 +1175,7 @@ impl LaunchWizardState {
         self.effective_agent_id() == "claude"
             && matches!(
                 self.model.as_str(),
-                "Default (Opus 4.6)" | "opus" | "sonnet"
+                "Default (Opus 4.7)" | "opus" | "sonnet"
             )
     }
 
@@ -1266,7 +1266,7 @@ impl LaunchWizardState {
         if self.agent_is_codex() {
             &CODEX_REASONING_OPTIONS
         } else if self.effective_agent_id() == "claude"
-            && matches!(self.model.as_str(), "Default (Opus 4.6)" | "opus")
+            && matches!(self.model.as_str(), "Default (Opus 4.7)" | "opus")
         {
             &CLAUDE_OPUS_REASONING_OPTIONS
         } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
@@ -1558,7 +1558,7 @@ enum QuickStartAction {
 
 const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     ModelDisplayOption {
-        label: "Default (Opus 4.6)",
+        label: "Default (Opus 4.7)",
         description: "Most capable for complex work",
     },
     ModelDisplayOption {
