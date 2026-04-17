@@ -698,6 +698,34 @@ mod tests {
     }
 
     #[test]
+    fn build_claude_with_xhigh_reasoning_exports_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("xhigh")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"xhigh".to_string())
+        );
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_max_reasoning_exports_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("max")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("max"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"max".to_string())
+        );
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
     fn build_claude_skip_permissions_adds_dangerous_flag() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .skip_permissions(true)
