@@ -1,6 +1,7 @@
 //! Bootstrap and repair the shared project-index runtime under `~/.gwt/runtime`.
 
 use std::{
+    cmp::Reverse,
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -270,7 +271,7 @@ where
         }
     }
 
-    discovered.sort_by(|left, right| right.0.cmp(&left.0));
+    discovered.sort_by_key(|item| Reverse(item.0));
     discovered.dedup_by(|left, right| left.1 == right.1);
 
     discovered
