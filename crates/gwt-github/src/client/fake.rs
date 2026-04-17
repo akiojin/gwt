@@ -6,6 +6,7 @@
 //! [`IssueClient`] contract in a predictable, deterministic way.
 
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -266,7 +267,7 @@ impl IssueClient for FakeIssueClient {
             })
             .collect();
         // Deterministic ordering: number desc (newest first).
-        out.sort_by(|a, b| b.number.cmp(&a.number));
+        out.sort_by_key(|item| Reverse(item.number));
         Ok(out)
     }
 }
