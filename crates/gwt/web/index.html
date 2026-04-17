@@ -3790,20 +3790,43 @@
         canvas.setPointerCapture(event.pointerId);
       });
 
+      function eventTargetElement(target) {
+        if (target instanceof Element) {
+          return target;
+        }
+        if (target && target.parentElement instanceof Element) {
+          return target.parentElement;
+        }
+        return null;
+      }
+
+      function findNativeWheelScrollSurface(target) {
+        const element = eventTargetElement(target);
+        if (!element) {
+          return null;
+        }
+        return element.closest(".branch-scroll, .file-tree-scroll");
+      }
+
       // Capture phase so wheel events on child elements (windows, terminals)
       // are intercepted before they reach xterm.js or other consumers.
       document.addEventListener(
         "wheel",
         (event) => {
-          if (!canvas.contains(event.target)) {
+          const targetElement = eventTargetElement(event.target);
+          if (!targetElement || !canvas.contains(targetElement)) {
             return;
           }
           // Let terminal windows handle their own scroll (xterm.js scrollback)
           if (
             !event.ctrlKey &&
             !event.metaKey &&
-            event.target.closest(".surface-terminal")
+            targetElement.closest(".surface-terminal")
           ) {
+            return;
+          }
+          const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);
+          if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface) {
             return;
           }
           if (event.ctrlKey || event.metaKey) {

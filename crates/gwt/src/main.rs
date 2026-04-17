@@ -1886,6 +1886,30 @@ mod tests {
             "expected selection copy path to pass terminal focus restoration",
         );
     }
+
+    #[test]
+    fn embedded_web_repo_browser_scroll_surfaces_bypass_canvas_pan() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("function findNativeWheelScrollSurface"),
+            "expected embedded html to define a repo browser wheel routing helper",
+        );
+        assert!(
+            html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
+            "expected embedded html to reference repo browser scroll containers",
+        );
+        assert!(
+            html.contains(
+                "const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);"
+            ),
+            "expected wheel handler to consult the repo browser scroll helper",
+        );
+        assert!(
+            html.contains("if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface)"),
+            "expected plain wheel input on repo browser scroll surfaces to skip canvas pan",
+        );
+    }
 }
 
 fn normalize_active_tab_id(
