@@ -2301,6 +2301,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit_date: None,
+            cleanup: crate::BranchCleanupInfo::default(),
         }
     }
 

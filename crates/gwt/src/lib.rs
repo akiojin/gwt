@@ -1,3 +1,4 @@
+pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
 mod discussion_resume;
@@ -12,7 +13,14 @@ pub mod preset;
 pub mod protocol;
 pub mod workspace;
 
+pub use branch_cleanup::{
+    cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
+};
 pub use branch_list::{list_branch_entries, BranchListEntry, BranchScope};
+pub use branch_list::{
+    list_branch_entries_with_active_sessions, BranchCleanupAvailability,
+    BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
+};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use launch_wizard::{
     build_builtin_agent_options, default_wizard_version_cache_path, AgentOption,
