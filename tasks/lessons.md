@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-17 — fix: CI lint 再現は workflow と同じ package / feature 範囲で実行する
+
+### 事象
+
+PR #2052 の `Clippy & Rustfmt` が CI で失敗したが、手元では直前に `cargo clippy` を
+通したつもりだった。実際の失敗箇所は `crates/gwt-github/src/client/fake.rs` の
+`unnecessary_sort_by` で、`gwt` の feature 経由で lint 対象に入っていた。
+
+### 原因
+
+- 手元の確認で、workflow に書かれている package 指定と同じコマンドを厳密に再現していなかった。
+- 「workspace 全体を見ているはず」という前提で済ませ、CI job 定義をその場で確認しなかった。
+- transitive dependency / feature 経由で lint 対象になる crate を、変更ファイルだけ見て外していた。
+
+### 再発防止策
+
+1. CI 失敗の再現では、先に `.github/workflows/*.yml` の実コマンドを確認し、そのまま手元で実行する。
+2. `-p` 指定の lint/test でも、feature 経由で別 crate が対象に入る前提でログを確認する。
+3. 「ローカルで通った」は抽象化せず、最終報告では実行した正確なコマンド列を残す。
+
 ## 2026-04-17 — fix: embedded WebView JS の回帰確認は整形文字列ではなく契約と対称性を見る
 
 ### 事象
