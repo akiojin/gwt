@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.5.0] - 2026-04-17
+
+### Bug Fixes
+
+- **gui:** Cleanup PTY and agent processes on window close
+- **gui:** Terminate PTY process group eagerly on kill
+- Restore web terminal copy workflow
+- Restore terminal focus after fallback copy
+- Satisfy current clippy sort lint
+- Address terminal copy review follow-ups
+- Unblock remaining PR lint checks
+
+### Features
+
+- **launch:** Claude Code 起動時モデルを Opus 4.7 デフォルトに切替
+- **launch:** Opus 4.7 の xHigh effort level を wizard に追加しデフォルトに
+
+### Miscellaneous Tasks
+
+- **gwt-terminal:** Remove unused TUI/crossterm dead code
+
+### Refactor
+
+- **launch:** Claude effort-capable model 判定をヘルパーに抽出
+
+### Testing
+
+- **launch:** Xhigh / max effort level の CLAUDE_CODE_EFFORT_LEVEL export を検証
+
 ## [9.4.1] - 2026-04-16
 
 ### Bug Fixes
