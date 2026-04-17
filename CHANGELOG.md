@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.5.1] - 2026-04-17
+
+### Bug Fixes
+
+- **update:** MacOS DMG インストーラの install_result 型推論を明示して macOS ビルド失敗を解消
+
 ## [9.5.0] - 2026-04-17
 
 ### Bug Fixes
