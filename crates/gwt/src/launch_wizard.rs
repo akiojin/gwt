@@ -146,7 +146,7 @@ pub struct LiveSessionEntry {
 impl QuickStartEntry {
     fn reuse_action_label(&self) -> Option<&'static str> {
         if self.live_window_id.is_some() {
-            Some("Continue")
+            Some("Focus")
         } else if self.resume_session_id.is_some() {
             Some("Resume")
         } else {
@@ -2622,7 +2622,7 @@ mod tests {
         let view = state.view();
         assert_eq!(
             view.quick_start_entries[0].reuse_action_label.as_deref(),
-            Some("Continue")
+            Some("Focus")
         );
 
         state.apply(LaunchWizardAction::ApplyQuickStart {
@@ -2636,6 +2636,49 @@ mod tests {
             }
             other => panic!("expected focus completion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn quick_start_start_new_keeps_live_window_available_but_does_not_focus_it() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "gwt-session-1".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+        }];
+
+        let mut state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        assert!(state.completion.is_none());
+        assert_eq!(state.mode, "normal");
+        assert!(state.resume_session_id.is_none());
     }
 
     #[test]
