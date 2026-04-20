@@ -1220,8 +1220,8 @@ mod tests {
                 "unexpected retired distributed asset {retired}"
             );
         }
-        assert_no_gwt_hook_scripts(&wt, ".claude");
-        assert_no_gwt_hook_scripts(&wt, ".codex");
+        assert_no_gwt_hook_scripts(wt, ".claude");
+        assert_no_gwt_hook_scripts(wt, ".codex");
     }
 
     // ── helpers ──
