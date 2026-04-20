@@ -771,7 +771,7 @@ impl AppRuntime {
             .active_tab_id
             .as_ref()
             .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| self.workspace_view(tab).windows)
+            .map(|tab| workspace_view_for_tab(tab).windows)
             .unwrap_or_default();
         BackendEvent::WindowList { windows }
     }
@@ -1986,47 +1986,11 @@ impl AppRuntime {
     }
 
     fn app_state_view(&self) -> gwt::AppStateView {
-        gwt::AppStateView {
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
-            tabs: self
-                .tabs
-                .iter()
-                .map(|tab| gwt::ProjectTabView {
-                    id: tab.id.clone(),
-                    title: tab.title.clone(),
-                    project_root: tab.project_root.display().to_string(),
-                    kind: tab.kind,
-                    workspace: self.workspace_view(tab),
-                })
-                .collect(),
-            active_tab_id: self.active_tab_id.clone(),
-            recent_projects: self
-                .recent_projects
-                .iter()
-                .map(|project| gwt::RecentProjectView {
-                    path: project.path.display().to_string(),
-                    title: project.title.clone(),
-                    kind: project.kind,
-                })
-                .collect(),
-        }
-    }
-
-    fn workspace_view(&self, tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
-        gwt::WorkspaceView {
-            viewport: tab.workspace.persisted().viewport.clone(),
-            windows: tab
-                .workspace
-                .persisted()
-                .windows
-                .iter()
-                .cloned()
-                .map(|mut window| {
-                    window.id = combined_window_id(&tab.id, &window.id);
-                    window
-                })
-                .collect(),
-        }
+        app_state_view_from_parts(
+            &self.tabs,
+            self.active_tab_id.as_deref(),
+            &self.recent_projects,
+        )
     }
 
     fn workspace_state_broadcast(&self) -> OutboundEvent {
@@ -2230,15 +2194,60 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
         )
 }
 
+fn current_app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+    gwt::WorkspaceView {
+        viewport: tab.workspace.persisted().viewport.clone(),
+        windows: tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .cloned()
+            .map(|mut window| {
+                window.id = combined_window_id(&tab.id, &window.id);
+                window
+            })
+            .collect(),
+    }
+}
+
+fn app_state_view_from_parts(
+    tabs: &[ProjectTabRuntime],
+    active_tab_id: Option<&str>,
+    recent_projects: &[gwt::RecentProjectEntry],
+) -> gwt::AppStateView {
+    gwt::AppStateView {
+        app_version: current_app_version().to_string(),
+        tabs: tabs
+            .iter()
+            .map(|tab| gwt::ProjectTabView {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                project_root: tab.project_root.display().to_string(),
+                kind: tab.kind,
+                workspace: workspace_view_for_tab(tab),
+            })
+            .collect(),
+        active_tab_id: active_tab_id.map(str::to_owned),
+        recent_projects: recent_projects
+            .iter()
+            .map(|project| gwt::RecentProjectView {
+                path: project.path.display().to_string(),
+                title: project.title.clone(),
+                kind: project.kind,
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
-    use tao::event_loop::EventLoopBuilder;
-    #[cfg(unix)]
-    use tao::platform::unix::EventLoopBuilderExtUnix;
-    #[cfg(target_os = "windows")]
-    use tao::platform::windows::EventLoopBuilderExtWindows;
     use tempfile::tempdir;
 
     use gwt::{
@@ -2249,10 +2258,10 @@ mod tests {
     use gwt_terminal::PaneStatus;
 
     use super::{
-        apply_host_package_runner_fallback_with_probe, close_window_from_workspace,
-        combined_window_id, knowledge_kind_for_preset, preferred_issue_launch_branch,
-        resolve_project_target, should_auto_close_agent_window, should_auto_start_restored_window,
-        ActiveAgentSession, AppRuntime, ProjectTabRuntime, UserEvent, WindowAddress,
+        app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
+        close_window_from_workspace, combined_window_id, knowledge_kind_for_preset,
+        preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2328,37 +2337,6 @@ mod tests {
             display_name: "Codex".to_string(),
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
             tab_id: tab_id.to_string(),
-        }
-    }
-
-    fn test_proxy() -> tao::event_loop::EventLoopProxy<UserEvent> {
-        let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
-        #[cfg(unix)]
-        builder.with_any_thread(true);
-        #[cfg(target_os = "windows")]
-        builder.with_any_thread(true);
-        builder.build().create_proxy()
-    }
-
-    fn sample_app_runtime() -> AppRuntime {
-        AppRuntime {
-            tabs: vec![sample_project_tab_with_window(
-                "tab-1",
-                "shell-1",
-                WindowPreset::Shell,
-                WindowProcessStatus::Ready,
-            )],
-            active_tab_id: Some("tab-1".to_string()),
-            recent_projects: Vec::new(),
-            runtimes: HashMap::new(),
-            window_details: HashMap::new(),
-            window_lookup: HashMap::new(),
-            session_state_path: PathBuf::from("session.json"),
-            proxy: test_proxy(),
-            sessions_dir: PathBuf::from("sessions"),
-            launch_wizard: None,
-            active_agent_sessions: HashMap::new(),
-            pending_update: None,
         }
     }
 
@@ -2444,9 +2422,15 @@ mod tests {
 
     #[test]
     fn app_state_view_includes_current_app_version() {
-        let app = sample_app_runtime();
+        let tabs = vec![sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )];
+        let view = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
 
-        assert_eq!(app.app_state_view().app_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(view.app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
