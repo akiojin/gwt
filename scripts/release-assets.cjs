@@ -8,6 +8,14 @@ function binaryNameForPlatform(platform = os.platform()) {
   return platform === "win32" ? "gwt.exe" : "gwt";
 }
 
+function daemonBinaryNameForPlatform(platform = os.platform()) {
+  return platform === "win32" ? "gwtd.exe" : "gwtd";
+}
+
+function bundleBinaryNamesForPlatform(platform = os.platform()) {
+  return [binaryNameForPlatform(platform), daemonBinaryNameForPlatform(platform)];
+}
+
 function releaseAssetName(platform = os.platform(), arch = os.arch()) {
   if (platform === "darwin" && arch === "arm64") {
     return "gwt-macos-arm64.tar.gz";
@@ -120,16 +128,15 @@ function cleanupTempDir(tempRoot) {
   }
 }
 
-function installBinaryFromArchive({
+function installBundleFromArchive({
   archivePath,
   asset,
   binDir,
-  binaryName = binaryNameForPlatform(),
   platform = os.platform(),
+  binaryNames = bundleBinaryNamesForPlatform(platform),
 }) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-extract-"));
   const extractDir = path.join(tempRoot, "extract");
-  const dest = path.join(binDir, binaryName);
 
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(extractDir, { recursive: true });
@@ -137,17 +144,22 @@ function installBinaryFromArchive({
   try {
     extractArchive(archivePath, extractDir, asset);
 
-    const extractedBinary = findFileRecursive(extractDir, binaryName);
-    if (!extractedBinary) {
-      throw new Error(`Extracted archive does not contain ${binaryName}`);
+    const destinations = {};
+    for (const binaryName of binaryNames) {
+      const extractedBinary = findFileRecursive(extractDir, binaryName);
+      if (!extractedBinary) {
+        throw new Error(`Extracted archive does not contain ${binaryName}`);
+      }
+
+      const dest = path.join(binDir, binaryName);
+      fs.copyFileSync(extractedBinary, dest);
+      if (platform !== "win32") {
+        fs.chmodSync(dest, 0o755);
+      }
+      destinations[binaryName] = dest;
     }
 
-    fs.copyFileSync(extractedBinary, dest);
-    if (platform !== "win32") {
-      fs.chmodSync(dest, 0o755);
-    }
-
-    return { asset, dest };
+    return { asset, destinations };
   } finally {
     cleanupTempDir(tempRoot);
   }
@@ -157,7 +169,6 @@ async function installReleaseBinary({
   repo,
   version,
   binDir,
-  binaryName = binaryNameForPlatform(),
   platform = os.platform(),
   arch = os.arch(),
 }) {
@@ -167,11 +178,10 @@ async function installReleaseBinary({
 
   try {
     await download(url, archivePath);
-    return installBinaryFromArchive({
+    return installBundleFromArchive({
       archivePath,
       asset,
       binDir,
-      binaryName,
       platform,
     });
   } finally {
@@ -181,8 +191,11 @@ async function installReleaseBinary({
 
 module.exports = {
   binaryNameForPlatform,
+  bundleBinaryNamesForPlatform,
+  daemonBinaryNameForPlatform,
   download,
-  installBinaryFromArchive,
+  installBinaryFromArchive: installBundleFromArchive,
+  installBundleFromArchive,
   installReleaseBinary,
   releaseAssetName,
   releaseAssetUrl,
