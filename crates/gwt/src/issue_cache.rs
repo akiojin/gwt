@@ -179,7 +179,9 @@ fn parse_issue_list_snapshots(json: &str) -> Result<Vec<IssueSnapshot>, String> 
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs};
+    #[cfg(target_os = "windows")]
+    use std::env;
+    use std::fs;
 
     use super::*;
     use tempfile::tempdir;

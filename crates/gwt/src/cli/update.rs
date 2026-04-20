@@ -726,7 +726,11 @@ mod tests {
             run_with(&mut apply, UpdateCommand::Apply),
             RunOutcome::ExitSuccess
         ));
-        assert_eq!(apply.helper_copy_calls.len(), 1);
+        if cfg!(windows) {
+            assert_eq!(apply.helper_copy_calls.len(), 1);
+        } else {
+            assert!(apply.helper_copy_calls.is_empty());
+        }
         assert_eq!(apply.apply_calls.len(), 1);
         assert!(apply.stdout.contains("restarting"));
 
