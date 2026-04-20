@@ -3,9 +3,9 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc as std_mpsc, Arc, Mutex},
+    sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -789,17 +789,57 @@ impl AppRuntime {
     }
 
     fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let Some(runtime) = self.runtimes.get(id) else {
-            return Vec::new();
+        let data_len = data.len();
+        let write_result = {
+            let Some(runtime) = self.runtimes.get(id) else {
+                tracing::debug!(
+                    target: "gwt_input_trace",
+                    stage = "event_loop_runtime_missing",
+                    window_id = %id,
+                    data_len,
+                    "terminal_input dropped: no runtime for window"
+                );
+                return Vec::new();
+            };
+
+            let lock_started = Instant::now();
+            let lock_result = runtime.pane.lock().map_err(|error| error.to_string());
+            let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+
+            match lock_result {
+                Ok(pane) => {
+                    let write_started = Instant::now();
+                    let result = pane
+                        .write_input(data.as_bytes())
+                        .map_err(|error| error.to_string());
+                    tracing::debug!(
+                        target: "gwt_input_trace",
+                        stage = "pty_write",
+                        window_id = %id,
+                        data_len,
+                        lock_wait_us,
+                        write_us = write_started.elapsed().as_micros() as u64,
+                        ok = result.is_ok(),
+                        "terminal_input forwarded to PTY writer"
+                    );
+                    result
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "gwt_input_trace",
+                        stage = "pane_lock_failed",
+                        window_id = %id,
+                        data_len,
+                        lock_wait_us,
+                        error = %error,
+                        "terminal_input dropped: pane mutex poisoned"
+                    );
+                    Err(error)
+                }
+            }
         };
-        match runtime
-            .pane
-            .lock()
-            .map_err(|error| error.to_string())
-            .and_then(|pane| {
-                pane.write_input(data.as_bytes())
-                    .map_err(|error| error.to_string())
-            }) {
+
+        match write_result {
             Ok(()) => Vec::new(),
             Err(error) => {
                 self.handle_runtime_status(id.to_string(), WindowProcessStatus::Error, Some(error))
@@ -2089,8 +2129,28 @@ impl AppRuntime {
                     Ok(0) => break,
                     Ok(read) => {
                         let chunk = buffer[..read].to_vec();
+                        let lock_started = Instant::now();
                         if let Ok(mut pane) = pane.lock() {
+                            let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+                            let parse_started = Instant::now();
                             pane.process_bytes(&chunk);
+                            let parse_us = parse_started.elapsed().as_micros() as u64;
+                            // Log only when the contention window is large enough
+                            // to plausibly starve a concurrent `write_input`. The
+                            // threshold keeps the log volume bounded during
+                            // normal output bursts while still surfacing the
+                            // lock-hold windows that matter for drop triage.
+                            if lock_wait_us > 500 || parse_us > 500 {
+                                tracing::debug!(
+                                    target: "gwt_input_trace",
+                                    stage = "reader_pane_lock",
+                                    window_id = %id,
+                                    chunk_len = read,
+                                    lock_wait_us,
+                                    parse_us,
+                                    "reader thread held pane mutex (output parsing)"
+                                );
+                            }
                         }
                         let _ = proxy.send_event(UserEvent::RuntimeOutput {
                             id: id.clone(),
@@ -3060,6 +3120,11 @@ async fn client_session(socket: WebSocket, state: ServerState) {
     let mut outbound = state.clients.register(client_id.clone());
     let (mut sender, mut receiver) = socket.split();
 
+    // Per-session counter that tags each inbound `terminal_input` in order so
+    // we can diff layer counts (frontend → WS → event loop → PTY writer) when
+    // diagnosing intermittent key-input drops (bugfix/input-key).
+    let input_seq = Arc::new(AtomicU64::new(0));
+
     loop {
         tokio::select! {
             maybe_payload = outbound.recv() => {
@@ -3073,12 +3138,45 @@ async fn client_session(socket: WebSocket, state: ServerState) {
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
+                        let text_len = text.len();
                         match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
                             Ok(event) => {
-                                let _ = state.proxy.send_event(UserEvent::Frontend {
+                                let (ti_seq, ti_id, ti_len) = match &event {
+                                    FrontendEvent::TerminalInput { id, data } => {
+                                        let seq = input_seq.fetch_add(
+                                            1,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        ) + 1;
+                                        tracing::debug!(
+                                            target: "gwt_input_trace",
+                                            stage = "ws_recv",
+                                            client_id = %client_id,
+                                            seq,
+                                            window_id = %id,
+                                            data_len = data.len(),
+                                            text_len,
+                                            "terminal_input received over WebSocket"
+                                        );
+                                        (Some(seq), Some(id.clone()), Some(data.len()))
+                                    }
+                                    _ => (None, None, None),
+                                };
+                                let send_result = state.proxy.send_event(UserEvent::Frontend {
                                     client_id: client_id.clone(),
                                     event,
                                 });
+                                if let (Some(seq), Some(id), Some(len)) = (ti_seq, ti_id, ti_len) {
+                                    tracing::debug!(
+                                        target: "gwt_input_trace",
+                                        stage = "ws_dispatch",
+                                        client_id = %client_id,
+                                        seq,
+                                        window_id = %id,
+                                        data_len = len,
+                                        ok = send_result.is_ok(),
+                                        "terminal_input forwarded to event loop proxy"
+                                    );
+                                }
                             }
                             Err(error) => {
                                 eprintln!("invalid frontend message: {error}");
@@ -4221,6 +4319,21 @@ fn main() -> wry::Result<()> {
             std::process::exit(1);
         }
     }
+
+    // Install the tracing subscriber so that `tracing::debug!/info!` lands in
+    // `~/.gwt/logs/gwt.log`. The returned guard must outlive the event loop;
+    // we bind it to `_log_handles` and keep it until `main` returns.
+    //
+    // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
+    // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
+    // `RUST_LOG=gwt_input_trace=debug`.
+    let _log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
+        gwt_core::paths::gwt_logs_dir(),
+    ))
+    .map_err(|error| {
+        eprintln!("gwt logging init failed: {error}");
+    })
+    .ok();
 
     if let Ok(project_root) = std::env::current_dir() {
         if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&project_root) {
