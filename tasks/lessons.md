@@ -25,6 +25,27 @@
 3. Plan Mode で開始し、最終 handoff で leave Plan Mode できるところまでを
    command / skill / test で同時に拘束する。
 
+## 2026-04-20 — fix(gui): GUI unit test で EventLoop/GTK 初期化を持ち込まない
+
+### 事象
+
+PR #2074 の Linux CI で `tests::app_state_view_includes_current_app_version` が失敗した。
+最初は `tao` の EventLoop を main thread 外で初期化したことにより落ち、その場しのぎで
+`with_any_thread(true)` を入れると次は GTK 初期化失敗に変わった。
+
+### 原因
+
+- version 表示の回帰テストが、本来確認したい `AppStateView` の組み立てだけでなく、
+  GUI runtime (`AppRuntime`) の生成まで引き込んでいた。
+- `AppRuntime` のテスト補助が `tao::EventLoop` / platform backend 初期化を前提にしており、
+  headless Linux CI では GTK backend が使えず失敗した。
+
+### 再発防止策
+
+1. GUI state の unit test は EventLoop や WebView を生成せず、pure な state builder/helper に分離して検証する。
+2. `tao` / `wry` / GTK backend を触るテストは、thread 制約だけでなく headless backend 制約も前提に置く。
+3. 「表示用 state を確認したいだけ」のテストでは runtime 全体を組み立てず、必要な parts を直接渡す helper を先に用意する。
+
 ## 2026-04-20 — ci(release): cross-platform archive step は shell と runner の同梱コマンド差分を前提に分ける
 
 ### 事象
