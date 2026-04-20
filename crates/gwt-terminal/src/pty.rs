@@ -390,33 +390,39 @@ fn parse_windows_cmd_shim(candidate: &Path) -> Option<WindowsSpawnTarget> {
 
 #[cfg(windows)]
 fn build_windows_shim_target(base_dir: &Path, raw_paths: &[String]) -> Option<WindowsSpawnTarget> {
-    if let Some(executable) = raw_paths.iter().find(|path| {
+    let executable = raw_paths.iter().find_map(|path| {
         let lower = path.to_ascii_lowercase();
-        lower.ends_with(".exe") || lower.ends_with(".com")
-    }) {
-        let resolved = base_dir.join(normalize_windows_rel_path(executable));
-        return Some(WindowsSpawnTarget {
-            command: resolved.display().to_string(),
+        (lower.ends_with(".exe") || lower.ends_with(".com"))
+            .then(|| base_dir.join(normalize_windows_rel_path(path)))
+    });
+    let script = raw_paths.iter().find_map(|path| {
+        let lower = path.to_ascii_lowercase();
+        (lower.ends_with(".js") || lower.ends_with(".cjs"))
+            .then(|| base_dir.join(normalize_windows_rel_path(path)))
+    });
+
+    match (executable, script) {
+        (Some(executable), Some(script)) if windows_is_node_runtime(&executable) => {
+            let command = if executable.exists() {
+                executable.display().to_string()
+            } else {
+                windows_local_node_command(base_dir)
+            };
+            Some(WindowsSpawnTarget {
+                command,
+                args_prefix: vec![script.display().to_string()],
+            })
+        }
+        (Some(executable), _) if executable.exists() => Some(WindowsSpawnTarget {
+            command: executable.display().to_string(),
             args_prefix: Vec::new(),
-        });
+        }),
+        (_, Some(script)) => Some(WindowsSpawnTarget {
+            command: windows_local_node_command(base_dir),
+            args_prefix: vec![script.display().to_string()],
+        }),
+        _ => None,
     }
-
-    let script = raw_paths.iter().find(|path| {
-        path.to_ascii_lowercase().ends_with(".js") || path.to_ascii_lowercase().ends_with(".cjs")
-    })?;
-    let script_path = base_dir.join(normalize_windows_rel_path(script));
-
-    let local_node = ["node.exe", "node"]
-        .into_iter()
-        .map(|name| base_dir.join(name))
-        .find(|path| path.exists())
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "node".to_string());
-
-    Some(WindowsSpawnTarget {
-        command: local_node,
-        args_prefix: vec![script_path.display().to_string()],
-    })
 }
 
 #[cfg(windows)]
@@ -442,11 +448,37 @@ fn normalize_windows_rel_path(value: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
+fn windows_local_node_command(base_dir: &Path) -> String {
+    ["node.exe", "node"]
+        .into_iter()
+        .map(|name| base_dir.join(name))
+        .find(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "node".to_string())
+}
+
+#[cfg(windows)]
+fn windows_is_node_runtime(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("node"))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
 fn windows_env_value(
     key: &str,
     env: &HashMap<String, String>,
     remove_env: &[String],
 ) -> Option<std::ffi::OsString> {
+    if let Some(value) = env
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| std::ffi::OsString::from(value))
+    {
+        return Some(value);
+    }
+
     if remove_env
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(key))
@@ -454,10 +486,7 @@ fn windows_env_value(
         return None;
     }
 
-    env.iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-        .map(|(_, value)| std::ffi::OsString::from(value))
-        .or_else(|| std::env::var_os(key))
+    std::env::var_os(key)
 }
 
 #[cfg(windows)]
@@ -835,6 +864,101 @@ mod tests {
             normalized.args,
             vec![script.display().to_string(), "--no-alt-screen".to_string(),]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_preserves_script_arg_for_node_exe_shims() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        let node_modules = bin_dir
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin");
+        std::fs::create_dir_all(&node_modules).expect("node modules");
+        let shim = bin_dir.join("codex");
+        let local_node = bin_dir.join("node.exe");
+        let script = node_modules.join("codex.js");
+        std::fs::write(&local_node, "not-a-real-pe").expect("node exe");
+        std::fs::write(&script, "console.log('codex');\n").expect("script");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nif [ -x \"$basedir/node.exe\" ]; then\n  exec \"$basedir/node.exe\" \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\"\nelse\n  exec node \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\"\nfi\n",
+        )
+        .expect("shim");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalize_windows_spawn_config(SpawnConfig {
+            command: "codex".to_string(),
+            args: vec!["--no-alt-screen".to_string()],
+            cols: 80,
+            rows: 24,
+            env,
+            remove_env: Vec::new(),
+            cwd: None,
+        });
+
+        assert_eq!(normalized.command, local_node.display().to_string());
+        assert_eq!(
+            normalized.args,
+            vec![script.display().to_string(), "--no-alt-screen".to_string()]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_falls_back_to_node_when_shim_runtime_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        let node_modules = bin_dir
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("bin");
+        std::fs::create_dir_all(&node_modules).expect("node modules");
+        let shim = bin_dir.join("codex");
+        let script = node_modules.join("codex.js");
+        std::fs::write(&script, "console.log('codex');\n").expect("script");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nif [ -x \"$basedir/node.exe\" ]; then\n  exec \"$basedir/node.exe\" \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\"\nelse\n  exec node \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\"\nfi\n",
+        )
+        .expect("shim");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalize_windows_spawn_config(SpawnConfig {
+            command: "codex".to_string(),
+            args: vec!["--no-alt-screen".to_string()],
+            cols: 80,
+            rows: 24,
+            env,
+            remove_env: Vec::new(),
+            cwd: None,
+        });
+
+        assert_eq!(normalized.command, "node");
+        assert_eq!(
+            normalized.args,
+            vec![script.display().to_string(), "--no-alt-screen".to_string()]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_env_override_beats_remove_env() {
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), r"C:\custom\bin".to_string());
+
+        let value = windows_env_value("PATH", &env, &[String::from("PATH")]);
+
+        assert_eq!(value, Some(std::ffi::OsString::from(r"C:\custom\bin")));
     }
 
     #[cfg(windows)]

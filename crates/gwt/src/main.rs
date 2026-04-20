@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{mpsc as std_mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
@@ -1668,6 +1668,15 @@ impl AppRuntime {
             refresh_managed_gwt_assets_for_worktree(&worktree_path)
                 .map_err(|error| error.to_string())?;
 
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+                && apply_host_package_runner_fallback(&mut config)
+            {
+                let _ = proxy.send_event(UserEvent::LaunchProgress {
+                    window_id: window_id.clone(),
+                    message: "bunx unavailable, switching to npx...".to_string(),
+                });
+            }
+
             let branch_name = config
                 .branch
                 .clone()
@@ -2106,17 +2115,18 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
     use gwt::{
         BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind, PersistedWindowState,
         WindowGeometry, WindowPreset, WindowProcessStatus,
     };
+    use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use tempfile::tempdir;
 
     use super::{
-        knowledge_kind_for_preset, preferred_issue_launch_branch, resolve_project_target,
-        should_auto_start_restored_window,
+        apply_host_package_runner_fallback_with_probe, knowledge_kind_for_preset,
+        preferred_issue_launch_branch, resolve_project_target, should_auto_start_restored_window,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2186,6 +2196,95 @@ mod tests {
             dunce::canonicalize(&repo).expect("canonical repo root"),
         );
     }
+    fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir("E:/gwt/develop")
+            .version("latest")
+            .build();
+        config.command = r"C:\Users\test\AppData\Roaming\npm\bunx.cmd".to_string();
+        config.args = vec![
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--print".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
+        config
+    }
+
+    #[test]
+    fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
+        let mut config = sample_versioned_launch_config();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |command, args, _env, cwd| {
+                assert!(command.ends_with("bunx.cmd"), "command: {command}");
+                assert_eq!(
+                    args,
+                    vec![
+                        "@anthropic-ai/claude-code@latest".to_string(),
+                        "--version".to_string(),
+                    ]
+                );
+                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
+                false
+            },
+        );
+
+        assert!(changed, "expected bunx failure to switch to npx");
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_package_runner_fallback_keeps_bunx_when_probe_succeeds() {
+        let mut config = sample_versioned_launch_config();
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |_command, _args, _env, _cwd| true,
+        );
+
+        assert!(!changed, "successful bunx probe should keep bunx");
+        assert_eq!(config.command, original_command);
+        assert_eq!(config.args, original_args);
+    }
+
+    #[test]
+    fn host_package_runner_fallback_ignores_direct_installed_command() {
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir("E:/gwt/develop")
+            .version("installed")
+            .build();
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |_command, _args, _env, _cwd| {
+                panic!("installed command should not probe bunx");
+            },
+        );
+
+        assert!(!changed);
+        assert_eq!(config.command, original_command);
+        assert_eq!(config.args, original_args);
+    }
+
     #[test]
     fn issue_and_spec_presets_route_to_knowledge_bridge_kind() {
         assert_eq!(
@@ -2691,6 +2790,12 @@ struct DockerPackageRunnerCandidate {
     base_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageRunnerProgram {
+    executable: String,
+    args: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DevContainerLaunchDefaults {
     service: Option<String>,
@@ -2742,6 +2847,87 @@ fn apply_docker_runtime_to_launch_config(
     );
     config.docker_service = Some(launch.service);
     Ok(())
+}
+
+fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
+    apply_host_package_runner_fallback_with_probe(
+        config,
+        "npx".to_string(),
+        probe_host_package_runner,
+    )
+}
+
+fn apply_host_package_runner_fallback_with_probe<F>(
+    config: &mut gwt_agent::LaunchConfig,
+    fallback_executable: String,
+    mut probe: F,
+) -> bool
+where
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+{
+    let Some(program) =
+        resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
+    else {
+        return false;
+    };
+    config.command = program.executable;
+    config.args = program.args;
+    true
+}
+
+fn resolve_host_package_runner_with_probe<F>(
+    config: &gwt_agent::LaunchConfig,
+    fallback_executable: String,
+    probe: &mut F,
+) -> Option<PackageRunnerProgram>
+where
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+{
+    let version_spec = package_runner_version_spec(config)?;
+    if !command_matches_runner(&config.command, "bunx") {
+        return None;
+    }
+
+    let probe_args = vec![version_spec.clone(), "--version".to_string()];
+    let cwd = config.working_dir.clone();
+    if probe(&config.command, probe_args, &config.env_vars, cwd) {
+        return None;
+    }
+
+    let agent_args = strip_package_runner_args(&config.args, &version_spec);
+    let mut args = vec!["--yes".to_string(), version_spec];
+    args.extend(agent_args);
+    Some(PackageRunnerProgram {
+        executable: fallback_executable,
+        args,
+    })
+}
+
+fn probe_host_package_runner(
+    command: &str,
+    args: Vec<String>,
+    env_vars: &HashMap<String, String>,
+    cwd: Option<PathBuf>,
+) -> bool {
+    let mut process = Command::new(command);
+    process
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .envs(env_vars);
+    if let Some(cwd) = cwd {
+        process.current_dir(cwd);
+    }
+    process.status().is_ok_and(|status| status.success())
+}
+
+fn command_matches_runner(command: &str, runner: &str) -> bool {
+    let path = Path::new(command);
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
@@ -2865,7 +3051,7 @@ fn resolve_docker_exec_program(
     launch: &DockerLaunchPlan,
     config: &gwt_agent::LaunchConfig,
 ) -> Result<DockerExecProgram, String> {
-    let Some(version_spec) = docker_package_version_spec(config) else {
+    let Some(version_spec) = package_runner_version_spec(config) else {
         ensure_docker_launch_command_ready(launch, &config.command)?;
         return Ok(DockerExecProgram {
             executable: config.command.clone(),
@@ -2875,7 +3061,7 @@ fn resolve_docker_exec_program(
     resolve_docker_package_runner(launch, config, &version_spec)
 }
 
-fn docker_package_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
+fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
     let package = config.agent_id.package_name()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
@@ -2893,7 +3079,7 @@ fn resolve_docker_package_runner(
     config: &gwt_agent::LaunchConfig,
     version_spec: &str,
 ) -> Result<DockerExecProgram, String> {
-    let agent_args = strip_docker_package_runner_args(&config.args, version_spec);
+    let agent_args = strip_package_runner_args(&config.args, version_spec);
     let candidates = vec![
         DockerPackageRunnerCandidate {
             executable: "bunx",
@@ -2924,7 +3110,7 @@ fn resolve_docker_package_runner(
     ))
 }
 
-fn strip_docker_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
+fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
     if args.first().is_some_and(|first| first == "--yes")
         && args.get(1).is_some_and(|arg| arg == version_spec)
     {
