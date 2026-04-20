@@ -20,13 +20,14 @@ use axum::{
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    cleanup_selected_branches, default_wizard_version_cache_path, detect_shell_program,
-    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
-    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
-    refresh_managed_gwt_assets_for_worktree, resolve_launch_spec, save_session_state,
-    save_workspace_state, workspace_state_path, BackendEvent, DockerWizardContext, FrontendEvent,
-    KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
-    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    build_builtin_agent_options, cleanup_selected_branches, default_wizard_version_cache_path,
+    detect_shell_program, list_branch_entries_with_active_sessions, list_directory_entries,
+    load_knowledge_bridge, load_restored_workspace_state, load_session_state,
+    migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
+    save_session_state, save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry,
+    DockerWizardContext, FrontendEvent, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardHydration, LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -80,6 +81,11 @@ enum UserEvent {
             String,
         >,
     },
+    LaunchWizardHydrated {
+        wizard_id: String,
+        result: Result<LaunchWizardHydration, String>,
+    },
+    IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
@@ -159,7 +165,19 @@ struct WindowAddress {
 #[derive(Debug, Clone)]
 struct LaunchWizardSession {
     tab_id: String,
+    wizard_id: String,
     wizard: LaunchWizardState,
+}
+
+#[derive(Debug, Clone)]
+struct IssueLaunchWizardPrepared {
+    client_id: ClientId,
+    id: String,
+    knowledge_kind: KnowledgeKind,
+    tab_id: String,
+    project_root: PathBuf,
+    issue_number: u64,
+    result: Result<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1124,39 +1142,43 @@ impl AppRuntime {
         branch_name: &str,
         linked_issue_number: Option<u64>,
     ) -> Result<(), String> {
-        let active_session_branches = self.active_session_branches_for_tab(tab_id);
-        let entries =
-            list_branch_entries_with_active_sessions(project_root, &active_session_branches)
-                .map_err(|error| error.to_string())?;
-        let selected_branch = entries
-            .into_iter()
-            .find(|entry| entry.name == branch_name)
-            .ok_or_else(|| format!("Branch not found: {branch_name}"))?;
-
-        let normalized_branch_name = normalize_branch_name(&selected_branch.name);
-        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
-        let quick_start_root = worktree_path
-            .clone()
-            .unwrap_or_else(|| project_root.to_path_buf());
+        let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
-        let (docker_context, docker_service_status) =
-            detect_wizard_docker_context_and_status(&quick_start_root);
+        let wizard_id = Uuid::new_v4().to_string();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
-            wizard: LaunchWizardState::open(
+            wizard_id: wizard_id.clone(),
+            wizard: LaunchWizardState::open_loading(
                 LaunchWizardContext {
-                    selected_branch,
+                    selected_branch: synthetic_branch_entry(branch_name),
                     normalized_branch_name,
-                    worktree_path,
-                    quick_start_root,
+                    worktree_path: None,
+                    quick_start_root: project_root.to_path_buf(),
                     live_sessions,
-                    docker_context,
-                    docker_service_status,
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number,
                 },
-                &self.sessions_dir,
-                &default_wizard_version_cache_path(),
+                build_builtin_agent_options(
+                    gwt_agent::AgentDetector::detect_all(),
+                    &gwt_agent::VersionCache::load(&default_wizard_version_cache_path()),
+                ),
             ),
+        });
+
+        let proxy = self.proxy.clone();
+        let sessions_dir = self.sessions_dir.clone();
+        let project_root = project_root.to_path_buf();
+        let branch_name = branch_name.to_string();
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        thread::spawn(move || {
+            let result = resolve_launch_wizard_hydration(
+                &project_root,
+                &branch_name,
+                &active_session_branches,
+                &sessions_dir,
+            );
+            let _ = proxy.send_event(UserEvent::LaunchWizardHydrated { wizard_id, result });
         });
 
         Ok(())
@@ -1209,48 +1231,101 @@ impl AppRuntime {
             )];
         };
 
-        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
-        let branches = match list_branch_entries_with_active_sessions(
-            &tab.project_root,
-            &active_session_branches,
-        ) {
-            Ok(entries) => entries,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::KnowledgeError {
-                        id: id.to_string(),
-                        knowledge_kind: kind,
-                        message: error.to_string(),
-                    },
-                )]
-            }
-        };
-        let Some(branch_name) = preferred_issue_launch_branch(&branches) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: kind,
-                    message: "No local branch is available for launch".to_string(),
-                },
-            )];
-        };
-
         let project_root = tab.project_root.clone();
         let tab_id = address.tab_id.clone();
-        match self.open_launch_wizard_for_branch(
-            &tab_id,
-            &project_root,
-            &branch_name,
-            Some(issue_number),
-        ) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
+        let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
+        thread::spawn(move || {
+            let result =
+                list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
+                    .map_err(|error| error.to_string())
+                    .and_then(|entries| {
+                        preferred_issue_launch_branch(&entries)
+                            .ok_or_else(|| "No local branch is available for launch".to_string())
+                    });
+            let _ = proxy.send_event(UserEvent::IssueLaunchWizardPrepared(
+                IssueLaunchWizardPrepared {
+                    client_id,
+                    id,
                     knowledge_kind: kind,
+                    tab_id,
+                    project_root,
+                    issue_number,
+                    result,
+                },
+            ));
+        });
+        Vec::new()
+    }
+
+    fn handle_launch_wizard_hydrated(
+        &mut self,
+        wizard_id: String,
+        result: Result<LaunchWizardHydration, String>,
+    ) -> Vec<OutboundEvent> {
+        let Some(session) = self.launch_wizard.as_mut() else {
+            return Vec::new();
+        };
+        if session.wizard_id != wizard_id {
+            return Vec::new();
+        }
+
+        match result {
+            Ok(hydration) => session.wizard.apply_hydration(hydration),
+            Err(error) => session.wizard.set_hydration_error(error),
+        }
+
+        vec![self.launch_wizard_state_outbound()]
+    }
+
+    fn handle_issue_launch_wizard_prepared(
+        &mut self,
+        prepared: IssueLaunchWizardPrepared,
+    ) -> Vec<OutboundEvent> {
+        let IssueLaunchWizardPrepared {
+            client_id,
+            id,
+            knowledge_kind,
+            tab_id,
+            project_root,
+            issue_number,
+            result,
+        } = prepared;
+        if self.tab(&tab_id).is_none() {
+            return vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::KnowledgeError {
+                    id,
+                    knowledge_kind,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        }
+
+        match result {
+            Ok(branch_name) => match self.open_launch_wizard_for_branch(
+                &tab_id,
+                &project_root,
+                &branch_name,
+                Some(issue_number),
+            ) {
+                Ok(()) => vec![self.launch_wizard_state_outbound()],
+                Err(error) => vec![OutboundEvent::reply(
+                    &client_id,
+                    BackendEvent::KnowledgeError {
+                        id,
+                        knowledge_kind,
+                        message: error,
+                    },
+                )],
+            },
+            Err(error) => vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::KnowledgeError {
+                    id,
+                    knowledge_kind,
                     message: error,
                 },
             )],
@@ -2707,6 +2782,55 @@ fn normalize_branch_name(branch_name: &str) -> String {
     branch_name.to_string()
 }
 
+fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
+    BranchListEntry {
+        name: branch_name.to_string(),
+        scope: gwt::BranchScope::Local,
+        is_head: false,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        last_commit_date: None,
+        cleanup: gwt::BranchCleanupInfo::default(),
+    }
+}
+
+fn resolve_launch_wizard_hydration(
+    project_root: &Path,
+    branch_name: &str,
+    active_session_branches: &std::collections::HashSet<String>,
+    sessions_dir: &Path,
+) -> Result<LaunchWizardHydration, String> {
+    let entries = list_branch_entries_with_active_sessions(project_root, active_session_branches)
+        .map_err(|error| error.to_string())?;
+    let selected_branch = entries
+        .into_iter()
+        .find(|entry| entry.name == branch_name)
+        .ok_or_else(|| format!("Branch not found: {branch_name}"))?;
+    let normalized_branch_name = normalize_branch_name(&selected_branch.name);
+    let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
+    let quick_start_root = worktree_path
+        .clone()
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let quick_start_entries = gwt::launch_wizard::load_quick_start_entries(
+        &quick_start_root,
+        sessions_dir,
+        &normalized_branch_name,
+    );
+    let (docker_context, docker_service_status) =
+        detect_wizard_docker_context_and_status(&quick_start_root);
+
+    Ok(LaunchWizardHydration {
+        selected_branch: Some(selected_branch),
+        normalized_branch_name,
+        worktree_path,
+        quick_start_root,
+        docker_context,
+        docker_service_status,
+        quick_start_entries,
+    })
+}
+
 fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
         WindowPreset::Issue => Some(KnowledgeKind::Issue),
@@ -3795,6 +3919,14 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchWizardHydrated { wizard_id, result }) => {
+                let events = app.handle_launch_wizard_hydrated(wizard_id, result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
+                let events = app.handle_issue_launch_wizard_prepared(prepared);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {

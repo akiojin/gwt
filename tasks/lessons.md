@@ -2984,6 +2984,31 @@ reader detach timeout の best-effort cleanup が stderr に
 3. best-effort cleanup が timeout 後 detach を許容する設計なら、
    irrecoverable failure でない限り user-visible な stderr を出さない。
 
+## 2026-04-20 — fix: Issue 完了報告の前に branch HEAD が base branch に含まれるか確認する
+
+### 事象
+
+Issue #2045 で PR #2049 が merge された直後に「実装はマージ済み」「完了確認」と
+コメントしたが、同じ `bugfix/issue-2045` ブランチ上の follow-up commit
+`a5579c6e` は `develop` に入っていなかった。
+
+### 原因
+
+- PR の merge 状態と branch HEAD の反映状態を同一視した。
+- `git cherry -v origin/develop HEAD` や
+  `git merge-base --is-ancestor <head> origin/develop` で、
+  base branch 側に未反映 commit がないか確認していなかった。
+- SPEC / Issue artifact の完了更新時に、どの commit までを対象にした完了報告なのか
+  固定していなかった。
+
+### 再発防止策
+
+1. Issue 完了コメントや「マージ済み」報告の前に、
+   `git cherry -v origin/<base> HEAD` か同等確認で branch HEAD の未反映 commit を確認する。
+2. 「PR が merge 済み」と「branch HEAD が base branch に含まれる」を分けて記録する。
+3. 完了報告では commit hash か revision range を明示し、follow-up commit が残っていないことを確認してから
+   SPEC / Issue artifact を完了扱いにする。
+
 ## 2026-04-17 — fix: clipboard fallback は focus を奪ったら必ず terminal へ戻す
 
 ### 事象
