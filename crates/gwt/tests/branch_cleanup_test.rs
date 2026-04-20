@@ -41,8 +41,7 @@ fn cleanup_selected_branches_deletes_local_and_remote_branch() {
     let entries =
         list_branch_entries_with_active_sessions(&repo, &HashSet::new()).expect("entries");
     let results =
-        cleanup_selected_branches(&repo, &entries, &[String::from("feature/prune-me")], true)
-            .expect("cleanup results");
+        cleanup_selected_branches(&repo, &entries, &[String::from("feature/prune-me")], true);
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
@@ -65,8 +64,7 @@ fn cleanup_selected_branches_rejects_blocked_branch() {
 
     let entries =
         list_branch_entries_with_active_sessions(repo.path(), &HashSet::new()).expect("entries");
-    let results = cleanup_selected_branches(repo.path(), &entries, &[String::from("main")], true)
-        .expect("cleanup results");
+    let results = cleanup_selected_branches(repo.path(), &entries, &[String::from("main")], true);
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);

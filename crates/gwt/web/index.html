@@ -1688,6 +1688,7 @@
       let titlebarClickState = null;
       let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
       let projectError = "";
+      const BRANCH_CLEANUP_TIMEOUT_MS = 30000;
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
       function presetSurface(preset) {
@@ -1719,6 +1720,18 @@
       function setConnectionState(connected) {
         connectionDot.classList.toggle("connected", connected);
         connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
+        if (!connected) {
+          for (const [windowId] of branchListStateMap.entries()) {
+            if (
+              failRunningBranchCleanup(
+                windowId,
+                "Connection lost while cleaning up branches",
+              )
+            ) {
+              renderBranches(windowId);
+            }
+          }
+        }
       }
 
       function websocketUrl() {
@@ -2640,6 +2653,7 @@
               stage: "confirm",
               deleteRemote: false,
               results: [],
+              timeoutId: null,
             },
           });
         }
@@ -3415,10 +3429,10 @@
           button.classList.toggle("active", button.dataset.branchFilter === state.filter);
         }
         if (cleanupButton) {
-          cleanupButton.disabled = selectedBranchCleanupEntries(windowId).length === 0;
-          cleanupButton.textContent = cleanupButton.disabled
-            ? "Clean Up"
-            : `Clean Up (${selectedBranchCleanupEntries(windowId).length})`;
+          const selectedCount = selectedBranchCleanupEntries(windowId).length;
+          cleanupButton.disabled = selectedCount === 0;
+          cleanupButton.textContent =
+            selectedCount === 0 ? "Clean Up" : `Clean Up (${selectedCount})`;
         }
         if (notice) {
           notice.hidden = !state.notice;
@@ -3580,6 +3594,46 @@
           .filter(Boolean);
       }
 
+      function clearBranchCleanupTimeout(state) {
+        if (state.cleanupModal.timeoutId !== null) {
+          clearTimeout(state.cleanupModal.timeoutId);
+          state.cleanupModal.timeoutId = null;
+        }
+      }
+
+      function branchCleanupFailureResults(state, message) {
+        const selectedBranches = Array.from(state.cleanupSelected);
+        if (selectedBranches.length === 0) {
+          return [
+            {
+              branch: "Cleanup request",
+              execution_branch: null,
+              status: "failed",
+              message,
+            },
+          ];
+        }
+        return selectedBranches.map((branch) => ({
+          branch,
+          execution_branch: null,
+          status: "failed",
+          message,
+        }));
+      }
+
+      function failRunningBranchCleanup(windowId, message) {
+        const state = ensureBranchListState(windowId);
+        if (state.cleanupModal.stage !== "running") {
+          return false;
+        }
+        clearBranchCleanupTimeout(state);
+        state.cleanupModal.open = true;
+        state.cleanupModal.stage = "result";
+        state.cleanupModal.results = branchCleanupFailureResults(state, message);
+        branchCleanupWindowId = windowId;
+        return true;
+      }
+
       function cleanupToggleClass(entry, state) {
         if (state.cleanupSelected.has(entry.name)) {
           return "selected";
@@ -3697,6 +3751,7 @@
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
         state.cleanupModal.results = [];
+        clearBranchCleanupTimeout(state);
         branchCleanupWindowId = windowId;
         renderBranches(windowId);
       }
@@ -3711,6 +3766,7 @@
         if (state.cleanupModal.stage === "running") {
           return;
         }
+        clearBranchCleanupTimeout(state);
         state.cleanupModal.open = false;
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
@@ -3732,6 +3788,17 @@
         state.notice = "";
         state.cleanupModal.stage = "running";
         state.cleanupModal.results = [];
+        clearBranchCleanupTimeout(state);
+        state.cleanupModal.timeoutId = window.setTimeout(() => {
+          if (
+            failRunningBranchCleanup(
+              windowId,
+              "Branch cleanup timed out. Check the branch list and try again.",
+            )
+          ) {
+            renderBranches(windowId);
+          }
+        }, BRANCH_CLEANUP_TIMEOUT_MS);
         renderBranchCleanupModal();
         send({
           kind: "run_branch_cleanup",
@@ -4264,6 +4331,7 @@
           }
           case "branch_cleanup_result": {
             const state = ensureBranchListState(event.id);
+            clearBranchCleanupTimeout(state);
             state.cleanupSelected.clear();
             state.cleanupModal.open = true;
             state.cleanupModal.stage = "result";
@@ -4275,6 +4343,11 @@
           case "branch_error": {
             const state = ensureBranchListState(event.id);
             state.loading = false;
+            if (state.cleanupModal.stage === "running") {
+              failRunningBranchCleanup(event.id, event.message);
+              renderBranches(event.id);
+              break;
+            }
             state.error = event.message;
             renderBranches(event.id);
             break;

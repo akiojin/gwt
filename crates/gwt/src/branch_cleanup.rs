@@ -25,14 +25,14 @@ pub fn cleanup_selected_branches(
     entries: &[BranchListEntry],
     selected_branches: &[String],
     delete_remote: bool,
-) -> std::io::Result<Vec<BranchCleanupResultEntry>> {
+) -> Vec<BranchCleanupResultEntry> {
     let manager = gwt_git::WorktreeManager::new(repo_path);
     let lookup: HashMap<&str, &BranchListEntry> = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry))
         .collect();
 
-    Ok(selected_branches
+    selected_branches
         .iter()
         .map(|branch_name| {
             let Some(entry) = lookup.get(branch_name.as_str()).copied() else {
@@ -119,7 +119,7 @@ pub fn cleanup_selected_branches(
                 },
             }
         })
-        .collect())
+        .collect()
 }
 
 fn blocked_reason_message(reason: BranchCleanupBlockedReason) -> String {

@@ -78,6 +78,7 @@ enum UserEvent {
             String,
         >,
     },
+    Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
@@ -890,60 +891,77 @@ impl AppRuntime {
             )];
         }
 
-        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
-        let entries = match list_branch_entries_with_active_sessions(
-            &tab.project_root,
-            &active_session_branches,
-        ) {
-            Ok(entries) => entries,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BranchError {
-                        id: id.to_string(),
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-        let results =
-            match cleanup_selected_branches(&tab.project_root, &entries, branches, delete_remote) {
-                Ok(results) => results,
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::BranchError {
-                            id: id.to_string(),
-                            message: error.to_string(),
+        Self::spawn_branch_cleanup_async(
+            self.proxy.clone(),
+            client_id.to_string(),
+            id.to_string(),
+            tab.project_root.clone(),
+            self.active_session_branches_for_tab(&address.tab_id),
+            branches.to_vec(),
+            delete_remote,
+        );
+        Vec::new()
+    }
+
+    fn spawn_branch_cleanup_async(
+        proxy: EventLoopProxy<UserEvent>,
+        client_id: ClientId,
+        window_id: String,
+        project_root: PathBuf,
+        active_session_branches: std::collections::HashSet<String>,
+        branches: Vec<String>,
+        delete_remote: bool,
+    ) {
+        thread::spawn(move || {
+            let events = match list_branch_entries_with_active_sessions(
+                &project_root,
+                &active_session_branches,
+            ) {
+                Ok(entries) => {
+                    let results = cleanup_selected_branches(
+                        &project_root,
+                        &entries,
+                        &branches,
+                        delete_remote,
+                    );
+                    let mut events = vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::BranchCleanupResult {
+                            id: window_id.clone(),
+                            results,
                         },
                     )];
+                    match list_branch_entries_with_active_sessions(
+                        &project_root,
+                        &active_session_branches,
+                    ) {
+                        Ok(entries) => events.push(OutboundEvent::reply(
+                            client_id.clone(),
+                            BackendEvent::BranchEntries {
+                                id: window_id.clone(),
+                                entries,
+                            },
+                        )),
+                        Err(error) => events.push(OutboundEvent::reply(
+                            client_id.clone(),
+                            BackendEvent::BranchError {
+                                id: window_id.clone(),
+                                message: error.to_string(),
+                            },
+                        )),
+                    }
+                    events
                 }
+                Err(error) => vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BranchError {
+                        id: window_id,
+                        message: error.to_string(),
+                    },
+                )],
             };
-        let mut events = vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::BranchCleanupResult {
-                id: id.to_string(),
-                results,
-            },
-        )];
-        match list_branch_entries_with_active_sessions(&tab.project_root, &active_session_branches)
-        {
-            Ok(entries) => events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::BranchEntries {
-                    id: id.to_string(),
-                    entries,
-                },
-            )),
-            Err(error) => events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::BranchError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )),
-        }
-        events
+            let _ = proxy.send_event(UserEvent::Dispatch(events));
+        });
     }
 
     fn open_launch_wizard(
@@ -3282,6 +3300,9 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {

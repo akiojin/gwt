@@ -255,9 +255,13 @@ fn cleanup_execution_branch(
     if branch.is_local {
         return Some(branch.name.clone());
     }
-    local_branch_for_remote_ref(&branch.name)
-        .filter(|local_name| local_upstreams.contains_key(*local_name))
-        .map(ToString::to_string)
+    let local_name = local_branch_for_remote_ref(&branch.name)?;
+    let upstream = local_upstreams.get(local_name)?;
+    if upstream.as_deref() == Some(branch.name.as_str()) {
+        Some(local_name.to_string())
+    } else {
+        None
+    }
 }
 
 fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
