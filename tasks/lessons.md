@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: path 文字列ヒューリスティクスは host OS の `Path` semantics に依存させない
+
+### 事象
+
+`managed_assets` の hook binary 選択で、Windows 形式 path を使う unit test が
+Linux CI の `Test (Rust)` だけ失敗した。`gwt.exe` と `bunx-*` を見分ける
+helper が、host OS の path separator 解釈に引っ張られていた。
+
+### 原因
+
+- `Path::file_stem()` と `Path::components()` は host OS の separator 規則で動くため、
+  Linux 上で `C:\\...\\gwt.exe` を渡すと Windows path として分解されない。
+- 「他 OS 形式の path 文字列をどう扱うか」をテストは固定していたが、
+  実装側はその前提を吸収していなかった。
+
+### 再発防止策
+
+1. 実行ファイル名や temp wrapper 判定のような path ヒューリスティクスでは、
+   必要なら `\\` / `/` を明示的に正規化してから文字列ベースで判定する。
+2. cross-platform 回帰テストでは、「Windows path を Linux で評価する」ような
+   foreign-path case をそのまま残し、host OS 依存退行を早めに拾う。
+3. `Path` API を使う helper を追加したら、「その判定は path 操作か、文字列契約か」を
+   先に切り分ける。
+
 ## 2026-04-20 — fix: project-scoped asset は「repo を見つけたか」と「origin があるか」を分けて扱う
 
 ### 事象

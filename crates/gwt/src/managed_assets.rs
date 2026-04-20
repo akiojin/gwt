@@ -56,18 +56,26 @@ fn should_prefer_path_gwt(current_exe: &Path) -> bool {
 }
 
 fn is_named_gwt_binary(path: &Path) -> bool {
-    path.file_stem()
-        .and_then(|value| value.to_str())
+    normalized_path_segments(path)
+        .into_iter()
+        .next_back()
+        .map(|value| value.trim_end_matches(".exe").to_string())
         .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
 }
 
 fn is_bunx_temp_executable(path: &Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|value| value.starts_with("bunx-"))
-    })
+    normalized_path_segments(path)
+        .into_iter()
+        .any(|segment| segment.starts_with("bunx-"))
+}
+
+fn normalized_path_segments(path: &Path) -> Vec<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
