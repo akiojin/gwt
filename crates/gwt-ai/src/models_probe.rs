@@ -175,12 +175,19 @@ fn map_reqwest_error(err: reqwest::Error) -> ProbeError {
 fn truncate_for_diagnostic(body: &str) -> String {
     const MAX: usize = 512;
     if body.len() <= MAX {
-        body.to_string()
-    } else {
-        let mut out = body[..MAX].to_string();
-        out.push_str("...<truncated>");
-        out
+        return body.to_string();
     }
+    // Walk backwards from MAX to find the nearest char boundary so that
+    // multi-byte UTF-8 upstream bodies (e.g. Japanese error messages) do
+    // not cause `body[..MAX]` to panic at a mid-scalar byte split.
+    let mut cut = MAX;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + 16);
+    out.push_str(&body[..cut]);
+    out.push_str("...<truncated>");
+    out
 }
 
 /// Shorthand that lists models and returns only the `id` strings. Useful for
@@ -305,5 +312,37 @@ mod tests {
     fn truncate_for_diagnostic_leaves_short_bodies_alone() {
         let body = "short body";
         assert_eq!(truncate_for_diagnostic(body), "short body");
+    }
+
+    #[test]
+    fn truncate_for_diagnostic_preserves_char_boundary_with_multibyte_utf8() {
+        // 3-byte chars (Japanese) at byte ~512 would panic under
+        // `body[..512]` if byte 512 lands mid-scalar. The helper must
+        // round down to a char boundary.
+        let body: String = "あ".repeat(1024);
+        let truncated = truncate_for_diagnostic(&body);
+        assert!(truncated.ends_with("...<truncated>"));
+        // The prefix must still be a valid UTF-8 string (confirmed by
+        // the fact that `truncated` was built via push_str of a &str slice).
+        assert!(truncated.starts_with("あ"));
+    }
+
+    #[test]
+    fn truncate_for_diagnostic_handles_mixed_width_utf8_at_cap() {
+        // Force a scenario where MAX=512 lands in the middle of a 4-byte char.
+        // 510 ASCII + U+1F600 (😀, 4 bytes) repeated — byte 512 is inside the
+        // emoji.
+        let mut body = String::with_capacity(600);
+        for _ in 0..510 {
+            body.push('a');
+        }
+        for _ in 0..20 {
+            body.push('😀');
+        }
+        let truncated = truncate_for_diagnostic(&body);
+        // Must not panic; must be valid UTF-8 (enforced by Rust type system
+        // once the function returns String). Verify truncation happened.
+        assert!(truncated.ends_with("...<truncated>"));
+        assert!(truncated.len() < body.len() + 16);
     }
 }

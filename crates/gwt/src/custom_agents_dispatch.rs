@@ -24,11 +24,19 @@ use crate::{
     protocol::BackendEvent,
 };
 
-/// Resolve the custom-agent config file path. Falls back to `./config.toml`
-/// when the home directory cannot be discovered, keeping the code path
-/// exercisable in sandboxes and tests.
-pub fn config_path() -> PathBuf {
-    Settings::global_config_path().unwrap_or_else(|| PathBuf::from("config.toml"))
+/// Resolve the custom-agent config file path. Returns `Storage` error when
+/// the home directory cannot be discovered — silently falling back to
+/// `./config.toml` would write `api_key` secrets into the current working
+/// directory, which diverges from the app's canonical `~/.gwt/config.toml`
+/// source of truth.
+pub fn config_path() -> Result<PathBuf, CustomAgentsServiceError> {
+    Settings::global_config_path().ok_or_else(|| {
+        CustomAgentsServiceError::Storage(
+            "unable to resolve home directory (`~/.gwt/config.toml`); \
+             set HOME/USERPROFILE before managing custom agents"
+                .to_string(),
+        )
+    })
 }
 
 /// Map a service-layer error to the `CustomAgentError` backend event with
@@ -50,7 +58,11 @@ pub fn error_to_event(err: CustomAgentsServiceError) -> BackendEvent {
 
 /// Respond to `FrontendEvent::ListCustomAgents`.
 pub fn list_event() -> BackendEvent {
-    match list_custom_agents(&config_path()) {
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(err) => return error_to_event(err),
+    };
+    match list_custom_agents(&path) {
         Ok(agents) => BackendEvent::CustomAgentList { agents },
         Err(err) => error_to_event(err),
     }
@@ -65,7 +77,11 @@ pub fn list_presets_event() -> BackendEvent {
 
 /// Respond to `FrontendEvent::AddCustomAgentFromPreset`.
 pub fn add_from_preset_event(input: ClaudeCodeOpenaiCompatInput) -> BackendEvent {
-    match add_from_claude_code_openai_compat_preset(&config_path(), &input) {
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(err) => return error_to_event(err),
+    };
+    match add_from_claude_code_openai_compat_preset(&path, &input) {
         Ok(agent) => BackendEvent::CustomAgentSaved {
             agent: Box::new(agent),
         },
@@ -75,8 +91,12 @@ pub fn add_from_preset_event(input: ClaudeCodeOpenaiCompatInput) -> BackendEvent
 
 /// Respond to `FrontendEvent::UpdateCustomAgent`.
 pub fn update_event(agent: CustomCodingAgent) -> BackendEvent {
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(err) => return error_to_event(err),
+    };
     let saved = agent.clone();
-    match update_custom_agent(&config_path(), agent) {
+    match update_custom_agent(&path, agent) {
         Ok(()) => BackendEvent::CustomAgentSaved {
             agent: Box::new(saved),
         },
@@ -86,7 +106,11 @@ pub fn update_event(agent: CustomCodingAgent) -> BackendEvent {
 
 /// Respond to `FrontendEvent::DeleteCustomAgent`.
 pub fn delete_event(agent_id: String) -> BackendEvent {
-    match delete_custom_agent(&config_path(), &agent_id) {
+    let path = match config_path() {
+        Ok(p) => p,
+        Err(err) => return error_to_event(err),
+    };
+    match delete_custom_agent(&path, &agent_id) {
         Ok(()) => BackendEvent::CustomAgentDeleted { agent_id },
         Err(err) => error_to_event(err),
     }
