@@ -1987,6 +1987,7 @@ impl AppRuntime {
 
     fn app_state_view(&self) -> gwt::AppStateView {
         gwt::AppStateView {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             tabs: self
                 .tabs
                 .iter()
@@ -2233,19 +2234,23 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
+    use tao::event_loop::EventLoopBuilder;
+    #[cfg(target_os = "windows")]
+    use tao::platform::windows::EventLoopBuilderExtWindows;
+    use tempfile::tempdir;
+
     use gwt::{
         empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
         PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_terminal::PaneStatus;
-    use tempfile::tempdir;
 
     use super::{
         apply_host_package_runner_fallback_with_probe, close_window_from_workspace,
         combined_window_id, knowledge_kind_for_preset, preferred_issue_launch_branch,
         resolve_project_target, should_auto_close_agent_window, should_auto_start_restored_window,
-        ActiveAgentSession, ProjectTabRuntime, WindowAddress,
+        ActiveAgentSession, AppRuntime, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2321,6 +2326,35 @@ mod tests {
             display_name: "Codex".to_string(),
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
             tab_id: tab_id.to_string(),
+        }
+    }
+
+    fn test_proxy() -> tao::event_loop::EventLoopProxy<UserEvent> {
+        let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
+        #[cfg(target_os = "windows")]
+        builder.with_any_thread(true);
+        builder.build().create_proxy()
+    }
+
+    fn sample_app_runtime() -> AppRuntime {
+        AppRuntime {
+            tabs: vec![sample_project_tab_with_window(
+                "tab-1",
+                "shell-1",
+                WindowPreset::Shell,
+                WindowProcessStatus::Ready,
+            )],
+            active_tab_id: Some("tab-1".to_string()),
+            recent_projects: Vec::new(),
+            runtimes: HashMap::new(),
+            window_details: HashMap::new(),
+            window_lookup: HashMap::new(),
+            session_state_path: PathBuf::from("session.json"),
+            proxy: test_proxy(),
+            sessions_dir: PathBuf::from("sessions"),
+            launch_wizard: None,
+            active_agent_sessions: HashMap::new(),
+            pending_update: None,
         }
     }
 
@@ -2402,6 +2436,13 @@ mod tests {
         assert!(tabs[0].workspace.window(raw_window_id).is_none());
         assert!(!window_lookup.contains_key(&window_id));
         assert!(!window_details.contains_key(&window_id));
+    }
+
+    #[test]
+    fn app_state_view_includes_current_app_version() {
+        let app = sample_app_runtime();
+
+        assert_eq!(app.app_state_view().app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
