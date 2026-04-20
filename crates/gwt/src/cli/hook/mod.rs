@@ -16,6 +16,7 @@ pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
+pub mod board_reminder;
 pub mod coordination_event;
 pub mod forward;
 pub mod runtime_state;
@@ -35,6 +36,7 @@ use serde::{Deserialize, Serialize};
 pub enum HookKind {
     RuntimeState,
     CoordinationEvent,
+    BoardReminder,
     BlockBashPolicy,
     WorkflowPolicy,
     Forward,
@@ -49,6 +51,7 @@ impl HookKind {
         match name {
             "runtime-state" => Some(Self::RuntimeState),
             "coordination-event" => Some(Self::CoordinationEvent),
+            "board-reminder" => Some(Self::BoardReminder),
             "block-bash-policy" => Some(Self::BlockBashPolicy),
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
