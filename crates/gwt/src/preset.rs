@@ -247,17 +247,21 @@ where
         }),
         WindowPreset::Claude | WindowPreset::Codex => {
             let command = preset.command_name().expect("command preset");
-            if command_exists(command) {
-                Ok(LaunchSpec {
-                    title: preset.title().to_string(),
+            if !command_exists(command) {
+                return Err(PresetResolveError::CommandNotFound {
                     command: command.to_string(),
-                    args: Vec::new(),
-                })
-            } else {
-                Err(PresetResolveError::CommandNotFound {
-                    command: command.to_string(),
-                })
+                });
             }
+            let agent_id = match preset {
+                WindowPreset::Codex => gwt_agent::AgentId::Codex,
+                WindowPreset::Claude => gwt_agent::AgentId::ClaudeCode,
+                _ => unreachable!("outer match narrows to Claude/Codex"),
+            };
+            Ok(LaunchSpec {
+                title: preset.title().to_string(),
+                command: command.to_string(),
+                args: gwt_agent::canonical_launch_args(&agent_id),
+            })
         }
         WindowPreset::Agent
         | WindowPreset::FileTree
@@ -362,6 +366,61 @@ mod tests {
             PresetResolveError::CommandNotFound {
                 command: "codex".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn resolve_codex_preset_includes_no_alt_screen_arg() {
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
+                .expect("codex preset should resolve");
+        assert_eq!(result.command, "codex");
+        assert!(
+            result.args.iter().any(|arg| arg == "--no-alt-screen"),
+            "Codex preset must launch with --no-alt-screen so inline scrollback survives \
+             Plan-mode input waits (regression guard for Issue #2091)"
+        );
+    }
+
+    #[test]
+    fn resolve_codex_preset_launch_args_match_canonical_api() {
+        // SPEC-1921 FR-064 / FR-065: preset path must produce exactly the
+        // canonical launch args for the corresponding AgentId — no hard-coded
+        // agent-specific flags allowed on the preset side.
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
+                .expect("codex preset should resolve");
+        assert_eq!(
+            result.args,
+            gwt_agent::canonical_launch_args(&gwt_agent::AgentId::Codex),
+            "preset Codex args must equal canonical_launch_args(&AgentId::Codex)"
+        );
+    }
+
+    #[test]
+    fn resolve_claude_preset_launch_args_match_canonical_api() {
+        // SPEC-1921 FR-064 / FR-065: the preset layer must not hard-code
+        // agent-specific defaults even for agents whose current canonical
+        // list is empty — the equivalence must hold by construction.
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Claude, &shell, |command| command == "claude")
+                .expect("claude preset should resolve");
+        assert_eq!(
+            result.args,
+            gwt_agent::canonical_launch_args(&gwt_agent::AgentId::ClaudeCode),
+            "preset Claude args must equal canonical_launch_args(&AgentId::ClaudeCode)"
         );
     }
 }

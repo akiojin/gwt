@@ -5,14 +5,14 @@ const fs = require("fs");
 const path = require("path");
 
 const {
-  binaryNameForPlatform,
+  bundleBinaryNamesForPlatform,
   installReleaseBinary,
   releaseAssetUrl,
 } = require("./release-assets.cjs");
 
 const REPO = "akiojin/gwt";
 const BIN_DIR = path.join(__dirname, "..", "bin");
-const BINARY_NAME = binaryNameForPlatform();
+const BUNDLE_BINARIES = bundleBinaryNamesForPlatform();
 
 function readVersion() {
   const pkg = path.join(__dirname, "..", "package.json");
@@ -29,7 +29,7 @@ async function main() {
   const version = readVersion();
   const { url } = releaseAssetUrl(REPO, version);
 
-  console.log(`Downloading gwt binary for ${process.platform}-${process.arch}...`);
+  console.log(`Downloading gwt bundle for ${process.platform}-${process.arch}...`);
   console.log(`Downloading from: ${url}`);
 
   try {
@@ -37,9 +37,8 @@ async function main() {
       repo: REPO,
       version,
       binDir: BIN_DIR,
-      binaryName: BINARY_NAME,
     });
-    console.log("gwt binary installed successfully!");
+    console.log(`gwt bundle installed successfully: ${BUNDLE_BINARIES.join(", ")}`);
   } catch (err) {
     console.error(`gwt: failed to download binary - ${err.message}`);
     console.error("gwt: you can build from source with: cargo build --release -p gwt");

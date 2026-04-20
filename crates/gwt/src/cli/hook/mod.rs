@@ -96,22 +96,70 @@ impl HookEvent {
     }
 }
 
-/// JSON shape a block hook writes to stdout when it vetoes a tool call.
+/// PreToolUse `hookSpecificOutput` denial payload.
+///
+/// The wire format exposes only `permissionDecisionReason` because the
+/// legacy top-level `stopReason` is ignored on PreToolUse and only the
+/// short `reason` was reaching the user before this was introduced.
 #[derive(Debug, Clone, Serialize)]
 pub struct BlockDecision {
-    pub decision: &'static str,
-    pub reason: String,
-    #[serde(rename = "stopReason")]
-    pub stop_reason: String,
+    #[serde(rename = "hookSpecificOutput")]
+    hook_specific_output: HookSpecificOutput,
+    #[serde(skip)]
+    summary: String,
+    #[serde(skip)]
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HookSpecificOutput {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: &'static str,
+    #[serde(rename = "permissionDecision")]
+    permission_decision: &'static str,
+    #[serde(rename = "permissionDecisionReason")]
+    permission_decision_reason: String,
+}
+
+impl HookSpecificOutput {
+    const EVENT_NAME: &'static str = "PreToolUse";
+    const DECISION_DENY: &'static str = "deny";
 }
 
 impl BlockDecision {
-    pub fn new(reason: impl Into<String>, stop_reason: impl Into<String>) -> Self {
+    pub fn new(summary: impl Into<String>, detail: impl Into<String>) -> Self {
+        let summary = summary.into();
+        let detail = detail.into();
+        let permission_decision_reason = match (summary.is_empty(), detail.is_empty()) {
+            (true, _) => detail.clone(),
+            (_, true) => summary.clone(),
+            _ => format!("{summary}\n\n{detail}"),
+        };
         Self {
-            decision: "block",
-            reason: reason.into(),
-            stop_reason: stop_reason.into(),
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: HookSpecificOutput::EVENT_NAME,
+                permission_decision: HookSpecificOutput::DECISION_DENY,
+                permission_decision_reason,
+            },
+            summary,
+            detail,
         }
+    }
+
+    /// Short headline. Kept separate from `detail` so tests can assert the
+    /// rule name without scanning the merged reason.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Full guidance (alternatives, blocked command, etc.).
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// The merged text Claude Code / Codex surface to the LLM and user.
+    pub fn permission_decision_reason(&self) -> &str {
+        &self.hook_specific_output.permission_decision_reason
     }
 }
 

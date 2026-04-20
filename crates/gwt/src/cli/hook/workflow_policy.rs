@@ -158,7 +158,7 @@ fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
 fn load_session_from_env() -> Option<Session> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV).ok()?;
     let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
-    Session::load(&session_path).ok()
+    Session::load_and_migrate(&session_path).ok()
 }
 
 fn resolve_issue_from_linkage_store(

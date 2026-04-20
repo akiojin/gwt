@@ -54,7 +54,7 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
     if !path.exists() {
         return Ok(None);
     }
-    Session::load(&path).map(Some)
+    Session::load_and_migrate(&path).map(Some)
 }
 
 fn sync_coordination_for_session_with_paths(

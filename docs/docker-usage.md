@@ -15,6 +15,15 @@ Linux向けの共通依存は `scripts/install-linux-deps.sh` で管理されて
 docker compose build --no-cache
 ```
 
+## Docker agent bundle
+
+Docker-backed agent sessions expect the Linux `gwt` bundle to be available on the host and mounted into the container as the public front door plus its internal daemon companion.
+
+- `~/.gwt/bin/gwt-linux` -> `/usr/local/bin/gwt`
+- `~/.gwt/bin/gwtd-linux` -> `/usr/local/bin/gwtd`
+
+`gwt` remains the only operator-facing entrypoint inside the container. Skills and scripts should prefer `GWT_BIN_PATH` when it is present instead of calling `gwtd` directly.
+
 ## エラー対応
 
 ### `exec /entrypoint.sh: no such file or directory` エラーが発生した場合

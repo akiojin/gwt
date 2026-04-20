@@ -10,11 +10,20 @@ const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";
 
 /// Patterns to exclude gwt-managed assets from git tracking.
+///
+/// `.gwt/discussion.md` is the gwt-discussion skill's working artifact, which
+/// is always created under the active worktree. gwt owns its exclusion via
+/// this managed block rather than `.gitignore`, because a project-level
+/// `.gitignore` cannot assume every worktree using a gwt skill has the same
+/// repo-wide rule (some consumers run gwt without committing to the
+/// repository's `.gitignore`).
 const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/skills/gwt-*",
     ".claude/commands/gwt-*",
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
+    ".gwt/discussion.md",
+    "docker-compose.override.yml",
 ];
 
 /// Update `.git/info/exclude` to include gwt-managed asset exclusions.
@@ -149,6 +158,8 @@ mod tests {
         assert!(result.contains(END_MARKER));
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
+        assert!(result.contains(".gwt/discussion.md"));
+        assert!(result.contains("docker-compose.override.yml"));
         assert!(!result.contains(".codex/hooks.json"));
         assert!(!result.contains(".codex/hooks/scripts/gwt-*"));
         assert!(!result.contains(".agents/skills/gwt-*"));
@@ -187,6 +198,7 @@ mod tests {
         let content = fs::read_to_string(git_resolved_exclude_path(worktree)).unwrap();
         assert!(content.contains(BEGIN_MARKER));
         assert!(content.contains(".claude/skills/gwt-*"));
+        assert!(content.contains("docker-compose.override.yml"));
     }
 
     #[test]
@@ -209,6 +221,7 @@ mod tests {
         let exclude_path = git_resolved_exclude_path(&worktree);
         let content = fs::read_to_string(&exclude_path).unwrap();
         assert!(content.contains(BEGIN_MARKER));
+        assert!(content.contains("docker-compose.override.yml"));
         assert!(!content.contains(".codex/hooks.json"));
         assert!(
             !worktree.join(".git/info/exclude").exists(),

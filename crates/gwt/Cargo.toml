@@ -13,14 +13,21 @@ default-run = "gwt"
 name = "gwt"
 path = "src/main.rs"
 
+[[bin]]
+name = "gwtd"
+path = "src/bin/gwtd.rs"
+
 [dependencies]
 gwt-agent.workspace = true
+gwt-ai.workspace = true
+gwt-config.workspace = true
 gwt-core.workspace = true
 gwt-docker.workspace = true
 gwt-git.workspace = true
 gwt-github.workspace = true
 gwt-skills.workspace = true
 gwt-terminal.workspace = true
+tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

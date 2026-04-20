@@ -1,5 +1,77 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: preset 経由の agent launch で wizard 側の default arg が抜ける
+
+### 事象
+
+preset ボタンから起動した Codex は、wizard 経由の launch と違い
+`--no-alt-screen` が抜けた状態で spawn されていた。結果 alternate screen に入り、
+xterm.js の scrollback ring に行が蓄積されず、Plan mode 入力待ちに入ると
+マウスホイールが完全 no-op になった (Issue #2091)。
+
+### 原因
+
+- agent-specific な launch 既定値 (`--no-alt-screen` 等) は
+  `gwt-agent/src/launch.rs` の `build_codex_args` にしか書かれておらず、
+  preset resolver (`crates/gwt/src/preset.rs`) は bare command で spawn していた。
+- `normalize_launch_args` はセッション永続化のロード経路でのみ呼ばれていて、
+  fresh preset spawn には適用されていなかった。
+- agent 起動経路が「wizard」「preset」「persisted session load」で分岐しており、
+  既定引数の one source of truth が存在しなかった。
+
+### 再発防止策
+
+1. agent 固有の起動既定値を変更する際は、wizard / preset / session load の
+   3 経路すべてに適用されていることを確認する。
+2. preset 経由の agent spawn では、対応する agent の既定引数 (`--no-alt-screen`
+   等) を必ず組み込む。regression テストを preset unit test に追加する。
+3. 「wizard では動くが preset では動かない」系の挙動差分は、経路ごとの
+   `LaunchSpec` / `LaunchConfig` を突き合わせて探す。
+
+### 追記 (2026-04-20 Phase 53 完了)
+
+SPEC-1921 Phase 53 で `gwt_agent::canonical_launch_args(&AgentId) -> Vec<String>` を
+single source of truth として追加し、preset / wizard / session-load が同じ API を
+通るよう refactor 済み (#2091 後続作業として同 PR #2092 に収録)。新しい agent 既定
+引数を追加するときは canonical API 1 箇所の編集で全経路に反映される。session 永続
+化は `schema_version` を導入し、`Session::load` は verbatim 化、migration は
+`Session::migrate_legacy_launch_args` に明示的に切り出した。再発防止策 1-3 の運用は
+継続するが、3 経路の同期漏れは canonical API の強制ルートでアーキテクチャ的に
+不可能になった。
+
+## 2026-04-20 — fix(hooks): PreToolUse で `stopReason` は表示されない。`hookSpecificOutput.permissionDecisionReason` を使う
+
+### 事象
+
+`gwt hook block-bash-policy` が `gh issue/pr/run` をブロックした際、ユーザーには
+`Direct GitHub workflow CLI commands are not allowed` という短文しか表示されず、
+詳細な代替コマンド一覧 (`gwt issue view` / `gwt pr view` / `gwt actions logs` /
+`gwt-search`) と `Blocked command: ...` 原文が届かなかった。他の block 系フック
+(cd / file-ops / branch-ops / git-dir) も同じ欠陥を抱えていたが、短文自体が自己
+説明的だったため見落とされていた。
+
+### 原因
+
+- `BlockDecision` が stdout へ `{"decision":"block","reason":"<short>","stopReason":"<long>"}` を
+  emit していた。
+- Claude Code の PreToolUse フックでは `stopReason` はパースされない
+  (`stopReason` は Stop/SubagentStop 専用)。長文はどこにも届いていなかった。
+- Codex も同様に Claude Code 仕様を踏襲しており、`stopReason` は PreToolUse で
+  無視される。
+
+### 再発防止策
+
+1. PreToolUse フックの block 出力は `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<all text>"}}` の
+   正式形を使い、visible 情報は必ず `permissionDecisionReason` に集約する。
+   レガシーの top-level `decision` / `reason` / `stopReason` は emit しない。
+2. `BlockDecision::new(short, long)` の call API を維持し、構造体内部で
+   `short + "\n\n" + long` を `permissionDecisionReason` に畳み込む。
+3. ブロック理由をユーザーが本当に見ているかを、個別フックに頼らず
+   `hook_types_test` 層で wire format 契約として固定する。
+4. Stop / SubagentStop 用の `stopReason` / `continue:false` と、PreToolUse 用の
+   `permissionDecision` / `permissionDecisionReason` は別物であることを前提として
+   フックを設計する。
+
 ## 2026-04-20 — fix: discussion の深さは「継続質問する」と書くだけでは維持できない
 
 ### 事象
