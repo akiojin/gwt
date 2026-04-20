@@ -157,6 +157,59 @@ impl OutboundEvent {
     }
 }
 
+fn build_frontend_sync_events(
+    client_id: &str,
+    workspace: gwt::AppStateView,
+    terminal_statuses: Vec<(String, WindowProcessStatus, String)>,
+    terminal_snapshots: Vec<(String, Vec<u8>)>,
+    launch_wizard: Option<gwt::LaunchWizardView>,
+    pending_update: Option<gwt_core::update::UpdateState>,
+) -> Vec<OutboundEvent> {
+    let mut events = vec![OutboundEvent::reply(
+        client_id,
+        BackendEvent::WorkspaceState { workspace },
+    )];
+
+    for (id, status, detail) in terminal_statuses {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::TerminalStatus {
+                id,
+                status,
+                detail: Some(detail),
+            },
+        ));
+    }
+
+    for (id, snapshot) in terminal_snapshots {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::TerminalSnapshot {
+                id,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+            },
+        ));
+    }
+
+    if let Some(wizard) = launch_wizard {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::LaunchWizardState {
+                wizard: Some(Box::new(wizard)),
+            },
+        ));
+    }
+
+    if let Some(state) = pending_update {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateState(state),
+        ));
+    }
+
+    events
+}
+
 #[derive(Debug, Clone)]
 struct ProjectTabRuntime {
     id: String,
@@ -396,63 +449,37 @@ impl AppRuntime {
     }
 
     fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
-        let mut events = vec![OutboundEvent::reply(
+        let terminal_statuses = self
+            .window_details
+            .iter()
+            .filter_map(|(id, detail)| {
+                self.window_status(id)
+                    .map(|status| (id.clone(), status, detail.clone()))
+            })
+            .collect();
+        let terminal_snapshots = self
+            .runtimes
+            .iter()
+            .filter_map(|(id, runtime)| {
+                let snapshot = runtime
+                    .pane
+                    .lock()
+                    .map(|pane| pane.screen().contents().into_bytes())
+                    .unwrap_or_default();
+                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
+            })
+            .collect();
+
+        build_frontend_sync_events(
             client_id,
-            BackendEvent::WorkspaceState {
-                workspace: self.app_state_view(),
-            },
-        )];
-
-        for (id, detail) in &self.window_details {
-            let Some(status) = self.window_status(id) else {
-                continue;
-            };
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::TerminalStatus {
-                    id: id.clone(),
-                    status,
-                    detail: Some(detail.clone()),
-                },
-            ));
-        }
-
-        for (id, runtime) in &self.runtimes {
-            let snapshot = runtime
-                .pane
-                .lock()
-                .map(|pane| pane.screen().contents().into_bytes())
-                .unwrap_or_default();
-            if snapshot.is_empty() {
-                continue;
-            }
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::TerminalSnapshot {
-                    id: id.clone(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-                },
-            ));
-        }
-
-        if let Some(wizard) = self.launch_wizard.as_ref() {
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::LaunchWizardState {
-                    wizard: Some(Box::new(wizard.wizard.view())),
-                },
-            ));
-        }
-
-        // Replay any pending update notification so late-connecting WebView clients see the toast.
-        if let Some(state) = self.pending_update.clone() {
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::UpdateState(state),
-            ));
-        }
-
-        events
+            self.app_state_view(),
+            terminal_statuses,
+            terminal_snapshots,
+            self.launch_wizard
+                .as_ref()
+                .map(|wizard| wizard.wizard.view()),
+            self.pending_update.clone(),
+        )
     }
 
     fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
@@ -2362,6 +2389,7 @@ mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+    use base64::Engine;
     use tempfile::tempdir;
 
     use gwt::{
@@ -2370,14 +2398,16 @@ mod tests {
         WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        broadcast_runtime_hook_event, build_shell_process_launch, close_window_from_workspace,
-        combined_window_id, hook_forward_authorized, knowledge_kind_for_preset,
-        resolve_project_target, should_auto_close_agent_window, should_auto_start_restored_window,
-        ActiveAgentSession, ClientHub, ProjectTabRuntime, WindowAddress,
+        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
+        close_window_from_workspace, combined_window_id, hook_forward_authorized,
+        knowledge_kind_for_preset, resolve_project_target, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, ClientHub, DispatchTarget,
+        OutboundEvent, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2427,6 +2457,109 @@ mod tests {
         assert_eq!(native_payload, browser_payload);
         assert!(native_payload.contains("\"kind\":\"runtime_hook_event\""));
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
+    }
+
+    fn drain_client_payloads(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Vec<String> {
+        let mut payloads = Vec::new();
+        while let Ok(payload) = receiver.try_recv() {
+            payloads.push(payload);
+        }
+        payloads
+    }
+
+    #[test]
+    fn frontend_sync_events_reply_only_to_connecting_client() {
+        let tabs = vec![sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )];
+        let workspace = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
+        let snapshot = b"hello from terminal".to_vec();
+        let expected_snapshot =
+            base64::engine::general_purpose::STANDARD.encode(snapshot.as_slice());
+
+        let events = build_frontend_sync_events(
+            "browser-1",
+            workspace,
+            vec![(
+                "tab-1::shell-1".to_string(),
+                WindowProcessStatus::Ready,
+                "Shell ready".to_string(),
+            )],
+            vec![("tab-1::shell-1".to_string(), snapshot)],
+            None,
+            Some(UpdateState::UpToDate { checked_at: None }),
+        );
+
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|event| {
+            matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "browser-1")
+        }));
+        assert!(matches!(
+            &events[0].event,
+            gwt::BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::TerminalStatus { id, status, detail }
+                if id == "tab-1::shell-1"
+                    && *status == WindowProcessStatus::Ready
+                    && detail.as_deref() == Some("Shell ready")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::TerminalSnapshot { id, data_base64 }
+                if id == "tab-1::shell-1" && data_base64 == &expected_snapshot
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::UpdateState(UpdateState::UpToDate { checked_at: None })
+        )));
+    }
+
+    #[test]
+    fn client_hub_dispatch_keeps_frontend_sync_events_client_scoped() {
+        let clients = ClientHub::default();
+        let mut primary = clients.register("primary".to_string());
+        let mut secondary = clients.register("secondary".to_string());
+        let tabs = vec![sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )];
+        let workspace = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
+        let mut events =
+            build_frontend_sync_events("primary", workspace, Vec::new(), Vec::new(), None, None);
+        events.push(OutboundEvent::broadcast(
+            gwt::BackendEvent::ProjectOpenError {
+                message: "shared".to_string(),
+            },
+        ));
+
+        clients.dispatch(events);
+
+        let primary_payloads = drain_client_payloads(&mut primary);
+        let secondary_payloads = drain_client_payloads(&mut secondary);
+
+        assert_eq!(primary_payloads.len(), 2);
+        assert_eq!(secondary_payloads.len(), 1);
+        assert!(primary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"workspace_state\"")));
+        assert!(primary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"project_open_error\"")));
+        assert!(secondary_payloads
+            .iter()
+            .all(|payload| payload.contains("\"kind\":\"project_open_error\"")));
+        assert!(!secondary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"workspace_state\"")));
     }
 
     #[test]
