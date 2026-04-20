@@ -148,4 +148,40 @@ mod tests {
             "expected socket listeners to be registered through named handlers",
         );
     }
+
+    #[test]
+    fn embedded_web_branches_surface_includes_scope_filter_controls() {
+        let html = index_html();
+
+        assert!(
+            html.contains("data-branch-filter=\"local\""),
+            "expected Local branch filter control in embedded html",
+        );
+        assert!(
+            html.contains("data-branch-filter=\"remote\""),
+            "expected Remote branch filter control in embedded html",
+        );
+        assert!(
+            html.contains("data-branch-filter=\"all\""),
+            "expected All branch filter control in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_branches_surface_includes_cleanup_flow_contract() {
+        let html = index_html();
+
+        assert!(
+            html.contains("branch-cleanup-modal"),
+            "expected cleanup modal scaffold in embedded html",
+        );
+        assert!(
+            html.contains("run_branch_cleanup"),
+            "expected branch cleanup frontend event in embedded html",
+        );
+        assert!(
+            html.contains("branch_cleanup_result"),
+            "expected branch cleanup result handler in embedded html",
+        );
+    }
 }
