@@ -13,7 +13,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     routing::get,
     Router,
 };
@@ -41,6 +41,8 @@ use tokio::{
 };
 use uuid::Uuid;
 use wry::WebViewBuilder;
+
+mod embedded_web;
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -2184,155 +2186,6 @@ mod tests {
             dunce::canonicalize(&repo).expect("canonical repo root"),
         );
     }
-
-    #[test]
-    fn embedded_web_terminal_copy_shortcut_uses_ctrl_shift_c() {
-        let html = include_str!("../web/index.html");
-
-        assert!(
-            html.contains("function installTerminalCopyHandlers"),
-            "expected web terminal copy handler bootstrap in embedded html",
-        );
-        assert!(
-            html.contains("terminal.attachCustomKeyEventHandler"),
-            "expected xterm custom key handler for copy shortcut",
-        );
-        assert!(
-            html.contains("event.ctrlKey"),
-            "expected Ctrl modifier handling in embedded html",
-        );
-        assert!(
-            html.contains("event.shiftKey"),
-            "expected Shift modifier handling in embedded html",
-        );
-    }
-
-    #[test]
-    fn embedded_web_terminal_drag_selection_copies_on_mouseup() {
-        let html = include_str!("../web/index.html");
-
-        assert!(
-            html.contains("terminalRoot.addEventListener(\"mousedown\""),
-            "expected drag selection tracking in embedded html",
-        );
-        assert!(
-            html.contains("window.addEventListener(\"mouseup\"") && html.contains("handleMouseUp"),
-            "expected mouse release copy handling in embedded html",
-        );
-        assert!(
-            html.contains("function copyTerminalSelection"),
-            "expected clipboard copy helper in embedded html",
-        );
-        assert!(
-            html.contains("navigator.clipboard.writeText"),
-            "expected clipboard write path in embedded html",
-        );
-    }
-
-    #[test]
-    fn embedded_web_terminal_clipboard_fallback_restores_terminal_focus() {
-        let html = include_str!("../web/index.html");
-
-        assert!(
-            html.contains("restoreFocus"),
-            "expected clipboard fallback to invoke restoreFocus after textarea copy",
-        );
-        assert!(
-            html.contains("writeClipboardText(selection")
-                && html.contains("runtime.terminal.focus()"),
-            "expected selection copy path to pass terminal focus restoration",
-        );
-    }
-
-    #[test]
-    fn embedded_web_repo_browser_scroll_surfaces_bypass_canvas_pan() {
-        let html = include_str!("../web/index.html");
-        let scroll_gate = regex::Regex::new(
-            r"nativeWheelScrollSurface\s*&&\s*canScrollSurfaceConsumeWheelDelta\(\s*nativeWheelScrollSurface,\s*event\s*\)",
-        )
-        .expect("valid regex");
-
-        assert!(
-            html.contains("function findNativeWheelScrollSurface"),
-            "expected embedded html to define a repo browser wheel routing helper",
-        );
-        assert!(
-            html.contains("function canScrollSurfaceConsumeWheelDelta"),
-            "expected embedded html to gate native scrolling on actual scrollability",
-        );
-        assert!(
-            html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
-            "expected embedded html to reference repo browser scroll containers",
-        );
-        assert!(
-            html.contains("surface.scrollHeight > surface.clientHeight")
-                && html.contains("surface.scrollWidth > surface.clientWidth"),
-            "expected wheel helper to inspect vertical and horizontal overflow before bypassing canvas pan",
-        );
-        assert!(
-            scroll_gate.is_match(html),
-            "expected plain wheel input to bypass canvas pan only when the repo browser surface can consume the delta",
-        );
-    }
-
-    #[test]
-    fn embedded_web_branches_surface_includes_scope_filter_controls() {
-        let html = include_str!("../web/index.html");
-
-        assert!(
-            html.contains("data-branch-filter=\"local\""),
-            "expected Local branch filter control in embedded html",
-        );
-        assert!(
-            html.contains("data-branch-filter=\"remote\""),
-            "expected Remote branch filter control in embedded html",
-        );
-        assert!(
-            html.contains("data-branch-filter=\"all\""),
-            "expected All branch filter control in embedded html",
-        );
-    }
-
-    #[test]
-    fn embedded_web_branches_surface_includes_cleanup_flow_contract() {
-        let html = include_str!("../web/index.html");
-
-        assert!(
-            html.contains("branch-cleanup-modal"),
-            "expected cleanup modal scaffold in embedded html",
-        );
-        assert!(
-            html.contains("run_branch_cleanup"),
-            "expected branch cleanup frontend event in embedded html",
-        );
-        assert!(
-            html.contains("branch_cleanup_result"),
-            "expected branch cleanup result handler in embedded html",
-        );
-    }
-
-    #[test]
-    fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
-        let html = include_str!("../web/index.html");
-
-        assert!(
-            html.contains("knowledge-root"),
-            "expected knowledge bridge root scaffold in embedded html",
-        );
-        assert!(
-            html.contains("load_knowledge_bridge"),
-            "expected knowledge bridge load event in embedded html",
-        );
-        assert!(
-            html.contains("select_knowledge_bridge_entry"),
-            "expected knowledge bridge detail selection event in embedded html",
-        );
-        assert!(
-            html.contains("open_issue_launch_wizard"),
-            "expected issue launch wizard event in embedded html",
-        );
-    }
-
     #[test]
     fn issue_and_spec_presets_route_to_knowledge_bridge_kind() {
         assert_eq!(
@@ -2531,7 +2384,7 @@ impl EmbeddedServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let app = Router::new()
-            .route("/", get(index_handler))
+            .route("/", get(embedded_web::index_handler))
             .route("/healthz", get(health_handler))
             .route("/ws", get(websocket_handler))
             .with_state(ServerState { proxy, clients });
@@ -2560,10 +2413,6 @@ impl EmbeddedServer {
             let _ = tx.send(());
         }
     }
-}
-
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
 }
 
 async fn health_handler() -> &'static str {
