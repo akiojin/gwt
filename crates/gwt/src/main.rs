@@ -1953,11 +1953,18 @@ impl AppRuntime {
                 });
 
             match status {
-                Ok(PaneStatus::Running) | Ok(PaneStatus::Completed(_)) => {
+                Ok(PaneStatus::Running) | Ok(PaneStatus::Completed(0)) => {
                     let _ = proxy.send_event(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Exited,
                         detail: Some("Process exited".to_string()),
+                    });
+                }
+                Ok(PaneStatus::Completed(code)) => {
+                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                        id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(format!("Process exited with status {code}")),
                     });
                 }
                 Ok(PaneStatus::Error(message)) => {
@@ -2231,6 +2238,7 @@ mod tests {
         PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_terminal::PaneStatus;
     use tempfile::tempdir;
 
     use super::{
@@ -2342,6 +2350,26 @@ mod tests {
             &HashMap::new(),
             "tab-1::shell-1",
             &WindowProcessStatus::Exited,
+        ));
+    }
+
+    #[test]
+    fn failed_completed_pane_status_is_not_auto_close_eligible() {
+        let status = match PaneStatus::Completed(1) {
+            PaneStatus::Completed(0) => WindowProcessStatus::Exited,
+            PaneStatus::Completed(_) | PaneStatus::Error(_) => WindowProcessStatus::Error,
+            PaneStatus::Running => WindowProcessStatus::Exited,
+        };
+
+        let window_id = "tab-1::claude-1";
+        let sessions = HashMap::from([(
+            window_id.to_string(),
+            sample_active_agent_session("tab-1", window_id),
+        )]);
+
+        assert_eq!(status, WindowProcessStatus::Error);
+        assert!(!should_auto_close_agent_window(
+            &sessions, window_id, &status
         ));
     }
 

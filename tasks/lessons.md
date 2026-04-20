@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: auto-close 判定では「終了したか」だけでなく exit 成否を分ける
+
+### 事象
+
+agent window の auto-close 修正後、review で non-zero exit まで `Exited` 扱いになり、
+失敗した agent terminal も自動で閉じて最後のエラー文脈を失う指摘が出た。
+
+### 原因
+
+- `PaneStatus::Completed(0)` と `PaneStatus::Completed(non-zero)` を
+  両方とも `WindowProcessStatus::Exited` に潰していた。
+- close 条件は active agent ownership で絞れていても、
+  成功終了と失敗終了の意味分離までは入っていなかった。
+
+### 再発防止策
+
+1. auto-close のトリガは ownership だけでなく successful completion まで条件に含める。
+2. process status 変換では `Completed(0)` と `Completed(non-zero)` を別経路にし、
+   失敗終了は `Error` surface を残す。
+3. auto-close 回帰テストには「active agent success で close」と
+   「active agent failure では残る」を対で入れる。
+
 ## 2026-04-20 — fix: path 文字列ヒューリスティクスは host OS の `Path` semantics に依存させない
 
 ### 事象
