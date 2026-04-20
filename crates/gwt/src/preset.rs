@@ -247,17 +247,20 @@ where
         }),
         WindowPreset::Claude | WindowPreset::Codex => {
             let command = preset.command_name().expect("command preset");
-            if command_exists(command) {
-                Ok(LaunchSpec {
-                    title: preset.title().to_string(),
+            if !command_exists(command) {
+                return Err(PresetResolveError::CommandNotFound {
                     command: command.to_string(),
-                    args: Vec::new(),
-                })
-            } else {
-                Err(PresetResolveError::CommandNotFound {
-                    command: command.to_string(),
-                })
+                });
             }
+            let args = match preset {
+                WindowPreset::Codex => vec!["--no-alt-screen".to_string()],
+                _ => Vec::new(),
+            };
+            Ok(LaunchSpec {
+                title: preset.title().to_string(),
+                command: command.to_string(),
+                args,
+            })
         }
         WindowPreset::Agent
         | WindowPreset::FileTree
@@ -487,5 +490,22 @@ mod tests {
         assert!(WindowPreset::Agent.requires_process());
         assert_eq!(WindowPreset::Agent.command_name(), None);
         assert_eq!(WindowPreset::Agent.default_size(), (720.0, 420.0));
+    }
+
+    #[test]
+    fn resolve_codex_preset_includes_no_alt_screen_arg() {
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
+                .expect("codex preset should resolve");
+        assert_eq!(result.command, "codex");
+        assert!(
+            result.args.iter().any(|arg| arg == "--no-alt-screen"),
+            "Codex preset must launch with --no-alt-screen so inline scrollback survives \
+             Plan-mode input waits (regression guard for Issue #2091)"
+        );
     }
 }
