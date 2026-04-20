@@ -6,7 +6,7 @@
 //!
 //! - `gwt-agent::store` for TOML persistence
 //! - `gwt-agent::presets::claude_code_openai_compat_preset` for preset seeding
-//! - `gwt-ai::anthropic_backend::list_model_ids_blocking` for `/v1/models` probe
+//! - `gwt-ai::models_probe::list_model_ids_blocking` for `/v1/models` probe
 //!
 //! SPEC-1921 Phase 52, tasks T226-T232: this is the backend side of the
 //! Settings UI. The HTML/JS surface that drives these functions is still to
@@ -19,7 +19,7 @@ use gwt_agent::{
     load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, CustomCodingAgent,
     StoredCustomAgent,
 };
-use gwt_ai::anthropic_backend::{list_model_ids_blocking, ProbeError};
+use gwt_ai::models_probe::{is_valid_base_url, list_model_ids_blocking, ProbeError};
 use serde::{Deserialize, Serialize};
 
 /// Stable identifier for a built-in preset. Keep this set small — every new
@@ -214,17 +214,7 @@ fn validate_preset_input(
             "display_name must not be empty".to_string(),
         ));
     }
-    if !input
-        .base_url
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("http://")
-        && !input
-            .base_url
-            .trim()
-            .to_ascii_lowercase()
-            .starts_with("https://")
-    {
+    if !is_valid_base_url(&input.base_url) {
         return Err(CustomAgentsServiceError::InvalidInput(format!(
             "base_url must start with http:// or https://, got: {}",
             input.base_url

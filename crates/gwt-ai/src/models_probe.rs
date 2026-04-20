@@ -1,8 +1,9 @@
-//! Probe client for Anthropic Messages API compatible backends that also expose
-//! the OpenAI-compatible `/v1/models` endpoint.
+//! `/v1/models` probe client for OpenAI-compatible upstreams (including
+//! Anthropic Messages API compatible proxies that expose the OpenAI model
+//! listing endpoint).
 //!
-//! This module supports SPEC-1921 FR-061: Settings > Custom Agents > Add from
-//! preset > "Claude Code (OpenAI-compat backend)" saves only after a
+//! Supports SPEC-1921 FR-061: Settings > Custom Agents > Add from preset >
+//! "Claude Code (OpenAI-compat backend)" saves only after a
 //! `GET {base_url}/v1/models` call returns HTTP 200 with parseable JSON
 //! containing `data[].id`.
 
@@ -13,6 +14,14 @@ use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
 };
 use serde::{Deserialize, Serialize};
+
+/// Validate that `base_url` uses the `http://` or `https://` scheme.
+/// SPEC-1921 FR-060. Accepts leading/trailing whitespace and is case-insensitive
+/// on the scheme portion only.
+pub fn is_valid_base_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
 
 /// Connect + read timeout for the `/v1/models` probe. SPEC-1921 FR-061.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -89,10 +98,10 @@ pub fn parse_models_response(body: &str) -> Result<Vec<ModelInfo>, ProbeError> {
     Ok(out)
 }
 
-/// Validate the `base_url` scheme. SPEC-1921 FR-060.
+/// Validate the `base_url` scheme and return the structured probe error on
+/// failure. Thin wrapper over [`is_valid_base_url`].
 fn validate_base_url(base_url: &str) -> Result<(), ProbeError> {
-    let lower = base_url.trim().to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
+    if is_valid_base_url(base_url) {
         Ok(())
     } else {
         Err(ProbeError::InvalidUrl(format!(
