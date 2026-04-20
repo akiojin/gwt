@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="GWT"
+    Language="1033"
+    Version="$(Version)"
+    Manufacturer="GWT Contributors"
+    UpgradeCode="55555555-5555-5555-5555-555555555555"
+    InstallerVersion="500"
+    Scope="perMachine">
+    <SummaryInformation Description="Canvas-based floating terminal GUI for Git Worktree Manager" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of GWT is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="GWT" />
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="GWT" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="GwtExecutable" Source="!(bindpath.gwt)gwt.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

@@ -1,5 +1,191 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: canvas window ID を「同 preset 件数 + 1」で採番すると欠番で live window に衝突する
+
+### 事象
+
+Launch Wizard の `Start new` から別ブランチの Agent window を開いたとき、
+既存の Agent window が新しいブランチ内容で上書きされた。実際には
+`agent-1` を閉じて `agent-2` だけ残っている状態で次の新規 Agent も
+`agent-2` として生成され、window/runtime/session の紐付けが衝突していた。
+
+### 原因
+
+- `crates/gwt/src/workspace.rs` の window ID 採番が
+  「同じ preset の live window 件数 + 1」だった。
+- 同じ preset に欠番があると、件数ベース採番が既存 live window の suffix と一致し、
+  frontend の `windowMap`、backend の `window_lookup`、active session が
+  同じ ID で上書きされた。
+
+### 再発防止策
+
+1. floating window の ID は件数ではなく既存 live window の ID 集合から決める。
+   少なくとも同 preset の最大 suffix + 1 など、live window と衝突しない方式を使う。
+2. 「閉じた window がある状態で同 preset を新規作成する」回帰テストを
+   `WorkspaceState` に必ず追加する。
+3. Quick Start の `Start new` と既存ウィンドウ再利用導線は意味を分離し、
+   live window がある場合は `Focus` と明示する。
+
+## 2026-04-20 — fix: auto-close 判定では「終了したか」だけでなく exit 成否を分ける
+
+### 事象
+
+agent window の auto-close 修正後、review で non-zero exit まで `Exited` 扱いになり、
+失敗した agent terminal も自動で閉じて最後のエラー文脈を失う指摘が出た。
+
+### 原因
+
+- `PaneStatus::Completed(0)` と `PaneStatus::Completed(non-zero)` を
+  両方とも `WindowProcessStatus::Exited` に潰していた。
+- close 条件は active agent ownership で絞れていても、
+  成功終了と失敗終了の意味分離までは入っていなかった。
+
+### 再発防止策
+
+1. auto-close のトリガは ownership だけでなく successful completion まで条件に含める。
+2. process status 変換では `Completed(0)` と `Completed(non-zero)` を別経路にし、
+   失敗終了は `Error` surface を残す。
+3. auto-close 回帰テストには「active agent success で close」と
+   「active agent failure では残る」を対で入れる。
+
+## 2026-04-20 — fix: path 文字列ヒューリスティクスは host OS の `Path` semantics に依存させない
+
+### 事象
+
+`managed_assets` の hook binary 選択で、Windows 形式 path を使う unit test が
+Linux CI の `Test (Rust)` だけ失敗した。`gwt.exe` と `bunx-*` を見分ける
+helper が、host OS の path separator 解釈に引っ張られていた。
+
+### 原因
+
+- `Path::file_stem()` と `Path::components()` は host OS の separator 規則で動くため、
+  Linux 上で `C:\\...\\gwt.exe` を渡すと Windows path として分解されない。
+- 「他 OS 形式の path 文字列をどう扱うか」をテストは固定していたが、
+  実装側はその前提を吸収していなかった。
+
+### 再発防止策
+
+1. 実行ファイル名や temp wrapper 判定のような path ヒューリスティクスでは、
+   必要なら `\\` / `/` を明示的に正規化してから文字列ベースで判定する。
+2. cross-platform 回帰テストでは、「Windows path を Linux で評価する」ような
+   foreign-path case をそのまま残し、host OS 依存退行を早めに拾う。
+3. `Path` API を使う helper を追加したら、「その判定は path 操作か、文字列契約か」を
+   先に切り分ける。
+
+## 2026-04-20 — fix: project-scoped asset は「repo を見つけたか」と「origin があるか」を分けて扱う
+
+### 事象
+
+coordination の保存先は `~/.gwt/projects/<repo-hash>/coordination/` が正なのに、
+origin がない git repo / worktree では `.gwt/coordination/` へ落ちていた。あわせて
+managed hook 再生成が `current_exe()` の一時 bunx 実体をそのまま焼き込み、
+古い `gwt` バイナリを hooks が呼び続ける経路が残っていた。
+
+### 原因
+
+- project-scoped path への切り替え条件を「git repo か」ではなく
+  「origin から repo hash を引けるか」にしていた。
+- 永続化する hook command の実体選択で、`current_exe()` が
+  bunx temp / helper binary のときの扱いを分けていなかった。
+
+### 再発防止策
+
+1. project-scoped data directory は、repo 検出と hash 取得を分離する。
+   repo root が取れるなら project scope を使い、hash は origin か path hash で決める。
+2. 設定ファイルへ永続化する実行パスは、transient wrapper (`bunx-*` など) を検知し、
+   安定した `gwt` 実体か明示 override を優先する。
+3. path migration の回帰テストは「origin なし git repo」と
+   「一時実体からの hook 再生成」の両方を必ず固定する。
+
+## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
+
+### 事象
+
+PR #2063 の merge 後 review で、`crates/gwt-terminal/src/pty.rs` の
+`build_windows_shim_target` が `.exe/.com` を見つけた時点で即 return しており、
+`node.exe + cli.js` のような npm shim で script 引数を落とす指摘が出た。
+あわせて `windows_env_value` が `remove_env` を先に見ていたため、
+`env` で明示指定した値まで無視する非対称も見つかった。
+
+### 原因
+
+- shim 解析を「最初に見つかった実行ファイル」中心で書き、runtime と script が
+  セットで現れる wrapper を考慮していなかった。
+- 環境変数解決で `portable_pty::CommandBuilder` の適用順
+  (`remove_env` の後に `env`) と同じ優先順位を維持していなかった。
+
+### 再発防止策
+
+1. Windows の shim 解析では、`.exe` 単体だけでなく `runtime + script` の
+   wrapper パターンを先に洗い出してから target 決定ロジックを書く。
+2. wrapper で runtime が見つかっても、`.js/.cjs` が同居する場合は
+   「runtime 単体」ではなく「runtime + script arg」を回帰テストで固定する。
+3. spawn 前の env 正規化 helper は、実際に適用する `CommandBuilder` と
+   同じ優先順位になるよう unit test を先に足す。
+
+## 2026-04-20 — fix: OS 固有実装を足したら import も同じ cfg 境界に置く
+
+### 事象
+
+Windows PTY shim 修正後、PR #2063 の `Clippy & Rustfmt` が Linux CI で失敗した。
+原因は `crates/gwt-terminal/src/pty.rs` の `Path` import がトップレベルにあり、
+Windows 専用関数でしか使わないのに Linux では unused import になっていたことだった。
+
+### 原因
+
+- 実装本体は `#[cfg(windows)]` で囲っていたが、use 宣言の cfg 境界を揃えていなかった。
+- 手元確認が Windows 実行中心で、Linux compile/lint 時の未使用 import を見落とした。
+
+### 再発防止策
+
+1. OS 固有 helper を追加するときは、type import / helper function / test を同じ cfg 境界で揃える。
+2. `cfg(windows)` 専用コードを触った後でも、CI と同じ package 指定の `cargo clippy` を必ず回す。
+3. クロスプラットフォーム crate のトップレベル import 追加では、「他 OS で unused にならないか」を差分確認に含める。
+
+## 2026-04-20 — fix: Windows PTY で PATH 解決をそのまま信じると npm shim に吸われる
+
+### 事象
+
+Windows で installed Claude agent を PTY 起動すると、`CreateProcessW` が
+`%APPDATA%\\npm\\claude` を直接実行しようとして `os error 193`
+(`%1 は有効な Win32 アプリケーションではありません`) で失敗した。
+
+### 原因
+
+- `portable-pty` の Windows `search_path()` は PATHEXT 候補より先に「拡張子なしの実在ファイル」を返す。
+- npm global install は `claude` / `codex` の拡張子なし shim を配置するため、
+  Win32 実行可能ファイルではない shell shim が最優先になっていた。
+- `cmd.exe` ラップに逃がすだけでは ConPTY 上で挙動が不安定なケースがあり、
+  実体の `.exe` / `node + .js` まで解決した方が安定する。
+
+### 再発防止策
+
+1. Windows で PATH 検索結果を PTY に渡す前に、npm shim を実体コマンドへ正規化する。
+2. `.exe` / `.com` は直起動し、shell shim が `node_modules/.../*.js` を指す場合は
+   `node` と script path に分解して起動する。
+3. Windows の PTY 起動修正では、少なくとも「shim 解決」「spawn 成功」の両方を
+   回帰テストで固定する。
+
+## 2026-04-20 — fix: repo browser の wheel ownership を generic な edge fallback へ一般化しない
+
+### 事象
+
+Branches ウィンドウで一覧を最上端/最下端までスクロールしたあと、さらに同じ方向へ wheel/trackpad scroll すると、
+内部リストは止まる一方で canvas pan が始まり、repo browser surface 上の操作が window 内で完結しなかった。
+
+### 原因
+
+- 4/17 の修正で「surface が delta を実際に消費できるときだけ native scroll を優先する」という一般則を入れた。
+- この一般則を repo browser surface にもそのまま適用した結果、scroll edge では capture-phase handler が
+  canvas pan 経路へフォールバックしてしまった。
+- Branches / File Tree の UX では、surface 上の plain wheel は canvas に流さず no-op に留める契約だった。
+
+### 再発防止策
+
+1. wheel ownership は surface ごとに決める。repo browser list は「scroll 可能時は native scroll、edge では no-op」、canvas 背景だけが pan owner。
+2. `can surface consume delta? -> else canvas` のような generic fallback を、window 内 scroll surface へ無条件に再利用しない。
+3. repo browser の回帰テストには「内部スクロール可能」「edge で no-op」「canvas 背景で pan」の 3 観点をセットで入れる。
+
 ## 2026-04-17 — fix: scrollable pane の wheel 奪取は「surface が実際に消費できる delta」だけに限定する
 
 ### 事象
@@ -2842,6 +3028,58 @@ v9.2.0 リリース実行中に `/release` コマンドの Step 9.2（`scripts/r
 3. Release PR の Closing Issues セクション生成時に「自動クローズ対象があるか」をユーザーに明示し、空の場合は明確に `None` と記載する
 4. release.md の Step 9 冒頭に「GitHub 自動クローズは Issue のみが対象であり、PR 番号は無視される」と注釈を追加し、PR/Issue 分類の重要性を強調する
 5. `tasks/lessons.md` にこの教訓を記録し、同種の長時間手順コマンド設計時の参考にする
+
+## 2026-04-20 — fix: agent auto-close は共有 status ではなく active agent ownership で絞る
+
+### 事象
+
+agent の正常終了で window を自動 close したい変更を入れる際、
+`WindowProcessStatus::Exited` だけを条件にすると shell など他の process window まで
+一緒に閉じる危険があった。あわせて、起動直後に window を閉じたとき
+reader detach timeout の best-effort cleanup が stderr に
+`did not exit within 500ms; detaching` を出し、失敗のように見えていた。
+
+### 原因
+
+- `Exited` は agent 専用ではなく、一般 terminal window も共有する process status だった。
+- close 契約を window の owner ではなく共通 status enum だけで分岐すると、
+  別 surface の lifecycle まで巻き込む。
+- `stop_window_runtime()` は timeout 後 detach を許容する設計なのに、
+  その通常回復経路を stderr に出していた。
+
+### 再発防止策
+
+1. process status を契機に UI surface を消す変更では、status だけでなく
+   domain ownership（例: active agent session）を必ず条件に含める。
+2. auto-close 系の回帰テストでは、対象の正例だけでなく
+   `Error` と non-agent window の負例を必ず固定する。
+3. best-effort cleanup が timeout 後 detach を許容する設計なら、
+   irrecoverable failure でない限り user-visible な stderr を出さない。
+
+## 2026-04-20 — fix: Issue 完了報告の前に branch HEAD が base branch に含まれるか確認する
+
+### 事象
+
+Issue #2045 で PR #2049 が merge された直後に「実装はマージ済み」「完了確認」と
+コメントしたが、同じ `bugfix/issue-2045` ブランチ上の follow-up commit
+`a5579c6e` は `develop` に入っていなかった。
+
+### 原因
+
+- PR の merge 状態と branch HEAD の反映状態を同一視した。
+- `git cherry -v origin/develop HEAD` や
+  `git merge-base --is-ancestor <head> origin/develop` で、
+  base branch 側に未反映 commit がないか確認していなかった。
+- SPEC / Issue artifact の完了更新時に、どの commit までを対象にした完了報告なのか
+  固定していなかった。
+
+### 再発防止策
+
+1. Issue 完了コメントや「マージ済み」報告の前に、
+   `git cherry -v origin/<base> HEAD` か同等確認で branch HEAD の未反映 commit を確認する。
+2. 「PR が merge 済み」と「branch HEAD が base branch に含まれる」を分けて記録する。
+3. 完了報告では commit hash か revision range を明示し、follow-up commit が残っていないことを確認してから
+   SPEC / Issue artifact を完了扱いにする。
 
 ## 2026-04-17 — fix: clipboard fallback は focus を奪ったら必ず terminal へ戻す
 

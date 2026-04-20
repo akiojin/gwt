@@ -52,6 +52,13 @@ pub(crate) fn sync_issue_cache_from_remote_if_missing(
         return Ok(());
     }
 
+    sync_issue_cache_from_remote(repo_path, cache_root)
+}
+
+pub(crate) fn sync_issue_cache_from_remote(
+    repo_path: &Path,
+    cache_root: &Path,
+) -> Result<(), String> {
     let snapshots = fetch_issue_list_snapshots(repo_path)?;
     if snapshots.is_empty() {
         fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
