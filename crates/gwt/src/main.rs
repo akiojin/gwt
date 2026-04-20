@@ -2674,7 +2674,8 @@ mod tests {
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, docker_bundle_mounts_for_home,
+        close_window_from_workspace, combined_window_id, current_git_branch,
+        docker_bundle_mounts_for_home,
         docker_bundle_override_content, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
@@ -3772,6 +3773,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
+        let default_branch = current_git_branch(&repo).expect("current branch");
         let status = Command::new("git")
             .args(["checkout", "-qb", "feature/prune-me"])
             .current_dir(&repo)
@@ -3779,11 +3781,11 @@ mod tests {
             .expect("create branch");
         assert!(status.success(), "create branch failed");
         let status = Command::new("git")
-            .args(["checkout", "main"])
+            .args(["checkout", default_branch.as_str()])
             .current_dir(&repo)
             .status()
-            .expect("checkout main");
-        assert!(status.success(), "checkout main failed");
+            .expect("checkout default branch");
+        assert!(status.success(), "checkout default branch failed");
 
         let (mut runtime, events) = sample_runtime_with_events(
             temp.path(),
