@@ -1,6 +1,6 @@
 //! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     pty::{PtyHandle, SpawnConfig},
@@ -17,9 +17,15 @@ pub enum PaneStatus {
 }
 
 /// A terminal pane integrating PTY, vt100 parser, and scrollback.
+///
+/// `pty` is wrapped in an `Arc` so that callers who only need to write input
+/// or query process state can hold a lock-free clone without contending with
+/// the reader thread's exclusive `Mutex<Pane>` guard. The gwt GUI binary uses
+/// this to bypass the tao event loop for `terminal_input` hot path (see the
+/// fast-path write in `client_session`).
 pub struct Pane {
     id: String,
-    pty: PtyHandle,
+    pty: Arc<PtyHandle>,
     parser: vt100::Parser,
     scrollback: ScrollbackStorage,
     status: PaneStatus,
@@ -47,7 +53,7 @@ impl Pane {
             remove_env: Vec::new(),
             cwd,
         };
-        let pty = PtyHandle::spawn(config)?;
+        let pty = Arc::new(PtyHandle::spawn(config)?);
         let parser = vt100::Parser::new(rows, cols, 0);
         let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
@@ -69,6 +75,15 @@ impl Pane {
     /// Get a reference to the PTY handle.
     pub fn pty(&self) -> &PtyHandle {
         &self.pty
+    }
+
+    /// Get a shared handle to the underlying PTY.
+    ///
+    /// Callers on threads that do not own the surrounding `Mutex<Pane>` guard
+    /// can clone this `Arc` and invoke `write_input` / `resize` / `process_id`
+    /// without contending with the reader thread.
+    pub fn shared_pty(&self) -> Arc<PtyHandle> {
+        Arc::clone(&self.pty)
     }
 
     /// Feed raw bytes from PTY output through the vt100 parser and scrollback.
