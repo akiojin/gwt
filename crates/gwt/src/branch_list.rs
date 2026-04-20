@@ -4,6 +4,7 @@ use std::{
     path::Path,
 };
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +71,8 @@ pub struct BranchListEntry {
     pub ahead: u32,
     pub behind: u32,
     pub last_commit_date: Option<String>,
+    #[serde(default)]
+    pub cleanup_ready: bool,
     pub cleanup: BranchCleanupInfo,
 }
 
@@ -77,25 +80,38 @@ pub fn list_branch_entries(repo_path: &Path) -> std::io::Result<Vec<BranchListEn
     list_branch_entries_with_active_sessions(repo_path, &HashSet::new())
 }
 
-pub fn list_branch_entries_with_active_sessions(
-    repo_path: &Path,
-    active_session_branches: &HashSet<String>,
-) -> std::io::Result<Vec<BranchListEntry>> {
+pub fn list_branch_inventory(repo_path: &Path) -> std::io::Result<Vec<BranchListEntry>> {
     let branches = gwt_git::branch::list_branches(repo_path)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(adapt_branch_inventory(branches))
+}
+
+pub fn hydrate_branch_entries_with_active_sessions(
+    repo_path: &Path,
+    entries: Vec<BranchListEntry>,
+    active_session_branches: &HashSet<String>,
+) -> std::io::Result<Vec<BranchListEntry>> {
     let gone_branches = gwt_git::list_gone_branches(repo_path)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let cleanup_targets = build_cleanup_targets(repo_path, &branches, &gone_branches)?;
-    Ok(adapt_branches(
-        branches,
+    let cleanup_targets = build_cleanup_targets(repo_path, &entries, &gone_branches)?;
+    Ok(hydrate_branch_entries(
+        entries,
         active_session_branches,
         &cleanup_targets,
     ))
 }
 
+pub fn list_branch_entries_with_active_sessions(
+    repo_path: &Path,
+    active_session_branches: &HashSet<String>,
+) -> std::io::Result<Vec<BranchListEntry>> {
+    let entries = list_branch_inventory(repo_path)?;
+    hydrate_branch_entries_with_active_sessions(repo_path, entries, active_session_branches)
+}
+
 fn build_cleanup_targets(
     repo_path: &Path,
-    branches: &[gwt_git::Branch],
+    entries: &[BranchListEntry],
     gone_branches: &HashSet<String>,
 ) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTarget>>> {
     let cleanup_bases = [
@@ -104,7 +120,10 @@ fn build_cleanup_targets(
         ("develop", gwt_git::MergeTarget::Develop),
     ];
     let mut cleanup_targets = HashMap::new();
-    for branch in branches.iter().filter(|branch| branch.is_local) {
+    for branch in entries
+        .iter()
+        .filter(|branch| branch.scope == BranchScope::Local)
+    {
         let target = gwt_git::detect_cleanable_target(
             repo_path,
             &branch.name,
@@ -117,44 +136,56 @@ fn build_cleanup_targets(
     Ok(cleanup_targets)
 }
 
-fn adapt_branches(
-    branches: Vec<gwt_git::Branch>,
+fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry> {
+    let mut entries: Vec<BranchListEntry> = branches
+        .into_iter()
+        .map(|branch| BranchListEntry {
+            name: branch.name,
+            scope: if branch.is_remote {
+                BranchScope::Remote
+            } else {
+                BranchScope::Local
+            },
+            is_head: branch.is_head,
+            upstream: branch.upstream,
+            ahead: branch.ahead,
+            behind: branch.behind,
+            last_commit_date: branch.last_commit_date,
+            cleanup_ready: false,
+            cleanup: BranchCleanupInfo::default(),
+        })
+        .collect();
+
+    entries.sort_by(compare_branch_entries);
+    entries
+}
+
+fn hydrate_branch_entries(
+    entries: Vec<BranchListEntry>,
     active_session_branches: &HashSet<String>,
     cleanup_targets: &HashMap<String, Option<gwt_git::MergeTarget>>,
 ) -> Vec<BranchListEntry> {
-    let current_head_branch = branches
+    let current_head_branch = entries
         .iter()
-        .find(|branch| branch.is_local && branch.is_head)
+        .find(|branch| branch.scope == BranchScope::Local && branch.is_head)
         .map(|branch| branch.name.clone());
-    let local_upstreams: HashMap<String, Option<String>> = branches
+    let local_upstreams: HashMap<String, Option<String>> = entries
         .iter()
-        .filter(|branch| branch.is_local)
+        .filter(|branch| branch.scope == BranchScope::Local)
         .map(|branch| (branch.name.clone(), branch.upstream.clone()))
         .collect();
-    let mut entries: Vec<BranchListEntry> = branches
+    let mut entries: Vec<BranchListEntry> = entries
         .into_iter()
-        .map(|branch| {
-            let cleanup = build_cleanup_info(
+        .map(|mut branch| {
+            branch.cleanup = build_cleanup_info(
                 &branch,
                 &local_upstreams,
                 current_head_branch.as_deref(),
                 active_session_branches,
                 cleanup_targets,
             );
-            BranchListEntry {
-                name: branch.name,
-                scope: if branch.is_remote {
-                    BranchScope::Remote
-                } else {
-                    BranchScope::Local
-                },
-                is_head: branch.is_head,
-                upstream: branch.upstream,
-                ahead: branch.ahead,
-                behind: branch.behind,
-                last_commit_date: branch.last_commit_date,
-                cleanup,
-            }
+            branch.cleanup_ready = true;
+            branch
         })
         .collect();
 
@@ -163,7 +194,7 @@ fn adapt_branches(
 }
 
 fn build_cleanup_info(
-    branch: &gwt_git::Branch,
+    branch: &BranchListEntry,
     local_upstreams: &HashMap<String, Option<String>>,
     current_head_branch: Option<&str>,
     active_session_branches: &HashSet<String>,
@@ -212,7 +243,7 @@ fn build_cleanup_info(
         .cloned()
         .flatten();
     let mut risks = Vec::new();
-    if branch.is_remote {
+    if branch.scope == BranchScope::Remote {
         risks.push(BranchCleanupRisk::RemoteTracking);
     }
     if merge_target.is_none() {
@@ -249,10 +280,10 @@ fn blocked_cleanup_info(
 }
 
 fn cleanup_execution_branch(
-    branch: &gwt_git::Branch,
+    branch: &BranchListEntry,
     local_upstreams: &HashMap<String, Option<String>>,
 ) -> Option<String> {
-    if branch.is_local {
+    if branch.scope == BranchScope::Local {
         return Some(branch.name.clone());
     }
     let local_name = local_branch_for_remote_ref(&branch.name)?;
@@ -269,9 +300,8 @@ fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
 }
 
 fn compare_branch_entries(left: &BranchListEntry, right: &BranchListEntry) -> Ordering {
-    right
-        .is_head
-        .cmp(&left.is_head)
+    compare_branch_commit_dates(&left.last_commit_date, &right.last_commit_date)
+        .then_with(|| right.is_head.cmp(&left.is_head))
         .then_with(|| match (left.scope, right.scope) {
             (BranchScope::Local, BranchScope::Remote) => Ordering::Less,
             (BranchScope::Remote, BranchScope::Local) => Ordering::Greater,
@@ -285,12 +315,30 @@ fn compare_branch_entries(left: &BranchListEntry, right: &BranchListEntry) -> Or
         .then_with(|| left.name.cmp(&right.name))
 }
 
+fn compare_branch_commit_dates(left: &Option<String>, right: &Option<String>) -> Ordering {
+    match (
+        left.as_deref().and_then(parse_branch_commit_date),
+        right.as_deref().and_then(parse_branch_commit_date),
+    ) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => right.cmp(left),
+    }
+}
+
+fn parse_branch_commit_date(value: &str) -> Option<DateTime<FixedOffset>> {
+    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S %z")
+        .ok()
+        .or_else(|| DateTime::parse_from_rfc3339(value).ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn adapt_branches_sorts_head_then_local_then_remote() {
+    fn adapt_branches_sorts_newest_first_then_head_local_then_remote() {
         let branches = vec![
             gwt_git::Branch {
                 name: "origin/main".to_string(),
@@ -300,7 +348,7 @@ mod tests {
                 upstream: None,
                 ahead: 0,
                 behind: 0,
-                last_commit_date: None,
+                last_commit_date: Some("2026-04-19 12:00:00 +0000".to_string()),
             },
             gwt_git::Branch {
                 name: "feature/zeta".to_string(),
@@ -310,7 +358,7 @@ mod tests {
                 upstream: None,
                 ahead: 0,
                 behind: 0,
-                last_commit_date: None,
+                last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
             },
             gwt_git::Branch {
                 name: "main".to_string(),
@@ -320,7 +368,7 @@ mod tests {
                 upstream: Some("origin/main".to_string()),
                 ahead: 0,
                 behind: 0,
-                last_commit_date: None,
+                last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
             },
             gwt_git::Branch {
                 name: "feature/alpha".to_string(),
@@ -330,18 +378,45 @@ mod tests {
                 upstream: None,
                 ahead: 0,
                 behind: 0,
-                last_commit_date: None,
+                last_commit_date: Some("2026-04-18 09:00:00 +0000".to_string()),
             },
         ];
 
-        let entries = adapt_branches(branches, &HashSet::new(), &HashMap::new());
+        let entries = adapt_branch_inventory(branches);
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["main", "feature/alpha", "feature/zeta", "origin/main"]
+            vec!["main", "feature/zeta", "origin/main", "feature/alpha"]
         );
         assert_eq!(entries[0].scope, BranchScope::Local);
         assert!(entries[0].is_head);
-        assert_eq!(entries[3].scope, BranchScope::Remote);
+        assert_eq!(entries[2].scope, BranchScope::Remote);
+    }
+
+    #[test]
+    fn hydrated_entries_mark_cleanup_ready() {
+        let entries = vec![BranchListEntry {
+            name: "feature/demo".to_string(),
+            scope: BranchScope::Local,
+            is_head: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
+            cleanup_ready: false,
+            cleanup: BranchCleanupInfo::default(),
+        }];
+        let cleanup_targets = HashMap::from([(
+            String::from("feature/demo"),
+            Some(gwt_git::MergeTarget::Develop),
+        )]);
+
+        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets);
+
+        assert!(hydrated[0].cleanup_ready);
+        assert_eq!(
+            hydrated[0].cleanup.availability,
+            BranchCleanupAvailability::Safe
+        );
     }
 }
