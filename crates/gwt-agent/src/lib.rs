@@ -14,7 +14,8 @@ pub mod version_cache;
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use launch::{
-    normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner,
+    canonical_launch_args, normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig,
+    ResolvedRunner,
 };
 pub use session::{
     persist_agent_session_id, persist_session_status, reset_runtime_state_dir,
