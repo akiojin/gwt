@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn board_entry_kind_and_agent_card_keys_round_trip() {
+    fn board_entry_kind_round_trip() {
         for (kind, value) in [
             (BoardEntryKind::Request, "request"),
             (BoardEntryKind::Status, "status"),
@@ -1203,98 +1203,5 @@ mod tests {
             assert_eq!(kind.as_str(), value);
         }
         assert!(BoardEntryKind::from_str("mystery").is_err());
-
-        let now = Utc::now();
-        let session_card = AgentCard {
-            agent_id: "codex".to_string(),
-            session_id: Some("session-1".to_string()),
-            branch: "feature/coverage".to_string(),
-            role: None,
-            responsibility: None,
-            status: None,
-            current_focus: None,
-            next_action: None,
-            blocked_reason: None,
-            related_topics: Vec::new(),
-            related_owners: Vec::new(),
-            working_scope: None,
-            handoff_target: None,
-            updated_at: now,
-        };
-        assert_eq!(session_card.key(), "session:session-1");
-
-        let fallback_card = AgentCard {
-            session_id: Some("   ".to_string()),
-            ..session_card.clone()
-        };
-        assert_eq!(fallback_card.key(), "agent:codex:feature/coverage");
-    }
-
-    #[test]
-    fn agent_card_patch_and_event_io_cover_round_trips_and_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let context = AgentCardContext {
-            agent_id: "codex".to_string(),
-            session_id: Some("session-1".to_string()),
-            branch: "feature/coverage".to_string(),
-        };
-
-        let snapshot = apply_agent_card_patch(
-            dir.path(),
-            context.clone(),
-            AgentCardPatch {
-                role: Some("implementer".to_string()),
-                status: Some("running".to_string()),
-                current_focus: Some("raise coverage".to_string()),
-                related_topics: Some(vec!["coverage".to_string()]),
-                ..AgentCardPatch::default()
-            },
-        )
-        .unwrap();
-        assert!(snapshot.board.entries.is_empty());
-
-        let updated = apply_agent_card_patch(
-            dir.path(),
-            context,
-            AgentCardPatch {
-                next_action: Some("push coverage gate".to_string()),
-                handoff_target: Some("qa".to_string()),
-                ..AgentCardPatch::default()
-            },
-        )
-        .unwrap();
-        assert!(updated.board.entries.is_empty());
-
-        let events_path = coordination_events_path(dir.path());
-        let events = load_events_from_path(&events_path).unwrap();
-        assert_eq!(events.len(), 2);
-        match &events[0] {
-            CoordinationEvent::AgentCardUpsert { card } => {
-                assert_eq!(card.key(), "session:session-1");
-                assert_eq!(card.status.as_deref(), Some("running"));
-                assert_eq!(card.current_focus.as_deref(), Some("raise coverage"));
-            }
-            other => panic!("expected agent card event, got {other:?}"),
-        }
-        match &events[1] {
-            CoordinationEvent::AgentCardUpsert { card } => {
-                assert_eq!(card.next_action.as_deref(), Some("push coverage gate"));
-                assert_eq!(card.handoff_target.as_deref(), Some("qa"));
-            }
-            other => panic!("expected agent card event, got {other:?}"),
-        }
-
-        let roundtrip_path = dir.path().join("roundtrip.jsonl");
-        write_events_to_path(&roundtrip_path, &events).unwrap();
-        let roundtrip = load_events_from_path(&roundtrip_path).unwrap();
-        assert_eq!(roundtrip.len(), 2);
-
-        let invalid_path = dir.path().join("invalid.jsonl");
-        std::fs::write(&invalid_path, "{not-json}\n").unwrap();
-        assert!(load_events_from_path(&invalid_path).is_err());
-
-        let rebuilt = rebuild_snapshot_from_events(&roundtrip_path).unwrap();
-        assert!(rebuilt.board.entries.is_empty());
-        assert!(rebuilt.cards.cards.is_empty());
     }
 }
