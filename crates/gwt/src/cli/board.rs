@@ -181,11 +181,35 @@ fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::Coordina
             out.push_str(&format!(
                 "- [{}] {}: {} ({})\n",
                 entry.kind.as_str(),
-                entry.author,
+                format_author(entry),
                 entry.body,
                 entry.id
             ));
         }
+    }
+}
+
+/// Format the author header with optional `origin_branch` /
+/// `origin_session_id` suffix (SPEC-1974 FR-020). Entries without origin
+/// metadata fall back to bare author, preserving legacy render output.
+fn format_author(entry: &BoardEntry) -> String {
+    let branch = entry
+        .origin_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session = entry
+        .origin_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (branch, session) {
+        (Some(branch), Some(session)) => {
+            format!("{} @ {} / {}", entry.author, branch, session)
+        }
+        (Some(branch), None) => format!("{} @ {}", entry.author, branch),
+        (None, Some(session)) => format!("{} / {}", entry.author, session),
+        (None, None) => entry.author.clone(),
     }
 }
 
@@ -269,6 +293,65 @@ mod tests {
         assert_eq!(snapshot.board.entries.len(), 1);
         assert_eq!(snapshot.board.entries[0].body, "Need a board");
         assert!(out.contains("board entries: 1"));
+    }
+
+    #[test]
+    fn board_family_run_show_renders_origin_metadata_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        post_entry(
+            tmp.path(),
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Claude",
+                BoardEntryKind::Status,
+                "Investigating",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_branch("feature/foo")
+            .with_origin_session_id("sess-a3f2"),
+        )
+        .unwrap();
+
+        let mut out = String::new();
+        let code = run(&mut env, CliCommand::BoardShow { json: false }, &mut out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("Claude @ feature/foo / sess-a3f2"),
+            "expected origin metadata suffix, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn board_family_run_show_falls_back_to_author_without_origin_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        post_entry(
+            tmp.path(),
+            BoardEntry::new(
+                AuthorKind::User,
+                "user",
+                BoardEntryKind::Request,
+                "legacy entry",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+
+        let mut out = String::new();
+        let code = run(&mut env, CliCommand::BoardShow { json: false }, &mut out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(out.contains("user: legacy entry"));
+        assert!(!out.contains(" @ "));
+        assert!(!out.contains(" / "));
     }
 
     #[test]
