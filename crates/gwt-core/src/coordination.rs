@@ -675,15 +675,15 @@ fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
                 Err(err) => return Err(err.into()),
             }
         }
+
+        unreachable!("Windows retry loop should always return or error");
     }
 
     #[cfg(not(windows))]
     {
         try_replace_path_with_temp(path, tmp_path)?;
-        return Ok(());
+        Ok(())
     }
-
-    unreachable!("Windows retry loop should always return or error");
 }
 
 fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<()> {
