@@ -411,7 +411,9 @@ fn worktree_external_file_op_is_blocked_before_owner_gate() {
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
         .expect("out-of-worktree file ops must be blocked");
-    assert!(decision.reason.contains("outside worktree"));
+    assert!(decision
+        .permission_decision_reason()
+        .contains("outside worktree"));
 }
 
 #[test]
@@ -422,7 +424,9 @@ fn reuses_legacy_bash_policy_rules_before_spec_gate() {
         workflow_policy::WorkflowContext::spec_issue(1935, true, true),
     )
     .expect("issue cli must still be blocked");
-    assert!(decision.reason.contains("GitHub workflow CLI"));
+    assert!(decision
+        .permission_decision_reason()
+        .contains("GitHub workflow CLI"));
 }
 
 #[test]
