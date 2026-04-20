@@ -845,4 +845,81 @@ mod tests {
         let detail = project_index_runtime_error_detail(&error);
         assert!(detail.contains("3.8"));
     }
+
+    #[test]
+    fn runtime_helper_parsers_cover_versions_aliases_and_wrapping() {
+        let venv_python = venv_python_path(Path::new("/tmp/venv"));
+        if cfg!(windows) {
+            assert!(venv_python.ends_with(Path::new("Scripts").join("python.exe")));
+        } else {
+            assert!(venv_python.ends_with(Path::new("bin").join("python3")));
+        }
+
+        assert_eq!(
+            parse_versioned_python_candidate_name("python3.11.exe"),
+            Some(11)
+        );
+        assert_eq!(
+            parse_versioned_python_candidate_name("PYTHON3.15"),
+            Some(15)
+        );
+        assert_eq!(parse_versioned_python_candidate_name("python3"), None);
+        assert_eq!(parse_versioned_python_candidate_name("python3.x"), None);
+
+        assert_eq!(parse_python_version("3.12.7").unwrap(), (3, 12));
+        assert!(parse_python_version("3").is_err());
+        assert!(supported_project_index_python_version(3, 9));
+        assert!(!supported_project_index_python_version(3, 8));
+
+        assert!(is_windows_store_python_alias(Path::new(
+            "/Users/example/AppData/Local/Microsoft/WindowsApps/python.exe"
+        )));
+        assert!(!is_windows_store_python_alias(Path::new(
+            "/usr/bin/python3"
+        )));
+
+        assert_eq!(project_index_runtime_error_kind("plain error"), None);
+        let wrapped = wrap_project_index_runtime_error(GwtError::Other("boom".into())).to_string();
+        assert_eq!(
+            project_index_runtime_error_kind(&wrapped),
+            Some(ProjectIndexRuntimeErrorKind::RuntimeUnavailable)
+        );
+        assert_eq!(project_index_runtime_error_detail(&wrapped), "boom");
+    }
+
+    #[test]
+    fn write_if_changed_and_run_checked_cover_updates_and_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.txt");
+
+        assert!(write_if_changed(&path, "first").unwrap());
+        assert!(!write_if_changed(&path, "first").unwrap());
+        assert!(write_if_changed(&path, "second").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+
+        let mut ok = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "exit 0"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            command
+        };
+        run_checked(&mut ok, "ok").unwrap();
+
+        let mut failing = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "echo fail 1>&2 & exit 4"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "echo fail >&2; exit 4"]);
+            command
+        };
+        let error = run_checked(&mut failing, "failing")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("failing failed"));
+    }
 }

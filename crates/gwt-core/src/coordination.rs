@@ -464,15 +464,7 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
         }
         file.sync_all()?;
     }
-    if cfg!(windows) && path.exists() {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    replace_path_with_temp(path, &tmp_path)
 }
 
 fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
@@ -505,15 +497,49 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(b"\n")?;
         file.sync_all()?;
     }
-    if cfg!(windows) && path.exists() {
+    replace_path_with_temp(path, &tmp_path)
+}
+
+fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        const MAX_RETRIES: usize = 20;
+        const SLEEP_MS: u64 = 25;
+
+        for attempt in 0..MAX_RETRIES {
+            match try_replace_path_with_temp(path, tmp_path) {
+                Ok(()) => return Ok(()),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt + 1 < MAX_RETRIES =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        unreachable!("Windows retry loop should always return or error");
+    }
+
+    #[cfg(not(windows))]
+    {
+        try_replace_path_with_temp(path, tmp_path)?;
+        Ok(())
+    }
+}
+
+fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if path.exists() {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         }
     }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+
+    std::fs::rename(tmp_path, path)
 }
 
 fn json_error(err: serde_json::Error) -> GwtError {
@@ -599,6 +625,7 @@ pub fn has_recent_post_by(
 mod tests {
     use std::{
         ffi::OsString,
+        str::FromStr,
         sync::{Arc, Mutex, OnceLock},
         thread,
     };
@@ -1157,5 +1184,24 @@ mod tests {
         )
         .unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn board_entry_kind_round_trip() {
+        for (kind, value) in [
+            (BoardEntryKind::Request, "request"),
+            (BoardEntryKind::Status, "status"),
+            (BoardEntryKind::Next, "next"),
+            (BoardEntryKind::Claim, "claim"),
+            (BoardEntryKind::Impact, "impact"),
+            (BoardEntryKind::Question, "question"),
+            (BoardEntryKind::Blocked, "blocked"),
+            (BoardEntryKind::Handoff, "handoff"),
+            (BoardEntryKind::Decision, "decision"),
+        ] {
+            assert_eq!(BoardEntryKind::from_str(value).unwrap(), kind);
+            assert_eq!(kind.as_str(), value);
+        }
+        assert!(BoardEntryKind::from_str("mystery").is_err());
     }
 }

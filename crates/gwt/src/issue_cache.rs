@@ -90,8 +90,16 @@ fn issue_cache_has_entries(cache_root: &Path) -> bool {
     })
 }
 
+fn gh_executable() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("GWT_TEST_GH") {
+        return path;
+    }
+    std::ffi::OsString::from("gh")
+}
+
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
-    let output = Command::new("gh")
+    let output = Command::new(gh_executable())
         .args([
             "issue",
             "list",
@@ -171,7 +179,12 @@ fn parse_issue_list_snapshots(json: &str) -> Result<Vec<IssueSnapshot>, String> 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use std::env;
+    use std::fs;
+
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn repo_slug_root_uses_repo_hash_subdirectory() {
@@ -205,5 +218,115 @@ mod tests {
         assert_eq!(snapshots[0].body, "Body");
         assert_eq!(snapshots[0].labels, vec!["ux".to_string()]);
         assert_eq!(snapshots[0].updated_at.0, "2026-04-13T00:00:00Z");
+    }
+
+    #[test]
+    fn cache_entry_detection_and_detached_sync_short_circuit_non_repo_paths() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("issues");
+        fs::create_dir_all(cache_root.join("not-an-issue")).expect("create cache dir");
+        assert!(!issue_cache_has_entries(&cache_root));
+
+        fs::create_dir_all(cache_root.join("1234")).expect("create numeric issue dir");
+        assert!(issue_cache_has_entries(&cache_root));
+
+        let repo_path = temp.path().join("plain-dir");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+        assert_eq!(
+            issue_cache_root_for_repo_path_or_detached(&repo_path),
+            detached_issue_cache_root()
+        );
+        assert!(sync_issue_cache_from_remote_if_missing(&repo_path, &cache_root).is_ok());
+    }
+
+    #[test]
+    fn parse_issue_list_snapshots_defaults_missing_fields_and_closed_state() {
+        let snapshots = parse_issue_list_snapshots(
+            r#"[{
+                "number": 12,
+                "title": "Closed issue",
+                "state": "closed",
+                "labels": [{}]
+            }]"#,
+        )
+        .expect("parse snapshots");
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].number.0, 12);
+        assert_eq!(snapshots[0].body, "");
+        assert!(snapshots[0].labels.is_empty());
+        assert_eq!(snapshots[0].state, IssueState::Closed);
+        assert_eq!(
+            snapshots[0].updated_at,
+            UpdatedAt::new("1970-01-01T00:00:00Z")
+        );
+
+        let err = parse_issue_list_snapshots("{not-json").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sync_issue_cache_from_remote_writes_entries_and_surfaces_gh_failures() {
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        let empty_cache_root = temp.path().join("empty-cache");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+        let fake_gh = repo_path.join("gh.cmd");
+        fs::write(
+            &fake_gh,
+            "@echo off\r\n\
+if /I \"%FAKE_GH_MODE%\"==\"fail\" (\r\n\
+  >&2 echo gh api down\r\n\
+  exit /b 1\r\n\
+)\r\n\
+if /I \"%FAKE_GH_MODE%\"==\"empty\" (\r\n\
+  echo []\r\n\
+  exit /b 0\r\n\
+)\r\n\
+echo [{\"number\":7,\"title\":\"Cached issue\",\"body\":\"Body\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
+exit /b 0\r\n",
+        )
+        .expect("write fake gh");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo_path)
+            .status()
+            .expect("git init");
+
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+
+        env::set_var("FAKE_GH_MODE", "ok");
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("sync success");
+        let cache = Cache::new(cache_root.clone());
+        let entry = cache
+            .load_entry(IssueNumber(7))
+            .expect("cached issue entry should exist");
+        assert_eq!(entry.snapshot.title, "Cached issue");
+        assert_eq!(entry.snapshot.body, "Body");
+        assert_eq!(entry.snapshot.labels, vec!["gwt-spec".to_string()]);
+
+        env::set_var("FAKE_GH_MODE", "empty");
+        sync_issue_cache_from_remote(&repo_path, &empty_cache_root).expect("empty sync succeeds");
+        assert!(empty_cache_root.is_dir());
+        assert!(fs::read_dir(&empty_cache_root)
+            .expect("read empty cache")
+            .next()
+            .is_none());
+
+        env::set_var("FAKE_GH_MODE", "fail");
+        let err = sync_issue_cache_from_remote(&repo_path, &cache_root).unwrap_err();
+        assert!(err.contains("gh issue list: gh api down"));
+
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+        env::remove_var("FAKE_GH_MODE");
     }
 }
