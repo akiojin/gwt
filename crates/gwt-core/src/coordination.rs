@@ -94,9 +94,30 @@ pub struct BoardEntry {
     pub related_topics: Vec<String>,
     #[serde(default)]
     pub related_owners: Vec<String>,
+    #[serde(default)]
+    pub origin_branch: Option<String>,
+    #[serde(default)]
+    pub origin_session_id: Option<String>,
+    #[serde(default)]
+    pub origin_agent_id: Option<String>,
 }
 
 impl BoardEntry {
+    pub fn with_origin_branch(mut self, value: impl Into<String>) -> Self {
+        self.origin_branch = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_session_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_session_id = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_agent_id = Some(value.into());
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         author_kind: AuthorKind,
@@ -121,6 +142,9 @@ impl BoardEntry {
             updated_at: now,
             related_topics,
             related_owners,
+            origin_branch: None,
+            origin_session_id: None,
+            origin_agent_id: None,
         }
     }
 }
@@ -1018,6 +1042,45 @@ mod tests {
             serde_json::to_writer(&mut file, event).unwrap();
             file.write_all(b"\n").unwrap();
         }
+    }
+
+    #[test]
+    fn board_entry_has_origin_metadata() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "started work",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_branch("feature/update-board")
+        .with_origin_session_id("sess-a3f2")
+        .with_origin_agent_id("agent-codex-001");
+
+        assert_eq!(entry.origin_branch.as_deref(), Some("feature/update-board"));
+        assert_eq!(entry.origin_session_id.as_deref(), Some("sess-a3f2"));
+        assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-codex-001"));
+    }
+
+    #[test]
+    fn board_entry_deserializes_legacy_without_origin_fields() {
+        let legacy_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z"
+        }"#;
+
+        let entry: BoardEntry = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(entry.origin_session_id, None);
+        assert_eq!(entry.origin_agent_id, None);
     }
 
     fn write_legacy_board_post(path: &std::path::Path, entry: &BoardEntry) {
