@@ -1,5 +1,76 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: auto-close 判定では「終了したか」だけでなく exit 成否を分ける
+
+### 事象
+
+agent window の auto-close 修正後、review で non-zero exit まで `Exited` 扱いになり、
+失敗した agent terminal も自動で閉じて最後のエラー文脈を失う指摘が出た。
+
+### 原因
+
+- `PaneStatus::Completed(0)` と `PaneStatus::Completed(non-zero)` を
+  両方とも `WindowProcessStatus::Exited` に潰していた。
+- close 条件は active agent ownership で絞れていても、
+  成功終了と失敗終了の意味分離までは入っていなかった。
+
+### 再発防止策
+
+1. auto-close のトリガは ownership だけでなく successful completion まで条件に含める。
+2. process status 変換では `Completed(0)` と `Completed(non-zero)` を別経路にし、
+   失敗終了は `Error` surface を残す。
+3. auto-close 回帰テストには「active agent success で close」と
+   「active agent failure では残る」を対で入れる。
+
+## 2026-04-20 — fix: path 文字列ヒューリスティクスは host OS の `Path` semantics に依存させない
+
+### 事象
+
+`managed_assets` の hook binary 選択で、Windows 形式 path を使う unit test が
+Linux CI の `Test (Rust)` だけ失敗した。`gwt.exe` と `bunx-*` を見分ける
+helper が、host OS の path separator 解釈に引っ張られていた。
+
+### 原因
+
+- `Path::file_stem()` と `Path::components()` は host OS の separator 規則で動くため、
+  Linux 上で `C:\\...\\gwt.exe` を渡すと Windows path として分解されない。
+- 「他 OS 形式の path 文字列をどう扱うか」をテストは固定していたが、
+  実装側はその前提を吸収していなかった。
+
+### 再発防止策
+
+1. 実行ファイル名や temp wrapper 判定のような path ヒューリスティクスでは、
+   必要なら `\\` / `/` を明示的に正規化してから文字列ベースで判定する。
+2. cross-platform 回帰テストでは、「Windows path を Linux で評価する」ような
+   foreign-path case をそのまま残し、host OS 依存退行を早めに拾う。
+3. `Path` API を使う helper を追加したら、「その判定は path 操作か、文字列契約か」を
+   先に切り分ける。
+
+## 2026-04-20 — fix: project-scoped asset は「repo を見つけたか」と「origin があるか」を分けて扱う
+
+### 事象
+
+coordination の保存先は `~/.gwt/projects/<repo-hash>/coordination/` が正なのに、
+origin がない git repo / worktree では `.gwt/coordination/` へ落ちていた。あわせて
+managed hook 再生成が `current_exe()` の一時 bunx 実体をそのまま焼き込み、
+古い `gwt` バイナリを hooks が呼び続ける経路が残っていた。
+
+### 原因
+
+- project-scoped path への切り替え条件を「git repo か」ではなく
+  「origin から repo hash を引けるか」にしていた。
+- 永続化する hook command の実体選択で、`current_exe()` が
+  bunx temp / helper binary のときの扱いを分けていなかった。
+
+### 再発防止策
+
+1. project-scoped data directory は、repo 検出と hash 取得を分離する。
+   repo root が取れるなら project scope を使い、hash は origin か path hash で決める。
+2. 設定ファイルへ永続化する実行パスは、transient wrapper (`bunx-*` など) を検知し、
+   安定した `gwt` 実体か明示 override を優先する。
+3. path migration の回帰テストは「origin なし git repo」と
+   「一時実体からの hook 再生成」の両方を必ず固定する。
+
 ## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
 
 ### 事象
@@ -2931,6 +3002,33 @@ v9.2.0 リリース実行中に `/release` コマンドの Step 9.2（`scripts/r
 3. Release PR の Closing Issues セクション生成時に「自動クローズ対象があるか」をユーザーに明示し、空の場合は明確に `None` と記載する
 4. release.md の Step 9 冒頭に「GitHub 自動クローズは Issue のみが対象であり、PR 番号は無視される」と注釈を追加し、PR/Issue 分類の重要性を強調する
 5. `tasks/lessons.md` にこの教訓を記録し、同種の長時間手順コマンド設計時の参考にする
+
+## 2026-04-20 — fix: agent auto-close は共有 status ではなく active agent ownership で絞る
+
+### 事象
+
+agent の正常終了で window を自動 close したい変更を入れる際、
+`WindowProcessStatus::Exited` だけを条件にすると shell など他の process window まで
+一緒に閉じる危険があった。あわせて、起動直後に window を閉じたとき
+reader detach timeout の best-effort cleanup が stderr に
+`did not exit within 500ms; detaching` を出し、失敗のように見えていた。
+
+### 原因
+
+- `Exited` は agent 専用ではなく、一般 terminal window も共有する process status だった。
+- close 契約を window の owner ではなく共通 status enum だけで分岐すると、
+  別 surface の lifecycle まで巻き込む。
+- `stop_window_runtime()` は timeout 後 detach を許容する設計なのに、
+  その通常回復経路を stderr に出していた。
+
+### 再発防止策
+
+1. process status を契機に UI surface を消す変更では、status だけでなく
+   domain ownership（例: active agent session）を必ず条件に含める。
+2. auto-close 系の回帰テストでは、対象の正例だけでなく
+   `Error` と non-agent window の負例を必ず固定する。
+3. best-effort cleanup が timeout 後 detach を許容する設計なら、
+   irrecoverable failure でない限り user-visible な stderr を出さない。
 
 ## 2026-04-20 — fix: Issue 完了報告の前に branch HEAD が base branch に含まれるか確認する
 

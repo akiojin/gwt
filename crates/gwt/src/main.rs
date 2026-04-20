@@ -753,20 +753,15 @@ impl AppRuntime {
     }
 
     fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
         self.stop_window_runtime(id);
-        let closed = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.close_window(&address.raw_id)
-        };
-        if !closed {
+        if !close_window_from_workspace(
+            &mut self.tabs,
+            &mut self.window_lookup,
+            &mut self.window_details,
+            id,
+        ) {
             return Vec::new();
         }
-        self.window_lookup.remove(id);
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }
@@ -1437,6 +1432,8 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
+        let should_auto_close =
+            should_auto_close_agent_window(&self.active_agent_sessions, &id, &status);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
@@ -1453,6 +1450,19 @@ impl AppRuntime {
             _ => {
                 self.window_details.remove(&id);
             }
+        }
+        if should_auto_close {
+            self.stop_window_runtime(&id);
+            if !close_window_from_workspace(
+                &mut self.tabs,
+                &mut self.window_lookup,
+                &mut self.window_details,
+                &id,
+            ) {
+                return Vec::new();
+            }
+            let _ = self.persist();
+            return vec![self.workspace_state_broadcast()];
         }
         if matches!(
             status,
@@ -1873,11 +1883,7 @@ impl AppRuntime {
                     let _ = handle.join();
                     let _ = tx.send(());
                 });
-                if rx.recv_timeout(Duration::from_millis(500)).is_err() {
-                    eprintln!(
-                        "output reader thread for window {window_id} did not exit within 500ms; detaching"
-                    );
-                }
+                let _ = rx.recv_timeout(Duration::from_millis(500));
             }
         }
         self.window_details.remove(window_id);
@@ -1947,11 +1953,18 @@ impl AppRuntime {
                 });
 
             match status {
-                Ok(PaneStatus::Running) | Ok(PaneStatus::Completed(_)) => {
+                Ok(PaneStatus::Running) | Ok(PaneStatus::Completed(0)) => {
                     let _ = proxy.send_event(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Exited,
                         detail: Some("Process exited".to_string()),
+                    });
+                }
+                Ok(PaneStatus::Completed(code)) => {
+                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                        id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(format!("Process exited with status {code}")),
                     });
                 }
                 Ok(PaneStatus::Error(message)) => {
@@ -2180,6 +2193,34 @@ fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
 }
 
+fn should_auto_close_agent_window(
+    active_agent_sessions: &HashMap<String, ActiveAgentSession>,
+    window_id: &str,
+    status: &WindowProcessStatus,
+) -> bool {
+    matches!(status, WindowProcessStatus::Exited) && active_agent_sessions.contains_key(window_id)
+}
+
+fn close_window_from_workspace(
+    tabs: &mut [ProjectTabRuntime],
+    window_lookup: &mut HashMap<String, WindowAddress>,
+    window_details: &mut HashMap<String, String>,
+    id: &str,
+) -> bool {
+    let Some(address) = window_lookup.get(id).cloned() else {
+        return false;
+    };
+    let Some(tab) = tabs.iter_mut().find(|tab| tab.id == address.tab_id) else {
+        return false;
+    };
+    if !tab.workspace.close_window(&address.raw_id) {
+        return false;
+    }
+    window_lookup.remove(id);
+    window_details.remove(id);
+    true
+}
+
 fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
     window.preset.requires_process()
         && matches!(
@@ -2193,15 +2234,18 @@ mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
     use gwt::{
-        BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind, PersistedWindowState,
-        WindowGeometry, WindowPreset, WindowProcessStatus,
+        empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
+        PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_terminal::PaneStatus;
     use tempfile::tempdir;
 
     use super::{
-        apply_host_package_runner_fallback_with_probe, knowledge_kind_for_preset,
-        preferred_issue_launch_branch, resolve_project_target, should_auto_start_restored_window,
+        apply_host_package_runner_fallback_with_probe, close_window_from_workspace,
+        combined_window_id, knowledge_kind_for_preset, preferred_issue_launch_branch,
+        resolve_project_target, should_auto_close_agent_window, should_auto_start_restored_window,
+        ActiveAgentSession, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2246,6 +2290,118 @@ mod tests {
             WindowPreset::Branches,
             WindowProcessStatus::Ready,
         )));
+    }
+
+    fn sample_project_tab_with_window(
+        tab_id: &str,
+        raw_window_id: &str,
+        preset: WindowPreset,
+        status: WindowProcessStatus,
+    ) -> ProjectTabRuntime {
+        let mut persisted = empty_workspace_state();
+        let mut window = sample_window(preset, status);
+        window.id = raw_window_id.to_string();
+        persisted.windows.push(window);
+        persisted.next_z_index = 2;
+        ProjectTabRuntime {
+            id: tab_id.to_string(),
+            title: "Repo".to_string(),
+            project_root: PathBuf::from("E:/gwt/test-repo"),
+            kind: gwt::ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+        }
+    }
+
+    fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
+        ActiveAgentSession {
+            window_id: window_id.to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "feature/test".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            tab_id: tab_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn exited_active_agent_window_is_marked_for_auto_close() {
+        let window_id = "tab-1::claude-1";
+        let sessions = HashMap::from([(
+            window_id.to_string(),
+            sample_active_agent_session("tab-1", window_id),
+        )]);
+
+        assert!(should_auto_close_agent_window(
+            &sessions,
+            window_id,
+            &WindowProcessStatus::Exited,
+        ));
+        assert!(!should_auto_close_agent_window(
+            &sessions,
+            window_id,
+            &WindowProcessStatus::Error,
+        ));
+    }
+
+    #[test]
+    fn non_agent_window_is_not_marked_for_auto_close() {
+        assert!(!should_auto_close_agent_window(
+            &HashMap::new(),
+            "tab-1::shell-1",
+            &WindowProcessStatus::Exited,
+        ));
+    }
+
+    #[test]
+    fn failed_completed_pane_status_is_not_auto_close_eligible() {
+        let status = match PaneStatus::Completed(1) {
+            PaneStatus::Completed(0) => WindowProcessStatus::Exited,
+            PaneStatus::Completed(_) | PaneStatus::Error(_) => WindowProcessStatus::Error,
+            PaneStatus::Running => WindowProcessStatus::Exited,
+        };
+
+        let window_id = "tab-1::claude-1";
+        let sessions = HashMap::from([(
+            window_id.to_string(),
+            sample_active_agent_session("tab-1", window_id),
+        )]);
+
+        assert_eq!(status, WindowProcessStatus::Error);
+        assert!(!should_auto_close_agent_window(
+            &sessions, window_id, &status
+        ));
+    }
+
+    #[test]
+    fn close_window_from_workspace_removes_window_lookup_and_details() {
+        let tab_id = "tab-1";
+        let raw_window_id = "claude-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let mut tabs = vec![sample_project_tab_with_window(
+            tab_id,
+            raw_window_id,
+            WindowPreset::Claude,
+            WindowProcessStatus::Exited,
+        )];
+        let mut window_lookup = HashMap::from([(
+            window_id.clone(),
+            WindowAddress {
+                tab_id: tab_id.to_string(),
+                raw_id: raw_window_id.to_string(),
+            },
+        )]);
+        let mut window_details = HashMap::from([(window_id.clone(), "Process exited".to_string())]);
+
+        assert!(close_window_from_workspace(
+            &mut tabs,
+            &mut window_lookup,
+            &mut window_details,
+            &window_id,
+        ));
+        assert!(tabs[0].workspace.window(raw_window_id).is_none());
+        assert!(!window_lookup.contains_key(&window_id));
+        assert!(!window_details.contains_key(&window_id));
     }
 
     #[test]
