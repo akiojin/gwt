@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-20 — ci(release): cross-platform archive step は shell と runner の同梱コマンド差分を前提に分ける
+
+### 事象
+
+`main` へ release PR #2072 を merge した後、Release workflow `24650370386` の
+`Build gwt (windows-x86_64)` が `Prepare artifact` で失敗し、`v9.6.0` の
+Windows zip asset だけ GitHub Release に載らなかった。
+
+### 原因
+
+- `.github/workflows/release.yml` の artifact 作成が全 OS 共通で `shell: bash` になっていた。
+- Windows 分岐では `zip` を呼んでいたが、GitHub の Windows runner + Git Bash 環境には
+  `zip` binary が常にある前提を置けなかった。
+- build 自体は成功しており、最後の packaging だけ shell 依存で壊れていた。
+
+### 再発防止策
+
+1. cross-platform workflow の packaging / file operation は「同じ shell で書けるか」ではなく、
+   各 runner に標準であるコマンドを基準に step を分ける。
+2. Windows artifact 作成では `zip` のような Unix 由来コマンドを前提にせず、
+   `Compress-Archive` など OS 標準機能を優先する。
+3. release workflow を触ったら、job ごとの最後の packaging/upload step までログを確認し、
+   「ビルド成功で安心しない」を checklist に入れる。
+
 ## 2026-04-20 — fix: canvas window ID を「同 preset 件数 + 1」で採番すると欠番で live window に衝突する
 
 ### 事象
