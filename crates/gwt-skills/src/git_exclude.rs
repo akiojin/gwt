@@ -10,11 +10,19 @@ const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";
 
 /// Patterns to exclude gwt-managed assets from git tracking.
+///
+/// `.gwt/discussion.md` is the gwt-discussion skill's working artifact, which
+/// is always created under the active worktree. gwt owns its exclusion via
+/// this managed block rather than `.gitignore`, because a project-level
+/// `.gitignore` cannot assume every worktree using a gwt skill has the same
+/// repo-wide rule (some consumers run gwt without committing to the
+/// repository's `.gitignore`).
 const GWT_EXCLUDE_PATTERNS: &[&str] = &[
     ".claude/skills/gwt-*",
     ".claude/commands/gwt-*",
     ".claude/settings.local.json",
     ".codex/skills/gwt-*",
+    ".gwt/discussion.md",
     "docker-compose.override.yml",
 ];
 
@@ -150,6 +158,7 @@ mod tests {
         assert!(result.contains(END_MARKER));
         assert!(result.contains(".claude/skills/gwt-*"));
         assert!(result.contains(".codex/skills/gwt-*"));
+        assert!(result.contains(".gwt/discussion.md"));
         assert!(result.contains("docker-compose.override.yml"));
         assert!(!result.contains(".codex/hooks.json"));
         assert!(!result.contains(".codex/hooks/scripts/gwt-*"));

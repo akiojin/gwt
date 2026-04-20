@@ -2510,7 +2510,7 @@ pub fn load_quick_start_entries(
         if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
             continue;
         }
-        let Ok(session) = gwt_agent::Session::load(&path) else {
+        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
             continue;
         };
         if session.branch != branch_name || session.worktree_path != repo_path {
@@ -2599,6 +2599,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit_date: None,
+            cleanup_ready: true,
             cleanup: crate::BranchCleanupInfo::default(),
         }
     }

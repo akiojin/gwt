@@ -20,11 +20,11 @@ pub mod workspace;
 pub use branch_cleanup::{
     cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
-pub use branch_list::{list_branch_entries, BranchListEntry, BranchScope};
 pub use branch_list::{
-    list_branch_entries_with_active_sessions, BranchCleanupAvailability,
-    BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
+    hydrate_branch_entries_with_active_sessions, list_branch_entries_with_active_sessions,
+    BranchCleanupAvailability, BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
 };
+pub use branch_list::{list_branch_entries, list_branch_inventory, BranchListEntry, BranchScope};
 pub use custom_agents_service::{
     add_from_claude_code_openai_compat_preset, delete_custom_agent, list_custom_agents,
     list_presets, probe_backend, update_custom_agent, ClaudeCodeOpenaiCompatInput,
@@ -64,7 +64,7 @@ pub use preset::{
     WindowPreset, WindowSurface,
 };
 pub use protocol::{
-    AppStateView, ArrangeMode, BackendEvent, FocusCycleDirection, FrontendEvent, ProjectTabView,
-    RecentProjectView, WorkspaceView,
+    AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, FocusCycleDirection,
+    FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

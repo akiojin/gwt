@@ -76,13 +76,27 @@ fn blocks_workflow_focused_github_cli_commands() {
 
 #[test]
 fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
+    // `permissionDecisionReason` is the single field PreToolUse actually
+    // surfaces, so the canonical alternatives and the blocked command
+    // must all land inside it — otherwise the LLM/user only sees the
+    // short rule name and has no recovery path.
     let decision = block_bash_policy::evaluate_bash_command("gh pr view 1949", &root())
         .expect("workflow gh command must block");
-    assert!(decision.reason.contains("GitHub workflow CLI"));
-    assert!(decision.stop_reason.contains("gwt issue view"));
-    assert!(decision.stop_reason.contains("gwt pr view"));
-    assert!(decision.stop_reason.contains("gwt actions logs"));
-    assert!(decision.stop_reason.contains("gwt-search"));
+    let visible = decision.permission_decision_reason();
+
+    for required in [
+        "GitHub workflow CLI",
+        "gwt issue view",
+        "gwt pr view",
+        "gwt actions logs",
+        "gwt-search",
+        "Blocked command: gh pr view 1949",
+    ] {
+        assert!(
+            visible.contains(required),
+            "{required:?} missing from permission_decision_reason: {visible}"
+        );
+    }
 }
 
 #[test]

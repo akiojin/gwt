@@ -18,7 +18,8 @@ pub use audit::{is_secret_env_key, redact_env_value_for_audit, REDACTED_PLACEHOL
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use launch::{
-    normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner,
+    canonical_launch_args, normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig,
+    ResolvedRunner,
 };
 pub use presets::claude_code_openai_compat_preset;
 pub use session::{

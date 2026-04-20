@@ -29,6 +29,13 @@ pub enum FocusCycleDirection {
     Backward,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchEntriesPhase {
+    Inventory,
+    Hydrated,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -221,6 +228,7 @@ pub enum BackendEvent {
     },
     BranchEntries {
         id: String,
+        phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
     },
     KnowledgeEntries {
@@ -290,4 +298,30 @@ pub enum BackendEvent {
         code: String,
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::{BackendEvent, BranchEntriesPhase};
+
+    #[test]
+    fn branch_entries_serializes_explicit_phase_contract() {
+        let event = BackendEvent::BranchEntries {
+            id: "branches-1".to_string(),
+            phase: BranchEntriesPhase::Inventory,
+            entries: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize branch entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("branch_entries".to_string()))
+        );
+        assert_eq!(
+            value.get("phase"),
+            Some(&Value::String("inventory".to_string()))
+        );
+    }
 }

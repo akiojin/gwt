@@ -169,7 +169,7 @@ fn current_session_from_env() -> io::Result<Option<Session>> {
     if !path.exists() {
         return Ok(None);
     }
-    Session::load(&path).map(Some)
+    Session::load_and_migrate(&path).map(Some)
 }
 
 fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::CoordinationSnapshot) {

@@ -84,7 +84,7 @@ fn pending_discussion_for_session(
     sessions_dir: &Path,
     session_id: &str,
 ) -> io::Result<Option<PendingDiscussionResume>> {
-    let session = Session::load(&sessions_dir.join(format!("{session_id}.toml")))?;
+    let session = Session::load_and_migrate(&sessions_dir.join(format!("{session_id}.toml")))?;
     load_pending_resume(&session.worktree_path)
 }
 
@@ -96,7 +96,7 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
     if !path.exists() {
         return Ok(None);
     }
-    Session::load(&path).map(Some)
+    Session::load_and_migrate(&path).map(Some)
 }
 
 fn sync_agent_session_id(

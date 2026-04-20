@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::repo_browser::{
+    preferred_issue_launch_branch, spawn_branch_cleanup_async, spawn_branch_load_async,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,15 +24,15 @@ use axum::{
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    build_builtin_agent_options, cleanup_selected_branches, default_wizard_version_cache_path,
-    detect_shell_program, list_branch_entries_with_active_sessions, list_directory_entries,
-    load_knowledge_bridge, load_restored_workspace_state, load_session_state,
-    migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
-    save_session_state, save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry,
-    DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardCompletion,
-    LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState,
-    LiveSessionEntry, RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState, APP_NAME,
+    build_builtin_agent_options, default_wizard_version_cache_path, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
+    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
+    refresh_managed_gwt_assets_for_worktree, resolve_launch_spec, save_session_state,
+    save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry, DockerWizardContext,
+    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry,
+    RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -46,6 +49,7 @@ use uuid::Uuid;
 use wry::WebViewBuilder;
 
 mod embedded_web;
+mod repo_browser;
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -173,6 +177,59 @@ impl OutboundEvent {
             event,
         }
     }
+}
+
+fn build_frontend_sync_events(
+    client_id: &str,
+    workspace: gwt::AppStateView,
+    terminal_statuses: Vec<(String, WindowProcessStatus, String)>,
+    terminal_snapshots: Vec<(String, Vec<u8>)>,
+    launch_wizard: Option<gwt::LaunchWizardView>,
+    pending_update: Option<gwt_core::update::UpdateState>,
+) -> Vec<OutboundEvent> {
+    let mut events = vec![OutboundEvent::reply(
+        client_id,
+        BackendEvent::WorkspaceState { workspace },
+    )];
+
+    for (id, status, detail) in terminal_statuses {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::TerminalStatus {
+                id,
+                status,
+                detail: Some(detail),
+            },
+        ));
+    }
+
+    for (id, snapshot) in terminal_snapshots {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::TerminalSnapshot {
+                id,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+            },
+        ));
+    }
+
+    if let Some(wizard) = launch_wizard {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::LaunchWizardState {
+                wizard: Some(Box::new(wizard)),
+            },
+        ));
+    }
+
+    if let Some(state) = pending_update {
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateState(state),
+        ));
+    }
+
+    events
 }
 
 #[derive(Debug, Clone)]
@@ -372,12 +429,7 @@ impl AppRuntime {
                     self.load_file_tree_event(&id, &path),
                 )]
             }
-            FrontendEvent::LoadBranches { id } => {
-                vec![OutboundEvent::reply(
-                    client_id,
-                    self.load_branches_event(&id),
-                )]
-            }
+            FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
                 knowledge_kind,
@@ -451,63 +503,37 @@ impl AppRuntime {
     }
 
     fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
-        let mut events = vec![OutboundEvent::reply(
+        let terminal_statuses = self
+            .window_details
+            .iter()
+            .filter_map(|(id, detail)| {
+                self.window_status(id)
+                    .map(|status| (id.clone(), status, detail.clone()))
+            })
+            .collect();
+        let terminal_snapshots = self
+            .runtimes
+            .iter()
+            .filter_map(|(id, runtime)| {
+                let snapshot = runtime
+                    .pane
+                    .lock()
+                    .map(|pane| pane.screen().contents().into_bytes())
+                    .unwrap_or_default();
+                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
+            })
+            .collect();
+
+        build_frontend_sync_events(
             client_id,
-            BackendEvent::WorkspaceState {
-                workspace: self.app_state_view(),
-            },
-        )];
-
-        for (id, detail) in &self.window_details {
-            let Some(status) = self.window_status(id) else {
-                continue;
-            };
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::TerminalStatus {
-                    id: id.clone(),
-                    status,
-                    detail: Some(detail.clone()),
-                },
-            ));
-        }
-
-        for (id, runtime) in &self.runtimes {
-            let snapshot = runtime
-                .pane
-                .lock()
-                .map(|pane| pane.screen().contents().into_bytes())
-                .unwrap_or_default();
-            if snapshot.is_empty() {
-                continue;
-            }
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::TerminalSnapshot {
-                    id: id.clone(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-                },
-            ));
-        }
-
-        if let Some(wizard) = self.launch_wizard.as_ref() {
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::LaunchWizardState {
-                    wizard: Some(Box::new(wizard.wizard.view())),
-                },
-            ));
-        }
-
-        // Replay any pending update notification so late-connecting WebView clients see the toast.
-        if let Some(state) = self.pending_update.clone() {
-            events.push(OutboundEvent::reply(
-                client_id,
-                BackendEvent::UpdateState(state),
-            ));
-        }
-
-        events
+            self.app_state_view(),
+            terminal_statuses,
+            terminal_snapshots,
+            self.launch_wizard
+                .as_ref()
+                .map(|wizard| wizard.wizard.view()),
+            self.pending_update.clone(),
+        )
     }
 
     fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
@@ -952,45 +978,53 @@ impl AppRuntime {
         }
     }
 
-    fn load_branches_event(&self, id: &str) -> BackendEvent {
+    fn load_branches_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
-            return BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            };
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
-            return BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Project tab not found".to_string(),
-            };
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            };
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
         };
 
         if window.preset != WindowPreset::Branches {
-            return BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window is not a branches list".to_string(),
-            };
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window is not a branches list".to_string(),
+                },
+            )];
         }
 
-        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
-        match list_branch_entries_with_active_sessions(&tab.project_root, &active_session_branches)
-        {
-            Ok(entries) => BackendEvent::BranchEntries {
-                id: id.to_string(),
-                entries,
-            },
-            Err(error) => BackendEvent::BranchError {
-                id: id.to_string(),
-                message: error.to_string(),
-            },
-        }
+        spawn_branch_load_async(
+            self.proxy.clone(),
+            client_id.to_string(),
+            id.to_string(),
+            tab.project_root.clone(),
+            self.active_session_branches_for_tab(&address.tab_id),
+        );
+        Vec::new()
     }
 
     fn load_knowledge_bridge_events(
@@ -1120,7 +1154,7 @@ impl AppRuntime {
             )];
         }
 
-        Self::spawn_branch_cleanup_async(
+        spawn_branch_cleanup_async(
             self.proxy.clone(),
             client_id.to_string(),
             id.to_string(),
@@ -1131,68 +1165,9 @@ impl AppRuntime {
         );
         Vec::new()
     }
+}
 
-    fn spawn_branch_cleanup_async(
-        proxy: EventLoopProxy<UserEvent>,
-        client_id: ClientId,
-        window_id: String,
-        project_root: PathBuf,
-        active_session_branches: std::collections::HashSet<String>,
-        branches: Vec<String>,
-        delete_remote: bool,
-    ) {
-        thread::spawn(move || {
-            let events = match list_branch_entries_with_active_sessions(
-                &project_root,
-                &active_session_branches,
-            ) {
-                Ok(entries) => {
-                    let results = cleanup_selected_branches(
-                        &project_root,
-                        &entries,
-                        &branches,
-                        delete_remote,
-                    );
-                    let mut events = vec![OutboundEvent::reply(
-                        client_id.clone(),
-                        BackendEvent::BranchCleanupResult {
-                            id: window_id.clone(),
-                            results,
-                        },
-                    )];
-                    match list_branch_entries_with_active_sessions(
-                        &project_root,
-                        &active_session_branches,
-                    ) {
-                        Ok(entries) => events.push(OutboundEvent::reply(
-                            client_id.clone(),
-                            BackendEvent::BranchEntries {
-                                id: window_id.clone(),
-                                entries,
-                            },
-                        )),
-                        Err(error) => events.push(OutboundEvent::reply(
-                            client_id.clone(),
-                            BackendEvent::BranchError {
-                                id: window_id.clone(),
-                                message: error.to_string(),
-                            },
-                        )),
-                    }
-                    events
-                }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BranchError {
-                        id: window_id,
-                        message: error.to_string(),
-                    },
-                )],
-            };
-            let _ = proxy.send_event(UserEvent::Dispatch(events));
-        });
-    }
-
+impl AppRuntime {
     fn open_launch_wizard(
         &mut self,
         id: &str,
@@ -2583,24 +2558,26 @@ mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+    use base64::Engine;
     use tempfile::tempdir;
 
     use gwt::{
-        empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
-        PersistedWindowState, RuntimeHookEvent, RuntimeHookEventKind, ShellLaunchConfig,
-        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
+        empty_workspace_state, KnowledgeKind, PersistedWindowState, RuntimeHookEvent,
+        RuntimeHookEventKind, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
+        WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        broadcast_runtime_hook_event, build_shell_process_launch, close_window_from_workspace,
-        combined_window_id, docker_bundle_mounts_for_home, docker_bundle_override_content,
-        hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
-        preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
-        should_auto_start_restored_window, ActiveAgentSession, ClientHub, ProjectTabRuntime,
-        WindowAddress,
+        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
+        close_window_from_workspace, combined_window_id, docker_bundle_mounts_for_home,
+        docker_bundle_override_content, hook_forward_authorized,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
+        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
+        ClientHub, DispatchTarget, OutboundEvent, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2650,6 +2627,109 @@ mod tests {
         assert_eq!(native_payload, browser_payload);
         assert!(native_payload.contains("\"kind\":\"runtime_hook_event\""));
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
+    }
+
+    fn drain_client_payloads(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Vec<String> {
+        let mut payloads = Vec::new();
+        while let Ok(payload) = receiver.try_recv() {
+            payloads.push(payload);
+        }
+        payloads
+    }
+
+    #[test]
+    fn frontend_sync_events_reply_only_to_connecting_client() {
+        let tabs = vec![sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )];
+        let workspace = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
+        let snapshot = b"hello from terminal".to_vec();
+        let expected_snapshot =
+            base64::engine::general_purpose::STANDARD.encode(snapshot.as_slice());
+
+        let events = build_frontend_sync_events(
+            "browser-1",
+            workspace,
+            vec![(
+                "tab-1::shell-1".to_string(),
+                WindowProcessStatus::Ready,
+                "Shell ready".to_string(),
+            )],
+            vec![("tab-1::shell-1".to_string(), snapshot)],
+            None,
+            Some(UpdateState::UpToDate { checked_at: None }),
+        );
+
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(|event| {
+            matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "browser-1")
+        }));
+        assert!(matches!(
+            &events[0].event,
+            gwt::BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::TerminalStatus { id, status, detail }
+                if id == "tab-1::shell-1"
+                    && *status == WindowProcessStatus::Ready
+                    && detail.as_deref() == Some("Shell ready")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::TerminalSnapshot { id, data_base64 }
+                if id == "tab-1::shell-1" && data_base64 == &expected_snapshot
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            gwt::BackendEvent::UpdateState(UpdateState::UpToDate { checked_at: None })
+        )));
+    }
+
+    #[test]
+    fn client_hub_dispatch_keeps_frontend_sync_events_client_scoped() {
+        let clients = ClientHub::default();
+        let mut primary = clients.register("primary".to_string());
+        let mut secondary = clients.register("secondary".to_string());
+        let tabs = vec![sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )];
+        let workspace = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
+        let mut events =
+            build_frontend_sync_events("primary", workspace, Vec::new(), Vec::new(), None, None);
+        events.push(OutboundEvent::broadcast(
+            gwt::BackendEvent::ProjectOpenError {
+                message: "shared".to_string(),
+            },
+        ));
+
+        clients.dispatch(events);
+
+        let primary_payloads = drain_client_payloads(&mut primary);
+        let secondary_payloads = drain_client_payloads(&mut secondary);
+
+        assert_eq!(primary_payloads.len(), 2);
+        assert_eq!(secondary_payloads.len(), 1);
+        assert!(primary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"workspace_state\"")));
+        assert!(primary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"project_open_error\"")));
+        assert!(secondary_payloads
+            .iter()
+            .all(|payload| payload.contains("\"kind\":\"project_open_error\"")));
+        assert!(!secondary_payloads
+            .iter()
+            .any(|payload| payload.contains("\"kind\":\"workspace_state\"")));
     }
 
     #[test]
@@ -3007,51 +3087,6 @@ mod tests {
             Some(KnowledgeKind::Pr)
         );
         assert_eq!(knowledge_kind_for_preset(WindowPreset::Branches), None);
-    }
-
-    #[test]
-    fn preferred_issue_launch_branch_prefers_develop_then_head_then_first_local() {
-        let entries = vec![
-            BranchListEntry {
-                name: "feature/demo".to_string(),
-                scope: BranchScope::Local,
-                is_head: true,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: None,
-                cleanup: BranchCleanupInfo::default(),
-            },
-            BranchListEntry {
-                name: "develop".to_string(),
-                scope: BranchScope::Local,
-                is_head: false,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: None,
-                cleanup: BranchCleanupInfo::default(),
-            },
-        ];
-        assert_eq!(
-            preferred_issue_launch_branch(&entries),
-            Some("develop".to_string())
-        );
-
-        let head_only = vec![BranchListEntry {
-            name: "feature/demo".to_string(),
-            scope: BranchScope::Local,
-            is_head: true,
-            upstream: None,
-            ahead: 0,
-            behind: 0,
-            last_commit_date: None,
-            cleanup: BranchCleanupInfo::default(),
-        }];
-        assert_eq!(
-            preferred_issue_launch_branch(&head_only),
-            Some("feature/demo".to_string())
-        );
     }
 }
 
@@ -3472,6 +3507,7 @@ fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
         ahead: 0,
         behind: 0,
         last_commit_date: None,
+        cleanup_ready: true,
         cleanup: gwt::BranchCleanupInfo::default(),
     }
 }
@@ -3524,26 +3560,6 @@ fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
         WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
     }
-}
-
-fn preferred_issue_launch_branch(entries: &[gwt::BranchListEntry]) -> Option<String> {
-    use gwt::BranchScope;
-
-    let mut locals = entries
-        .iter()
-        .filter(|entry| entry.scope == BranchScope::Local)
-        .collect::<Vec<_>>();
-    locals.sort_by(|left, right| left.name.cmp(&right.name));
-
-    for preferred in ["develop", "main", "master"] {
-        if let Some(entry) = locals.iter().find(|entry| entry.name == preferred) {
-            return Some(entry.name.clone());
-        }
-    }
-    if let Some(entry) = locals.iter().find(|entry| entry.is_head) {
-        return Some(entry.name.clone());
-    }
-    locals.first().map(|entry| entry.name.clone())
 }
 
 fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
