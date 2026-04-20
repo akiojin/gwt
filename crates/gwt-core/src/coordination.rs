@@ -151,86 +151,10 @@ impl BoardEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCard {
-    pub agent_id: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    pub branch: String,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub responsibility: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub current_focus: Option<String>,
-    #[serde(default)]
-    pub next_action: Option<String>,
-    #[serde(default)]
-    pub blocked_reason: Option<String>,
-    #[serde(default)]
-    pub related_topics: Vec<String>,
-    #[serde(default)]
-    pub related_owners: Vec<String>,
-    #[serde(default)]
-    pub working_scope: Option<String>,
-    #[serde(default)]
-    pub handoff_target: Option<String>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl AgentCard {
-    pub fn key(&self) -> String {
-        if let Some(session_id) = self.session_id.as_deref() {
-            if !session_id.trim().is_empty() {
-                return format!("session:{session_id}");
-            }
-        }
-        format!("agent:{}:{}", self.agent_id, self.branch)
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCardPatch {
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub responsibility: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub current_focus: Option<String>,
-    #[serde(default)]
-    pub next_action: Option<String>,
-    #[serde(default)]
-    pub blocked_reason: Option<String>,
-    #[serde(default)]
-    pub related_topics: Option<Vec<String>>,
-    #[serde(default)]
-    pub related_owners: Option<Vec<String>>,
-    #[serde(default)]
-    pub working_scope: Option<String>,
-    #[serde(default)]
-    pub handoff_target: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCardContext {
-    pub agent_id: String,
-    pub session_id: Option<String>,
-    pub branch: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinationEvent {
     #[serde(alias = "board_post")]
-    MessageAppended {
-        entry: BoardEntry,
-    },
-    AgentCardUpsert {
-        card: AgentCard,
-    },
+    MessageAppended { entry: BoardEntry },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,26 +173,9 @@ impl Default for BoardProjection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCardsProjection {
-    #[serde(default)]
-    pub cards: Vec<AgentCard>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Default for AgentCardsProjection {
-    fn default() -> Self {
-        Self {
-            cards: Vec::new(),
-            updated_at: Utc::now(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoordinationSnapshot {
     pub board: BoardProjection,
-    pub cards: AgentCardsProjection,
 }
 
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
@@ -314,109 +221,11 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
     Ok(CoordinationSnapshot {
         board: load_json_or_default(&coordination_board_projection_path(worktree_root))?,
-        cards: AgentCardsProjection::default(),
     })
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
     append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
-}
-
-pub fn apply_agent_card_patch(
-    worktree_root: &Path,
-    context: AgentCardContext,
-    patch: AgentCardPatch,
-) -> Result<CoordinationSnapshot> {
-    ensure_repo_local_files(worktree_root)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(coordination_lock_path(worktree_root))?;
-    lock.lock_exclusive()?;
-
-    let result = apply_agent_card_patch_locked(worktree_root, context, patch);
-    let unlock_result = lock.unlock();
-    match (result, unlock_result) {
-        (Ok(snapshot), Ok(())) => Ok(snapshot),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err.into()),
-    }
-}
-
-fn apply_agent_card_patch_locked(
-    worktree_root: &Path,
-    context: AgentCardContext,
-    patch: AgentCardPatch,
-) -> Result<CoordinationSnapshot> {
-    let snapshot = load_snapshot(worktree_root)?;
-    let key = if let Some(session_id) = context.session_id.as_deref() {
-        if !session_id.trim().is_empty() {
-            format!("session:{session_id}")
-        } else {
-            format!("agent:{}:{}", context.agent_id, context.branch)
-        }
-    } else {
-        format!("agent:{}:{}", context.agent_id, context.branch)
-    };
-    let now = Utc::now();
-    let mut card = snapshot
-        .cards
-        .cards
-        .iter()
-        .find(|candidate| candidate.key() == key)
-        .cloned()
-        .unwrap_or(AgentCard {
-            agent_id: context.agent_id,
-            session_id: context.session_id,
-            branch: context.branch,
-            role: None,
-            responsibility: None,
-            status: None,
-            current_focus: None,
-            next_action: None,
-            blocked_reason: None,
-            related_topics: Vec::new(),
-            related_owners: Vec::new(),
-            working_scope: None,
-            handoff_target: None,
-            updated_at: now,
-        });
-
-    if let Some(value) = patch.role {
-        card.role = Some(value);
-    }
-    if let Some(value) = patch.responsibility {
-        card.responsibility = Some(value);
-    }
-    if let Some(value) = patch.status {
-        card.status = Some(value);
-    }
-    if let Some(value) = patch.current_focus {
-        card.current_focus = Some(value);
-    }
-    if let Some(value) = patch.next_action {
-        card.next_action = Some(value);
-    }
-    if let Some(value) = patch.blocked_reason {
-        card.blocked_reason = Some(value);
-    }
-    if let Some(value) = patch.related_topics {
-        card.related_topics = value;
-    }
-    if let Some(value) = patch.related_owners {
-        card.related_owners = value;
-    }
-    if let Some(value) = patch.working_scope {
-        card.working_scope = Some(value);
-    }
-    if let Some(value) = patch.handoff_target {
-        card.handoff_target = Some(value);
-    }
-    card.updated_at = now;
-
-    append_event_locked(worktree_root, &CoordinationEvent::AgentCardUpsert { card })
 }
 
 pub fn append_event(
@@ -476,10 +285,21 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
         if trimmed.is_empty() {
             continue;
         }
-        let event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
-        match event {
-            CoordinationEvent::MessageAppended { entry } => board_entries.push(entry),
-            CoordinationEvent::AgentCardUpsert { .. } => {}
+        // Parse as a generic Value first so legacy event types (e.g. the
+        // retired `agent_card_upsert` from the pre-shared-chat era) can be
+        // skipped without failing the whole rebuild.
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(json_error)?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match event_type {
+            "message_appended" | "board_post" => {
+                let event: CoordinationEvent = serde_json::from_value(value).map_err(json_error)?;
+                let CoordinationEvent::MessageAppended { entry } = event;
+                board_entries.push(entry);
+            }
+            _ => continue,
         }
     }
 
@@ -492,7 +312,6 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
             entries: board_entries,
             updated_at: now,
         },
-        cards: AgentCardsProjection::default(),
     })
 }
 
@@ -659,7 +478,6 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
 fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
     match event {
         CoordinationEvent::MessageAppended { entry } => entry.created_at,
-        CoordinationEvent::AgentCardUpsert { card } => card.updated_at,
     }
 }
 
@@ -833,6 +651,58 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_skips_legacy_agent_card_upsert_events() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+
+        // Simulate an events.jsonl written by the pre-shared-chat code path.
+        // The legacy `agent_card_upsert` line must be tolerated and simply
+        // skipped — not treated as a parse error.
+        let events_path = coordination_events_path(dir.path());
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&events_path)
+                .unwrap();
+            let entry = BoardEntry::new(
+                AuthorKind::User,
+                "user",
+                BoardEntryKind::Request,
+                "after legacy line",
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            let legacy = serde_json::json!({
+                "type": "agent_card_upsert",
+                "card": {
+                    "agent_id": "codex",
+                    "branch": "feature/legacy",
+                    "updated_at": "2026-04-14T00:00:00Z"
+                }
+            });
+            writeln!(file, "{}", legacy).unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type": "message_appended",
+                    "entry": entry,
+                })
+            )
+            .unwrap();
+        }
+
+        let rebuilt = rebuild_snapshot_from_events(&events_path).unwrap();
+        assert_eq!(rebuilt.board.entries.len(), 1);
+        assert_eq!(rebuilt.board.entries[0].body, "after legacy line");
+    }
+
+    #[test]
     fn post_entry_updates_event_log_and_board_projection() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -902,7 +772,6 @@ mod tests {
         assert_eq!(rebuilt.board.entries.len(), 2);
         assert_eq!(rebuilt.board.entries[0].body, "Initial request");
         assert_eq!(rebuilt.board.entries[1].body, "Investigating");
-        assert!(rebuilt.cards.cards.is_empty());
     }
 
     #[test]
