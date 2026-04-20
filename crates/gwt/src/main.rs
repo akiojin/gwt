@@ -49,6 +49,16 @@ mod embedded_web;
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
+const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
+const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
+const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerBundleMounts {
+    host_gwt: PathBuf,
+    host_gwtd: PathBuf,
+}
 
 /// Shared lock-free PTY writer registry used by the WebSocket fast-path.
 ///
@@ -1956,6 +1966,7 @@ impl AppRuntime {
                     message: "bunx unavailable, switching to npx...".to_string(),
                 });
             }
+            install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
 
             let branch_name = config
                 .branch
@@ -2002,6 +2013,7 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
+            finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
 
             session
                 .save(&sessions_dir)
@@ -2558,7 +2570,8 @@ mod tests {
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
         broadcast_runtime_hook_event, build_shell_process_launch, close_window_from_workspace,
-        combined_window_id, hook_forward_authorized, knowledge_kind_for_preset,
+        combined_window_id, docker_bundle_mounts_for_home, docker_bundle_override_content,
+        hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, ClientHub, ProjectTabRuntime,
         WindowAddress,
@@ -2915,6 +2928,42 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_prefers_public_gwt_binary_for_host_sessions() {
+        let current_exe = PathBuf::from(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe");
+        let mut env = HashMap::new();
+
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |command| {
+                assert_eq!(command, "gwt");
+                Some(stable.clone())
+            },
+        )
+        .expect("install GWT_BIN_PATH");
+
+        assert_eq!(
+            env.get(gwt_agent::GWT_BIN_PATH_ENV).map(String::as_str),
+            Some(stable.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn docker_bundle_override_content_mounts_front_door_and_daemon() {
+        let home = PathBuf::from("/home/example");
+        let bundle = docker_bundle_mounts_for_home(&home);
+        let content = docker_bundle_override_content("app", &bundle);
+
+        assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
+        assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
     }
 
     #[test]
@@ -3709,9 +3758,36 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree)?;
+    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
+    install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
+    config.command = runtime_program.executable;
+    config.args = runtime_program.args;
+    config
+        .env_vars
+        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    config.docker_service = Some(launch.service);
+    Ok(())
+}
+
+fn finalize_docker_agent_launch_config(
+    repo_path: &Path,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<(), String> {
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
+        return Ok(());
+    }
+
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+    let runtime_program = PackageRunnerProgram {
+        executable: config.command.clone(),
+        args: config.args.clone(),
+    };
 
     let mut args = vec![
         "compose".to_string(),
@@ -3719,24 +3795,15 @@ fn apply_docker_runtime_to_launch_config(
         launch.compose_file.display().to_string(),
         "exec".to_string(),
         "-w".to_string(),
-        launch.container_cwd.clone(),
+        launch.container_cwd,
     ];
     args.extend(docker_compose_exec_env_args(&config.env_vars));
-    args.push(launch.service.clone());
+    args.push(launch.service);
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
     config.command = docker_binary_for_launch();
     config.args = args;
-    config
-        .env_vars
-        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
-    // Override GWT_BIN_PATH for Docker containers to use the mounted binary
-    config.env_vars.insert(
-        gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
-        "/usr/local/bin/gwt".to_string(),
-    );
-    config.docker_service = Some(launch.service);
     Ok(())
 }
 
@@ -3755,6 +3822,7 @@ fn build_shell_process_launch(
         let shell = detect_shell_program().map_err(|error| error.to_string())?;
         env.entry("GWT_PROJECT_ROOT".to_string())
             .or_insert_with(|| worktree.display().to_string());
+        install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Host)?;
         config.env_vars = env.clone();
         return Ok(ProcessLaunch {
             command: shell.command,
@@ -3767,8 +3835,10 @@ fn build_shell_process_launch(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
     env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Docker)?;
     config.docker_service = Some(launch.service.clone());
     config.env_vars = env.clone();
 
@@ -3886,9 +3956,44 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
-    use std::{fs, path::PathBuf};
+fn install_launch_gwt_bin_env(
+    env_vars: &mut HashMap<String, String>,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+) -> Result<(), String> {
+    let current_exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+    install_launch_gwt_bin_env_with_lookup(env_vars, runtime_target, &current_exe, |command| {
+        which::which(command).ok()
+    })
+}
 
+fn install_launch_gwt_bin_env_with_lookup(
+    env_vars: &mut HashMap<String, String>,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    current_exe: &Path,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> Result<(), String> {
+    let gwt_bin = match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWT_BIN_PATH.to_string(),
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            env_vars.insert(gwt_agent::session::GWT_BIN_PATH_ENV.to_string(), gwt_bin);
+        }
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            env_vars
+                .entry(gwt_agent::session::GWT_BIN_PATH_ENV.to_string())
+                .or_insert(gwt_bin);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_user_home_dir() -> Result<PathBuf, String> {
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE")
     } else {
@@ -3896,40 +4001,64 @@ fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
     }
     .map(PathBuf::from)
     .map_err(|_| "Could not determine home directory".to_string())?;
+    Ok(home)
+}
 
+fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
     let gwt_bin_dir = home.join(".gwt").join("bin");
-    let gwt_linux = gwt_bin_dir.join("gwt-linux");
+    DockerBundleMounts {
+        host_gwt: gwt_bin_dir.join(DOCKER_HOST_GWT_BIN_NAME),
+        host_gwtd: gwt_bin_dir.join(DOCKER_HOST_GWTD_BIN_NAME),
+    }
+}
 
-    // Check if Linux gwt binary exists
-    if !gwt_linux.exists() {
-        // TODO: Download Linux gwt binary from GitHub Release
-        // For now, create a note for the user
+fn docker_compose_mount_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+    let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
+    let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
+    format!(
+        "# Auto-generated docker-compose override for gwt bundle mounting\n\
+         version: '3.8'\n\
+         services:\n\
+           {service}:\n\
+             volumes:\n\
+               - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
+               - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
+    )
+}
+
+fn ensure_docker_gwt_binary_setup(repo_path: &Path, service: &str) -> Result<(), String> {
+    use std::fs;
+
+    let home = resolve_user_home_dir()?;
+    let bundle = docker_bundle_mounts_for_home(&home);
+
+    if !bundle.host_gwt.exists() || !bundle.host_gwtd.exists() {
         let override_path = repo_path.join("docker-compose.override.yml");
         if !override_path.exists() {
             eprintln!(
-                "Note: Linux gwt binary not found at ~/.gwt/bin/gwt-linux\n\
+                "Note: Linux gwt bundle not found at {} and {}\n\
                  This is required for Docker agent support.\n\
                  You can either:\n\
-                 1. Download gwt-linux-x86_64 from GitHub Releases and place it at ~/.gwt/bin/gwt-linux\n\
+                 1. Download the Linux release bundle and place the extracted binaries at these paths\n\
                  2. Run 'gwt setup docker' to set up Docker integration automatically"
+                ,
+                bundle.host_gwt.display(),
+                bundle.host_gwtd.display()
             );
         }
     }
 
-    // Ensure docker-compose.override.yml exists with gwt volume mount
     let override_path = repo_path.join("docker-compose.override.yml");
     if !override_path.exists() {
-        let override_content = "# Auto-generated docker-compose override for gwt binary mounting\n\
-                                version: '3.8'\n\
-                                services:\n\
-                                  # Add your service name and uncomment the volumes section\n\
-                                  # <service>:\n\
-                                  #   volumes:\n\
-                                  #     - ~/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro\n";
+        let override_content = docker_bundle_override_content(service, &bundle);
         fs::write(&override_path, override_content).map_err(|err| {
             format!(
                 "Failed to create docker-compose.override.yml: {err}\n\
-                 Manually create {} with gwt volume mount",
+                 Manually create {} with gwt/gwtd bundle mounts",
                 override_path.display()
             )
         })?;
