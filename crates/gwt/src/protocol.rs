@@ -146,6 +146,7 @@ pub struct RecentProjectView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStateView {
+    pub app_version: String,
     pub tabs: Vec<ProjectTabView>,
     pub active_tab_id: Option<String>,
     pub recent_projects: Vec<RecentProjectView>,
