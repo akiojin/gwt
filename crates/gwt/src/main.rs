@@ -26,8 +26,8 @@ use gwt::{
     migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
     save_session_state, save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry,
     DockerWizardContext, FrontendEvent, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardHydration, LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState, APP_NAME,
+    LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry,
+    ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -80,6 +80,10 @@ enum UserEvent {
             ),
             String,
         >,
+    },
+    ShellLaunchComplete {
+        window_id: String,
+        result: Result<ProcessLaunch, String>,
     },
     LaunchWizardHydrated {
         wizard_id: String,
@@ -1366,19 +1370,34 @@ impl AppRuntime {
                     self.launch_wizard_state_broadcast(None),
                 ]
             }
-            Some(LaunchWizardCompletion::Launch(config)) => {
-                match self.spawn_agent_window(&session.tab_id, *config, bounds) {
-                    Ok(mut events) => {
-                        events.push(self.launch_wizard_state_broadcast(None));
-                        events
-                    }
-                    Err(error) => {
-                        session.wizard.error = Some(error);
-                        self.launch_wizard = Some(session);
-                        vec![self.launch_wizard_state_outbound()]
+            Some(LaunchWizardCompletion::Launch(config)) => match *config {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    match self.spawn_agent_window(&session.tab_id, *config, bounds) {
+                        Ok(mut events) => {
+                            events.push(self.launch_wizard_state_broadcast(None));
+                            events
+                        }
+                        Err(error) => {
+                            session.wizard.error = Some(error);
+                            self.launch_wizard = Some(session);
+                            vec![self.launch_wizard_state_outbound()]
+                        }
                     }
                 }
-            }
+                LaunchWizardLaunchRequest::Shell(config) => {
+                    match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
+                        Ok(mut events) => {
+                            events.push(self.launch_wizard_state_broadcast(None));
+                            events
+                        }
+                        Err(error) => {
+                            session.wizard.error = Some(error);
+                            self.launch_wizard = Some(session);
+                            vec![self.launch_wizard_state_outbound()]
+                        }
+                    }
+                }
+            },
             None => {
                 self.launch_wizard = Some(session);
                 vec![self.launch_wizard_state_outbound()]
@@ -1537,6 +1556,56 @@ impl AppRuntime {
                 );
 
                 let _ = self.persist();
+
+                match self.spawn_process_window(&window_id, geometry, process_launch) {
+                    Ok(event) => vec![
+                        self.workspace_state_broadcast(),
+                        OutboundEvent::broadcast(event),
+                    ],
+                    Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(error),
+                    })],
+                }
+            }
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id,
+                status: WindowProcessStatus::Error,
+                detail: Some(error),
+            })],
+        }
+    }
+
+    fn handle_shell_launch_complete(
+        &mut self,
+        window_id: String,
+        result: Result<ProcessLaunch, String>,
+    ) -> Vec<OutboundEvent> {
+        match result {
+            Ok(process_launch) => {
+                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Window not found".to_string()),
+                    })];
+                };
+                let Some(tab) = self.tab(&address.tab_id) else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Project tab not found".to_string()),
+                    })];
+                };
+                let Some(window) = tab.workspace.window(&address.raw_id) else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Window not found".to_string()),
+                    })];
+                };
+                let geometry = window.geometry.clone();
 
                 match self.spawn_process_window(&window_id, geometry, process_launch) {
                     Ok(event) => vec![
@@ -1719,6 +1788,53 @@ impl AppRuntime {
         Ok(events)
     }
 
+    fn spawn_wizard_shell_window(
+        &mut self,
+        tab_id: &str,
+        config: ShellLaunchConfig,
+        bounds: Option<WindowGeometry>,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        let tab = self
+            .tab_mut(tab_id)
+            .ok_or_else(|| "Project tab not found".to_string())?;
+        let project_root = tab.project_root.display().to_string();
+        let title = format!(
+            "{} · {}",
+            config.display_name,
+            config.branch.as_ref().unwrap_or(&"workspace".to_string())
+        );
+        let default_bounds = WindowGeometry {
+            x: 100.0,
+            y: 40.0,
+            width: 1000.0,
+            height: 760.0,
+        };
+        let window = tab.workspace.add_window_with_title(
+            WindowPreset::Shell,
+            title,
+            false,
+            bounds.unwrap_or(default_bounds),
+        );
+        self.register_window(tab_id, &window.id);
+        let window_id = combined_window_id(tab_id, &window.id);
+
+        let events = vec![
+            self.workspace_state_broadcast(),
+            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id.clone(),
+                status: WindowProcessStatus::Starting,
+                detail: None,
+            }),
+        ];
+
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            Self::spawn_wizard_shell_window_async(proxy, project_root, window_id, config)
+        });
+
+        Ok(events)
+    }
+
     fn spawn_agent_window_async(
         proxy: EventLoopProxy<UserEvent>,
         sessions_dir: PathBuf,
@@ -1848,6 +1964,32 @@ impl AppRuntime {
                 });
             }
         }
+    }
+
+    fn spawn_wizard_shell_window_async(
+        proxy: EventLoopProxy<UserEvent>,
+        project_root: String,
+        window_id: String,
+        mut config: ShellLaunchConfig,
+    ) {
+        let result = (|| {
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Preparing worktree...".to_string(),
+            });
+            resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
+
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                let _ = proxy.send_event(UserEvent::LaunchProgress {
+                    window_id: window_id.clone(),
+                    message: "Starting Docker service...".to_string(),
+                });
+            }
+
+            build_shell_process_launch(Path::new(&project_root), &mut config)
+        })();
+
+        let _ = proxy.send_event(UserEvent::ShellLaunchComplete { window_id, result });
     }
 
     fn mark_agent_session_stopped(&mut self, window_id: &str) {
@@ -2232,17 +2374,18 @@ mod tests {
 
     use gwt::{
         empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
-        PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
+        PersistedWindowState, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
+        WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_terminal::PaneStatus;
     use tempfile::tempdir;
 
     use super::{
-        apply_host_package_runner_fallback_with_probe, close_window_from_workspace,
-        combined_window_id, knowledge_kind_for_preset, preferred_issue_launch_branch,
-        resolve_project_target, should_auto_close_agent_window, should_auto_start_restored_window,
-        ActiveAgentSession, ProjectTabRuntime, WindowAddress,
+        apply_host_package_runner_fallback_with_probe, build_shell_process_launch,
+        close_window_from_workspace, combined_window_id, knowledge_kind_for_preset,
+        preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2511,6 +2654,37 @@ mod tests {
         assert!(!changed);
         assert_eq!(config.command, original_command);
         assert_eq!(config.args, original_args);
+    }
+
+    #[test]
+    fn build_shell_process_launch_for_host_uses_worktree_env() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/gui".to_string()),
+            base_branch: None,
+            display_name: "Shell".to_string(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            env_vars: HashMap::from([("EXTRA_FLAG".to_string(), "1".to_string())]),
+        };
+
+        let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
+
+        assert!(!launch.command.is_empty());
+        assert_eq!(launch.cwd.as_deref(), Some(worktree.as_path()));
+        assert_eq!(launch.env.get("EXTRA_FLAG").map(String::as_str), Some("1"));
+        assert_eq!(
+            launch.env.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(worktree.display().to_string().as_str())
+        );
+        assert_eq!(
+            config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(worktree.display().to_string().as_str())
+        );
     }
 
     #[test]
@@ -2949,27 +3123,30 @@ fn detect_wizard_docker_context_and_status(
     )
 }
 
-fn resolve_launch_worktree(
+fn resolve_launch_worktree_request(
     repo_path: &Path,
-    config: &mut gwt_agent::LaunchConfig,
+    branch_name: Option<&str>,
+    base_branch: Option<&str>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    let Some(branch_name) = config.branch.clone() else {
+    let Some(branch_name) = branch_name.map(str::to_string) else {
         return Ok(());
     };
-    if config.working_dir.is_some() {
+    if working_dir.is_some() {
         return Ok(());
     }
 
     let current_branch = current_git_branch(repo_path);
-    if current_branch.is_err() && config.base_branch.is_none() {
+    if current_branch.is_err() && base_branch.is_none() {
         return Ok(());
     }
     if current_branch
         .as_ref()
         .is_ok_and(|current| current == &branch_name)
     {
-        config.working_dir = Some(repo_path.to_path_buf());
-        config.env_vars.insert(
+        *working_dir = Some(repo_path.to_path_buf());
+        env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
             repo_path.display().to_string(),
         );
@@ -2985,17 +3162,16 @@ fn resolve_launch_worktree(
         .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
         .map(|worktree| worktree.path.clone())
     {
-        config.working_dir = Some(existing_worktree.clone());
-        config.env_vars.insert(
+        *working_dir = Some(existing_worktree.clone());
+        env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
             existing_worktree.display().to_string(),
         );
         return Ok(());
     }
 
-    let base_branch = config
-        .base_branch
-        .clone()
+    let base_branch = base_branch
+        .map(str::to_string)
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
@@ -3045,12 +3221,38 @@ fn resolve_launch_worktree(
             .map_err(|err| err.to_string())?;
     }
 
-    config.working_dir = Some(worktree_path.clone());
-    config.env_vars.insert(
+    *working_dir = Some(worktree_path.clone());
+    env_vars.insert(
         "GWT_PROJECT_ROOT".to_string(),
         worktree_path.display().to_string(),
     );
     Ok(())
+}
+
+fn resolve_launch_worktree(
+    repo_path: &Path,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<(), String> {
+    resolve_launch_worktree_request(
+        repo_path,
+        config.branch.as_deref(),
+        config.base_branch.as_deref(),
+        &mut config.working_dir,
+        &mut config.env_vars,
+    )
+}
+
+fn resolve_shell_launch_worktree(
+    repo_path: &Path,
+    config: &mut ShellLaunchConfig,
+) -> Result<(), String> {
+    resolve_launch_worktree_request(
+        repo_path,
+        config.branch.as_deref(),
+        config.base_branch.as_deref(),
+        &mut config.working_dir,
+        &mut config.env_vars,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -3129,6 +3331,58 @@ fn apply_docker_runtime_to_launch_config(
     );
     config.docker_service = Some(launch.service);
     Ok(())
+}
+
+fn build_shell_process_launch(
+    repo_path: &Path,
+    config: &mut ShellLaunchConfig,
+) -> Result<ProcessLaunch, String> {
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let mut env = spawn_env();
+    env.extend(config.env_vars.clone());
+
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
+        let shell = detect_shell_program().map_err(|error| error.to_string())?;
+        env.entry("GWT_PROJECT_ROOT".to_string())
+            .or_insert_with(|| worktree.display().to_string());
+        config.env_vars = env.clone();
+        return Ok(ProcessLaunch {
+            command: shell.command,
+            args: shell.args,
+            env,
+            cwd: Some(worktree),
+        });
+    }
+
+    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+    ensure_docker_launch_runtime_ready()?;
+    ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    let shell_command = resolve_docker_shell_command(&launch)?;
+    env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    config.docker_service = Some(launch.service.clone());
+    config.env_vars = env.clone();
+
+    let mut args = vec![
+        "compose".to_string(),
+        "-f".to_string(),
+        launch.compose_file.display().to_string(),
+        "exec".to_string(),
+        "-w".to_string(),
+        launch.container_cwd.clone(),
+    ];
+    args.extend(docker_compose_exec_env_args(&env));
+    args.push(launch.service);
+    args.push(shell_command);
+
+    Ok(ProcessLaunch {
+        command: docker_binary_for_launch(),
+        args,
+        env,
+        cwd: Some(worktree),
+    })
 }
 
 fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
@@ -3402,6 +3656,25 @@ fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String>
         return args[1..].to_vec();
     }
     args.to_vec()
+}
+
+fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String, String> {
+    for candidate in ["bash", "sh"] {
+        let available = gwt_docker::compose_service_has_command(
+            &launch.compose_file,
+            &launch.service,
+            candidate,
+        )
+        .map_err(|err| err.to_string())?;
+        if available {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    Err(format!(
+        "Selected Docker runtime has no interactive shell in service '{}'",
+        launch.service
+    ))
 }
 
 fn ensure_docker_launch_command_ready(
@@ -3949,6 +4222,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
                 let events = app.handle_launch_complete(window_id, result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
+                let events = app.handle_shell_launch_complete(window_id, result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardHydrated { wizard_id, result }) => {
