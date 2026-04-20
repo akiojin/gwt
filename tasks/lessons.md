@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
+
+### 事象
+
+PR #2063 の merge 後 review で、`crates/gwt-terminal/src/pty.rs` の
+`build_windows_shim_target` が `.exe/.com` を見つけた時点で即 return しており、
+`node.exe + cli.js` のような npm shim で script 引数を落とす指摘が出た。
+あわせて `windows_env_value` が `remove_env` を先に見ていたため、
+`env` で明示指定した値まで無視する非対称も見つかった。
+
+### 原因
+
+- shim 解析を「最初に見つかった実行ファイル」中心で書き、runtime と script が
+  セットで現れる wrapper を考慮していなかった。
+- 環境変数解決で `portable_pty::CommandBuilder` の適用順
+  (`remove_env` の後に `env`) と同じ優先順位を維持していなかった。
+
+### 再発防止策
+
+1. Windows の shim 解析では、`.exe` 単体だけでなく `runtime + script` の
+   wrapper パターンを先に洗い出してから target 決定ロジックを書く。
+2. wrapper で runtime が見つかっても、`.js/.cjs` が同居する場合は
+   「runtime 単体」ではなく「runtime + script arg」を回帰テストで固定する。
+3. spawn 前の env 正規化 helper は、実際に適用する `CommandBuilder` と
+   同じ優先順位になるよう unit test を先に足す。
+
 ## 2026-04-20 — fix: OS 固有実装を足したら import も同じ cfg 境界に置く
 
 ### 事象
