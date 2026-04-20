@@ -744,13 +744,21 @@ mod tests {
 
         let mut helper_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         helper_error.make_helper_copy_result = Err("copy failed".to_string());
-        assert!(matches!(
-            run_with(&mut helper_error, UpdateCommand::Apply),
-            RunOutcome::Code(1)
-        ));
-        assert!(helper_error
-            .stderr
-            .contains("Failed to create update helper"));
+        if cfg!(windows) {
+            assert!(matches!(
+                run_with(&mut helper_error, UpdateCommand::Apply),
+                RunOutcome::Code(1)
+            ));
+            assert!(helper_error
+                .stderr
+                .contains("Failed to create update helper"));
+        } else {
+            assert!(matches!(
+                run_with(&mut helper_error, UpdateCommand::Apply),
+                RunOutcome::ExitSuccess
+            ));
+            assert!(helper_error.helper_copy_calls.is_empty());
+        }
 
         let mut installer = FakeUpdateCliOps::available(Some("https://example.test/gwt.msi"));
         installer.prepare_update_result = Ok(PreparedPayload::Installer {
