@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: Windows PTY で PATH 解決をそのまま信じると npm shim に吸われる
+
+### 事象
+
+Windows で installed Claude agent を PTY 起動すると、`CreateProcessW` が
+`%APPDATA%\\npm\\claude` を直接実行しようとして `os error 193`
+(`%1 は有効な Win32 アプリケーションではありません`) で失敗した。
+
+### 原因
+
+- `portable-pty` の Windows `search_path()` は PATHEXT 候補より先に「拡張子なしの実在ファイル」を返す。
+- npm global install は `claude` / `codex` の拡張子なし shim を配置するため、
+  Win32 実行可能ファイルではない shell shim が最優先になっていた。
+- `cmd.exe` ラップに逃がすだけでは ConPTY 上で挙動が不安定なケースがあり、
+  実体の `.exe` / `node + .js` まで解決した方が安定する。
+
+### 再発防止策
+
+1. Windows で PATH 検索結果を PTY に渡す前に、npm shim を実体コマンドへ正規化する。
+2. `.exe` / `.com` は直起動し、shell shim が `node_modules/.../*.js` を指す場合は
+   `node` と script path に分解して起動する。
+3. Windows の PTY 起動修正では、少なくとも「shim 解決」「spawn 成功」の両方を
+   回帰テストで固定する。
+
 ## 2026-04-17 — fix: scrollable pane の wheel 奪取は「surface が実際に消費できる delta」だけに限定する
 
 ### 事象
