@@ -581,9 +581,15 @@ mod tests {
             1,
             "PreToolUse must collapse to a single workflow policy hook, got: {actual:?}"
         );
+        let marker = " hook workflow-policy";
+        let (_, suffix) = actual[0].split_once(marker).unwrap_or_else(|| {
+            panic!("workflow policy hook must dispatch to workflow-policy, got: {actual:?}")
+        });
         assert!(
-            actual[0].contains(" hook workflow-policy"),
-            "workflow policy hook must dispatch to workflow-policy, got: {actual:?}"
+            suffix
+                .trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '}' | ')'))
+                .is_empty(),
+            "workflow policy hook must terminate after workflow-policy, got: {actual:?}"
         );
         assert!(
             !actual[0].starts_with("gwt hook "),
