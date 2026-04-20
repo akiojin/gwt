@@ -3509,62 +3509,87 @@
         {
           const section = createLaunchSection(
             "Launch",
-            "Choose the agent and default execution behavior.",
+            "Choose what to launch on the selected branch.",
           );
           const grid = createNode("div", "launch-form-grid");
           appendSelectField(
             grid,
-            "Agent",
-            launchWizard.agent_options || [],
-            launchWizard.selected_agent_id,
+            "Target",
+            launchWizard.launch_target_options || [],
+            launchWizard.selected_launch_target,
             (value) =>
               sendWizardAction({
-                kind: "set_agent",
-                agent_id: value,
+                kind: "set_launch_target",
+                target: value === "shell" ? "shell" : "agent",
               }),
           );
-          if ((launchWizard.model_options || []).length > 0) {
+          if (launchWizard.show_agent_settings) {
             appendSelectField(
               grid,
-              "Model",
-              launchWizard.model_options || [],
-              launchWizard.selected_model,
+              "Agent",
+              launchWizard.agent_options || [],
+              launchWizard.selected_agent_id,
               (value) =>
                 sendWizardAction({
-                  kind: "set_model",
-                  model: value,
+                  kind: "set_agent",
+                  agent_id: value,
                 }),
             );
-          }
-          if (launchWizard.show_reasoning) {
-            appendSelectField(
-              grid,
-              "Reasoning",
-              launchWizard.reasoning_options || [],
-              launchWizard.selected_reasoning,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_reasoning",
-                  reasoning: value,
-                }),
+            if ((launchWizard.model_options || []).length > 0) {
+              appendSelectField(
+                grid,
+                "Model",
+                launchWizard.model_options || [],
+                launchWizard.selected_model,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_model",
+                    model: value,
+                  }),
+              );
+            }
+            if (launchWizard.show_reasoning) {
+              appendSelectField(
+                grid,
+                "Reasoning",
+                launchWizard.reasoning_options || [],
+                launchWizard.selected_reasoning,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_reasoning",
+                    reasoning: value,
+                  }),
+              );
+            }
+            if (launchWizard.show_execution_mode) {
+              appendSelectField(
+                grid,
+                "Execution mode",
+                launchWizard.execution_mode_options || [],
+                launchWizard.selected_execution_mode,
+                (value) =>
+                  sendWizardAction({
+                    kind: "set_execution_mode",
+                    mode: value,
+                  }),
+              );
+            }
+          } else {
+            const note = createLaunchField("Shell", true);
+            note.appendChild(
+              createNode(
+                "div",
+                "launch-note",
+                "Open a plain shell in the selected branch and runtime.",
+              ),
             );
+            grid.appendChild(note);
           }
-          appendSelectField(
-            grid,
-            "Execution mode",
-            launchWizard.execution_mode_options || [],
-            launchWizard.selected_execution_mode,
-            (value) =>
-              sendWizardAction({
-                kind: "set_execution_mode",
-                mode: value,
-              }),
-          );
           section.appendChild(grid);
           panel.appendChild(section);
         }
 
-        {
+        if (launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
             "Optional: Link an issue to this launch session.",
@@ -3683,17 +3708,19 @@
                   }),
               );
             }
-            appendCheckboxField(
-              grid,
-              "Permissions",
-              "Skip permission prompts",
-              launchWizard.skip_permissions,
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_skip_permissions",
-                  enabled,
-                }),
-            );
+            if (launchWizard.show_skip_permissions) {
+              appendCheckboxField(
+                grid,
+                "Permissions",
+                "Skip permission prompts",
+                launchWizard.skip_permissions,
+                (enabled) =>
+                  sendWizardAction({
+                    kind: "set_skip_permissions",
+                    enabled,
+                  }),
+              );
+            }
             if (launchWizard.show_codex_fast_mode) {
               appendCheckboxField(
                 grid,
