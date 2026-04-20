@@ -30,9 +30,9 @@ pub use knowledge_bridge::{
 pub use launch_wizard::{
     build_builtin_agent_options, default_wizard_version_cache_path, AgentOption,
     DockerWizardContext, LaunchWizardAction, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardQuickStartView,
-    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
-    LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
+    LaunchWizardHydration, LaunchWizardLiveSessionView, LaunchWizardOptionView,
+    LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
+    LaunchWizardView, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]
