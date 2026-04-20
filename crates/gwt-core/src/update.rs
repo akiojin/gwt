@@ -1465,13 +1465,15 @@ mod tests {
         io::{Cursor, Read, Write},
         net::TcpListener,
         path::Path,
-        sync::Mutex,
         thread,
-        time::Duration as StdDuration,
     };
 
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    use std::{sync::Mutex, time::Duration as StdDuration};
+
+    #[cfg(target_os = "windows")]
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn serve_once(path: &str, status: &str, content_type: &str, body: Vec<u8>) -> String {
