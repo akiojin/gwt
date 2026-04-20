@@ -10,6 +10,7 @@ const path = require("path");
 const fs = require("fs");
 
 const {
+  bundleBinaryNamesForPlatform,
   binaryNameForPlatform,
   installReleaseBinary,
   releaseAssetUrl,
@@ -19,6 +20,7 @@ const REPO = "akiojin/gwt";
 const BIN_DIR = __dirname;
 const BIN_NAME = binaryNameForPlatform(process.platform);
 const BIN_PATH = path.join(BIN_DIR, BIN_NAME);
+const BUNDLE_BINARIES = bundleBinaryNamesForPlatform(process.platform);
 
 function readVersion() {
   const pkg = path.join(__dirname, "..", "package.json");
@@ -26,24 +28,25 @@ function readVersion() {
 }
 
 async function ensureBinary() {
-  if (fs.existsSync(BIN_PATH)) return;
+  if (BUNDLE_BINARIES.every((name) => fs.existsSync(path.join(BIN_DIR, name)))) {
+    return;
+  }
 
   const version = readVersion();
   const { url } = releaseAssetUrl(REPO, version, process.platform, process.arch);
 
-  console.log(`Downloading gwt binary for ${process.platform}-${process.arch}...`);
+  console.log(`Downloading gwt bundle for ${process.platform}-${process.arch}...`);
   console.log(`Downloading from: ${url}`);
 
   await installReleaseBinary({
     repo: REPO,
     version,
     binDir: BIN_DIR,
-    binaryName: BIN_NAME,
     platform: process.platform,
     arch: process.arch,
   });
 
-  console.log("gwt binary installed successfully!");
+  console.log(`gwt bundle installed successfully: ${BUNDLE_BINARIES.join(", ")}`);
 }
 
 async function main() {

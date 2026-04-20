@@ -90,31 +90,26 @@ jobs:
           - platform: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: gwt
             release_name: gwt-linux-x86_64
             archive_name: gwt-linux-x86_64.tar.gz
           - platform: linux-aarch64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            binary: gwt
             release_name: gwt-linux-aarch64
             archive_name: gwt-linux-aarch64.tar.gz
           - platform: macos-x86_64
             os: macos-14
             target: x86_64-apple-darwin
-            binary: gwt
             release_name: gwt-macos-x86_64
             archive_name: gwt-macos-x86_64.tar.gz
           - platform: macos-aarch64
             os: macos-14
             target: aarch64-apple-darwin
-            binary: gwt
             release_name: gwt-macos-arm64
             archive_name: gwt-macos-arm64.tar.gz
           - platform: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: gwt.exe
             release_name: gwt-windows-x86_64
             archive_name: gwt-windows-x86_64.zip
     steps:
@@ -130,25 +125,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
-      - name: Build gwt binary
-        run: cargo build --release -p gwt --target ${{ matrix.target }}
+      - name: Build gwt bundle binaries
+        run: cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
-          Compress-Archive -Path "dist/${{ matrix.binary }}" -DestinationPath "dist/${{ matrix.archive_name }}" -Force
-          Remove-Item "dist/${{ matrix.binary }}"
+          Copy-Item "target/${{ matrix.target }}/release/gwt.exe" "dist/gwt.exe"
+          Copy-Item "target/${{ matrix.target }}/release/gwtd.exe" "dist/gwtd.exe"
+          Compress-Archive -Path @("dist/gwt.exe", "dist/gwtd.exe") -DestinationPath "dist/${{ matrix.archive_name }}" -Force
+          Remove-Item "dist/gwt.exe", "dist/gwtd.exe"
       - name: Prepare artifact (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
           cd dist
-          cp ../target/${{ matrix.target }}/release/${{ matrix.binary }} .
-          tar -czf ${{ matrix.archive_name }} ${{ matrix.binary }}
-          rm ${{ matrix.binary }}
+          cp ../target/${{ matrix.target }}/release/gwt .
+          cp ../target/${{ matrix.target }}/release/gwtd .
+          tar -czf ${{ matrix.archive_name }} gwt gwtd
+          rm gwt gwtd
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -172,8 +169,8 @@ jobs:
       - name: Install WiX Toolset
         run: |
           dotnet tool install --global wix --version 6.0.2
-      - name: Build gwt binary
-        run: cargo build --release -p gwt --target x86_64-pc-windows-msvc
+      - name: Build gwt bundle binaries
+        run: cargo build --release -p gwt --target x86_64-pc-windows-msvc --bin gwt --bin gwtd
       - name: Build MSI
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -198,17 +195,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gwt-dmg
-      - name: Build gwt for aarch64
-        run: cargo build --release -p gwt --target aarch64-apple-darwin
-      - name: Build gwt for x86_64
-        run: cargo build --release -p gwt --target x86_64-apple-darwin
-      - name: Create universal binary
+      - name: Build gwt bundle binaries for aarch64
+        run: cargo build --release -p gwt --target aarch64-apple-darwin --bin gwt --bin gwtd
+      - name: Build gwt bundle binaries for x86_64
+        run: cargo build --release -p gwt --target x86_64-apple-darwin --bin gwt --bin gwtd
+      - name: Create universal binaries
         run: |
           mkdir -p dist
           lipo -create \
             target/aarch64-apple-darwin/release/gwt \
             target/x86_64-apple-darwin/release/gwt \
             -output dist/gwt
+          lipo -create \
+            target/aarch64-apple-darwin/release/gwtd \
+            target/x86_64-apple-darwin/release/gwtd \
+            -output dist/gwtd
       - name: Create app bundle
         run: |
           mkdir -p dist/GWT.app/Contents/MacOS
@@ -235,7 +236,9 @@ jobs:
           </plist>
           EOF
           cp dist/gwt dist/GWT.app/Contents/MacOS/gwt
+          cp dist/gwtd dist/GWT.app/Contents/MacOS/gwtd
           chmod +x dist/GWT.app/Contents/MacOS/gwt
+          chmod +x dist/GWT.app/Contents/MacOS/gwtd
       - name: Create DMG
         run: |
           mkdir -p dmg_temp

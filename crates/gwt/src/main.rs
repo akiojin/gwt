@@ -3,9 +3,9 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc as std_mpsc, Arc, Mutex},
+    sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::repo_browser::{
@@ -34,7 +34,7 @@ use gwt::{
     RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
     WorkspaceState, APP_NAME,
 };
-use gwt_terminal::{Pane, PaneStatus};
+use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
@@ -53,6 +53,28 @@ mod repo_browser;
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
+const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
+const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
+const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
+const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerBundleMounts {
+    host_gwt: PathBuf,
+    host_gwtd: PathBuf,
+}
+
+/// Shared lock-free PTY writer registry used by the WebSocket fast-path.
+///
+/// The WS receiver task (tokio async) looks up the `Arc<PtyHandle>` by window
+/// id and calls `write_input` directly, bypassing the tao event loop and the
+/// surrounding `Mutex<Pane>` guard. This eliminates the two main contention
+/// sources for intermittent key drops under heavy output bursts
+/// (bugfix/input-key): (a) FIFO queue behind many `RuntimeOutput` events on
+/// the single-threaded tao main loop, and (b) pane mutex held by the reader
+/// thread while parsing vt100 chunks. Reads are hot (every keystroke), writes
+/// are rare (pane create/destroy), so `RwLock` is the natural fit.
+type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
 #[derive(Debug, Clone)]
 enum UserEvent {
@@ -265,6 +287,8 @@ struct AppRuntime {
     hook_forward_target: Option<HookForwardTarget>,
     /// Cached update state so late-connecting WebView clients get the toast.
     pending_update: Option<gwt_core::update::UpdateState>,
+    /// Shared PTY writer registry published to the WebSocket fast-path.
+    pty_writers: PtyWriterRegistry,
 }
 
 impl ProjectTabRuntime {
@@ -283,7 +307,10 @@ impl ProjectTabRuntime {
 }
 
 impl AppRuntime {
-    fn new(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<Self> {
+    fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        pty_writers: PtyWriterRegistry,
+    ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let legacy_target = resolve_project_target(&launch_dir)
@@ -321,6 +348,7 @@ impl AppRuntime {
             active_agent_sessions: HashMap::new(),
             hook_forward_target: None,
             pending_update: None,
+            pty_writers,
         };
         app.rebuild_window_lookup();
         app.seed_restored_window_details();
@@ -815,17 +843,57 @@ impl AppRuntime {
     }
 
     fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let Some(runtime) = self.runtimes.get(id) else {
-            return Vec::new();
+        let data_len = data.len();
+        let write_result = {
+            let Some(runtime) = self.runtimes.get(id) else {
+                tracing::debug!(
+                    target: "gwt_input_trace",
+                    stage = "event_loop_runtime_missing",
+                    window_id = %id,
+                    data_len,
+                    "terminal_input dropped: no runtime for window"
+                );
+                return Vec::new();
+            };
+
+            let lock_started = Instant::now();
+            let lock_result = runtime.pane.lock().map_err(|error| error.to_string());
+            let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+
+            match lock_result {
+                Ok(pane) => {
+                    let write_started = Instant::now();
+                    let result = pane
+                        .write_input(data.as_bytes())
+                        .map_err(|error| error.to_string());
+                    tracing::debug!(
+                        target: "gwt_input_trace",
+                        stage = "pty_write",
+                        window_id = %id,
+                        data_len,
+                        lock_wait_us,
+                        write_us = write_started.elapsed().as_micros() as u64,
+                        ok = result.is_ok(),
+                        "terminal_input forwarded to PTY writer"
+                    );
+                    result
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "gwt_input_trace",
+                        stage = "pane_lock_failed",
+                        window_id = %id,
+                        data_len,
+                        lock_wait_us,
+                        error = %error,
+                        "terminal_input dropped: pane mutex poisoned"
+                    );
+                    Err(error)
+                }
+            }
         };
-        match runtime
-            .pane
-            .lock()
-            .map_err(|error| error.to_string())
-            .and_then(|pane| {
-                pane.write_input(data.as_bytes())
-                    .map_err(|error| error.to_string())
-            }) {
+
+        match write_result {
             Ok(()) => Vec::new(),
             Err(error) => {
                 self.handle_runtime_status(id.to_string(), WindowProcessStatus::Error, Some(error))
@@ -1434,6 +1502,7 @@ impl AppRuntime {
         let should_auto_close =
             should_auto_close_agent_window(&self.active_agent_sessions, &id, &status);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
+            self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
             return Vec::new();
@@ -1708,6 +1777,12 @@ impl AppRuntime {
             );
         }
         self.window_details.remove(id);
+        // Publish the PTY handle to the WebSocket fast-path registry BEFORE
+        // inserting the runtime so that the first `terminal_input` from the
+        // frontend (which can arrive immediately after `TerminalStatus`) has a
+        // target to write to. Registry holds a cloned `Arc<PtyHandle>`; the
+        // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
+        self.register_pty_writer(id, &pane);
         self.runtimes.insert(
             id.to_string(),
             WindowRuntime {
@@ -1866,6 +1941,7 @@ impl AppRuntime {
                     message: "bunx unavailable, switching to npx...".to_string(),
                 });
             }
+            install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
 
             let branch_name = config
                 .branch
@@ -1912,6 +1988,7 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
+            finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
 
             session
                 .save(&sessions_dir)
@@ -2004,8 +2081,54 @@ impl AppRuntime {
         );
     }
 
+    fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+        let Ok(pane_guard) = pane.lock() else {
+            tracing::warn!(
+                target: "gwt_input_trace",
+                stage = "registry_lock_poisoned",
+                window_id = %id,
+                "failed to register PTY writer: pane mutex poisoned"
+            );
+            return;
+        };
+        let pty = pane_guard.shared_pty();
+        drop(pane_guard);
+        match self.pty_writers.write() {
+            Ok(mut guard) => {
+                guard.insert(id.to_string(), pty);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_input_trace",
+                    stage = "registry_write_poisoned",
+                    window_id = %id,
+                    error = %error,
+                    "failed to register PTY writer: registry poisoned"
+                );
+            }
+        }
+    }
+
+    fn deregister_pty_writer(&self, id: &str) {
+        match self.pty_writers.write() {
+            Ok(mut guard) => {
+                guard.remove(id);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_input_trace",
+                    stage = "registry_deregister_poisoned",
+                    window_id = %id,
+                    error = %error,
+                    "failed to deregister PTY writer: registry poisoned"
+                );
+            }
+        }
+    }
+
     fn stop_window_runtime(&mut self, window_id: &str) {
         self.mark_agent_session_stopped(window_id);
+        self.deregister_pty_writer(window_id);
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
@@ -2064,8 +2187,28 @@ impl AppRuntime {
                     Ok(0) => break,
                     Ok(read) => {
                         let chunk = buffer[..read].to_vec();
+                        let lock_started = Instant::now();
                         if let Ok(mut pane) = pane.lock() {
+                            let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+                            let parse_started = Instant::now();
                             pane.process_bytes(&chunk);
+                            let parse_us = parse_started.elapsed().as_micros() as u64;
+                            // Log only when the contention window is large enough
+                            // to plausibly starve a concurrent `write_input`. The
+                            // threshold keeps the log volume bounded during
+                            // normal output bursts while still surfacing the
+                            // lock-hold windows that matter for drop triage.
+                            if lock_wait_us > 500 || parse_us > 500 {
+                                tracing::debug!(
+                                    target: "gwt_input_trace",
+                                    stage = "reader_pane_lock",
+                                    window_id = %id,
+                                    chunk_len = read,
+                                    lock_wait_us,
+                                    parse_us,
+                                    "reader thread held pane mutex (output parsing)"
+                                );
+                            }
                         }
                         let _ = proxy.send_event(UserEvent::RuntimeOutput {
                             id: id.clone(),
@@ -2404,10 +2547,11 @@ mod tests {
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, hook_forward_authorized,
-        knowledge_kind_for_preset, resolve_project_target, should_auto_close_agent_window,
-        should_auto_start_restored_window, ActiveAgentSession, ClientHub, DispatchTarget,
-        OutboundEvent, ProjectTabRuntime, WindowAddress,
+        close_window_from_workspace, combined_window_id, docker_bundle_mounts_for_home,
+        docker_bundle_override_content, hook_forward_authorized,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
+        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
+        ClientHub, DispatchTarget, OutboundEvent, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2867,6 +3011,42 @@ mod tests {
     }
 
     #[test]
+    fn install_launch_gwt_bin_env_prefers_public_gwt_binary_for_host_sessions() {
+        let current_exe = PathBuf::from(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe");
+        let mut env = HashMap::new();
+
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env,
+            LaunchRuntimeTarget::Host,
+            &current_exe,
+            |command| {
+                assert_eq!(command, "gwt");
+                Some(stable.clone())
+            },
+        )
+        .expect("install GWT_BIN_PATH");
+
+        assert_eq!(
+            env.get(gwt_agent::GWT_BIN_PATH_ENV).map(String::as_str),
+            Some(stable.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn docker_bundle_override_content_mounts_front_door_and_daemon() {
+        let home = PathBuf::from("/home/example");
+        let bundle = docker_bundle_mounts_for_home(&home);
+        let content = docker_bundle_override_content("app", &bundle);
+
+        assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
+        assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+    }
+
+    #[test]
     fn issue_and_spec_presets_route_to_knowledge_bridge_kind() {
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Issue),
@@ -3002,6 +3182,8 @@ struct ServerState {
     proxy: EventLoopProxy<UserEvent>,
     clients: ClientHub,
     hook_forward_token: String,
+    /// Shared PTY writer registry for the `terminal_input` fast-path.
+    pty_writers: PtyWriterRegistry,
 }
 
 struct EmbeddedServer {
@@ -3015,6 +3197,7 @@ impl EmbeddedServer {
         runtime: &Runtime,
         proxy: EventLoopProxy<UserEvent>,
         clients: ClientHub,
+        pty_writers: PtyWriterRegistry,
     ) -> std::io::Result<Self> {
         let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0)))?;
         let addr = listener.local_addr()?;
@@ -3030,6 +3213,7 @@ impl EmbeddedServer {
                 proxy,
                 clients,
                 hook_forward_token: hook_forward_token.clone(),
+                pty_writers,
             });
 
         runtime.spawn(async move {
@@ -3095,6 +3279,11 @@ async fn client_session(socket: WebSocket, state: ServerState) {
     let mut outbound = state.clients.register(client_id.clone());
     let (mut sender, mut receiver) = socket.split();
 
+    // Per-session counter that tags each inbound `terminal_input` in order so
+    // we can diff layer counts (frontend → WS → event loop → PTY writer) when
+    // diagnosing intermittent key-input drops (bugfix/input-key).
+    let input_seq = Arc::new(AtomicU64::new(0));
+
     loop {
         tokio::select! {
             maybe_payload = outbound.recv() => {
@@ -3108,12 +3297,16 @@ async fn client_session(socket: WebSocket, state: ServerState) {
             maybe_message = receiver.next() => {
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
+                        let text_len = text.len();
                         match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
                             Ok(event) => {
-                                let _ = state.proxy.send_event(UserEvent::Frontend {
-                                    client_id: client_id.clone(),
+                                handle_frontend_message(
+                                    &state,
+                                    &client_id,
+                                    &input_seq,
+                                    text_len,
                                     event,
-                                });
+                                );
                             }
                             Err(error) => {
                                 eprintln!("invalid frontend message: {error}");
@@ -3132,6 +3325,127 @@ async fn client_session(socket: WebSocket, state: ServerState) {
     }
 
     state.clients.unregister(&client_id);
+}
+
+/// Dispatch a parsed `FrontendEvent` from the WebSocket receiver task.
+///
+/// `TerminalInput` takes the fast-path: the pane's PTY handle is looked up in
+/// the shared registry and written to directly, bypassing the single-threaded
+/// tao event loop. Other events still flow through `UserEvent::Frontend` so
+/// they can mutate `AppRuntime` on the main thread.
+///
+/// If the fast-path fails (unknown window, PTY write error, or poisoned
+/// registry lock), the input is forwarded to the proxy so the existing
+/// error-reporting path in `terminal_input_events` still runs.
+fn handle_frontend_message(
+    state: &ServerState,
+    client_id: &str,
+    input_seq: &AtomicU64,
+    text_len: usize,
+    event: FrontendEvent,
+) {
+    // Fast-path only applies to TerminalInput. For every other variant, just
+    // forward to the main-thread event loop as before.
+    let (id, data) = match event {
+        FrontendEvent::TerminalInput { id, data } => (id, data),
+        other => {
+            let _ = state.proxy.send_event(UserEvent::Frontend {
+                client_id: client_id.to_string(),
+                event: other,
+            });
+            return;
+        }
+    };
+
+    let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let data_len = data.len();
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "ws_recv",
+        client_id = %client_id,
+        seq,
+        window_id = %id,
+        data_len,
+        text_len,
+        "terminal_input received over WebSocket"
+    );
+
+    let pty_handle = match state.pty_writers.read() {
+        Ok(guard) => guard.get(&id).cloned(),
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt_input_trace",
+                stage = "fast_path_lock_poisoned",
+                client_id = %client_id,
+                seq,
+                window_id = %id,
+                error = %error,
+                "pty_writers read lock poisoned; falling back to event loop"
+            );
+            None
+        }
+    };
+
+    if let Some(pty) = pty_handle {
+        let write_started = Instant::now();
+        match pty.write_input(data.as_bytes()) {
+            Ok(()) => {
+                tracing::debug!(
+                    target: "gwt_input_trace",
+                    stage = "fast_path_write",
+                    client_id = %client_id,
+                    seq,
+                    window_id = %id,
+                    data_len,
+                    write_us = write_started.elapsed().as_micros() as u64,
+                    "terminal_input written to PTY via WS fast-path"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_input_trace",
+                    stage = "fast_path_write_err",
+                    client_id = %client_id,
+                    seq,
+                    window_id = %id,
+                    data_len,
+                    error = %error,
+                    "fast-path PTY write failed; forwarding to event loop for error handling"
+                );
+                // fall through to proxy path so `terminal_input_events` can
+                // route the error through `handle_runtime_status`.
+            }
+        }
+    } else {
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "fast_path_miss",
+            client_id = %client_id,
+            seq,
+            window_id = %id,
+            data_len,
+            "pty_writers registry miss; falling back to event loop"
+        );
+    }
+
+    let send_result = state.proxy.send_event(UserEvent::Frontend {
+        client_id: client_id.to_string(),
+        event: FrontendEvent::TerminalInput {
+            id: id.clone(),
+            data,
+        },
+    });
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "ws_dispatch",
+        client_id = %client_id,
+        seq,
+        window_id = %id,
+        data_len,
+        ok = send_result.is_ok(),
+        "terminal_input forwarded to event loop proxy (fallback)"
+    );
 }
 
 fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
@@ -3460,9 +3774,36 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree)?;
+    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
+    install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
+    config.command = runtime_program.executable;
+    config.args = runtime_program.args;
+    config
+        .env_vars
+        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    config.docker_service = Some(launch.service);
+    Ok(())
+}
+
+fn finalize_docker_agent_launch_config(
+    repo_path: &Path,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<(), String> {
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
+        return Ok(());
+    }
+
+    let worktree = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
+    let runtime_program = PackageRunnerProgram {
+        executable: config.command.clone(),
+        args: config.args.clone(),
+    };
 
     let mut args = vec![
         "compose".to_string(),
@@ -3470,24 +3811,15 @@ fn apply_docker_runtime_to_launch_config(
         launch.compose_file.display().to_string(),
         "exec".to_string(),
         "-w".to_string(),
-        launch.container_cwd.clone(),
+        launch.container_cwd,
     ];
     args.extend(docker_compose_exec_env_args(&config.env_vars));
-    args.push(launch.service.clone());
+    args.push(launch.service);
     args.push(runtime_program.executable);
     args.extend(runtime_program.args);
 
     config.command = docker_binary_for_launch();
     config.args = args;
-    config
-        .env_vars
-        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
-    // Override GWT_BIN_PATH for Docker containers to use the mounted binary
-    config.env_vars.insert(
-        gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
-        "/usr/local/bin/gwt".to_string(),
-    );
-    config.docker_service = Some(launch.service);
     Ok(())
 }
 
@@ -3506,6 +3838,7 @@ fn build_shell_process_launch(
         let shell = detect_shell_program().map_err(|error| error.to_string())?;
         env.entry("GWT_PROJECT_ROOT".to_string())
             .or_insert_with(|| worktree.display().to_string());
+        install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Host)?;
         config.env_vars = env.clone();
         return Ok(ProcessLaunch {
             command: shell.command,
@@ -3518,8 +3851,10 @@ fn build_shell_process_launch(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
+    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
     env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
+    install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Docker)?;
     config.docker_service = Some(launch.service.clone());
     config.env_vars = env.clone();
 
@@ -3637,9 +3972,44 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
-    use std::{fs, path::PathBuf};
+fn install_launch_gwt_bin_env(
+    env_vars: &mut HashMap<String, String>,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+) -> Result<(), String> {
+    let current_exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+    install_launch_gwt_bin_env_with_lookup(env_vars, runtime_target, &current_exe, |command| {
+        which::which(command).ok()
+    })
+}
 
+fn install_launch_gwt_bin_env_with_lookup(
+    env_vars: &mut HashMap<String, String>,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    current_exe: &Path,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> Result<(), String> {
+    let gwt_bin = match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWT_BIN_PATH.to_string(),
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            env_vars.insert(gwt_agent::session::GWT_BIN_PATH_ENV.to_string(), gwt_bin);
+        }
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            env_vars
+                .entry(gwt_agent::session::GWT_BIN_PATH_ENV.to_string())
+                .or_insert(gwt_bin);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_user_home_dir() -> Result<PathBuf, String> {
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE")
     } else {
@@ -3647,40 +4017,64 @@ fn ensure_docker_gwt_binary_setup(repo_path: &Path) -> Result<(), String> {
     }
     .map(PathBuf::from)
     .map_err(|_| "Could not determine home directory".to_string())?;
+    Ok(home)
+}
 
+fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
     let gwt_bin_dir = home.join(".gwt").join("bin");
-    let gwt_linux = gwt_bin_dir.join("gwt-linux");
+    DockerBundleMounts {
+        host_gwt: gwt_bin_dir.join(DOCKER_HOST_GWT_BIN_NAME),
+        host_gwtd: gwt_bin_dir.join(DOCKER_HOST_GWTD_BIN_NAME),
+    }
+}
 
-    // Check if Linux gwt binary exists
-    if !gwt_linux.exists() {
-        // TODO: Download Linux gwt binary from GitHub Release
-        // For now, create a note for the user
+fn docker_compose_mount_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+    let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
+    let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
+    format!(
+        "# Auto-generated docker-compose override for gwt bundle mounting\n\
+         version: '3.8'\n\
+         services:\n\
+           {service}:\n\
+             volumes:\n\
+               - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
+               - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
+    )
+}
+
+fn ensure_docker_gwt_binary_setup(repo_path: &Path, service: &str) -> Result<(), String> {
+    use std::fs;
+
+    let home = resolve_user_home_dir()?;
+    let bundle = docker_bundle_mounts_for_home(&home);
+
+    if !bundle.host_gwt.exists() || !bundle.host_gwtd.exists() {
         let override_path = repo_path.join("docker-compose.override.yml");
         if !override_path.exists() {
             eprintln!(
-                "Note: Linux gwt binary not found at ~/.gwt/bin/gwt-linux\n\
+                "Note: Linux gwt bundle not found at {} and {}\n\
                  This is required for Docker agent support.\n\
                  You can either:\n\
-                 1. Download gwt-linux-x86_64 from GitHub Releases and place it at ~/.gwt/bin/gwt-linux\n\
+                 1. Download the Linux release bundle and place the extracted binaries at these paths\n\
                  2. Run 'gwt setup docker' to set up Docker integration automatically"
+                ,
+                bundle.host_gwt.display(),
+                bundle.host_gwtd.display()
             );
         }
     }
 
-    // Ensure docker-compose.override.yml exists with gwt volume mount
     let override_path = repo_path.join("docker-compose.override.yml");
     if !override_path.exists() {
-        let override_content = "# Auto-generated docker-compose override for gwt binary mounting\n\
-                                version: '3.8'\n\
-                                services:\n\
-                                  # Add your service name and uncomment the volumes section\n\
-                                  # <service>:\n\
-                                  #   volumes:\n\
-                                  #     - ~/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro\n";
+        let override_content = docker_bundle_override_content(service, &bundle);
         fs::write(&override_path, override_content).map_err(|err| {
             format!(
                 "Failed to create docker-compose.override.yml: {err}\n\
-                 Manually create {} with gwt volume mount",
+                 Manually create {} with gwt/gwtd bundle mounts",
                 override_path.display()
             )
         })?;
@@ -4238,6 +4632,21 @@ fn main() -> wry::Result<()> {
         }
     }
 
+    // Install the tracing subscriber so that `tracing::debug!/info!` lands in
+    // `~/.gwt/logs/gwt.log`. The returned guard must outlive the event loop;
+    // we bind it to `_log_handles` and keep it until `main` returns.
+    //
+    // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
+    // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
+    // `RUST_LOG=gwt_input_trace=debug`.
+    let _log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
+        gwt_core::paths::gwt_logs_dir(),
+    ))
+    .map_err(|error| {
+        eprintln!("gwt logging init failed: {error}");
+    })
+    .ok();
+
     if let Ok(project_root) = std::env::current_dir() {
         if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&project_root) {
             eprintln!("gwt daemon bootstrap: {error}");
@@ -4257,11 +4666,17 @@ fn main() -> wry::Result<()> {
     let clients = ClientHub::default();
     #[cfg(target_os = "macos")]
     let clients = ClientHub::default();
-    let mut app = AppRuntime::new(proxy.clone()).expect("app runtime");
+    let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let mut app = AppRuntime::new(proxy.clone(), pty_writers.clone()).expect("app runtime");
     app.bootstrap();
 
-    let mut server =
-        EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
+    let mut server = EmbeddedServer::start(
+        &runtime,
+        proxy.clone(),
+        clients.clone(),
+        pty_writers.clone(),
+    )
+    .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());
     eprintln!("gwt browser URL: {}", server.url());
 

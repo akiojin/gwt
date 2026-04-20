@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -110,15 +110,36 @@ impl PtyHandle {
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        let data_len = data.len();
+        let lock_started = Instant::now();
         let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        writer
-            .write_all(data)
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })?;
-        writer.flush().map_err(|e| TerminalError::PtyIoError {
+        let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+
+        let write_started = Instant::now();
+        let write_result = writer.write_all(data);
+        let write_us = write_started.elapsed().as_micros() as u64;
+        write_result.map_err(|e| TerminalError::PtyIoError {
+            details: e.to_string(),
+        })?;
+
+        let flush_started = Instant::now();
+        let flush_result = writer.flush();
+        let flush_us = flush_started.elapsed().as_micros() as u64;
+
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "pty_writer",
+            data_len,
+            lock_wait_us,
+            write_us,
+            flush_us,
+            ok = flush_result.is_ok(),
+            "PTY writer completed write_all + flush"
+        );
+
+        flush_result.map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })?;
         Ok(())

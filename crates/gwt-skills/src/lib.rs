@@ -1051,20 +1051,24 @@ mod tests {
 
         let release_command = include_str!("../../../.claude/commands/release.md");
         assert!(
-            release_command.contains("gwt issue comment"),
-            "expected release command to use gwt issue comment"
+            release_command.contains("GWT_BIN_PATH"),
+            "expected release command to route shell snippets through GWT_BIN_PATH"
         );
         assert!(
-            release_command.contains("gwt pr current"),
-            "expected release command to use gwt pr current"
+            release_command.contains("\"$GWT_BIN\" issue comment"),
+            "expected release command to use the canonical gwt issue comment via GWT_BIN"
         );
         assert!(
-            release_command.contains("gwt pr create"),
-            "expected release command to use gwt pr create"
+            release_command.contains("\"$GWT_BIN\" pr current"),
+            "expected release command to use the canonical gwt pr current via GWT_BIN"
         );
         assert!(
-            release_command.contains("gwt pr edit"),
-            "expected release command to use gwt pr edit"
+            release_command.contains("\"$GWT_BIN\" pr create"),
+            "expected release command to use the canonical gwt pr create via GWT_BIN"
+        );
+        assert!(
+            release_command.contains("\"$GWT_BIN\" pr edit"),
+            "expected release command to use the canonical gwt pr edit via GWT_BIN"
         );
         assert!(
             !release_command.contains("gh issue comment"),
@@ -1073,8 +1077,8 @@ mod tests {
 
         let pr_command = include_str!("../../../.claude/commands/gwt-manage-pr.md");
         assert!(
-            pr_command.contains("`gwt pr current` should succeed"),
-            "expected gwt-manage-pr command wrapper to point to canonical gwt auth check"
+            pr_command.contains("GWT_BIN_PATH"),
+            "expected gwt-manage-pr command wrapper to point to canonical GWT_BIN_PATH auth check"
         );
         assert!(
             pr_command.contains("conflicting") || pr_command.contains("behind"),
@@ -1216,8 +1220,8 @@ mod tests {
                 "unexpected retired distributed asset {retired}"
             );
         }
-        assert_no_gwt_hook_scripts(&wt, ".claude");
-        assert_no_gwt_hook_scripts(&wt, ".codex");
+        assert_no_gwt_hook_scripts(wt, ".claude");
+        assert_no_gwt_hook_scripts(wt, ".codex");
     }
 
     // ── helpers ──

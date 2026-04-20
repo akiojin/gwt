@@ -234,6 +234,24 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_branches_surface_keeps_inventory_failures_blocking_until_fresh_rows_arrive() {
+        let html = index_html();
+
+        assert!(
+            html.contains("state.receivedFreshEntries = false;"),
+            "expected each branch load request to reset fresh-entry tracking",
+        );
+        assert!(
+            html.contains("state.receivedFreshEntries = true;"),
+            "expected branch entries handler to mark when the current request delivered fresh rows",
+        );
+        assert!(
+            html.contains("if (state.receivedFreshEntries) {"),
+            "expected branch errors to downgrade to notices only after fresh rows were delivered",
+        );
+    }
+
+    #[test]
     fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
         let html = index_html();
 
