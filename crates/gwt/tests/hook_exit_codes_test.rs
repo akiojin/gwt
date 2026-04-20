@@ -134,8 +134,31 @@ fn delegated_block_hook_preserves_block_json_contract() {
 
     let stdout = String::from_utf8(env.stdout).unwrap();
     assert!(
-        stdout.contains("\"decision\":\"block\""),
-        "stdout: {stdout}"
+        stdout.contains("\"hookSpecificOutput\""),
+        "stdout must emit hookSpecificOutput wrapper, got: {stdout}"
     );
-    assert!(stdout.contains("Direct GitHub workflow CLI commands are not allowed"));
+    assert!(
+        stdout.contains("\"hookEventName\":\"PreToolUse\""),
+        "stdout must declare PreToolUse event, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "stdout must deny the tool, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Direct GitHub workflow CLI commands are not allowed"),
+        "short summary must remain in the visible reason: {stdout}"
+    );
+    assert!(
+        stdout.contains("gwt pr view"),
+        "canonical gwt alternative must be present in the visible reason: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"decision\":\"block\""),
+        "legacy decision:block output must not be emitted, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"stopReason\""),
+        "legacy stopReason output must not be emitted, got: {stdout}"
+    );
 }

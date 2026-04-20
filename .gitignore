@@ -6,7 +6,6 @@ PLANS.md
 .gwt-session.toml
 .gwt/index/
 .gwt/index.crashed-*/
-.gwt/discussion.md
 
 # Serena MCP tool cache directory
 .serena/
