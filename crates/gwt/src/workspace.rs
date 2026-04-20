@@ -146,16 +146,9 @@ impl WorkspaceState {
         persist: bool,
         bounds: WindowGeometry,
     ) -> PersistedWindowState {
-        let count = self
-            .persisted
-            .windows
-            .iter()
-            .filter(|window| window.preset == preset)
-            .count()
-            + 1;
         let (width, height) = preset.default_size();
         let window = PersistedWindowState {
-            id: format!("{}-{count}", preset.id_prefix()),
+            id: self.next_window_id(preset),
             title: title.into(),
             preset,
             geometry: WindowGeometry {
@@ -327,6 +320,26 @@ impl WorkspaceState {
         self.persisted.next_z_index = self.persisted.windows.len() as u32 + 1;
     }
 
+    fn next_window_id(&self, preset: WindowPreset) -> String {
+        let prefix = preset.id_prefix();
+        let next_suffix = self
+            .persisted
+            .windows
+            .iter()
+            .filter(|window| window.preset == preset)
+            .filter_map(|window| {
+                window
+                    .id
+                    .strip_prefix(prefix)
+                    .and_then(|suffix| suffix.strip_prefix('-'))
+                    .and_then(|suffix| suffix.parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        format!("{prefix}-{next_suffix}")
+    }
+
     fn center_window(&mut self, id: &str, bounds: WindowGeometry) -> bool {
         let Some(window) = self.persisted.windows.iter().find(|window| window.id == id) else {
             return false;
@@ -359,7 +372,7 @@ impl WorkspaceState {
 mod tests {
     use super::*;
     use crate::{
-        persistence::{default_workspace_state, WindowProcessStatus},
+        persistence::{default_canvas_viewport, default_workspace_state, WindowProcessStatus},
         protocol::FocusCycleDirection,
     };
 
@@ -414,6 +427,38 @@ mod tests {
         assert_eq!(window.title, "Branches");
         assert_eq!(window.preset, WindowPreset::Branches);
         assert_eq!(window.status, WindowProcessStatus::Ready);
+    }
+
+    #[test]
+    fn adding_agent_window_uses_new_id_when_lower_suffix_was_closed() {
+        let mut workspace = WorkspaceState::from_persisted(PersistedWorkspaceState {
+            viewport: default_canvas_viewport(),
+            windows: vec![PersistedWindowState {
+                id: "agent-2".to_string(),
+                title: "Agent".to_string(),
+                preset: WindowPreset::Agent,
+                geometry: WindowGeometry {
+                    x: 80.0,
+                    y: 64.0,
+                    width: 720.0,
+                    height: 420.0,
+                },
+                z_index: 1,
+                status: WindowProcessStatus::Running,
+                minimized: false,
+                maximized: false,
+                pre_maximize_geometry: None,
+                persist: false,
+            }],
+            next_z_index: 2,
+        });
+
+        let window = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+
+        assert_eq!(window.id, "agent-3");
+        assert_eq!(workspace.persisted().windows.len(), 2);
+        assert!(workspace.window("agent-2").is_some());
+        assert!(workspace.window("agent-3").is_some());
     }
 
     #[test]

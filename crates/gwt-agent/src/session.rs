@@ -26,6 +26,10 @@ pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
 /// Environment variable injected into agent PTYs so skills can locate the
 /// gwt binary for calling gwt CLI (GitHub operations, etc.).
 pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
+/// Loopback endpoint used by daemon-owned hook live events.
+pub const GWT_HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
+/// Bearer token paired with [`GWT_HOOK_FORWARD_URL_ENV`].
+pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]

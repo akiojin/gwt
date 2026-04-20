@@ -20,7 +20,8 @@ pub use session::{
     persist_agent_session_id, persist_session_status, reset_runtime_state_dir,
     reset_runtime_state_dir_for_pid, runtime_state_dir_for_pid, runtime_state_path,
     runtime_state_path_for_pid, PendingDiscussionResume, Session, SessionRuntimeState,
-    GWT_BIN_PATH_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
+    GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use types::{
     AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget,

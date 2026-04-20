@@ -16,6 +16,7 @@ pub enum LaunchWizardStep {
     BranchAction,
     BranchTypeSelect,
     BranchNameInput,
+    LaunchTarget,
     AgentSelect,
     ModelSelect,
     ReasoningLevel,
@@ -33,6 +34,13 @@ pub struct LaunchWizardOptionView {
     pub value: String,
     pub label: String,
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchTargetKind {
+    Agent,
+    Shell,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,11 +78,16 @@ pub struct LaunchWizardView {
     pub title: String,
     pub branch_name: String,
     pub selected_branch_name: String,
+    pub linked_issue_number: Option<u64>,
+    pub is_hydrating: bool,
+    pub hydration_error: Option<String>,
     pub quick_start_entries: Vec<LaunchWizardQuickStartView>,
     pub live_sessions: Vec<LaunchWizardLiveSessionView>,
     pub branch_mode: String,
     pub branch_type_options: Vec<LaunchWizardOptionView>,
     pub selected_branch_type: Option<String>,
+    pub launch_target_options: Vec<LaunchWizardOptionView>,
+    pub selected_launch_target: String,
     pub agent_options: Vec<LaunchWizardOptionView>,
     pub selected_agent_id: String,
     pub model_options: Vec<LaunchWizardOptionView>,
@@ -92,11 +105,14 @@ pub struct LaunchWizardView {
     pub execution_mode_options: Vec<LaunchWizardOptionView>,
     pub selected_execution_mode: String,
     pub skip_permissions: bool,
+    pub show_agent_settings: bool,
     pub show_reasoning: bool,
     pub show_runtime_target: bool,
     pub show_docker_service: bool,
     pub show_docker_lifecycle: bool,
     pub show_version: bool,
+    pub show_execution_mode: bool,
+    pub show_skip_permissions: bool,
     pub show_codex_fast_mode: bool,
     pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
@@ -130,6 +146,18 @@ pub struct QuickStartEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellLaunchConfig {
+    pub working_dir: Option<PathBuf>,
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub display_name: String,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+    pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    pub env_vars: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveSessionEntry {
     pub session_id: String,
     pub window_id: String,
@@ -143,7 +171,7 @@ pub struct LiveSessionEntry {
 impl QuickStartEntry {
     fn reuse_action_label(&self) -> Option<&'static str> {
         if self.live_window_id.is_some() {
-            Some("Continue")
+            Some("Focus")
         } else if self.resume_session_id.is_some() {
             Some("Resume")
         } else {
@@ -175,8 +203,26 @@ pub struct LaunchWizardContext {
 }
 
 #[derive(Debug, Clone)]
+pub struct LaunchWizardHydration {
+    pub selected_branch: Option<BranchListEntry>,
+    pub normalized_branch_name: String,
+    pub worktree_path: Option<PathBuf>,
+    pub quick_start_root: PathBuf,
+    pub docker_context: Option<DockerWizardContext>,
+    pub docker_service_status: gwt_docker::ComposeServiceStatus,
+    pub agent_options: Vec<AgentOption>,
+    pub quick_start_entries: Vec<QuickStartEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub enum LaunchWizardLaunchRequest {
+    Agent(Box<gwt_agent::LaunchConfig>),
+    Shell(Box<ShellLaunchConfig>),
+}
+
+#[derive(Debug, Clone)]
 pub enum LaunchWizardCompletion {
-    Launch(Box<gwt_agent::LaunchConfig>),
+    Launch(Box<LaunchWizardLaunchRequest>),
     FocusWindow { window_id: String },
     Cancelled,
 }
@@ -207,6 +253,9 @@ pub enum LaunchWizardAction {
     },
     SetBranchName {
         value: String,
+    },
+    SetLaunchTarget {
+        target: LaunchTargetKind,
     },
     SetAgent {
         agent_id: String,
@@ -254,6 +303,7 @@ pub struct LaunchWizardState {
     pub quick_start_entries: Vec<QuickStartEntry>,
     pub is_new_branch: bool,
     pub base_branch_name: Option<String>,
+    pub launch_target: LaunchTargetKind,
     pub agent_id: String,
     pub model: String,
     pub reasoning: String,
@@ -268,16 +318,17 @@ pub struct LaunchWizardState {
     pub branch_name: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
+    pub is_hydrating: bool,
+    pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
 }
 
 impl LaunchWizardState {
-    pub fn open_with(
-        context: LaunchWizardContext,
-        agent_options: Vec<AgentOption>,
-        mut quick_start_entries: Vec<QuickStartEntry>,
-    ) -> Self {
-        for entry in &mut quick_start_entries {
+    fn hydrate_live_window_ids(
+        context: &LaunchWizardContext,
+        quick_start_entries: &mut [QuickStartEntry],
+    ) {
+        for entry in quick_start_entries {
             entry.live_window_id = context
                 .live_sessions
                 .iter()
@@ -290,6 +341,15 @@ impl LaunchWizardState {
                 })
                 .map(|session| session.window_id.clone());
         }
+    }
+
+    fn new_with(
+        context: LaunchWizardContext,
+        agent_options: Vec<AgentOption>,
+        mut quick_start_entries: Vec<QuickStartEntry>,
+        is_hydrating: bool,
+    ) -> Self {
+        Self::hydrate_live_window_ids(&context, &mut quick_start_entries);
         let runtime_target = if context.docker_context.is_some() {
             gwt_agent::LaunchRuntimeTarget::Docker
         } else {
@@ -316,6 +376,7 @@ impl LaunchWizardState {
             quick_start_entries,
             is_new_branch: false,
             base_branch_name: None,
+            launch_target: LaunchTargetKind::Agent,
             agent_id: String::new(),
             model: String::new(),
             reasoning: String::new(),
@@ -330,12 +391,26 @@ impl LaunchWizardState {
             branch_name: String::new(),
             completion: None,
             error: None,
+            is_hydrating,
+            hydration_error: None,
             linked_issue_number: context.linked_issue_number,
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
         state.selected = step_default_selection(state.step, &state);
         state
+    }
+
+    pub fn open_with(
+        context: LaunchWizardContext,
+        agent_options: Vec<AgentOption>,
+        quick_start_entries: Vec<QuickStartEntry>,
+    ) -> Self {
+        Self::new_with(context, agent_options, quick_start_entries, false)
+    }
+
+    pub fn open_loading(context: LaunchWizardContext, agent_options: Vec<AgentOption>) -> Self {
+        Self::new_with(context, agent_options, Vec::new(), true)
     }
 
     pub fn open(context: LaunchWizardContext, sessions_dir: &Path, cache_path: &Path) -> Self {
@@ -356,6 +431,9 @@ impl LaunchWizardState {
             title: "Launch Agent".to_string(),
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
+            linked_issue_number: self.linked_issue_number,
+            is_hydrating: self.is_hydrating,
+            hydration_error: self.hydration_error.clone(),
             quick_start_entries: self.quick_start_entries_view(),
             live_sessions: self.live_sessions_view(),
             branch_mode: if self.is_new_branch {
@@ -365,6 +443,8 @@ impl LaunchWizardState {
             },
             branch_type_options: branch_type_options_view(),
             selected_branch_type: self.selected_branch_type_prefix().map(str::to_string),
+            launch_target_options: launch_target_options_view(),
+            selected_launch_target: launch_target_value(self.launch_target).to_string(),
             agent_options: self.agent_options_view(),
             selected_agent_id: self.effective_agent_id().to_string(),
             model_options: self.model_options_view(),
@@ -383,17 +463,71 @@ impl LaunchWizardState {
             execution_mode_options: execution_mode_options_view(),
             selected_execution_mode: self.mode.clone(),
             skip_permissions: self.skip_permissions,
-            show_reasoning: self.agent_uses_reasoning_step(),
+            show_agent_settings: self.launch_target_is_agent(),
+            show_reasoning: self.launch_target_is_agent() && self.agent_uses_reasoning_step(),
             show_runtime_target: self.has_docker_workflow(),
             show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
                 && self.docker_service_prompt_required(),
             show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker,
-            show_version: agent_has_npm_package(self.effective_agent_id()),
-            show_codex_fast_mode: self.agent_is_codex(),
+            show_version: self.launch_target_is_agent()
+                && agent_has_npm_package(self.effective_agent_id()),
+            show_execution_mode: self.launch_target_is_agent(),
+            show_skip_permissions: self.launch_target_is_agent(),
+            show_codex_fast_mode: self.launch_target_is_agent() && self.agent_is_codex(),
             codex_fast_mode: self.codex_fast_mode,
             launch_summary: self.launch_summary_view(),
             error: self.error.clone(),
         }
+    }
+
+    pub fn apply_hydration(&mut self, hydration: LaunchWizardHydration) {
+        let LaunchWizardHydration {
+            selected_branch,
+            normalized_branch_name,
+            worktree_path,
+            quick_start_root,
+            docker_context,
+            docker_service_status,
+            agent_options,
+            mut quick_start_entries,
+        } = hydration;
+        if let Some(selected_branch) = selected_branch {
+            self.context.selected_branch = selected_branch;
+        }
+        self.context.normalized_branch_name = normalized_branch_name;
+        self.context.worktree_path = worktree_path;
+        self.context.quick_start_root = quick_start_root;
+        self.context.docker_context = docker_context;
+        self.context.docker_service_status = docker_service_status;
+        self.detected_agents = agent_options;
+        Self::hydrate_live_window_ids(&self.context, &mut quick_start_entries);
+        self.quick_start_entries = quick_start_entries;
+        self.is_hydrating = false;
+        self.hydration_error = None;
+        self.branch_name = if self.is_new_branch {
+            self.branch_name.clone()
+        } else {
+            self.context.normalized_branch_name.clone()
+        };
+        if self.has_docker_workflow() {
+            self.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+            if self.docker_service.is_none() {
+                self.docker_service = self.preferred_docker_service().map(str::to_string);
+            }
+        } else {
+            self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+            self.docker_service = None;
+        }
+        self.sync_selected_agent_options();
+        self.sync_docker_lifecycle_default();
+        self.selected = self
+            .selected
+            .min(self.current_options().len().saturating_sub(1));
+    }
+
+    pub fn set_hydration_error(&mut self, error: String) {
+        self.is_hydrating = false;
+        self.hydration_error = Some(error);
     }
 
     pub fn apply(&mut self, action: LaunchWizardAction) {
@@ -420,6 +554,9 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetBranchName { value } => {
                 self.branch_name = value;
+            }
+            LaunchWizardAction::SetLaunchTarget { target } => {
+                self.set_launch_target(target);
             }
             LaunchWizardAction::SetAgent { agent_id } => {
                 self.set_agent_id(&agent_id);
@@ -489,6 +626,12 @@ impl LaunchWizardState {
     }
 
     pub fn build_launch_config(&self) -> Result<gwt_agent::LaunchConfig, String> {
+        if self.is_hydrating {
+            return Err("Launch options are still loading".to_string());
+        }
+        if !self.launch_target_is_agent() {
+            return Err("Agent launch target is not selected".to_string());
+        }
         let agent_id = agent_id_from_key(&self.agent_id);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
 
@@ -558,6 +701,50 @@ impl LaunchWizardState {
         Ok(config)
     }
 
+    fn build_shell_launch_config(&self) -> Result<ShellLaunchConfig, String> {
+        if self.is_hydrating {
+            return Err("Launch options are still loading".to_string());
+        }
+
+        let working_dir = if !self.is_new_branch {
+            self.context.worktree_path.clone()
+        } else {
+            None
+        };
+        let branch = (!self.branch_name.is_empty()).then(|| self.branch_name.clone());
+        let base_branch = self.is_new_branch.then(|| {
+            self.base_branch_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string())
+        });
+        let mut env_vars = HashMap::new();
+        if let Some(dir) = working_dir.as_ref() {
+            env_vars.insert("GWT_PROJECT_ROOT".to_string(), dir.display().to_string());
+        }
+
+        Ok(ShellLaunchConfig {
+            working_dir,
+            branch: branch.clone(),
+            base_branch,
+            display_name: "Shell".to_string(),
+            runtime_target: self.runtime_target,
+            docker_service: self.docker_service.clone(),
+            docker_lifecycle_intent: self.docker_lifecycle_intent,
+            env_vars,
+        })
+    }
+
+    fn build_launch_request(&self) -> Result<LaunchWizardLaunchRequest, String> {
+        match self.launch_target {
+            LaunchTargetKind::Agent => Ok(LaunchWizardLaunchRequest::Agent(Box::new(
+                self.build_launch_config()?,
+            ))),
+            LaunchTargetKind::Shell => Ok(LaunchWizardLaunchRequest::Shell(Box::new(
+                self.build_shell_launch_config()?,
+            ))),
+        }
+    }
+
     fn advance_after_current_step(&mut self) {
         if self.completion.is_some() {
             return;
@@ -569,7 +756,7 @@ impl LaunchWizardState {
             return;
         }
 
-        match self.build_launch_config() {
+        match self.build_launch_request() {
             Ok(config) => {
                 self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
             }
@@ -617,6 +804,13 @@ impl LaunchWizardState {
                     };
                     self.branch_name = apply_branch_prefix(&seed, prefix);
                 }
+            }
+            LaunchWizardStep::LaunchTarget => {
+                self.set_launch_target(if self.selected == 0 {
+                    LaunchTargetKind::Agent
+                } else {
+                    LaunchTargetKind::Shell
+                });
             }
             LaunchWizardStep::AgentSelect => {
                 if let Some(agent) = self.detected_agents.get(self.selected) {
@@ -691,7 +885,7 @@ impl LaunchWizardState {
             self.branch_name = trimmed.to_string();
         }
 
-        match self.build_launch_config() {
+        match self.build_launch_request() {
             Ok(config) => {
                 self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
             }
@@ -707,6 +901,7 @@ impl LaunchWizardState {
             return;
         };
 
+        self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         self.sync_selected_agent_options();
         if let Some(model) = entry.model {
@@ -723,6 +918,7 @@ impl LaunchWizardState {
         self.runtime_target = entry.runtime_target;
         self.docker_service = entry.docker_service.clone();
         self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
+        self.sync_docker_lifecycle_default();
         match mode {
             QuickStartLaunchMode::Resume => {
                 if let Some(window_id) = entry.live_window_id {
@@ -730,6 +926,13 @@ impl LaunchWizardState {
                 } else if let Some(resume_session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
+                    match self.build_launch_request() {
+                        Ok(config) => {
+                            self.completion =
+                                Some(LaunchWizardCompletion::Launch(Box::new(config)));
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
                 } else {
                     self.error = Some("No saved session is available".to_string());
                 }
@@ -737,9 +940,14 @@ impl LaunchWizardState {
             QuickStartLaunchMode::StartNew => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
+                match self.build_launch_request() {
+                    Ok(config) => {
+                        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
+                    }
+                    Err(error) => self.error = Some(error),
+                }
             }
         }
-        self.sync_docker_lifecycle_default();
     }
 
     fn focus_existing_session(&mut self, index: usize) {
@@ -781,6 +989,18 @@ impl LaunchWizardState {
             self.branch_name.clone()
         };
         self.branch_name = apply_branch_prefix(&seed, prefix);
+    }
+
+    fn set_launch_target(&mut self, target: LaunchTargetKind) {
+        self.launch_target = target;
+        if self.launch_target_is_shell() {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+            self.skip_permissions = false;
+            self.codex_fast_mode = false;
+        } else {
+            self.sync_selected_agent_options();
+        }
     }
 
     fn set_agent_id(&mut self, agent_id: &str) {
@@ -984,40 +1204,49 @@ impl LaunchWizardState {
                 value: self.branch_name.clone(),
             },
             LaunchWizardSummaryView {
+                label: "Target".to_string(),
+                value: match self.launch_target {
+                    LaunchTargetKind::Agent => "Agent".to_string(),
+                    LaunchTargetKind::Shell => "Shell".to_string(),
+                },
+            },
+        ];
+
+        if self.launch_target_is_agent() {
+            summary.push(LaunchWizardSummaryView {
                 label: "Agent".to_string(),
                 value: self
                     .selected_agent()
                     .map(|agent| agent.name.clone())
                     .unwrap_or_else(|| "Unavailable".to_string()),
-            },
-        ];
-
-        if is_explicit_model_selection(&self.model) {
+            });
+            if is_explicit_model_selection(&self.model) {
+                summary.push(LaunchWizardSummaryView {
+                    label: "Model".to_string(),
+                    value: self.model.clone(),
+                });
+            }
+            if let Some(reasoning) = self.reasoning_level_for_launch() {
+                summary.push(LaunchWizardSummaryView {
+                    label: if self.agent_is_codex() {
+                        "Reasoning".to_string()
+                    } else {
+                        "Effort".to_string()
+                    },
+                    value: reasoning.to_string(),
+                });
+            }
+            if !self.version.is_empty() {
+                summary.push(LaunchWizardSummaryView {
+                    label: "Version".to_string(),
+                    value: self.version.clone(),
+                });
+            }
             summary.push(LaunchWizardSummaryView {
-                label: "Model".to_string(),
-                value: self.model.clone(),
+                label: "Mode".to_string(),
+                value: self.mode.clone(),
             });
         }
-        if let Some(reasoning) = self.reasoning_level_for_launch() {
-            summary.push(LaunchWizardSummaryView {
-                label: if self.agent_is_codex() {
-                    "Reasoning".to_string()
-                } else {
-                    "Effort".to_string()
-                },
-                value: reasoning.to_string(),
-            });
-        }
-        if !self.version.is_empty() {
-            summary.push(LaunchWizardSummaryView {
-                label: "Version".to_string(),
-                value: self.version.clone(),
-            });
-        }
-        summary.push(LaunchWizardSummaryView {
-            label: "Mode".to_string(),
-            value: self.mode.clone(),
-        });
         summary.push(LaunchWizardSummaryView {
             label: "Runtime".to_string(),
             value: if self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
@@ -1029,14 +1258,16 @@ impl LaunchWizardState {
                 "host".to_string()
             },
         });
-        summary.push(LaunchWizardSummaryView {
-            label: "Permissions".to_string(),
-            value: if self.skip_permissions {
-                "skip".to_string()
-            } else {
-                "prompt".to_string()
-            },
-        });
+        if self.launch_target_is_agent() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Permissions".to_string(),
+                value: if self.skip_permissions {
+                    "skip".to_string()
+                } else {
+                    "prompt".to_string()
+                },
+            });
+        }
         if self.agent_is_codex() {
             summary.push(LaunchWizardSummaryView {
                 label: "Fast mode".to_string(),
@@ -1138,6 +1369,14 @@ impl LaunchWizardState {
         }
     }
 
+    fn launch_target_is_agent(&self) -> bool {
+        self.launch_target == LaunchTargetKind::Agent
+    }
+
+    fn launch_target_is_shell(&self) -> bool {
+        self.launch_target == LaunchTargetKind::Shell
+    }
+
     fn selected_agent(&self) -> Option<&AgentOption> {
         if self.step == LaunchWizardStep::AgentSelect {
             return self.detected_agents.get(self.selected);
@@ -1158,14 +1397,18 @@ impl LaunchWizardState {
     }
 
     fn agent_is_codex(&self) -> bool {
-        self.effective_agent_id() == "codex"
+        self.launch_target_is_agent() && self.effective_agent_id() == "codex"
     }
 
     fn agent_has_models(&self) -> bool {
-        matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
+        self.launch_target_is_agent()
+            && matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
     }
 
     fn agent_uses_reasoning_step(&self) -> bool {
+        if !self.launch_target_is_agent() {
+            return false;
+        }
         if self.agent_is_codex() {
             return true;
         }
@@ -1304,6 +1547,7 @@ impl LaunchWizardState {
             return;
         };
 
+        self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         if let Some(index) = self
             .detected_agents
@@ -1328,6 +1572,7 @@ impl LaunchWizardState {
         self.runtime_target = entry.runtime_target;
         self.docker_service = entry.docker_service.clone();
         self.docker_lifecycle_intent = entry.docker_lifecycle_intent;
+        self.sync_docker_lifecycle_default();
 
         match self.selected_quick_start_action() {
             QuickStartAction::ReuseEntry { .. } => {
@@ -1336,6 +1581,13 @@ impl LaunchWizardState {
                 } else if let Some(resume_session_id) = entry.resume_session_id {
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
+                    match self.build_launch_request() {
+                        Ok(config) => {
+                            self.completion =
+                                Some(LaunchWizardCompletion::Launch(Box::new(config)));
+                        }
+                        Err(error) => self.error = Some(error),
+                    }
                 } else {
                     self.error = Some("No saved session is available".to_string());
                 }
@@ -1343,6 +1595,12 @@ impl LaunchWizardState {
             QuickStartAction::StartNewEntry { .. } => {
                 self.mode = "normal".to_string();
                 self.resume_session_id = None;
+                match self.build_launch_request() {
+                    Ok(config) => {
+                        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(config)));
+                    }
+                    Err(error) => self.error = Some(error),
+                }
             }
             QuickStartAction::FocusExistingSession | QuickStartAction::ChooseDifferent => {}
         }
@@ -1416,6 +1674,7 @@ impl LaunchWizardState {
                     )),
                 })
                 .collect(),
+            LaunchWizardStep::LaunchTarget => launch_target_options_view(),
             LaunchWizardStep::AgentSelect => self
                 .detected_agents
                 .iter()
@@ -1813,13 +2072,22 @@ fn next_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<Lau
         LaunchWizardStep::FocusExistingSession => None,
         LaunchWizardStep::BranchAction => {
             if state.selected == 0 {
-                Some(LaunchWizardStep::AgentSelect)
+                Some(LaunchWizardStep::LaunchTarget)
             } else {
                 Some(LaunchWizardStep::BranchTypeSelect)
             }
         }
         LaunchWizardStep::BranchTypeSelect => Some(LaunchWizardStep::BranchNameInput),
-        LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::AgentSelect),
+        LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::LaunchTarget),
+        LaunchWizardStep::LaunchTarget => {
+            if state.launch_target_is_agent() {
+                Some(LaunchWizardStep::AgentSelect)
+            } else if state.has_docker_workflow() {
+                Some(LaunchWizardStep::RuntimeTarget)
+            } else {
+                None
+            }
+        }
         LaunchWizardStep::AgentSelect => {
             if state.agent_has_models() {
                 Some(LaunchWizardStep::ModelSelect)
@@ -1858,6 +2126,8 @@ fn next_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<Lau
                 Some(LaunchWizardStep::DockerServiceSelect)
             } else if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
                 Some(LaunchWizardStep::DockerLifecycle)
+            } else if state.launch_target_is_shell() {
+                None
             } else if agent_has_npm_package(state.effective_agent_id()) {
                 Some(LaunchWizardStep::VersionSelect)
             } else {
@@ -1866,7 +2136,9 @@ fn next_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<Lau
         }
         LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::DockerLifecycle),
         LaunchWizardStep::DockerLifecycle => {
-            if agent_has_npm_package(state.effective_agent_id()) {
+            if state.launch_target_is_shell() {
+                None
+            } else if agent_has_npm_package(state.effective_agent_id()) {
                 Some(LaunchWizardStep::VersionSelect)
             } else {
                 Some(LaunchWizardStep::ExecutionMode)
@@ -1898,17 +2170,20 @@ fn prev_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<Lau
         }
         LaunchWizardStep::BranchTypeSelect => Some(LaunchWizardStep::BranchAction),
         LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::BranchTypeSelect),
-        LaunchWizardStep::AgentSelect => {
+        LaunchWizardStep::LaunchTarget => {
             if state.is_new_branch {
                 Some(LaunchWizardStep::BranchNameInput)
             } else {
                 Some(LaunchWizardStep::BranchAction)
             }
         }
+        LaunchWizardStep::AgentSelect => Some(LaunchWizardStep::LaunchTarget),
         LaunchWizardStep::ModelSelect => Some(LaunchWizardStep::AgentSelect),
         LaunchWizardStep::ReasoningLevel => Some(LaunchWizardStep::ModelSelect),
         LaunchWizardStep::RuntimeTarget => {
-            if state.agent_uses_reasoning_step() {
+            if state.launch_target_is_shell() {
+                Some(LaunchWizardStep::LaunchTarget)
+            } else if state.agent_uses_reasoning_step() {
                 Some(LaunchWizardStep::ReasoningLevel)
             } else if state.agent_has_models() {
                 Some(LaunchWizardStep::ModelSelect)
@@ -1964,6 +2239,7 @@ fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizardState) -> 
         LaunchWizardStep::BranchAction => 0,
         LaunchWizardStep::BranchTypeSelect => 0,
         LaunchWizardStep::BranchNameInput => 0,
+        LaunchWizardStep::LaunchTarget => usize::from(state.launch_target_is_shell()),
         LaunchWizardStep::AgentSelect => state
             .detected_agents
             .iter()
@@ -2079,6 +2355,21 @@ fn branch_type_options_view() -> Vec<LaunchWizardOptionView> {
         .collect()
 }
 
+fn launch_target_options_view() -> Vec<LaunchWizardOptionView> {
+    vec![
+        LaunchWizardOptionView {
+            value: "agent".to_string(),
+            label: "Agent".to_string(),
+            description: Some("Launch a coding agent terminal".to_string()),
+        },
+        LaunchWizardOptionView {
+            value: "shell".to_string(),
+            label: "Shell".to_string(),
+            description: Some("Open a plain shell terminal".to_string()),
+        },
+    ]
+}
+
 fn runtime_target_options_view() -> Vec<LaunchWizardOptionView> {
     RUNTIME_TARGET_OPTIONS
         .iter()
@@ -2099,6 +2390,13 @@ fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
             description: Some(option.description.to_string()),
         })
         .collect()
+}
+
+fn launch_target_value(target: LaunchTargetKind) -> &'static str {
+    match target {
+        LaunchTargetKind::Agent => "agent",
+        LaunchTargetKind::Shell => "shell",
+    }
 }
 
 fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str {
@@ -2531,7 +2829,7 @@ mod tests {
         let view = state.view();
         assert_eq!(
             view.quick_start_entries[0].reuse_action_label.as_deref(),
-            Some("Continue")
+            Some("Focus")
         );
 
         state.apply(LaunchWizardAction::ApplyQuickStart {
@@ -2544,6 +2842,58 @@ mod tests {
                 assert_eq!(window_id, "window-1");
             }
             other => panic!("expected focus completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quick_start_start_new_keeps_live_window_available_but_does_not_focus_it() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "gwt-session-1".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+        }];
+
+        let mut state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        assert_eq!(state.mode, "normal");
+        assert!(state.resume_session_id.is_none());
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Normal);
+                    assert!(config.resume_session_id.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
         }
     }
 
@@ -2638,6 +2988,42 @@ mod tests {
     }
 
     #[test]
+    fn shell_target_hides_agent_specific_controls_and_builds_shell_request() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        state.apply(LaunchWizardAction::SetLaunchTarget {
+            target: LaunchTargetKind::Shell,
+        });
+
+        let view = state.view();
+        assert_eq!(view.selected_launch_target, "shell");
+        assert!(!view.show_agent_settings);
+        assert!(!view.show_execution_mode);
+        assert!(!view.show_skip_permissions);
+        assert!(!view.show_version);
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Target" && item.value == "Shell"));
+        assert!(!view.launch_summary.iter().any(|item| item.label == "Agent"));
+
+        match state.build_launch_request().expect("shell launch request") {
+            LaunchWizardLaunchRequest::Shell(config) => {
+                assert_eq!(
+                    config.working_dir.as_deref(),
+                    Some(Path::new("/tmp/repo-feature"))
+                );
+                assert_eq!(config.branch.as_deref(), Some("feature/gui"));
+                assert_eq!(config.display_name, "Shell");
+                assert_eq!(config.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+            }
+            other => panic!("expected shell launch request, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_launch_config_preserves_linked_issue_number() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.linked_issue_number = Some(1234);
@@ -2647,6 +3033,90 @@ mod tests {
         let config = state.build_launch_config().expect("config");
 
         assert_eq!(config.linked_issue_number, Some(1234));
+    }
+
+    #[test]
+    fn open_loading_marks_wizard_as_hydrating() {
+        let state = LaunchWizardState::open_loading(
+            context(branch("feature/gui"), "feature/gui"),
+            Vec::new(),
+        );
+
+        let view = state.view();
+        assert!(state.is_hydrating);
+        assert!(view.is_hydrating);
+        assert!(state.quick_start_entries.is_empty());
+        assert!(!view.show_runtime_target);
+        assert!(view.hydration_error.is_none());
+    }
+
+    #[test]
+    fn apply_hydration_updates_docker_defaults_and_quick_start_entries() {
+        let mut state = LaunchWizardState::open_loading(
+            context(branch("feature/gui"), "feature/gui"),
+            Vec::new(),
+        );
+        let worktree = PathBuf::from("/tmp/repo-feature");
+        state.apply_hydration(LaunchWizardHydration {
+            selected_branch: Some(branch("origin/feature/gui")),
+            normalized_branch_name: "feature/gui".to_string(),
+            worktree_path: Some(worktree.clone()),
+            quick_start_root: worktree.clone(),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string(), "worker".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        });
+
+        let view = state.view();
+        assert!(!state.is_hydrating);
+        assert_eq!(
+            state.context.worktree_path.as_deref(),
+            Some(worktree.as_path())
+        );
+        assert_eq!(state.context.normalized_branch_name, "feature/gui");
+        assert_eq!(state.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+        assert_eq!(state.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            state.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Connect
+        );
+        assert_eq!(state.quick_start_entries.len(), 1);
+        assert!(view.show_runtime_target);
+        assert!(!view.is_hydrating);
+        assert_eq!(view.selected_agent_id, "claude");
+        assert_eq!(view.agent_options.len(), 2);
+        assert_eq!(view.selected_runtime_target, "docker");
+    }
+
+    #[test]
+    fn build_launch_config_rejects_loading_state() {
+        let state = LaunchWizardState::open_loading(
+            context(branch("feature/gui"), "feature/gui"),
+            Vec::new(),
+        );
+
+        let error = state
+            .build_launch_config()
+            .expect_err("loading must block launch");
+        assert_eq!(error, "Launch options are still loading");
     }
 
     #[test]

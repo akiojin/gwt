@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
+    daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -146,6 +147,7 @@ pub struct RecentProjectView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStateView {
+    pub app_version: String,
     pub tabs: Vec<ProjectTabView>,
     pub active_tab_id: Option<String>,
     pub recent_projects: Vec<RecentProjectView>,
@@ -222,6 +224,9 @@ pub enum BackendEvent {
     LaunchProgress {
         id: String,
         message: String,
+    },
+    RuntimeHookEvent {
+        event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
 }

@@ -70,6 +70,13 @@ pub struct HookEvent {
 }
 
 impl HookEvent {
+    pub fn read_from_str(input: &str) -> Result<Option<Self>, HookError> {
+        if input.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(input)?))
+    }
+
     /// Read a single JSON payload from stdin.
     ///
     /// - Empty stdin → `Ok(None)` (treated as a no-op by the caller).
@@ -77,10 +84,7 @@ impl HookEvent {
     pub fn read_from_stdin() -> Result<Option<Self>, HookError> {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
-        if buf.trim().is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(serde_json::from_str(&buf)?))
+        Self::read_from_str(&buf)
     }
 
     /// Convenience accessor for `tool_input.command` (Bash tool payloads).

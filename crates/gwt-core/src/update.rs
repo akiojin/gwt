@@ -138,7 +138,7 @@ impl Platform {
     fn artifact(&self) -> Option<&'static str> {
         match (self.os.as_str(), self.arch.as_str()) {
             ("linux", "x86_64") => Some("linux-x86_64"),
-            ("linux", "aarch64") => Some("linux-arm64"),
+            ("linux", "aarch64") => Some("linux-aarch64"),
             ("macos", "x86_64") => Some("macos-x86_64"),
             ("macos", "aarch64") => Some("macos-arm64"),
             ("windows", "x86_64") => Some("windows-x86_64"),
@@ -798,10 +798,31 @@ fn choose_apply_plan(
     portable_url: Option<&str>,
     installer_url: Option<&str>,
 ) -> Option<ApplyPlan> {
+    let running_from_app_bundle =
+        current_exe.and_then(app_bundle_from_executable).is_some() || current_exe.is_none();
+    let writable = current_exe
+        .and_then(|p| p.parent())
+        .and_then(|dir| is_dir_writable(dir).ok())
+        .unwrap_or(true);
+
+    choose_apply_plan_with_writable(
+        platform,
+        running_from_app_bundle,
+        writable,
+        portable_url,
+        installer_url,
+    )
+}
+
+fn choose_apply_plan_with_writable(
+    platform: &Platform,
+    running_from_app_bundle: bool,
+    writable: bool,
+    portable_url: Option<&str>,
+    installer_url: Option<&str>,
+) -> Option<ApplyPlan> {
     // macOS: prefer installer when available to preserve codesign/notarization integrity.
     if platform.os == "macos" {
-        let running_from_app_bundle =
-            current_exe.and_then(app_bundle_from_executable).is_some() || current_exe.is_none();
         if running_from_app_bundle {
             if let Some(url) = installer_url {
                 let kind = installer_kind_for_url(platform, url)?;
@@ -810,17 +831,14 @@ fn choose_apply_plan(
                     kind,
                 });
             }
-        } else if let Some(url) = portable_url {
-            return Some(ApplyPlan::Portable {
-                url: url.to_string(),
-            });
+        } else if writable {
+            if let Some(url) = portable_url {
+                return Some(ApplyPlan::Portable {
+                    url: url.to_string(),
+                });
+            }
         }
     }
-
-    let writable = current_exe
-        .and_then(|p| p.parent())
-        .and_then(|dir| is_dir_writable(dir).ok())
-        .unwrap_or(true);
 
     // If we cannot replace in-place, prefer installer when available.
     if !writable {
@@ -1415,6 +1433,35 @@ mod tests {
     }
 
     #[test]
+    fn portable_asset_name_matches_release_contract() {
+        let linux_aarch64 = Platform {
+            os: "linux".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let macos_arm64 = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let windows_x64 = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+
+        assert_eq!(
+            linux_aarch64.portable_asset_name().as_deref(),
+            Some("gwt-linux-aarch64.tar.gz")
+        );
+        assert_eq!(
+            macos_arm64.portable_asset_name().as_deref(),
+            Some("gwt-macos-arm64.tar.gz")
+        );
+        assert_eq!(
+            windows_x64.portable_asset_name().as_deref(),
+            Some("gwt-windows-x86_64.zip")
+        );
+    }
+
+    #[test]
     fn choose_apply_plan_prefers_portable_for_macos_cli_install() {
         let platform = Platform {
             os: "macos".to_string(),
@@ -1432,6 +1479,30 @@ mod tests {
             plan,
             Some(ApplyPlan::Portable {
                 url: "https://example.com/gwt-macos-arm64.tar.gz".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn choose_apply_plan_falls_back_to_installer_for_nonwritable_macos_cli_install() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+
+        let plan = choose_apply_plan_with_writable(
+            &platform,
+            false,
+            false,
+            Some("https://example.com/gwt-macos-arm64.tar.gz"),
+            Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
+        );
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt_7.1.0_aarch64.dmg".to_string(),
+                kind: InstallerKind::MacDmg,
             })
         );
     }

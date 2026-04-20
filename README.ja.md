@@ -66,6 +66,9 @@ gwt board show
 gwt hook workflow-policy
 ```
 
+managed hook と runtime 委譲の入口も引き続き `gwt` です。利用者が別の daemon
+コマンドを手動起動する必要はありません。
+
 ## 基本フロー
 
 1. リポジトリを開く、または前回のプロジェクトを復元する

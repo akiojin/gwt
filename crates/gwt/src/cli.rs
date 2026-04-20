@@ -241,6 +241,8 @@ pub enum CliCommand {
     InternalApplyUpdate { rest: Vec<String> },
     /// `gwt __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
     InternalRunInstaller { rest: Vec<String> },
+    /// `gwt __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
+    InternalDaemonHook { name: String, rest: Vec<String> },
 }
 
 /// Errors surfaced by argv parsing.
@@ -385,6 +387,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         }
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
+        }
+        CliCommand::InternalDaemonHook { name, rest } => {
+            return run_daemon_hook(env, &name, &rest);
         }
         CliCommand::Update { check_only } => {
             let cmd = if check_only {
@@ -1365,33 +1370,101 @@ fn fetch_actions_job_log_via_gh(
 
 /// Dispatch a `gwt hook <name> [args...]` invocation.
 ///
-/// SPEC #1942 (CORE-CLI) scope: this is the single entry point for every
-/// in-binary hook handler. Each handler reads stdin (usually JSON), performs
-/// its judgment, and either:
-///
-/// - exits 0 (allow / success, stdout empty or a human-readable status)
-/// - exits 2 with a `{"decision":"block",...}` JSON on stdout (block)
-///
-/// Dispatches to the hook handlers in [`crate::cli::hook`]. Unknown hooks
-/// exit 2 with a `gwt hook: unknown hook '<name>'` message on stderr so
-/// that settings_local typos surface loudly. Runtime errors from known
-/// handlers exit 1 with the error chain on stderr; they are never turned
-/// into `decision=block` to avoid false positives under partial outages.
+/// SPEC-2077 Phase 2: `gwt hook ...` remains the outward-facing surface, but
+/// the front door now relays to the hidden `gwt __internal daemon-hook ...`
+/// helper so runtime evolution stays behind the same operator-facing binary.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{
-        block_bash_policy, coordination_event, forward, runtime_state, workflow_policy,
-        BlockDecision, HookKind,
+    use crate::cli::hook::HookKind;
+    let Some(_kind) = HookKind::from_name(name) else {
+        let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
+        return Ok(2);
     };
+
+    best_effort_prepare_daemon_front_door(env.repo_path());
+    let stdin = env.read_stdin().map_err(io_as_api_error)?;
+    let output = env
+        .run_internal_command(&daemon_hook_argv(name, rest), &stdin)
+        .map_err(io_as_api_error)?;
+    write_internal_command_output(env, output)
+}
+
+fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "gwt".to_string(),
+        "__internal".to_string(),
+        "daemon-hook".to_string(),
+        name.to_string(),
+    ];
+    argv.extend(rest.iter().cloned());
+    argv
+}
+
+fn write_internal_command_output<E: CliEnv>(
+    env: &mut E,
+    output: crate::cli::env::InternalCommandOutput,
+) -> Result<i32, SpecOpsError> {
+    env.stdout()
+        .write_all(&output.stdout)
+        .map_err(io_as_api_error)?;
+    env.stdout().flush().map_err(io_as_api_error)?;
+    env.stderr()
+        .write_all(&output.stderr)
+        .map_err(io_as_api_error)?;
+    env.stderr().flush().map_err(io_as_api_error)?;
+    Ok(output.status)
+}
+
+fn best_effort_prepare_daemon_front_door(project_root: &std::path::Path) {
+    let _ = prepare_daemon_front_door_for_path(project_root);
+}
+
+pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
+    if !project_root.exists() {
+        return Ok(());
+    }
+
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        project_root,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .map_err(|err| err.to_string())?;
+    let gwt_home = gwt_core::paths::gwt_home();
+    let action = gwt_core::daemon::resolve_bootstrap_action(
+        &gwt_home,
+        &scope,
+        gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+        |pid| pid == std::process::id(),
+    )
+    .map_err(|err| err.to_string())?;
+
+    if let gwt_core::daemon::DaemonBootstrapAction::Spawn { endpoint_path } = action {
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            "internal://gwt-front-door".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+pub fn run_daemon_hook<E: CliEnv>(
+    env: &mut E,
+    name: &str,
+    rest: &[String],
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::hook::{block_bash_policy, workflow_policy, BlockDecision, HookKind};
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
         return Ok(2);
     };
+    let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
-    // Every block hook returns `Result<Option<BlockDecision>, HookError>`.
-    // `emit_block_decision` serializes a decision to stdout and yields
-    // the block exit code (2). `emit_hook_error` reports a handler
-    // error on stderr and yields 1.
     fn emit_block_decision<E: CliEnv>(env: &mut E, decision: &BlockDecision) -> i32 {
         match serde_json::to_vec(decision) {
             Ok(bytes) => {
@@ -1422,7 +1495,7 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 );
                 return Ok(2);
             };
-            match runtime_state::handle(event) {
+            match crate::daemon_runtime::handle_runtime_state(event, &stdin) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -1435,22 +1508,22 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 );
                 return Ok(2);
             };
-            match coordination_event::handle(event) {
+            match crate::daemon_runtime::handle_coordination_event(event, &stdin) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
-        HookKind::BlockBashPolicy => match block_bash_policy::handle() {
+        HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
-        HookKind::WorkflowPolicy => match workflow_policy::handle() {
+        HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
-        HookKind::Forward => match forward::handle() {
+        HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
             Ok(()) => Ok(0),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
