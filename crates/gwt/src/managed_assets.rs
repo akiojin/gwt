@@ -1,4 +1,7 @@
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
@@ -29,7 +32,48 @@ fn install_hook_bin_override() -> io::Result<EnvVarGuard> {
     }
     let current_exe = std::env::current_exe()
         .map_err(|error| io::Error::other(format!("current_exe: {error}")))?;
-    Ok(EnvVarGuard::set("GWT_HOOK_BIN", current_exe))
+    let hook_bin =
+        resolve_managed_hook_bin_with_lookup(&current_exe, |command| which::which(command).ok());
+    Ok(EnvVarGuard::set("GWT_HOOK_BIN", hook_bin))
+}
+
+fn resolve_managed_hook_bin_with_lookup(
+    current_exe: &Path,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> PathBuf {
+    if should_prefer_path_gwt(current_exe) {
+        if let Some(candidate) = lookup("gwt").filter(|candidate| {
+            !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
+        }) {
+            return candidate;
+        }
+    }
+    current_exe.to_path_buf()
+}
+
+fn should_prefer_path_gwt(current_exe: &Path) -> bool {
+    is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
+}
+
+fn is_named_gwt_binary(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
+}
+
+fn is_bunx_temp_executable(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|value| value.starts_with("bunx-"))
+    })
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 struct EnvVarGuard {
@@ -68,5 +112,54 @@ impl Drop for EnvVarGuard {
         } else {
             std::env::remove_var(self.key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::resolve_managed_hook_bin_with_lookup;
+
+    #[test]
+    fn bunx_temp_current_exe_prefers_stable_path_gwt() {
+        let current_exe = Path::new(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe");
+
+        let resolved = resolve_managed_hook_bin_with_lookup(current_exe, |command| {
+            assert_eq!(command, "gwt");
+            Some(stable.clone())
+        });
+
+        assert_eq!(resolved, stable);
+    }
+
+    #[test]
+    fn stable_gwt_current_exe_is_kept_without_path_lookup() {
+        let current_exe = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
+
+        let resolved = resolve_managed_hook_bin_with_lookup(current_exe, |_command| {
+            panic!("stable gwt binary should not hit PATH lookup");
+        });
+
+        assert_eq!(resolved, current_exe);
+    }
+
+    #[test]
+    fn bunx_temp_current_exe_keeps_current_when_path_only_returns_bunx_temp() {
+        let current_exe = Path::new(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let path_candidate = PathBuf::from(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-2222222222-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+
+        let resolved = resolve_managed_hook_bin_with_lookup(current_exe, |_command| {
+            Some(path_candidate.clone())
+        });
+
+        assert_eq!(resolved, current_exe);
     }
 }

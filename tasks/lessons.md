@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: project-scoped asset は「repo を見つけたか」と「origin があるか」を分けて扱う
+
+### 事象
+
+coordination の保存先は `~/.gwt/projects/<repo-hash>/coordination/` が正なのに、
+origin がない git repo / worktree では `.gwt/coordination/` へ落ちていた。あわせて
+managed hook 再生成が `current_exe()` の一時 bunx 実体をそのまま焼き込み、
+古い `gwt` バイナリを hooks が呼び続ける経路が残っていた。
+
+### 原因
+
+- project-scoped path への切り替え条件を「git repo か」ではなく
+  「origin から repo hash を引けるか」にしていた。
+- 永続化する hook command の実体選択で、`current_exe()` が
+  bunx temp / helper binary のときの扱いを分けていなかった。
+
+### 再発防止策
+
+1. project-scoped data directory は、repo 検出と hash 取得を分離する。
+   repo root が取れるなら project scope を使い、hash は origin か path hash で決める。
+2. 設定ファイルへ永続化する実行パスは、transient wrapper (`bunx-*` など) を検知し、
+   安定した `gwt` 実体か明示 override を優先する。
+3. path migration の回帰テストは「origin なし git repo」と
+   「一時実体からの hook 再生成」の両方を必ず固定する。
+
 ## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
 
 ### 事象
