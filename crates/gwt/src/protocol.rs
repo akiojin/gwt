@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
     file_tree::FileTreeEntry,
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -88,6 +89,11 @@ pub enum FrontendEvent {
     LoadBranches {
         id: String,
     },
+    RunBranchCleanup {
+        id: String,
+        branches: Vec<String>,
+        delete_remote: bool,
+    },
     OpenLaunchWizard {
         id: String,
         branch_name: String,
@@ -164,6 +170,10 @@ pub enum BackendEvent {
     BranchEntries {
         id: String,
         entries: Vec<BranchListEntry>,
+    },
+    BranchCleanupResult {
+        id: String,
+        results: Vec<BranchCleanupResultEntry>,
     },
     BranchError {
         id: String,
