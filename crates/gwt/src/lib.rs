@@ -57,7 +57,7 @@ pub use preset::{
     WindowPreset, WindowSurface,
 };
 pub use protocol::{
-    AppStateView, ArrangeMode, BackendEvent, FocusCycleDirection, FrontendEvent, ProjectTabView,
-    RecentProjectView, WorkspaceView,
+    AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, FocusCycleDirection,
+    FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

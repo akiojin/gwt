@@ -2973,6 +2973,7 @@
         if (!branchListStateMap.has(windowId)) {
           branchListStateMap.set(windowId, {
             entries: [],
+            phase: "hydrated",
             loading: false,
             error: "",
             selectedBranchName: "",
@@ -5040,7 +5041,8 @@
           case "branch_entries": {
             const state = ensureBranchListState(event.id);
             state.entries = event.entries;
-            state.loading = state.entries.some((entry) => !entry.cleanup_ready);
+            state.phase = event.phase || "hydrated";
+            state.loading = event.phase !== "hydrated";
             state.error = "";
             syncBranchSelectionState(state);
             renderBranches(event.id);

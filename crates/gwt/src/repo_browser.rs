@@ -6,8 +6,8 @@ use std::{
 
 use gwt::{
     cleanup_selected_branches, hydrate_branch_entries_with_active_sessions,
-    list_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent, BranchListEntry,
-    BranchScope,
+    list_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent,
+    BranchEntriesPhase, BranchListEntry, BranchScope,
 };
 use tao::event_loop::EventLoopProxy;
 
@@ -117,6 +117,7 @@ fn dispatch_branch_load_progressive(
                     client_id.clone(),
                     BackendEvent::BranchEntries {
                         id: window_id.to_string(),
+                        phase: BranchEntriesPhase::Inventory,
                         entries: entries.clone(),
                     },
                 )],
@@ -132,6 +133,7 @@ fn dispatch_branch_load_progressive(
                         client_id.clone(),
                         BackendEvent::BranchEntries {
                             id: window_id.to_string(),
+                            phase: BranchEntriesPhase::Hydrated,
                             entries,
                         },
                     )],

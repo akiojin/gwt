@@ -224,8 +224,8 @@ mod tests {
             "expected embedded html to branch on cleanup hydration readiness",
         );
         assert!(
-            html.contains("state.loading = state.entries.some((entry) => !entry.cleanup_ready);"),
-            "expected branch entries handler to keep loading active until hydration finishes",
+            html.contains("state.loading = event.phase !== \"hydrated\";"),
+            "expected branch entries handler to derive loading state from explicit event phase",
         );
         assert!(
             html.contains("Loading branch details"),
