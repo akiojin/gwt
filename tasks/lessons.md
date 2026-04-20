@@ -1,5 +1,24 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: OS 固有実装を足したら import も同じ cfg 境界に置く
+
+### 事象
+
+Windows PTY shim 修正後、PR #2063 の `Clippy & Rustfmt` が Linux CI で失敗した。
+原因は `crates/gwt-terminal/src/pty.rs` の `Path` import がトップレベルにあり、
+Windows 専用関数でしか使わないのに Linux では unused import になっていたことだった。
+
+### 原因
+
+- 実装本体は `#[cfg(windows)]` で囲っていたが、use 宣言の cfg 境界を揃えていなかった。
+- 手元確認が Windows 実行中心で、Linux compile/lint 時の未使用 import を見落とした。
+
+### 再発防止策
+
+1. OS 固有 helper を追加するときは、type import / helper function / test を同じ cfg 境界で揃える。
+2. `cfg(windows)` 専用コードを触った後でも、CI と同じ package 指定の `cargo clippy` を必ず回す。
+3. クロスプラットフォーム crate のトップレベル import 追加では、「他 OS で unused にならないか」を差分確認に含める。
+
 ## 2026-04-20 — fix: Windows PTY で PATH 解決をそのまま信じると npm shim に吸われる
 
 ### 事象

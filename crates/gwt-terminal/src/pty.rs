@@ -3,10 +3,13 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+#[cfg(windows)]
+use std::path::Path;
 
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use tracing::instrument;
