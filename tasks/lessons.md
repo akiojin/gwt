@@ -1,5 +1,157 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
+
+### 事象
+
+PR #2063 の merge 後 review で、`crates/gwt-terminal/src/pty.rs` の
+`build_windows_shim_target` が `.exe/.com` を見つけた時点で即 return しており、
+`node.exe + cli.js` のような npm shim で script 引数を落とす指摘が出た。
+あわせて `windows_env_value` が `remove_env` を先に見ていたため、
+`env` で明示指定した値まで無視する非対称も見つかった。
+
+### 原因
+
+- shim 解析を「最初に見つかった実行ファイル」中心で書き、runtime と script が
+  セットで現れる wrapper を考慮していなかった。
+- 環境変数解決で `portable_pty::CommandBuilder` の適用順
+  (`remove_env` の後に `env`) と同じ優先順位を維持していなかった。
+
+### 再発防止策
+
+1. Windows の shim 解析では、`.exe` 単体だけでなく `runtime + script` の
+   wrapper パターンを先に洗い出してから target 決定ロジックを書く。
+2. wrapper で runtime が見つかっても、`.js/.cjs` が同居する場合は
+   「runtime 単体」ではなく「runtime + script arg」を回帰テストで固定する。
+3. spawn 前の env 正規化 helper は、実際に適用する `CommandBuilder` と
+   同じ優先順位になるよう unit test を先に足す。
+
+## 2026-04-20 — fix: OS 固有実装を足したら import も同じ cfg 境界に置く
+
+### 事象
+
+Windows PTY shim 修正後、PR #2063 の `Clippy & Rustfmt` が Linux CI で失敗した。
+原因は `crates/gwt-terminal/src/pty.rs` の `Path` import がトップレベルにあり、
+Windows 専用関数でしか使わないのに Linux では unused import になっていたことだった。
+
+### 原因
+
+- 実装本体は `#[cfg(windows)]` で囲っていたが、use 宣言の cfg 境界を揃えていなかった。
+- 手元確認が Windows 実行中心で、Linux compile/lint 時の未使用 import を見落とした。
+
+### 再発防止策
+
+1. OS 固有 helper を追加するときは、type import / helper function / test を同じ cfg 境界で揃える。
+2. `cfg(windows)` 専用コードを触った後でも、CI と同じ package 指定の `cargo clippy` を必ず回す。
+3. クロスプラットフォーム crate のトップレベル import 追加では、「他 OS で unused にならないか」を差分確認に含める。
+
+## 2026-04-20 — fix: Windows PTY で PATH 解決をそのまま信じると npm shim に吸われる
+
+### 事象
+
+Windows で installed Claude agent を PTY 起動すると、`CreateProcessW` が
+`%APPDATA%\\npm\\claude` を直接実行しようとして `os error 193`
+(`%1 は有効な Win32 アプリケーションではありません`) で失敗した。
+
+### 原因
+
+- `portable-pty` の Windows `search_path()` は PATHEXT 候補より先に「拡張子なしの実在ファイル」を返す。
+- npm global install は `claude` / `codex` の拡張子なし shim を配置するため、
+  Win32 実行可能ファイルではない shell shim が最優先になっていた。
+- `cmd.exe` ラップに逃がすだけでは ConPTY 上で挙動が不安定なケースがあり、
+  実体の `.exe` / `node + .js` まで解決した方が安定する。
+
+### 再発防止策
+
+1. Windows で PATH 検索結果を PTY に渡す前に、npm shim を実体コマンドへ正規化する。
+2. `.exe` / `.com` は直起動し、shell shim が `node_modules/.../*.js` を指す場合は
+   `node` と script path に分解して起動する。
+3. Windows の PTY 起動修正では、少なくとも「shim 解決」「spawn 成功」の両方を
+   回帰テストで固定する。
+
+## 2026-04-20 — fix: repo browser の wheel ownership を generic な edge fallback へ一般化しない
+
+### 事象
+
+Branches ウィンドウで一覧を最上端/最下端までスクロールしたあと、さらに同じ方向へ wheel/trackpad scroll すると、
+内部リストは止まる一方で canvas pan が始まり、repo browser surface 上の操作が window 内で完結しなかった。
+
+### 原因
+
+- 4/17 の修正で「surface が delta を実際に消費できるときだけ native scroll を優先する」という一般則を入れた。
+- この一般則を repo browser surface にもそのまま適用した結果、scroll edge では capture-phase handler が
+  canvas pan 経路へフォールバックしてしまった。
+- Branches / File Tree の UX では、surface 上の plain wheel は canvas に流さず no-op に留める契約だった。
+
+### 再発防止策
+
+1. wheel ownership は surface ごとに決める。repo browser list は「scroll 可能時は native scroll、edge では no-op」、canvas 背景だけが pan owner。
+2. `can surface consume delta? -> else canvas` のような generic fallback を、window 内 scroll surface へ無条件に再利用しない。
+3. repo browser の回帰テストには「内部スクロール可能」「edge で no-op」「canvas 背景で pan」の 3 観点をセットで入れる。
+
+## 2026-04-17 — fix: scrollable pane の wheel 奪取は「surface が実際に消費できる delta」だけに限定する
+
+### 事象
+
+Branches / File Tree の wheel 修正後、repo browser pane 上では内部スクロールを優先できるようになった一方、
+pane に overflow がない場合や scroll 端に達している場合でも canvas pan へ fall back せず、
+gesture が no-op になる回帰を reviewer に指摘された。
+
+### 原因
+
+- `wheel` handler が「scrollable pane 配下であること」だけで native scroll へ早期 return していた。
+- event target の面が scroll container であっても、その delta を実際に消費できるか
+  （overflow の有無、top/bottom/left/right の境界）を見ていなかった。
+
+### 再発防止策
+
+1. canvas から `wheel` を奪う条件は「pane 配下」ではなく「pane がその delta を実際に scroll できる」ことにする。
+2. trackpad / mouse wheel の routing では、vertical だけでなく horizontal delta と scroll 境界も確認する。
+3. repo pane の interaction 変更では、「scroll できる時は pane」「scroll できない時は canvas pan」の両方を回帰観点に入れる。
+
+## 2026-04-17 — fix: CI lint 再現は workflow と同じ package / feature 範囲で実行する
+
+### 事象
+
+PR #2052 の `Clippy & Rustfmt` が CI で失敗したが、手元では直前に `cargo clippy` を
+通したつもりだった。実際の失敗箇所は `crates/gwt-github/src/client/fake.rs` の
+`unnecessary_sort_by` で、`gwt` の feature 経由で lint 対象に入っていた。
+
+### 原因
+
+- 手元の確認で、workflow に書かれている package 指定と同じコマンドを厳密に再現していなかった。
+- 「workspace 全体を見ているはず」という前提で済ませ、CI job 定義をその場で確認しなかった。
+- transitive dependency / feature 経由で lint 対象になる crate を、変更ファイルだけ見て外していた。
+
+### 再発防止策
+
+1. CI 失敗の再現では、先に `.github/workflows/*.yml` の実コマンドを確認し、そのまま手元で実行する。
+2. `-p` 指定の lint/test でも、feature 経由で別 crate が対象に入る前提でログを確認する。
+3. 「ローカルで通った」は抽象化せず、最終報告では実行した正確なコマンド列を残す。
+
+## 2026-04-17 — fix: embedded WebView JS の回帰確認は整形文字列ではなく契約と対称性を見る
+
+### 事象
+
+Web terminal copy 修正の PR で、CodeRabbit から 3 件の follow-up 指摘が出た。
+`include_str!` ベースの HTML 回帰テストが単一行の exact string に依存していて
+整形変更に弱かったこと、`createTerminalRuntime()` の新規作成 path だけ返り値に
+`cleanup` を含めていなかったこと、copy 用の `mouseup` listener が capture/bubble の
+二重登録になっていたことが原因だった。
+
+### 原因
+
+- 埋め込み HTML の契約テストで、挙動ではなくフォーマット済み文字列そのものを固定していた。
+- JS helper の reuse path と create path の返り値形状を並べて確認していなかった。
+- event listener の追加/削除を対で見ず、window capture listener と terminalRoot listener の
+  役割重複を残していた。
+
+### 再発防止策
+
+1. `include_str!` で埋め込む HTML/JS の回帰テストは exact snippet ではなく、必要な token や契約を構造的に確認する。
+2. factory/helper 関数を変更するときは、既存再利用 path と新規作成 path の返り値 shape を揃えて確認する。
+3. DOM event handler 変更では、登録と cleanup を対で確認し、capture/bubble の重複 listener が本当に必要かを見直す。
+
 ## 2026-04-16 — fix: read-only CLI は eager GitHub auth を起動時に解決しない
 
 ### 事象
@@ -2804,3 +2956,26 @@ Issue #2045 で PR #2049 が merge された直後に「実装はマージ済み
 2. 「PR が merge 済み」と「branch HEAD が base branch に含まれる」を分けて記録する。
 3. 完了報告では commit hash か revision range を明示し、follow-up commit が残っていないことを確認してから
    SPEC / Issue artifact を完了扱いにする。
+
+## 2026-04-17 — fix: clipboard fallback は focus を奪ったら必ず terminal へ戻す
+
+### 事象
+
+Web terminal の copy 実装で `navigator.clipboard.writeText()` が使えない環境では、
+hidden `textarea` + `document.execCommand("copy")` fallback を使っていたが、copy 後に
+terminal input focus が戻らず、次のキー入力が shell / agent に届かなくなった。
+
+### 原因
+
+- fallback 実装が clipboard 書き込み成功だけを見ており、focus ownership の回復を考慮していなかった。
+- async clipboard API が使える通常経路だけを前提にして、permission-restricted WebView の
+  fallback 実機セマンティクスをテストで固定していなかった。
+
+### 再発防止策
+
+1. hidden input / textarea を使う clipboard fallback では、cleanup 時に元の interactive surface
+   へ focus を戻す処理を必須で入れる。
+2. WebView の permission 差分がありうる API は、正常経路だけでなく fallback 後の focus /
+   input routing 契約も埋め込みテストで固定する。
+3. terminal copy UX の変更では、copy success だけでなく「直後の次キー入力が terminal へ届くか」
+   を review 観点に含める。

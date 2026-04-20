@@ -217,7 +217,7 @@
 
 ## 使用中の技術
 
-- Rust 2021 Edition (stable) + ratatui, crossterm, vt100, portable-pty, serde, tokio
+- Rust 2021 Edition (stable) + vt100, portable-pty, serde, tokio, axum, wry/tao, xterm.js (GUI terminal)
 - ローカルファイルと Git メタデータ（DB なし）
 
 ## プロジェクト構成
@@ -266,7 +266,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal user interfaces with ratatui, crossterm, and xterm.js. |
+| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal UI surfaces for the xterm.js-based GUI terminal. |
 
 ### Recommended Workflow
 

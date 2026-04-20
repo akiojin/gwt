@@ -98,12 +98,12 @@ jobs:
             binary: gwt
             release_name: gwt-linux-aarch64
           - platform: macos-x86_64
-            os: macos-latest
+            os: macos-14
             target: x86_64-apple-darwin
             binary: gwt
             release_name: gwt-macos-x86_64
           - platform: macos-aarch64
-            os: macos-latest
+            os: macos-14
             target: aarch64-apple-darwin
             binary: gwt
             release_name: gwt-macos-aarch64

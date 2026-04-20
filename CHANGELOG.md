@@ -1,6 +1,69 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.5.2] - 2026-04-20
+
+### Bug Fixes
+
+- Restore repo browser wheel scrolling
+- Restore canvas pan fallback for repo browser wheel
+
+## [9.5.1] - 2026-04-17
+
+### Bug Fixes
+
+- **update:** MacOS DMG インストーラの install_result 型推論を明示して macOS ビルド失敗を解消
+
+## [9.5.0] - 2026-04-17
+
+### Bug Fixes
+
+- **gui:** Cleanup PTY and agent processes on window close
+- **gui:** Terminate PTY process group eagerly on kill
+- Restore web terminal copy workflow
+- Restore terminal focus after fallback copy
+- Satisfy current clippy sort lint
+- Address terminal copy review follow-ups
+- Unblock remaining PR lint checks
+
+### Features
+
+- **launch:** Claude Code 起動時モデルを Opus 4.7 デフォルトに切替
+- **launch:** Opus 4.7 の xHigh effort level を wizard に追加しデフォルトに
+
+### Miscellaneous Tasks
+
+- **gwt-terminal:** Remove unused TUI/crossterm dead code
+
+### Refactor
+
+- **launch:** Claude effort-capable model 判定をヘルパーに抽出
+
+### Testing
+
+- **launch:** Xhigh / max effort level の CLAUDE_CODE_EFFORT_LEVEL export を検証
+
+## [9.4.1] - 2026-04-16
+
+### Bug Fixes
+
+- **ci:** Pin macOS version to macos-14 to resolve Sequoia compatibility issues
+
+## [9.4.0] - 2026-04-16
+
+### Bug Fixes
+
+- Prevent main thread blocking during Launch Agent startup
+- 非同期エージェント起動で agent_id をActiveAgentSessionに渡す
+- Use unwrap_or instead of unnecessary unwrap_or_else
+- Adapt to WindowGeometry API changes from merge
+- **update:** Harden macOS installer flow
+
+### Features
+
+- Add issue selection field to launch wizard UI
+- Center windows in viewport on creation and focus
+
 ## [9.3.0] - 2026-04-16
 
 ### Bug Fixes
