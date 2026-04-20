@@ -1,6 +1,55 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.6.0] - 2026-04-20
+
+### Bug Fixes
+
+- **update:** Restore macOS installer fallback
+- **branches:** Harden cleanup flow follow-ups
+- **gui:** Keep repo browser wheel local at scroll edges
+- Normalize windows pty shim launches
+- Gate windows-specific pty imports
+- Preserve windows shim script args
+- **agent:** Fallback to npx when bunx probe fails
+- Launch Wizard の起動初期化を非同期化
+- Prevent launch wizard window id collisions
+- Close exited agent windows and silence detach timeout log
+- Keep coordination and hooks on stable paths
+- Normalize hook path heuristics across oses
+- Keep failed agent exits visible
+- **release:** Add MSI and DMG installers, fix portable asset naming
+- **release:** Align installer and portable distribution
+
+### Documentation
+
+- **lessons:** Record branch-head check before issue completion
+
+### Features
+
+- Add branches cleanup flow to web ui
+- **gui:** Add cache-backed knowledge bridge windows
+
+### Miscellaneous Tasks
+
+- **merge:** Sync origin/develop into bugfix/not-work-branches-scroll
+- Merge origin/develop into feature/issues
+- Merge origin/develop into bugfix/agent-not-working
+- Merge origin/develop into feature/issues
+- **merge:** Sync develop into bugfix/issue-2045
+- Merge origin/develop into bugfix/close-agent-finish
+- Merge origin/develop into bugfix/close-agent-finish
+- Merge origin develop
+
+### Refactor
+
+- **gui:** Isolate embedded web contracts from main
+- **gui:** Split embedded web event wiring
+
+### Testing
+
+- **gui:** Make bunx fallback test platform agnostic
+
 ## [9.5.2] - 2026-04-20
 
 ### Bug Fixes
