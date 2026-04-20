@@ -15,6 +15,8 @@ assert していたが、実装は Windows のみ helper copy、非 Windows は 
 - test module の import と assertion が `cfg!(windows)` / `#[cfg(target_os = "windows")]`
   で分岐する実装契約と揃っていなかった。
 - Windows ローカルでの検証結果をそのまま CI 全 OS に一般化していた。
+- `cargo llvm-cov --ignore-filename-regex` による `main.rs` 除外へ依存していたため、
+  Windows ローカルでは path 表現差分で 90% gate が誤判定する余地があった。
 
 ### 再発防止策
 
@@ -23,6 +25,8 @@ assert していたが、実装は Windows のみ helper copy、非 Windows は 
    まず確認する。
 3. helper process / installer / path まわりのテストでは、`Windows only` と
    `cross-platform fallback` を別々に明示して期待値を固定する。
+4. カバレッジ gate の除外判定は `cargo llvm-cov` の regex 文字列だけに寄せず、
+   summary JSON を読んで path 正規化込みで自前判定する。
 
 ## 2026-04-20 — fix: preset 経由の agent launch で wizard 側の default arg が抜ける
 

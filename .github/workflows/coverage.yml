@@ -13,14 +13,22 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: develop
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage
-        run: cargo llvm-cov -p gwt-core -p gwt --all-features --lcov --output-path lcov.info --fail-under-lines 90 --ignore-filename-regex 'crates[/\\]gwt[/\\]src[/\\]main\.rs$'
+      - name: Generate filtered summary
+        run: cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json
+        timeout-minutes: 15
+      - name: Enforce coverage threshold
+        run: node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90
+      - name: Generate lcov
+        run: cargo llvm-cov report -p gwt-core -p gwt --lcov --output-path lcov.info
         timeout-minutes: 15
       - name: Upload to Codecov
         uses: codecov/codecov-action@v6

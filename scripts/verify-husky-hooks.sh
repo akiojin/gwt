@@ -43,8 +43,9 @@ require_contains "$PACKAGE_JSON" "\"lint:husky\": \"bash scripts/verify-husky-ho
 require_file "$PRE_PUSH"
 require_contains "$PRE_PUSH" "cargo clippy --all-targets --all-features -- -D warnings"
 require_contains "$PRE_PUSH" "cargo fmt --all -- --check"
-require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --fail-under-lines 90 --ignore-filename-regex 'crates[/\\\\]gwt[/\\\\]src[/\\\\]main\\.rs$'"
-require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md"
+require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json"
+require_contains "$PRE_PUSH" "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90"
+require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md"
 require_contains "$PRE_PUSH" "pnpm lint:skills"
 
 require_file "$COMMIT_MSG"
