@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.5.2] - 2026-04-20
+
+### Bug Fixes
+
+- Restore repo browser wheel scrolling
+- Restore canvas pan fallback for repo browser wheel
+
 ## [9.5.1] - 2026-04-17
 
 ### Bug Fixes

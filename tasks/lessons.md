@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-17 — fix: scrollable pane の wheel 奪取は「surface が実際に消費できる delta」だけに限定する
+
+### 事象
+
+Branches / File Tree の wheel 修正後、repo browser pane 上では内部スクロールを優先できるようになった一方、
+pane に overflow がない場合や scroll 端に達している場合でも canvas pan へ fall back せず、
+gesture が no-op になる回帰を reviewer に指摘された。
+
+### 原因
+
+- `wheel` handler が「scrollable pane 配下であること」だけで native scroll へ早期 return していた。
+- event target の面が scroll container であっても、その delta を実際に消費できるか
+  （overflow の有無、top/bottom/left/right の境界）を見ていなかった。
+
+### 再発防止策
+
+1. canvas から `wheel` を奪う条件は「pane 配下」ではなく「pane がその delta を実際に scroll できる」ことにする。
+2. trackpad / mouse wheel の routing では、vertical だけでなく horizontal delta と scroll 境界も確認する。
+3. repo pane の interaction 変更では、「scroll できる時は pane」「scroll できない時は canvas pan」の両方を回帰観点に入れる。
+
 ## 2026-04-17 — fix: CI lint 再現は workflow と同じ package / feature 範囲で実行する
 
 ### 事象
