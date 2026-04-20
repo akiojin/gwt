@@ -94,21 +94,64 @@ impl HookEvent {
 }
 
 /// JSON shape a block hook writes to stdout when it vetoes a tool call.
+///
+/// Uses the Claude Code PreToolUse `hookSpecificOutput` contract so that
+/// `permissionDecisionReason` is the single visible field. The legacy
+/// `{"decision":"block","reason":"...","stopReason":"..."}` shape is
+/// deliberately not emitted: `stopReason` is a Stop/SubagentStop-only
+/// field and was silently dropped on PreToolUse, so only the short
+/// summary ever reached the user.
+///
+/// `reason` and `stop_reason` are kept as `#[serde(skip)]` internal fields
+/// so tests and call sites can still inspect the short summary and the
+/// detailed guidance independently, while the wire format emits only the
+/// merged `permissionDecisionReason`.
 #[derive(Debug, Clone, Serialize)]
 pub struct BlockDecision {
-    pub decision: &'static str,
+    #[serde(rename = "hookSpecificOutput")]
+    hook_specific_output: HookSpecificOutput,
+    #[serde(skip)]
     pub reason: String,
-    #[serde(rename = "stopReason")]
+    #[serde(skip)]
     pub stop_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HookSpecificOutput {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: &'static str,
+    #[serde(rename = "permissionDecision")]
+    permission_decision: &'static str,
+    #[serde(rename = "permissionDecisionReason")]
+    permission_decision_reason: String,
 }
 
 impl BlockDecision {
     pub fn new(reason: impl Into<String>, stop_reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        let stop_reason = stop_reason.into();
+        let permission_decision_reason = if stop_reason.is_empty() {
+            reason.clone()
+        } else if reason.is_empty() {
+            stop_reason.clone()
+        } else {
+            format!("{reason}\n\n{stop_reason}")
+        };
         Self {
-            decision: "block",
-            reason: reason.into(),
-            stop_reason: stop_reason.into(),
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: "PreToolUse",
+                permission_decision: "deny",
+                permission_decision_reason,
+            },
+            reason,
+            stop_reason,
         }
+    }
+
+    /// The merged text that Claude Code / Codex actually show to the
+    /// LLM and user when the tool call is denied.
+    pub fn permission_decision_reason(&self) -> &str {
+        &self.hook_specific_output.permission_decision_reason
     }
 }
 

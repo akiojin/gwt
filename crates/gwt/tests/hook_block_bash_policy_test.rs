@@ -76,13 +76,38 @@ fn blocks_workflow_focused_github_cli_commands() {
 
 #[test]
 fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
+    // All guidance must land inside `permissionDecisionReason` because the
+    // legacy `stopReason` field is ignored on PreToolUse hooks. If the
+    // canonical `gwt` alternatives are not in that single visible field,
+    // the LLM/user sees only the short summary and has no idea how to
+    // recover.
     let decision = block_bash_policy::evaluate_bash_command("gh pr view 1949", &root())
         .expect("workflow gh command must block");
-    assert!(decision.reason.contains("GitHub workflow CLI"));
-    assert!(decision.stop_reason.contains("gwt issue view"));
-    assert!(decision.stop_reason.contains("gwt pr view"));
-    assert!(decision.stop_reason.contains("gwt actions logs"));
-    assert!(decision.stop_reason.contains("gwt-search"));
+    let visible = decision.permission_decision_reason();
+    assert!(
+        visible.contains("GitHub workflow CLI"),
+        "summary must appear in permissionDecisionReason, got: {visible}"
+    );
+    assert!(
+        visible.contains("gwt issue view"),
+        "gwt issue view alternative missing from visible reason: {visible}"
+    );
+    assert!(
+        visible.contains("gwt pr view"),
+        "gwt pr view alternative missing from visible reason: {visible}"
+    );
+    assert!(
+        visible.contains("gwt actions logs"),
+        "gwt actions logs alternative missing from visible reason: {visible}"
+    );
+    assert!(
+        visible.contains("gwt-search"),
+        "gwt-search alternative missing from visible reason: {visible}"
+    );
+    assert!(
+        visible.contains("Blocked command: gh pr view 1949"),
+        "the blocked command must be echoed in the visible reason: {visible}"
+    );
 }
 
 #[test]

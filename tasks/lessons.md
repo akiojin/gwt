@@ -1,5 +1,38 @@
 # Lessons Learned
 
+## 2026-04-20 — fix(hooks): PreToolUse で `stopReason` は表示されない。`hookSpecificOutput.permissionDecisionReason` を使う
+
+### 事象
+
+`gwt hook block-bash-policy` が `gh issue/pr/run` をブロックした際、ユーザーには
+`Direct GitHub workflow CLI commands are not allowed` という短文しか表示されず、
+詳細な代替コマンド一覧 (`gwt issue view` / `gwt pr view` / `gwt actions logs` /
+`gwt-search`) と `Blocked command: ...` 原文が届かなかった。他の block 系フック
+(cd / file-ops / branch-ops / git-dir) も同じ欠陥を抱えていたが、短文自体が自己
+説明的だったため見落とされていた。
+
+### 原因
+
+- `BlockDecision` が stdout へ `{"decision":"block","reason":"<short>","stopReason":"<long>"}` を
+  emit していた。
+- Claude Code の PreToolUse フックでは `stopReason` はパースされない
+  (`stopReason` は Stop/SubagentStop 専用)。長文はどこにも届いていなかった。
+- Codex も同様に Claude Code 仕様を踏襲しており、`stopReason` は PreToolUse で
+  無視される。
+
+### 再発防止策
+
+1. PreToolUse フックの block 出力は `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<all text>"}}` の
+   正式形を使い、visible 情報は必ず `permissionDecisionReason` に集約する。
+   レガシーの top-level `decision` / `reason` / `stopReason` は emit しない。
+2. `BlockDecision::new(short, long)` の call API を維持し、構造体内部で
+   `short + "\n\n" + long` を `permissionDecisionReason` に畳み込む。
+3. ブロック理由をユーザーが本当に見ているかを、個別フックに頼らず
+   `hook_types_test` 層で wire format 契約として固定する。
+4. Stop / SubagentStop 用の `stopReason` / `continue:false` と、PreToolUse 用の
+   `permissionDecision` / `permissionDecisionReason` は別物であることを前提として
+   フックを設計する。
+
 ## 2026-04-20 — fix: discussion の深さは「継続質問する」と書くだけでは維持できない
 
 ### 事象
