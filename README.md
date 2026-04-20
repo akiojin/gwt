@@ -68,6 +68,9 @@ gwt board show
 gwt hook workflow-policy
 ```
 
+Managed hooks and runtime delegation continue to enter through `gwt`. There is
+no separate operator-facing daemon command to start by hand.
+
 ## Main Workflow
 
 1. Open a repository directory or restore the previous project.

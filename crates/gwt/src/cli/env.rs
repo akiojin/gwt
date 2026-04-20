@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
+    process::{Command, Stdio},
     sync::{Arc, OnceLock},
 };
 
@@ -59,6 +60,24 @@ pub trait CliEnv {
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary>;
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String>;
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
+    fn run_internal_command(
+        &mut self,
+        args: &[String],
+        stdin: &str,
+    ) -> io::Result<InternalCommandOutput>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalCommandOutput {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalCommandCall {
+    pub args: Vec<String>,
+    pub stdin: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +451,31 @@ impl CliEnv for DefaultCliEnv {
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String> {
         super::fetch_actions_job_log_via_gh(&self.owner, &self.repo, &self.repo_path, job_id)
     }
+    fn run_internal_command(
+        &mut self,
+        args: &[String],
+        stdin: &str,
+    ) -> io::Result<InternalCommandOutput> {
+        let current_exe = std::env::current_exe()?;
+        let mut child = Command::new(current_exe)
+            .args(args.iter().skip(1))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir(&self.repo_path)
+            .spawn()?;
+
+        if let Some(mut child_stdin) = child.stdin.take() {
+            io::Write::write_all(&mut child_stdin, stdin.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
+        Ok(InternalCommandOutput {
+            status: output.status.code().unwrap_or(1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
 }
 
 /// Convenience for tests and the main entry point: take a raw argv slice,
@@ -457,6 +501,12 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
             }),
             Some("run-installer") => Ok(super::CliCommand::InternalRunInstaller {
                 rest: rest[1..].to_vec(),
+            }),
+            Some("daemon-hook") => parse_hook_args(&rest[1..]).map(|cmd| match cmd {
+                super::CliCommand::Hook { name, rest } => {
+                    super::CliCommand::InternalDaemonHook { name, rest }
+                }
+                _ => unreachable!("parse_hook_args must return CliCommand::Hook"),
             }),
             other => Err(CliParseError::UnknownSubcommand(format!(
                 "__internal {}",
@@ -516,6 +566,7 @@ pub struct TestEnv {
     pub run_log_call_log: Vec<u64>,
     pub job_logs: HashMap<u64, String>,
     pub job_log_call_log: Vec<u64>,
+    pub internal_command_call_log: Vec<InternalCommandCall>,
 }
 
 impl TestEnv {
@@ -550,6 +601,7 @@ impl TestEnv {
             run_log_call_log: Vec::new(),
             job_logs: HashMap::new(),
             job_log_call_log: Vec::new(),
+            internal_command_call_log: Vec::new(),
         }
     }
 
@@ -732,6 +784,27 @@ impl CliEnv for TestEnv {
             .get(&job_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no job log: {job_id}")))
+    }
+    fn run_internal_command(
+        &mut self,
+        args: &[String],
+        stdin: &str,
+    ) -> io::Result<InternalCommandOutput> {
+        self.internal_command_call_log.push(InternalCommandCall {
+            args: args.to_vec(),
+            stdin: stdin.to_string(),
+        });
+
+        let mut child = TestEnv::new(self.cache_root.clone());
+        child.repo_path = self.repo_path.clone();
+        child.stdin = stdin.to_string();
+        child.files = self.files.clone();
+        let status = dispatch(&mut child, args);
+        Ok(InternalCommandOutput {
+            status,
+            stdout: child.stdout,
+            stderr: child.stderr,
+        })
     }
 }
 
