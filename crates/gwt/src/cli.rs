@@ -1513,6 +1513,19 @@ pub fn run_daemon_hook<E: CliEnv>(
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
+        HookKind::BoardReminder => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwt hook board-reminder: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin, env.stdout()) {
+                Ok(()) => Ok(0),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
         HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
