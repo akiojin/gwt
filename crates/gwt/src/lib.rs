@@ -18,11 +18,11 @@ pub mod workspace;
 pub use branch_cleanup::{
     cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
-pub use branch_list::{list_branch_entries, BranchListEntry, BranchScope};
 pub use branch_list::{
-    list_branch_entries_with_active_sessions, BranchCleanupAvailability,
-    BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
+    hydrate_branch_entries_with_active_sessions, list_branch_entries_with_active_sessions,
+    BranchCleanupAvailability, BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
 };
+pub use branch_list::{list_branch_entries, list_branch_inventory, BranchListEntry, BranchScope};
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use knowledge_bridge::{
@@ -57,7 +57,7 @@ pub use preset::{
     WindowPreset, WindowSurface,
 };
 pub use protocol::{
-    AppStateView, ArrangeMode, BackendEvent, FocusCycleDirection, FrontendEvent, ProjectTabView,
-    RecentProjectView, WorkspaceView,
+    AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, FocusCycleDirection,
+    FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;
