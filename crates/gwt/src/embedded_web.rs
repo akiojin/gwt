@@ -150,6 +150,36 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_project_bar_includes_app_version_surface() {
+        let html = index_html();
+
+        assert!(
+            html.contains("id=\"app-version\""),
+            "expected embedded html to expose a project bar surface for the app version",
+        );
+        assert!(
+            html.contains("function formatVersionLabel()"),
+            "expected version label formatting to live in a named helper",
+        );
+        assert!(
+            html.contains("function renderAppVersion()"),
+            "expected project bar version rendering to live in a named helper",
+        );
+        assert!(
+            html.contains("function setVersionState(current, latest = null)"),
+            "expected version state updates to be centralized behind a helper",
+        );
+        assert!(
+            html.contains("setVersionState(appState.app_version, versionState.latest);"),
+            "expected workspace state rendering to seed the current app version",
+        );
+        assert!(
+            html.contains("setVersionState(event.current, event.latest);"),
+            "expected update events to refresh both current and latest version labels",
+        );
+    }
+
+    #[test]
     fn embedded_web_branches_surface_includes_scope_filter_controls() {
         let html = index_html();
 

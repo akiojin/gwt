@@ -111,6 +111,24 @@
         gap: 8px;
       }
 
+      .app-version {
+        display: inline-flex;
+        align-items: center;
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .app-version[hidden] {
+        display: none;
+      }
+
       .canvas-area {
         position: relative;
         flex: 1;
@@ -1701,6 +1719,7 @@
         <div class="project-bar">
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
+            <span class="app-version" id="app-version" hidden></span>
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
             </button>
@@ -1900,6 +1919,7 @@
       const branchCleanupDialog = branchCleanupModal.querySelector(".modal");
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
+      const appVersionLabel = document.getElementById("app-version");
 
       const decoderMap = new Map();
       const pendingOutputMap = new Map();
@@ -1928,10 +1948,47 @@
       let windowListOpen = false;
       let windowListEntries = [];
       let titlebarClickState = null;
-      let appState = { tabs: [], active_tab_id: null, recent_projects: [] };
+      let appState = {
+        app_version: "",
+        tabs: [],
+        active_tab_id: null,
+        recent_projects: [],
+      };
+      let versionState = { current: "", latest: "" };
       let projectError = "";
       const BRANCH_CLEANUP_TIMEOUT_MS = 30000;
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
+
+      function formatVersionLabel() {
+        const current = versionState.current;
+        const latest = versionState.latest;
+        if (!current) {
+          return "";
+        }
+        if (latest && latest !== current) {
+          return `v${current} -> v${latest}`;
+        }
+        return `v${current}`;
+      }
+
+      function renderAppVersion() {
+        const label = formatVersionLabel();
+        appVersionLabel.hidden = !label;
+        appVersionLabel.textContent = label;
+        appVersionLabel.title = label;
+      }
+
+      function setVersionState(current, latest = null) {
+        if (current) {
+          versionState.current = current;
+        }
+        if (!latest || latest === versionState.current) {
+          versionState.latest = "";
+        } else {
+          versionState.latest = latest;
+        }
+        renderAppVersion();
+      }
 
       function presetSurface(preset) {
         if (
@@ -2270,7 +2327,13 @@
       }
 
       function renderAppState(nextState) {
-        appState = nextState || { tabs: [], active_tab_id: null, recent_projects: [] };
+        appState = nextState || {
+          app_version: "",
+          tabs: [],
+          active_tab_id: null,
+          recent_projects: [],
+        };
+        setVersionState(appState.app_version, versionState.latest);
         renderProjectTabs();
         renderProjectPicker();
         updateActionAvailability();
@@ -5002,6 +5065,7 @@
             break;
           case "update_state":
             if (event.state === "available") {
+              setVersionState(event.current, event.latest);
               showUpdateToast(event.latest);
             }
             break;
