@@ -750,6 +750,25 @@ mod tests {
                 "expected discussion skill to define Discussion TODO scratch state in {relative}"
             );
             assert!(
+                discussion_skill.contains("## Discussion Depth Gate")
+                    && discussion_skill.contains("Coverage Checks")
+                    && discussion_skill.contains("Exit Blockers"),
+                "expected discussion skill to define a depth gate with coverage and exit blocker tracking in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("scope boundary")
+                    && discussion_skill.contains("ownership / integration")
+                    && discussion_skill.contains("failure / edge case")
+                    && discussion_skill.contains("migration / compatibility")
+                    && discussion_skill.contains("verification / success signal"),
+                "expected discussion skill to enumerate the discussion coverage categories in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("Start the discussion in Plan Mode")
+                    && discussion_skill.contains("leave Plan Mode"),
+                "expected discussion skill to define Plan Mode entry and exit expectations in {relative}"
+            );
+            assert!(
                 discussion_skill.contains(".claude/settings.local.json")
                     && discussion_skill.contains(".codex/hooks.json")
                     && discussion_skill.contains("SessionStart")
@@ -824,11 +843,64 @@ mod tests {
                 "expected discussion command to mention discussion artifacts in {relative}"
             );
             assert!(
+                discussion_command.contains("Plan Mode")
+                    && discussion_command.contains("leave Plan Mode")
+                    && discussion_command.contains("Coverage Checks")
+                    && discussion_command.contains("Exit Blockers"),
+                "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
+            );
+            assert!(
                 discussion_command.contains(".gwt/discussion.md")
                     && discussion_command.contains("Resume discussion")
                     && discussion_command.contains("Park proposal")
                     && discussion_command.contains("Dismiss for now"),
                 "expected discussion command to describe the resume prompt contract in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/references/clarification.md",
+            ".codex/skills/gwt-discussion/references/clarification.md",
+        ] {
+            let clarification = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                clarification.contains("Do not stop because a fixed question count was reached.")
+                    && clarification.contains("Continue asking follow-up clarification questions"),
+                "expected clarification guidance to continue beyond a fixed number of questions in {relative}"
+            );
+            assert!(
+                clarification.contains("Planning-ready requires covering the applicable categories")
+                    && !clarification.contains("Ask at most 5 questions"),
+                "expected clarification guidance to require checklist coverage instead of a five-question cap in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/references/deepening.md",
+            ".codex/skills/gwt-discussion/references/deepening.md",
+        ] {
+            let deepening = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                deepening.contains("Escalate from the normal discussion flow into deepening")
+                    && deepening.contains("top 3 highest-impact points"),
+                "expected deepening guidance to allow automatic escalation and pre-prioritization in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/references/intake.md",
+            ".codex/skills/gwt-discussion/references/intake.md",
+        ] {
+            let intake = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                intake.contains("Do not stop after the first slice success condition alone.")
+                    && intake.contains("integration target")
+                    && intake.contains("explicit non-goals")
+                    && intake.contains("verification signal"),
+                "expected intake guidance to continue beyond the first-slice success signal in {relative}"
             );
         }
 
