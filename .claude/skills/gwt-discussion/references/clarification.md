@@ -61,11 +61,15 @@ Do not guess at product or design decisions.
 
 Rules:
 
-- Ask at most 5 questions, ordered by implementation impact.
 - Present each question with numbered options and trade-off explanations.
 - **STOP and wait for answers.**
 - **Never answer clarification questions on the user's behalf.**
 - Use the standard question checklist below to avoid missing critical questions.
+- Do not stop because a fixed question count was reached.
+- Continue asking follow-up clarification questions until the planning-ready
+  exit criteria are satisfied or a real blocker remains.
+- Planning-ready requires covering the applicable categories from the standard
+  question checklist.
 
 ### Step 5: Update spec.md
 
@@ -128,6 +132,8 @@ All of the following must be true:
 - Edge cases are explicit where implementation could diverge.
 - Functional requirements and success criteria are testable.
 - Ubiquitous Language section is consistent with user stories and FRs.
+- Planning-ready requires covering the applicable categories from the standard
+  question checklist.
 
 ## Output format
 
