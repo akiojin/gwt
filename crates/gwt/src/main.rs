@@ -2201,7 +2201,7 @@ mod tests {
             .working_dir("E:/gwt/develop")
             .version("latest")
             .build();
-        config.command = r"C:\Users\test\AppData\Roaming\npm\bunx.cmd".to_string();
+        config.command = "bunx".to_string();
         config.args = vec![
             "@anthropic-ai/claude-code@latest".to_string(),
             "--print".to_string(),
@@ -2221,7 +2221,7 @@ mod tests {
             &mut config,
             "npx".to_string(),
             |command, args, _env, cwd| {
-                assert!(command.ends_with("bunx.cmd"), "command: {command}");
+                assert_eq!(command, "bunx");
                 assert_eq!(
                     args,
                     vec![
