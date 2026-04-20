@@ -775,7 +775,7 @@ impl AppRuntime {
             .active_tab_id
             .as_ref()
             .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| self.workspace_view(tab).windows)
+            .map(|tab| workspace_view_for_tab(tab).windows)
             .unwrap_or_default();
         BackendEvent::WindowList { windows }
     }
@@ -2125,46 +2125,11 @@ impl AppRuntime {
     }
 
     fn app_state_view(&self) -> gwt::AppStateView {
-        gwt::AppStateView {
-            tabs: self
-                .tabs
-                .iter()
-                .map(|tab| gwt::ProjectTabView {
-                    id: tab.id.clone(),
-                    title: tab.title.clone(),
-                    project_root: tab.project_root.display().to_string(),
-                    kind: tab.kind,
-                    workspace: self.workspace_view(tab),
-                })
-                .collect(),
-            active_tab_id: self.active_tab_id.clone(),
-            recent_projects: self
-                .recent_projects
-                .iter()
-                .map(|project| gwt::RecentProjectView {
-                    path: project.path.display().to_string(),
-                    title: project.title.clone(),
-                    kind: project.kind,
-                })
-                .collect(),
-        }
-    }
-
-    fn workspace_view(&self, tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
-        gwt::WorkspaceView {
-            viewport: tab.workspace.persisted().viewport.clone(),
-            windows: tab
-                .workspace
-                .persisted()
-                .windows
-                .iter()
-                .cloned()
-                .map(|mut window| {
-                    window.id = combined_window_id(&tab.id, &window.id);
-                    window
-                })
-                .collect(),
-        }
+        app_state_view_from_parts(
+            &self.tabs,
+            self.active_tab_id.as_deref(),
+            &self.recent_projects,
+        )
     }
 
     fn workspace_state_broadcast(&self) -> OutboundEvent {
@@ -2368,9 +2333,61 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
         )
 }
 
+fn current_app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+    gwt::WorkspaceView {
+        viewport: tab.workspace.persisted().viewport.clone(),
+        windows: tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .cloned()
+            .map(|mut window| {
+                window.id = combined_window_id(&tab.id, &window.id);
+                window
+            })
+            .collect(),
+    }
+}
+
+fn app_state_view_from_parts(
+    tabs: &[ProjectTabRuntime],
+    active_tab_id: Option<&str>,
+    recent_projects: &[gwt::RecentProjectEntry],
+) -> gwt::AppStateView {
+    gwt::AppStateView {
+        app_version: current_app_version().to_string(),
+        tabs: tabs
+            .iter()
+            .map(|tab| gwt::ProjectTabView {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                project_root: tab.project_root.display().to_string(),
+                kind: tab.kind,
+                workspace: workspace_view_for_tab(tab),
+            })
+            .collect(),
+        active_tab_id: active_tab_id.map(str::to_owned),
+        recent_projects: recent_projects
+            .iter()
+            .map(|project| gwt::RecentProjectView {
+                path: project.path.display().to_string(),
+                title: project.title.clone(),
+                kind: project.kind,
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
+
+    use tempfile::tempdir;
 
     use gwt::{
         empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
@@ -2379,13 +2396,13 @@ mod tests {
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_terminal::PaneStatus;
-    use tempfile::tempdir;
 
     use super::{
-        apply_host_package_runner_fallback_with_probe, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, knowledge_kind_for_preset,
-        preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
-        should_auto_start_restored_window, ActiveAgentSession, ProjectTabRuntime, WindowAddress,
+        app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        knowledge_kind_for_preset, preferred_issue_launch_branch, resolve_project_target,
+        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
+        ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2542,6 +2559,19 @@ mod tests {
         assert!(tabs[0].workspace.window(raw_window_id).is_none());
         assert!(!window_lookup.contains_key(&window_id));
         assert!(!window_details.contains_key(&window_id));
+    }
+
+    #[test]
+    fn app_state_view_includes_current_app_version() {
+        let tabs = vec![sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        )];
+        let view = app_state_view_from_parts(&tabs, Some("tab-1"), &[]);
+
+        assert_eq!(view.app_version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
