@@ -80,8 +80,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run Windows PTY regression tests
         run: cargo test -p gwt-core terminal::pty
+        timeout-minutes: 15
+      - name: Run release asset contract tests
+        run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
