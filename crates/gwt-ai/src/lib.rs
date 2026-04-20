@@ -7,12 +7,17 @@
 //! - [`session_converter`] — Session format conversion between agents
 //! - [`error::AIError`] — Unified error type
 
+pub mod anthropic_backend;
 pub mod branch_suggest;
 pub mod client;
 pub mod error;
 pub mod issue_classify;
 pub mod session_converter;
 
+pub use anthropic_backend::{
+    list_model_ids_blocking, list_models_blocking, parse_models_response, ModelInfo, ProbeError,
+    PROBE_TIMEOUT,
+};
 pub use branch_suggest::{parse_suggestions, suggest_branch_name};
 pub use client::{AIClient, ChatMessage};
 pub use error::AIError;
