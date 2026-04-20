@@ -96,6 +96,39 @@ enum UserEvent {
     MenuEvent(muda::MenuEvent),
 }
 
+#[derive(Clone)]
+enum AppEventProxy {
+    Real(EventLoopProxy<UserEvent>),
+    #[cfg(test)]
+    Stub(Arc<Mutex<Vec<UserEvent>>>),
+}
+
+impl AppEventProxy {
+    fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        Self::Real(proxy)
+    }
+
+    fn send(&self, event: UserEvent) {
+        match self {
+            Self::Real(proxy) => {
+                let _ = proxy.send_event(event);
+            }
+            #[cfg(test)]
+            Self::Stub(events) => {
+                if let Ok(mut events) = events.lock() {
+                    events.push(event);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn stub() -> (Self, Arc<Mutex<Vec<UserEvent>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        (Self::Stub(events.clone()), events)
+    }
+}
+
 struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
@@ -199,7 +232,7 @@ struct AppRuntime {
     window_details: HashMap<String, String>,
     window_lookup: HashMap<String, WindowAddress>,
     session_state_path: PathBuf,
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -255,7 +288,7 @@ impl AppRuntime {
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
             session_state_path,
-            proxy,
+            proxy: AppEventProxy::new(proxy),
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
@@ -1031,7 +1064,7 @@ impl AppRuntime {
     }
 
     fn spawn_branch_cleanup_async(
-        proxy: EventLoopProxy<UserEvent>,
+        proxy: AppEventProxy,
         client_id: ClientId,
         window_id: String,
         project_root: PathBuf,
@@ -1087,7 +1120,7 @@ impl AppRuntime {
                     },
                 )],
             };
-            let _ = proxy.send_event(UserEvent::Dispatch(events));
+            proxy.send(UserEvent::Dispatch(events));
         });
     }
 
@@ -1179,7 +1212,7 @@ impl AppRuntime {
                 &active_session_branches,
                 &sessions_dir,
             );
-            let _ = proxy.send_event(UserEvent::LaunchWizardHydrated { wizard_id, result });
+            proxy.send(UserEvent::LaunchWizardHydrated { wizard_id, result });
         });
 
         Ok(())
@@ -1246,7 +1279,7 @@ impl AppRuntime {
                         preferred_issue_launch_branch(&entries)
                             .ok_or_else(|| "No local branch is available for launch".to_string())
                     });
-            let _ = proxy.send_event(UserEvent::IssueLaunchWizardPrepared(
+            proxy.send(UserEvent::IssueLaunchWizardPrepared(
                 IssueLaunchWizardPrepared {
                     client_id,
                     id,
@@ -1836,26 +1869,26 @@ impl AppRuntime {
     }
 
     fn spawn_agent_window_async(
-        proxy: EventLoopProxy<UserEvent>,
+        proxy: AppEventProxy,
         sessions_dir: PathBuf,
         project_root: String,
         window_id: String,
         mut config: gwt_agent::LaunchConfig,
     ) {
         let result = (|| {
-            let _ = proxy.send_event(UserEvent::LaunchProgress {
+            proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
             resolve_launch_worktree(Path::new(&project_root), &mut config)?;
 
-            let _ = proxy.send_event(UserEvent::LaunchProgress {
+            proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Starting Docker service...".to_string(),
             });
             apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
 
-            let _ = proxy.send_event(UserEvent::LaunchProgress {
+            proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Configuring workspace...".to_string(),
             });
@@ -1869,7 +1902,7 @@ impl AppRuntime {
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
                 && apply_host_package_runner_fallback(&mut config)
             {
-                let _ = proxy.send_event(UserEvent::LaunchProgress {
+                proxy.send(UserEvent::LaunchProgress {
                     window_id: window_id.clone(),
                     message: "bunx unavailable, switching to npx...".to_string(),
                 });
@@ -1945,7 +1978,7 @@ impl AppRuntime {
                 worktree_path,
                 agent_id,
             )) => {
-                let _ = proxy.send_event(UserEvent::LaunchComplete {
+                proxy.send(UserEvent::LaunchComplete {
                     window_id,
                     result: Ok((
                         process_launch,
@@ -1958,7 +1991,7 @@ impl AppRuntime {
                 });
             }
             Err(error) => {
-                let _ = proxy.send_event(UserEvent::LaunchComplete {
+                proxy.send(UserEvent::LaunchComplete {
                     window_id,
                     result: Err(error),
                 });
@@ -1967,20 +2000,20 @@ impl AppRuntime {
     }
 
     fn spawn_wizard_shell_window_async(
-        proxy: EventLoopProxy<UserEvent>,
+        proxy: AppEventProxy,
         project_root: String,
         window_id: String,
         mut config: ShellLaunchConfig,
     ) {
         let result = (|| {
-            let _ = proxy.send_event(UserEvent::LaunchProgress {
+            proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
             resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                let _ = proxy.send_event(UserEvent::LaunchProgress {
+                proxy.send(UserEvent::LaunchProgress {
                     window_id: window_id.clone(),
                     message: "Starting Docker service...".to_string(),
                 });
@@ -1989,7 +2022,7 @@ impl AppRuntime {
             build_shell_process_launch(Path::new(&project_root), &mut config)
         })();
 
-        let _ = proxy.send_event(UserEvent::ShellLaunchComplete { window_id, result });
+        proxy.send(UserEvent::ShellLaunchComplete { window_id, result });
     }
 
     fn mark_agent_session_stopped(&mut self, window_id: &str) {
@@ -2047,7 +2080,7 @@ impl AppRuntime {
             {
                 Ok(reader) => reader,
                 Err(error) => {
-                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                    proxy.send(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
@@ -2066,13 +2099,13 @@ impl AppRuntime {
                         if let Ok(mut pane) = pane.lock() {
                             pane.process_bytes(&chunk);
                         }
-                        let _ = proxy.send_event(UserEvent::RuntimeOutput {
+                        proxy.send(UserEvent::RuntimeOutput {
                             id: id.clone(),
                             data: chunk,
                         });
                     }
                     Err(error) => {
-                        let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                        proxy.send(UserEvent::RuntimeStatus {
                             id: id.clone(),
                             status: WindowProcessStatus::Error,
                             detail: Some(error.to_string()),
@@ -2093,28 +2126,28 @@ impl AppRuntime {
 
             match status {
                 Ok(PaneStatus::Running) | Ok(PaneStatus::Completed(0)) => {
-                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                    proxy.send(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Exited,
                         detail: Some("Process exited".to_string()),
                     });
                 }
                 Ok(PaneStatus::Completed(code)) => {
-                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                    proxy.send(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Error,
                         detail: Some(format!("Process exited with status {code}")),
                     });
                 }
                 Ok(PaneStatus::Error(message)) => {
-                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                    proxy.send(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Error,
                         detail: Some(message),
                     });
                 }
                 Err(error) => {
-                    let _ = proxy.send_event(UserEvent::RuntimeStatus {
+                    proxy.send(UserEvent::RuntimeStatus {
                         id,
                         status: WindowProcessStatus::Error,
                         detail: Some(error),
@@ -2385,14 +2418,23 @@ fn app_state_view_from_parts(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs, path::PathBuf, process::Command};
+    use std::{
+        collections::HashMap,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use tempfile::tempdir;
 
     use gwt::{
-        empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
-        PersistedWindowState, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
-        WorkspaceState,
+        empty_workspace_state, AgentOption, ArrangeMode, BackendEvent, BranchCleanupInfo,
+        BranchListEntry, BranchScope, CanvasViewport, FocusCycleDirection, KnowledgeKind,
+        LaunchWizardAction, LaunchWizardContext, LaunchWizardState, PersistedWindowState,
+        ProjectKind, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig, WindowGeometry,
+        WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_terminal::PaneStatus;
@@ -2402,8 +2444,108 @@ mod tests {
         build_shell_process_launch, close_window_from_workspace, combined_window_id,
         knowledge_kind_for_preset, preferred_issue_launch_branch, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        ProjectTabRuntime, WindowAddress,
+        AppEventProxy, AppRuntime, DispatchTarget, LaunchWizardSession, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowAddress,
     };
+
+    fn canvas_bounds() -> WindowGeometry {
+        WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1400.0,
+            height: 900.0,
+        }
+    }
+
+    fn init_git_repo(path: &Path) {
+        fs::create_dir_all(path).expect("create repo dir");
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(path)
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+
+        for args in [
+            vec!["config", "user.name", "Codex Test"],
+            vec!["config", "user.email", "codex@example.com"],
+            vec!["commit", "--allow-empty", "-qm", "init"],
+            vec!["branch", "feature/demo"],
+        ] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(path)
+                .status()
+                .expect("git command");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+    }
+
+    fn init_git_clone_with_origin(path: &Path) -> PathBuf {
+        let root = path.parent().expect("repo parent");
+        let seed = root.join("seed");
+        let origin = root.join("origin.git");
+
+        fs::create_dir_all(&seed).expect("create seed dir");
+        let status = Command::new("git")
+            .args(["init", "-q", "-b", "develop"])
+            .arg(&seed)
+            .status()
+            .expect("git init seed");
+        assert!(status.success(), "git init seed failed");
+
+        for args in [
+            vec!["config", "user.name", "Codex Test"],
+            vec!["config", "user.email", "codex@example.com"],
+        ] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(&seed)
+                .status()
+                .expect("git seed config");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        fs::write(seed.join("README.md"), "seed\n").expect("write seed readme");
+        for args in [vec!["add", "README.md"], vec!["commit", "-qm", "init"]] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(&seed)
+                .status()
+                .expect("git seed commit");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        let status = Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(&seed)
+            .arg(&origin)
+            .status()
+            .expect("git clone --bare");
+        assert!(status.success(), "git clone --bare failed");
+
+        let status = Command::new("git")
+            .args(["clone"])
+            .arg(&origin)
+            .arg(path)
+            .status()
+            .expect("git clone repo");
+        assert!(status.success(), "git clone repo failed");
+
+        for args in [
+            vec!["config", "user.name", "Codex Test"],
+            vec!["config", "user.email", "codex@example.com"],
+        ] {
+            let status = Command::new("git")
+                .args(&args)
+                .current_dir(path)
+                .status()
+                .expect("git repo config");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        origin
+    }
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -2479,6 +2621,1470 @@ mod tests {
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
             tab_id: tab_id.to_string(),
         }
+    }
+
+    fn sample_project_tab(
+        tab_id: &str,
+        title: &str,
+        project_root: PathBuf,
+        kind: ProjectKind,
+        presets: &[WindowPreset],
+    ) -> ProjectTabRuntime {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        for preset in presets {
+            let _ = workspace.add_window(*preset, canvas_bounds());
+        }
+        ProjectTabRuntime {
+            id: tab_id.to_string(),
+            title: title.to_string(),
+            project_root,
+            kind,
+            workspace,
+        }
+    }
+
+    fn sample_runtime(
+        temp_root: &Path,
+        tabs: Vec<ProjectTabRuntime>,
+        active_tab_id: Option<&str>,
+    ) -> AppRuntime {
+        sample_runtime_with_events(temp_root, tabs, active_tab_id).0
+    }
+
+    fn sample_runtime_with_events(
+        temp_root: &Path,
+        tabs: Vec<ProjectTabRuntime>,
+        active_tab_id: Option<&str>,
+    ) -> (AppRuntime, Arc<Mutex<Vec<UserEvent>>>) {
+        let (proxy, events) = AppEventProxy::stub();
+        let sessions_dir = temp_root.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let mut runtime = AppRuntime {
+            tabs,
+            active_tab_id: active_tab_id.map(str::to_owned),
+            recent_projects: Vec::new(),
+            runtimes: HashMap::new(),
+            window_details: HashMap::new(),
+            window_lookup: HashMap::new(),
+            session_state_path: temp_root.join("session-state.json"),
+            proxy,
+            sessions_dir,
+            launch_wizard: None,
+            active_agent_sessions: HashMap::new(),
+            pending_update: None,
+        };
+        runtime.rebuild_window_lookup();
+        (runtime, events)
+    }
+
+    fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
+        LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id: "wizard-1".to_string(),
+            wizard: LaunchWizardState::open_loading(
+                LaunchWizardContext {
+                    selected_branch: BranchListEntry {
+                        name: "feature/demo".to_string(),
+                        scope: BranchScope::Local,
+                        is_head: false,
+                        upstream: None,
+                        ahead: 0,
+                        behind: 0,
+                        last_commit_date: None,
+                        cleanup: BranchCleanupInfo::default(),
+                    },
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: None,
+                    quick_start_root: project_root.to_path_buf(),
+                    live_sessions: Vec::new(),
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                Vec::new(),
+            ),
+        }
+    }
+
+    fn sample_branch_entry(name: &str) -> BranchListEntry {
+        BranchListEntry {
+            name: name.to_string(),
+            scope: BranchScope::Local,
+            is_head: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: None,
+            cleanup: BranchCleanupInfo::default(),
+        }
+    }
+
+    fn sample_wizard_agent_options() -> Vec<AgentOption> {
+        vec![AgentOption {
+            id: "codex".to_string(),
+            name: "Codex".to_string(),
+            available: true,
+            installed_version: Some("0.110.0".to_string()),
+            versions: vec!["0.110.0".to_string()],
+        }]
+    }
+
+    fn sample_wizard_quick_start_entry(live_window_id: Option<&str>) -> QuickStartEntry {
+        QuickStartEntry {
+            session_id: "gwt-session-1".to_string(),
+            agent_id: "codex".to_string(),
+            tool_label: "Codex".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            reasoning: Some("high".to_string()),
+            version: Some("0.110.0".to_string()),
+            resume_session_id: Some("resume-1".to_string()),
+            live_window_id: live_window_id.map(str::to_string),
+            skip_permissions: true,
+            codex_fast_mode: true,
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+        }
+    }
+
+    fn sample_focus_launch_wizard_session(
+        tab_id: &str,
+        project_root: &Path,
+        live_window_id: Option<&str>,
+    ) -> LaunchWizardSession {
+        LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id: "wizard-focus".to_string(),
+            wizard: LaunchWizardState::open_with(
+                LaunchWizardContext {
+                    selected_branch: sample_branch_entry("feature/demo"),
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: Some(project_root.to_path_buf()),
+                    quick_start_root: project_root.to_path_buf(),
+                    live_sessions: Vec::new(),
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                sample_wizard_agent_options(),
+                vec![sample_wizard_quick_start_entry(live_window_id)],
+            ),
+        }
+    }
+
+    fn window_id_for_preset(
+        runtime: &AppRuntime,
+        tab_id: &str,
+        preset: WindowPreset,
+        ordinal: usize,
+    ) -> String {
+        let tab = runtime.tab(tab_id).expect("tab");
+        let raw_id = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == preset)
+            .nth(ordinal)
+            .map(|window| window.id.clone())
+            .expect("window");
+        combined_window_id(tab_id, &raw_id)
+    }
+
+    fn wait_for_recorded_event(
+        label: &str,
+        events: &Arc<Mutex<Vec<UserEvent>>>,
+        predicate: impl Fn(&[UserEvent]) -> bool,
+    ) {
+        for _ in 0..200 {
+            {
+                let events = events.lock().expect("event log");
+                if predicate(&events) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let snapshot = events.lock().expect("event log").clone();
+        panic!("timed out waiting for {label}: {snapshot:?}");
+    }
+
+    #[test]
+    fn frontend_sync_events_replay_status_wizard_and_pending_update() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::NonRepo,
+            &[WindowPreset::FileTree],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+        runtime
+            .window_details
+            .insert(window_id.clone(), "Paused".to_string());
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        runtime.pending_update = Some(gwt_core::update::UpdateState::UpToDate { checked_at: None });
+
+        let events = runtime.frontend_sync_events("client-1");
+
+        assert!(matches!(
+            events.first(),
+            Some(event)
+                if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
+                    && matches!(event.event, BackendEvent::WorkspaceState { .. })
+        ));
+        assert!(events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::TerminalStatus { id, status, detail }
+                    if id == &window_id
+                        && *status == WindowProcessStatus::Ready
+                        && detail.as_deref() == Some("Paused")
+            )
+        }));
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
+        )));
+    }
+
+    #[test]
+    fn open_project_path_reuses_existing_tab_and_adds_new_tab() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        let scratch = temp.path().join("scratch");
+        init_git_repo(&repo);
+        fs::create_dir_all(&other).expect("create other");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        let tabs = vec![
+            sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::Git,
+                &[WindowPreset::Branches],
+            ),
+            sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::NonRepo, &[]),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-2"));
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
+
+        let existing = runtime
+            .open_project_path(repo.clone())
+            .expect("open existing project");
+        let new_active = runtime.active_tab_id.clone().expect("active tab");
+
+        assert!(existing);
+        assert_eq!(new_active, "tab-1");
+        assert!(runtime.launch_wizard.is_none());
+        assert_eq!(runtime.recent_projects[0].path, repo);
+
+        let added = runtime
+            .open_project_path(scratch.clone())
+            .expect("open new project");
+
+        assert!(!added);
+        assert_eq!(runtime.tabs.len(), 3);
+        assert_eq!(runtime.recent_projects[0].path, scratch);
+        assert!(runtime
+            .active_tab_id
+            .as_deref()
+            .is_some_and(|tab_id| tab_id != "tab-1" && tab_id != "tab-2"));
+    }
+
+    #[test]
+    fn select_and_close_project_tabs_emit_workspace_and_wizard_updates() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other).expect("create other");
+        let tabs = vec![
+            sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::Branches],
+            ),
+            sample_project_tab(
+                "tab-2",
+                "Other",
+                other.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::FileTree],
+            ),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+
+        let select_events = runtime.select_project_tab_events("tab-2");
+
+        assert_eq!(select_events.len(), 2);
+        assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
+        assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            select_events[1].event,
+            BackendEvent::LaunchWizardState { wizard: None }
+        ));
+
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
+        let close_events = runtime.close_project_tab_events("tab-2");
+
+        assert_eq!(close_events.len(), 2);
+        assert_eq!(runtime.tabs.len(), 1);
+        assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
+        assert!(runtime.launch_wizard.is_none());
+        assert!(runtime
+            .window_lookup
+            .keys()
+            .all(|id| id.starts_with("tab-1::")));
+    }
+
+    #[test]
+    fn window_management_events_cover_canvas_operations() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let bounds = canvas_bounds();
+
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Branches, bounds.clone())
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::FileTree, bounds.clone())
+                .len(),
+            1
+        );
+
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+        let file_tree_raw_id = runtime
+            .window_lookup
+            .get(&file_tree_id)
+            .expect("file tree lookup")
+            .raw_id
+            .clone();
+
+        assert_eq!(
+            runtime.window_status(&branches_id),
+            Some(WindowProcessStatus::Ready)
+        );
+        assert_eq!(
+            runtime
+                .focus_window_events(&branches_id, Some(bounds.clone()))
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .cycle_focus_events(FocusCycleDirection::Forward, bounds.clone())
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .update_viewport_events(CanvasViewport {
+                    x: 10.0,
+                    y: 20.0,
+                    zoom: 1.2,
+                })
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .arrange_windows_events(ArrangeMode::Tile, bounds.clone())
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .maximize_window_events(&file_tree_id, bounds.clone())
+                .len(),
+            1
+        );
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&file_tree_raw_id)
+                .expect("window")
+                .maximized
+        );
+        assert_eq!(runtime.minimize_window_events(&file_tree_id).len(), 1);
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&file_tree_raw_id)
+                .expect("window")
+                .minimized
+        );
+        assert_eq!(runtime.restore_window_events(&file_tree_id).len(), 1);
+        assert!(
+            !runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&file_tree_raw_id)
+                .expect("window")
+                .minimized
+        );
+
+        let geometry = WindowGeometry {
+            x: 30.0,
+            y: 40.0,
+            width: 500.0,
+            height: 320.0,
+        };
+        assert_eq!(
+            runtime
+                .update_window_geometry_events(&file_tree_id, geometry.clone(), 10, 1)
+                .len(),
+            1
+        );
+        let updated_window = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&file_tree_raw_id)
+            .expect("window");
+        assert_eq!(updated_window.geometry, geometry);
+
+        match runtime.list_windows_event() {
+            BackendEvent::WindowList { windows } => assert_eq!(windows.len(), 2),
+            other => panic!("expected window list, got {other:?}"),
+        }
+
+        assert_eq!(runtime.close_window_events(&file_tree_id).len(), 1);
+        assert!(!runtime.window_lookup.contains_key(&file_tree_id));
+    }
+
+    #[test]
+    fn loaders_and_wizard_entrypoints_cover_success_and_error_paths() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::write(repo.join("README.md"), "hello").expect("write readme");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::Git,
+            &[
+                WindowPreset::Branches,
+                WindowPreset::FileTree,
+                WindowPreset::Issue,
+            ],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+
+        assert!(matches!(
+            runtime.load_file_tree_event("missing", ""),
+            BackendEvent::FileTreeError { ref message, .. } if message == "Window not found"
+        ));
+        assert!(matches!(
+            runtime.load_file_tree_event(&branches_id, ""),
+            BackendEvent::FileTreeError { ref message, .. } if message == "Window is not a file tree"
+        ));
+        assert!(matches!(
+            runtime.load_file_tree_event(&file_tree_id, ""),
+            BackendEvent::FileTreeEntries { ref entries, .. } if !entries.is_empty()
+        ));
+
+        assert!(matches!(
+            runtime.load_branches_event("missing"),
+            BackendEvent::BranchError { ref message, .. } if message == "Window not found"
+        ));
+        assert!(matches!(
+            runtime.load_branches_event(&file_tree_id),
+            BackendEvent::BranchError { ref message, .. } if message == "Window is not a branches list"
+        ));
+        assert!(matches!(
+            runtime.load_branches_event(&branches_id),
+            BackendEvent::BranchEntries { ref entries, .. } if !entries.is_empty()
+        ));
+
+        let knowledge_missing = runtime.load_knowledge_bridge_events(
+            "client-1",
+            "missing",
+            KnowledgeKind::Issue,
+            None,
+            false,
+        );
+        assert_eq!(knowledge_missing.len(), 1);
+        assert!(matches!(
+            knowledge_missing[0].event,
+            BackendEvent::KnowledgeError { ref message, .. } if message == "Window not found"
+        ));
+
+        let knowledge_wrong = runtime.load_knowledge_bridge_events(
+            "client-1",
+            &branches_id,
+            KnowledgeKind::Issue,
+            None,
+            false,
+        );
+        assert_eq!(knowledge_wrong.len(), 1);
+        assert!(matches!(
+            knowledge_wrong[0].event,
+            BackendEvent::KnowledgeError { ref message, .. }
+                if message == "Window is not a knowledge bridge"
+        ));
+
+        let cleanup_missing = runtime.run_branch_cleanup_events("client-1", "missing", &[], false);
+        assert_eq!(cleanup_missing.len(), 1);
+        assert!(matches!(
+            cleanup_missing[0].event,
+            BackendEvent::BranchError { ref message, .. } if message == "Window not found"
+        ));
+
+        let cleanup_wrong =
+            runtime.run_branch_cleanup_events("client-1", &file_tree_id, &[], false);
+        assert_eq!(cleanup_wrong.len(), 1);
+        assert!(matches!(
+            cleanup_wrong[0].event,
+            BackendEvent::BranchError { ref message, .. }
+                if message == "Window is not a branches list"
+        ));
+
+        let wizard_missing = runtime.open_launch_wizard("missing", "feature/demo", None);
+        assert_eq!(wizard_missing.len(), 1);
+        assert!(matches!(
+            wizard_missing[0].event,
+            BackendEvent::BranchError { ref message, .. } if message == "Window not found"
+        ));
+
+        let wizard_wrong = runtime.open_launch_wizard(&file_tree_id, "feature/demo", None);
+        assert_eq!(wizard_wrong.len(), 1);
+        assert!(matches!(
+            wizard_wrong[0].event,
+            BackendEvent::BranchError { ref message, .. }
+                if message == "Window is not a branches list"
+        ));
+
+        let issue_missing = runtime.open_issue_launch_wizard_events("client-1", "missing", 7);
+        assert_eq!(issue_missing.len(), 1);
+        assert!(matches!(
+            issue_missing[0].event,
+            BackendEvent::KnowledgeError { ref message, .. } if message == "Window not found"
+        ));
+
+        let issue_wrong = runtime.open_issue_launch_wizard_events("client-1", &file_tree_id, 7);
+        assert_eq!(issue_wrong.len(), 1);
+        assert!(matches!(
+            issue_wrong[0].event,
+            BackendEvent::KnowledgeError { ref message, .. }
+                if message == "Window is not a knowledge bridge"
+        ));
+    }
+
+    #[test]
+    fn runtime_status_helpers_cover_sessions_auto_close_and_launch_errors() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::NonRepo,
+            &[
+                WindowPreset::Claude,
+                WindowPreset::Claude,
+                WindowPreset::Shell,
+            ],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let claude_one_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
+        let claude_two_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 1);
+        let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
+        runtime.active_agent_sessions.insert(
+            claude_one_id.clone(),
+            ActiveAgentSession {
+                display_name: "Beta".to_string(),
+                branch_name: "feature/demo".to_string(),
+                ..sample_active_agent_session("tab-1", &claude_one_id)
+            },
+        );
+        runtime.active_agent_sessions.insert(
+            claude_two_id.clone(),
+            ActiveAgentSession {
+                display_name: "Alpha".to_string(),
+                branch_name: "feature/demo".to_string(),
+                session_id: "session-2".to_string(),
+                ..sample_active_agent_session("tab-1", &claude_two_id)
+            },
+        );
+
+        let live_sessions = runtime.live_sessions_for_branch("tab-1", "feature/demo");
+        assert_eq!(live_sessions.len(), 2);
+        assert_eq!(live_sessions[0].name, "Alpha");
+        assert_eq!(live_sessions[1].name, "Beta");
+        assert!(runtime
+            .active_session_branches_for_tab("tab-1")
+            .contains("feature/demo"));
+
+        assert!(runtime
+            .handle_runtime_output("missing".to_string(), b"noop".to_vec())
+            .is_empty());
+        let output_events = runtime.handle_runtime_output(shell_id.clone(), b"hello".to_vec());
+        assert!(matches!(
+            output_events[0].event,
+            BackendEvent::TerminalOutput { ref id, ref data_base64 }
+                if id == &shell_id && data_base64 == "aGVsbG8="
+        ));
+
+        let error_events = runtime.handle_runtime_status(
+            claude_one_id.clone(),
+            WindowProcessStatus::Error,
+            Some("boom".to_string()),
+        );
+        assert_eq!(error_events.len(), 2);
+        assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
+        assert_eq!(
+            runtime
+                .window_details
+                .get(&claude_one_id)
+                .map(String::as_str),
+            Some("boom")
+        );
+        assert!(matches!(
+            error_events[1].event,
+            BackendEvent::TerminalStatus { ref status, ref detail, .. }
+                if *status == WindowProcessStatus::Error
+                    && detail.as_deref() == Some("boom")
+        ));
+
+        let close_events = runtime.handle_runtime_status(
+            claude_two_id.clone(),
+            WindowProcessStatus::Exited,
+            Some("Process exited".to_string()),
+        );
+        assert_eq!(close_events.len(), 1);
+        assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
+        assert!(!runtime.window_lookup.contains_key(&claude_two_id));
+
+        let failed_launch = runtime.handle_launch_complete(
+            "tab-1::missing".to_string(),
+            Err("launch failed".to_string()),
+        );
+        assert!(matches!(
+            failed_launch[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("launch failed")
+        ));
+
+        let missing_window_launch = runtime.handle_launch_complete(
+            "tab-1::missing".to_string(),
+            Ok((
+                ProcessLaunch {
+                    command: "echo".to_string(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                "session-3".to_string(),
+                "feature/demo".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                AgentId::Codex,
+            )),
+        );
+        assert!(matches!(
+            missing_window_launch[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("Window not found")
+        ));
+
+        let shell_launch = runtime.handle_shell_launch_complete(
+            "tab-1::missing".to_string(),
+            Ok(ProcessLaunch {
+                command: "echo".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            }),
+        );
+        assert!(matches!(
+            shell_launch[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("Window not found")
+        ));
+    }
+
+    #[test]
+    fn app_runtime_window_helpers_cover_lookup_status_and_seeded_details() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut runtime = sample_runtime(
+            temp.path(),
+            vec![sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::Claude],
+            )],
+            Some("tab-1"),
+        );
+        let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
+        let raw_id = runtime
+            .window_lookup
+            .get(&window_id)
+            .expect("window lookup")
+            .raw_id
+            .clone();
+        runtime.set_window_status("tab-1", &raw_id, WindowProcessStatus::Exited);
+        runtime.seed_restored_window_details();
+
+        assert_eq!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Exited)
+        );
+        assert!(runtime
+            .window_details
+            .get(&window_id)
+            .is_some_and(|detail| detail.contains("Restored window is paused")));
+
+        runtime.window_lookup.clear();
+        runtime.register_window("tab-1", &raw_id);
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        runtime.window_lookup.clear();
+        runtime.rebuild_window_lookup();
+        assert!(runtime.window_lookup.contains_key(&window_id));
+
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        assert!(runtime.clear_launch_wizard().is_some());
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        assert!(!runtime.set_active_tab("tab-1".to_string()));
+    }
+
+    #[test]
+    fn async_main_helpers_emit_proxy_events_without_gui_runtime() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+        let status = Command::new("git")
+            .args(["checkout", "-qb", "feature/prune-me"])
+            .current_dir(&repo)
+            .status()
+            .expect("create branch");
+        assert!(status.success(), "create branch failed");
+        let status = Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("checkout main");
+        assert!(status.success(), "checkout main failed");
+
+        let (mut runtime, events) = sample_runtime_with_events(
+            temp.path(),
+            vec![sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo,
+                ProjectKind::Git,
+                &[WindowPreset::Branches, WindowPreset::Issue],
+            )],
+            Some("tab-1"),
+        );
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
+
+        let cleanup_events = runtime.run_branch_cleanup_events(
+            "client-1",
+            &branches_id,
+            &[String::from("feature/prune-me")],
+            false,
+        );
+        assert!(cleanup_events.is_empty());
+        wait_for_recorded_event("branch cleanup dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupResult { .. }
+                        ))
+                )
+            })
+        });
+
+        let wizard_events = runtime.open_launch_wizard(&branches_id, "feature/demo", Some(42));
+        assert_eq!(wizard_events.len(), 1);
+        assert!(matches!(
+            wizard_events[0].event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
+        ));
+        wait_for_recorded_event("launch wizard hydration", &events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
+        });
+
+        let issue_events = runtime.open_issue_launch_wizard_events("client-1", &issue_id, 42);
+        assert!(issue_events.is_empty());
+        wait_for_recorded_event("issue launch preparation", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::IssueLaunchWizardPrepared(prepared)
+                        if prepared.id == issue_id
+                            && prepared.client_id == "client-1"
+                            && prepared.issue_number == 42
+                            && prepared.result.is_ok()
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn frontend_event_dispatch_routes_canvas_knowledge_and_async_paths() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let scratch = temp.path().join("scratch");
+        init_git_repo(&repo);
+        fs::create_dir_all(repo.join("src")).expect("create src");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        fs::write(repo.join("README.md"), "hello").expect("write readme");
+
+        let (mut runtime, events) = sample_runtime_with_events(
+            temp.path(),
+            vec![sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::Git,
+                &[
+                    WindowPreset::Branches,
+                    WindowPreset::FileTree,
+                    WindowPreset::Issue,
+                ],
+            )],
+            Some("tab-1"),
+        );
+        let bounds = canvas_bounds();
+        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
+        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
+
+        assert!(!runtime
+            .handle_frontend_event("client-1".to_string(), gwt::FrontendEvent::FrontendReady)
+            .is_empty());
+        assert!(!runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::ReopenRecentProject {
+                    path: scratch.display().to_string(),
+                },
+            )
+            .is_empty());
+        assert!(!runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::SelectProjectTab {
+                    tab_id: "tab-1".to_string(),
+                },
+            )
+            .is_empty());
+        assert!(runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::CloseProjectTab {
+                    tab_id: "missing".to_string(),
+                },
+            )
+            .is_empty());
+
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::CreateWindow {
+                        preset: WindowPreset::Settings,
+                        bounds: bounds.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::FocusWindow {
+                        id: branches_id.clone(),
+                        bounds: Some(bounds.clone()),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::CycleFocus {
+                        direction: FocusCycleDirection::Forward,
+                        bounds: bounds.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::UpdateViewport {
+                        viewport: CanvasViewport {
+                            x: 5.0,
+                            y: 10.0,
+                            zoom: 1.1,
+                        },
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::ArrangeWindows {
+                        mode: ArrangeMode::Tile,
+                        bounds: bounds.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::MaximizeWindow {
+                        id: file_tree_id.clone(),
+                        bounds: bounds.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::MinimizeWindow {
+                        id: file_tree_id.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::RestoreWindow {
+                        id: file_tree_id.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event("client-1".to_string(), gwt::FrontendEvent::ListWindows,)
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::UpdateWindowGeometry {
+                        id: file_tree_id.clone(),
+                        geometry: WindowGeometry {
+                            x: 20.0,
+                            y: 30.0,
+                            width: 480.0,
+                            height: 300.0,
+                        },
+                        cols: 80,
+                        rows: 24,
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::CloseWindow { id: settings_id },
+                )
+                .len(),
+            1
+        );
+        assert!(runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::TerminalInput {
+                    id: "missing".to_string(),
+                    data: "noop".to_string(),
+                },
+            )
+            .is_empty());
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::LoadFileTree {
+                        id: file_tree_id.clone(),
+                        path: Some("src".to_string()),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .handle_frontend_event(
+                    "client-1".to_string(),
+                    gwt::FrontendEvent::LoadBranches {
+                        id: branches_id.clone(),
+                    },
+                )
+                .len(),
+            1
+        );
+        assert!(!runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::LoadKnowledgeBridge {
+                    id: issue_id.clone(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    selected_number: None,
+                    refresh: false,
+                },
+            )
+            .is_empty());
+        assert!(!runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::SelectKnowledgeBridgeEntry {
+                    id: issue_id.clone(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    number: 42,
+                },
+            )
+            .is_empty());
+
+        let cleanup_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::RunBranchCleanup {
+                id: branches_id.clone(),
+                branches: vec!["feature/missing".to_string()],
+                delete_remote: false,
+            },
+        );
+        assert!(cleanup_events.is_empty());
+        wait_for_recorded_event("branch cleanup dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::BranchCleanupResult { .. }
+                        ))
+                )
+            })
+        });
+
+        assert!(runtime
+            .handle_frontend_event(
+                "client-1".to_string(),
+                gwt::FrontendEvent::LaunchWizardAction {
+                    action: LaunchWizardAction::Cancel,
+                    bounds: None,
+                },
+            )
+            .is_empty());
+
+        let wizard_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::OpenLaunchWizard {
+                id: branches_id,
+                branch_name: "feature/demo".to_string(),
+                linked_issue_number: Some(42),
+            },
+        );
+        assert_eq!(wizard_events.len(), 1);
+        wait_for_recorded_event("launch wizard hydration", &events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
+        });
+
+        let issue_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::OpenIssueLaunchWizard {
+                id: issue_id.clone(),
+                issue_number: 42,
+            },
+        );
+        assert!(issue_events.is_empty());
+        wait_for_recorded_event("issue launch preparation", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::IssueLaunchWizardPrepared(prepared)
+                        if prepared.id == issue_id
+                            && prepared.client_id == "client-1"
+                            && prepared.issue_number == 42
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn wizard_handler_helpers_cover_hydration_preparation_focus_and_error_paths() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let (mut runtime, events) = sample_runtime_with_events(
+            temp.path(),
+            vec![sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::Issue, WindowPreset::Claude],
+            )],
+            Some("tab-1"),
+        );
+        let claude_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
+
+        assert!(runtime
+            .handle_launch_wizard_hydrated("wizard-1".to_string(), Err("missing".to_string()))
+            .is_empty());
+
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        assert!(runtime
+            .handle_launch_wizard_hydrated("other".to_string(), Err("skip".to_string()))
+            .is_empty());
+
+        let hydration_error = runtime.handle_launch_wizard_hydrated(
+            "wizard-1".to_string(),
+            Err("hydrate failed".to_string()),
+        );
+        assert_eq!(hydration_error.len(), 1);
+        assert_eq!(
+            runtime
+                .launch_wizard
+                .as_ref()
+                .unwrap()
+                .wizard
+                .hydration_error
+                .as_deref(),
+            Some("hydrate failed")
+        );
+
+        let hydration_ok = runtime.handle_launch_wizard_hydrated(
+            "wizard-1".to_string(),
+            Ok(gwt::LaunchWizardHydration {
+                selected_branch: Some(sample_branch_entry("feature/demo")),
+                normalized_branch_name: "feature/demo".to_string(),
+                worktree_path: Some(repo.clone()),
+                quick_start_root: repo.clone(),
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                agent_options: sample_wizard_agent_options(),
+                quick_start_entries: vec![sample_wizard_quick_start_entry(None)],
+            }),
+        );
+        assert_eq!(hydration_ok.len(), 1);
+        assert!(!runtime.launch_wizard.as_ref().unwrap().wizard.is_hydrating);
+
+        let missing_tab =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: "issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                tab_id: "missing".to_string(),
+                project_root: repo.clone(),
+                issue_number: 7,
+                result: Ok("feature/demo".to_string()),
+            });
+        assert!(matches!(
+            missing_tab[0].event,
+            BackendEvent::KnowledgeError { ref message, .. }
+                if message == "Project tab not found"
+        ));
+
+        let prepared_error =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: "issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+                issue_number: 7,
+                result: Err("No local branch is available for launch".to_string()),
+            });
+        assert!(matches!(
+            prepared_error[0].event,
+            BackendEvent::KnowledgeError { ref message, .. }
+                if message == "No local branch is available for launch"
+        ));
+
+        let prepared_ok =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: "issue-1".to_string(),
+                knowledge_kind: KnowledgeKind::Issue,
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+                issue_number: 7,
+                result: Ok("feature/demo".to_string()),
+            });
+        assert_eq!(prepared_ok.len(), 1);
+        assert!(matches!(
+            prepared_ok[0].event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
+        ));
+        wait_for_recorded_event("prepared launch hydration", &events, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
+        });
+
+        runtime.launch_wizard = None;
+        assert!(runtime
+            .handle_launch_wizard_action(LaunchWizardAction::Cancel, None)
+            .is_empty());
+
+        runtime.launch_wizard = Some(sample_focus_launch_wizard_session(
+            "tab-1",
+            &repo,
+            Some("missing"),
+        ));
+        let missing_focus = runtime.handle_launch_wizard_action(
+            LaunchWizardAction::ApplyQuickStart {
+                index: 0,
+                mode: QuickStartLaunchMode::Resume,
+            },
+            None,
+        );
+        assert!(!missing_focus.is_empty());
+
+        runtime.launch_wizard = Some(sample_focus_launch_wizard_session(
+            "tab-1",
+            &repo,
+            Some(&claude_id),
+        ));
+        let focus_events = runtime.handle_launch_wizard_action(
+            LaunchWizardAction::ApplyQuickStart {
+                index: 0,
+                mode: QuickStartLaunchMode::Resume,
+            },
+            None,
+        );
+        assert!(focus_events.len() >= 2);
+        assert!(runtime.launch_wizard.is_none());
+
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        let cancel_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Cancel, None);
+        assert_eq!(cancel_events.len(), 1);
+        assert!(matches!(
+            cancel_events[0].event,
+            BackendEvent::LaunchWizardState { wizard: None }
+        ));
+
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        let update_events = runtime.handle_launch_wizard_action(
+            LaunchWizardAction::SetLinkedIssue { issue_number: 99 },
+            None,
+        );
+        assert_eq!(update_events.len(), 1);
+        assert_eq!(
+            runtime
+                .launch_wizard
+                .as_ref()
+                .unwrap()
+                .wizard
+                .linked_issue_number,
+            Some(99)
+        );
+    }
+
+    #[test]
+    fn launch_completion_and_project_target_error_paths_are_reported() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut runtime = sample_runtime(
+            temp.path(),
+            vec![sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::Claude, WindowPreset::Shell],
+            )],
+            Some("tab-1"),
+        );
+        let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
+        runtime
+            .window_details
+            .insert(shell_id.clone(), "old detail".to_string());
+
+        let status_events =
+            runtime.handle_runtime_status(shell_id.clone(), WindowProcessStatus::Error, None);
+        assert_eq!(status_events.len(), 2);
+        assert!(!runtime.window_details.contains_key(&shell_id));
+        assert!(matches!(
+            status_events[1].event,
+            BackendEvent::TerminalStatus { ref detail, .. } if detail.is_none()
+        ));
+
+        let project_missing_id = "tab-1::ghost-project".to_string();
+        runtime.window_lookup.insert(
+            project_missing_id.clone(),
+            WindowAddress {
+                tab_id: "missing".to_string(),
+                raw_id: "ghost".to_string(),
+            },
+        );
+        let project_missing = runtime.handle_launch_complete(
+            project_missing_id.clone(),
+            Ok((
+                ProcessLaunch {
+                    command: "echo".to_string(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                "session-1".to_string(),
+                "feature/demo".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                AgentId::Codex,
+            )),
+        );
+        assert!(matches!(
+            project_missing[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("Project tab not found")
+        ));
+
+        let raw_missing_id = "tab-1::ghost-window".to_string();
+        runtime.window_lookup.insert(
+            raw_missing_id.clone(),
+            WindowAddress {
+                tab_id: "tab-1".to_string(),
+                raw_id: "ghost".to_string(),
+            },
+        );
+        let raw_missing = runtime.handle_launch_complete(
+            raw_missing_id.clone(),
+            Ok((
+                ProcessLaunch {
+                    command: "echo".to_string(),
+                    args: Vec::new(),
+                    env: HashMap::new(),
+                    cwd: None,
+                },
+                "session-2".to_string(),
+                "feature/demo".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                AgentId::Codex,
+            )),
+        );
+        assert!(matches!(
+            raw_missing[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("Window not found")
+        ));
+
+        let shell_project_missing = runtime.handle_shell_launch_complete(
+            project_missing_id,
+            Ok(ProcessLaunch {
+                command: "echo".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            }),
+        );
+        assert!(matches!(
+            shell_project_missing[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("Project tab not found")
+        ));
+
+        let shell_raw_missing = runtime.handle_shell_launch_complete(
+            raw_missing_id,
+            Ok(ProcessLaunch {
+                command: "echo".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: None,
+            }),
+        );
+        assert!(matches!(
+            shell_raw_missing[0].event,
+            BackendEvent::TerminalStatus { ref detail, .. }
+                if detail.as_deref() == Some("Window not found")
+        ));
+
+        let file = temp.path().join("not-a-dir.txt");
+        fs::write(&file, "hello").expect("write file");
+        let file_err = resolve_project_target(&file).expect_err("file target must fail");
+        assert!(file_err.contains("selected project is not a directory"));
+
+        let missing_dir = temp.path().join("missing");
+        let missing_err = resolve_project_target(&missing_dir).expect_err("missing path must fail");
+        assert!(missing_err.contains("failed to open project"));
+
+        let bare = temp.path().join("bare.git");
+        let status = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .status()
+            .expect("git init --bare");
+        assert!(status.success(), "git init --bare failed");
+        let target = resolve_project_target(&bare).expect("bare repo target");
+        assert_eq!(target.kind, ProjectKind::Bare);
+        assert_eq!(target.project_root, dunce::canonicalize(&bare).unwrap());
     }
 
     #[test]
@@ -2777,6 +4383,829 @@ mod tests {
             preferred_issue_launch_branch(&head_only),
             Some("feature/demo".to_string())
         );
+    }
+
+    #[test]
+    fn normalize_active_tab_id_prefers_existing_selection_or_first_tab() {
+        let tabs = vec![
+            sample_project_tab_with_window(
+                "tab-1",
+                "shell-1",
+                WindowPreset::Shell,
+                WindowProcessStatus::Ready,
+            ),
+            sample_project_tab_with_window(
+                "tab-2",
+                "claude-1",
+                WindowPreset::Claude,
+                WindowProcessStatus::Running,
+            ),
+        ];
+
+        assert_eq!(
+            super::normalize_active_tab_id(&tabs, None),
+            Some("tab-1".to_string())
+        );
+        assert_eq!(
+            super::normalize_active_tab_id(&tabs, Some("tab-2".to_string())),
+            Some("tab-2".to_string())
+        );
+        assert_eq!(
+            super::normalize_active_tab_id(&tabs, Some("missing".to_string())),
+            Some("tab-1".to_string())
+        );
+        assert_eq!(super::normalize_active_tab_id(&[], None), None);
+    }
+
+    #[test]
+    fn recent_project_and_path_helpers_dedupe_and_fallback() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("repo");
+        fs::create_dir_all(&project).expect("project dir");
+        let project_dot = project.join(".");
+        let entries = vec![
+            gwt::RecentProjectEntry {
+                path: project.clone(),
+                title: "repo".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: project_dot.clone(),
+                title: "repo-dot".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+        ];
+
+        let deduped = super::dedupe_recent_projects(entries);
+        assert_eq!(deduped.len(), 1);
+        assert!(super::same_worktree_path(&project, &project_dot));
+
+        let fallback = super::fallback_project_target(project.clone());
+        assert_eq!(fallback.project_root, project);
+        assert_eq!(fallback.kind, gwt::ProjectKind::NonRepo);
+        assert_eq!(fallback.title, "repo");
+    }
+
+    #[test]
+    fn client_hub_dispatches_broadcast_and_targeted_messages() {
+        let hub = super::ClientHub::default();
+        let mut client_one = hub.register("client-1".to_string());
+        let mut client_two = hub.register("client-2".to_string());
+
+        hub.dispatch(vec![
+            super::OutboundEvent::broadcast(gwt::BackendEvent::ProjectOpenError {
+                message: "broadcast".to_string(),
+            }),
+            super::OutboundEvent::reply(
+                "client-2",
+                gwt::BackendEvent::ProjectOpenError {
+                    message: "targeted".to_string(),
+                },
+            ),
+        ]);
+
+        let first = client_one.try_recv().expect("broadcast for client one");
+        assert!(first.contains("broadcast"));
+        assert!(matches!(
+            client_one.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let second = client_two.try_recv().expect("broadcast for client two");
+        let third = client_two.try_recv().expect("targeted for client two");
+        assert!(second.contains("broadcast"));
+        assert!(third.contains("targeted"));
+
+        hub.unregister("client-1");
+        hub.dispatch(vec![super::OutboundEvent::broadcast(
+            gwt::BackendEvent::ProjectOpenError {
+                message: "after-unregister".to_string(),
+            },
+        )]);
+        assert!(matches!(
+            client_one.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+                | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(client_two
+            .try_recv()
+            .expect("client two should still receive messages")
+            .contains("after-unregister"));
+    }
+
+    #[test]
+    fn branch_package_runner_and_env_helpers_cover_common_cases() {
+        assert_eq!(
+            super::normalize_branch_name("refs/remotes/origin/feature/gui"),
+            "feature/gui"
+        );
+        assert_eq!(super::normalize_branch_name("origin/develop"), "develop");
+        assert_eq!(super::origin_remote_ref("develop"), "origin/develop");
+        assert_eq!(
+            super::origin_remote_ref("refs/remotes/origin/feature/gui"),
+            "origin/feature/gui"
+        );
+
+        let branch = super::synthetic_branch_entry("feature/gui");
+        assert_eq!(branch.name, "feature/gui");
+        assert_eq!(branch.scope, BranchScope::Local);
+        assert!(!branch.is_head);
+
+        let config = sample_versioned_launch_config();
+        assert_eq!(
+            super::package_runner_version_spec(&config),
+            Some("@anthropic-ai/claude-code@latest".to_string())
+        );
+        assert_eq!(
+            super::strip_package_runner_args(
+                &[
+                    "--yes".to_string(),
+                    "@anthropic-ai/claude-code@latest".to_string(),
+                    "--print".to_string(),
+                ],
+                "@anthropic-ai/claude-code@latest",
+            ),
+            vec!["--print".to_string()]
+        );
+        assert!(super::command_matches_runner(
+            "C:/Users/test/bunx.cmd",
+            "bunx"
+        ));
+        assert!(!super::command_matches_runner(
+            "C:/Users/test/node.exe",
+            "bunx"
+        ));
+        assert!(super::is_valid_docker_env_key("GOOD_NAME"));
+        assert!(!super::is_valid_docker_env_key("9BAD"));
+        assert_eq!(
+            super::docker_compose_exec_env_args(&HashMap::from([
+                ("Z_VAR".to_string(), "last".to_string()),
+                ("BAD-NAME".to_string(), "ignored".to_string()),
+                ("A_VAR".to_string(), "first".to_string()),
+            ])),
+            vec![
+                "-e".to_string(),
+                "A_VAR=first".to_string(),
+                "-e".to_string(),
+                "Z_VAR=last".to_string(),
+            ]
+        );
+        assert_eq!(
+            super::normalize_docker_launch_action(
+                DockerLifecycleIntent::Restart,
+                gwt_docker::ComposeServiceStatus::Running,
+            ),
+            super::DockerLaunchServiceAction::Restart
+        );
+        assert_eq!(
+            super::normalize_docker_launch_action(
+                DockerLifecycleIntent::Connect,
+                gwt_docker::ComposeServiceStatus::Stopped,
+            ),
+            super::DockerLaunchServiceAction::Start
+        );
+    }
+
+    #[test]
+    fn docker_defaults_and_mount_helpers_prefer_devcontainer_settings() {
+        let temp = tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let devcontainer_dir = project_root.join(".devcontainer");
+        fs::create_dir_all(&devcontainer_dir).expect("devcontainer dir");
+        let compose_file = project_root.join("docker-compose.yml");
+        fs::write(&compose_file, "services:\n  app:\n    image: alpine:3.20\n").expect("compose");
+        fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{
+  "dockerComposeFile": ["missing.yml", "../docker-compose.yml"],
+  "service": "app",
+  "workspaceFolder": "/workspaces/repo"
+}"#,
+        )
+        .expect("devcontainer config");
+
+        let files = gwt_docker::DockerFiles {
+            dockerfile: None,
+            compose_file: Some(compose_file.clone()),
+            devcontainer_dir: Some(devcontainer_dir.clone()),
+        };
+
+        let defaults =
+            super::docker_devcontainer_defaults(&project_root, &files).expect("defaults");
+        assert_eq!(defaults.service.as_deref(), Some("app"));
+        assert_eq!(
+            defaults.workspace_folder.as_deref(),
+            Some("/workspaces/repo")
+        );
+        assert!(super::same_worktree_path(
+            defaults
+                .compose_file
+                .as_deref()
+                .expect("compose file from defaults"),
+            &compose_file,
+        ));
+        assert!(super::same_worktree_path(
+            super::docker_compose_file_for_launch(&project_root, &files)
+                .unwrap()
+                .as_deref()
+                .expect("compose file for launch"),
+            &compose_file,
+        ));
+
+        let service = gwt_docker::ComposeService {
+            name: "app".to_string(),
+            image: Some("alpine:3.20".to_string()),
+            ports: Vec::new(),
+            depends_on: Vec::new(),
+            working_dir: None,
+            volumes: vec![gwt_docker::compose::ComposeVolumeMount {
+                source: project_root.display().to_string(),
+                target: "/workspaces/repo".to_string(),
+                mode: None,
+            }],
+        };
+        assert_eq!(
+            super::compose_workspace_mount_target(&project_root, &service),
+            Some("/workspaces/repo".to_string())
+        );
+        assert!(super::mount_source_matches_project_root(".", &project_root));
+        assert!(super::mount_source_matches_project_root(
+            &project_root.display().to_string(),
+            &project_root,
+        ));
+    }
+
+    #[test]
+    fn worktree_git_and_misc_helpers_cover_repo_paths_and_defaults() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let init = Command::new("git")
+            .args(["init", "-q", "-b", "develop"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+        let config_name = Command::new("git")
+            .args(["config", "user.name", "Codex"])
+            .current_dir(&repo)
+            .status()
+            .expect("git config user.name");
+        assert!(config_name.success(), "git config user.name failed");
+        let config_email = Command::new("git")
+            .args(["config", "user.email", "codex@example.com"])
+            .current_dir(&repo)
+            .status()
+            .expect("git config user.email");
+        assert!(config_email.success(), "git config user.email failed");
+        fs::write(repo.join("README.md"), "repo\n").expect("write readme");
+        let add = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo)
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add failed");
+        let commit = Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&repo)
+            .status()
+            .expect("git commit");
+        assert!(commit.success(), "git commit failed");
+        let branch = Command::new("git")
+            .args(["branch", "feature/demo"])
+            .current_dir(&repo)
+            .status()
+            .expect("git branch");
+        assert!(branch.success(), "git branch failed");
+
+        assert_eq!(
+            super::branch_worktree_path(&repo, "develop"),
+            Some(repo.clone())
+        );
+        assert!(super::local_branch_exists(&repo, "feature/demo").unwrap());
+        assert!(!super::local_branch_exists(&repo, "feature/missing").unwrap());
+
+        let preferred = temp.path().join("feature-demo");
+        let worktrees = vec![gwt_git::WorktreeInfo {
+            path: preferred.clone(),
+            branch: Some("feature/demo".to_string()),
+            locked: false,
+            prunable: false,
+        }];
+        assert_eq!(
+            super::suffixed_worktree_path(&preferred, 2),
+            Some(temp.path().join("feature-demo-2"))
+        );
+        assert_eq!(
+            super::first_available_worktree_path(&preferred, &worktrees),
+            Some(temp.path().join("feature-demo-2"))
+        );
+        assert!(super::worktree_path_is_occupied(&preferred, &worktrees));
+        assert!(super::same_worktree_path(&repo, &repo.join(".")));
+
+        let env = super::spawn_env();
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+        assert_eq!(
+            super::geometry_to_pty_size(&WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }),
+            (46, 11)
+        );
+        assert_eq!(
+            super::parse_github_remote_url("git@github.com:akiojin/gwt.git"),
+            Some(("akiojin".to_string(), "gwt".to_string()))
+        );
+        assert_eq!(
+            super::parse_github_remote_url("https://github.com/akiojin/gwt/"),
+            Some(("akiojin".to_string(), "gwt".to_string()))
+        );
+        assert_eq!(
+            super::parse_github_remote_url("ssh://example.com/akiojin/gwt"),
+            None
+        );
+
+        let health = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(super::health_handler());
+        assert_eq!(health, "ok");
+    }
+
+    #[test]
+    fn resolve_launch_worktree_helpers_cover_short_circuits_existing_and_remote_creation() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_launch_worktree_request(
+            temp.path(),
+            None,
+            None,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("branchless launch");
+        assert!(working_dir.is_none());
+        assert!(env_vars.is_empty());
+
+        let scratch = temp.path().join("scratch");
+        fs::create_dir_all(&scratch).expect("create scratch");
+        super::resolve_launch_worktree_request(
+            &scratch,
+            Some("feature/demo"),
+            None,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("non repo short circuit");
+        assert!(working_dir.is_none());
+
+        let mut current_dir = None;
+        let mut current_env = HashMap::new();
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("develop"),
+            None,
+            &mut current_dir,
+            &mut current_env,
+        )
+        .expect("current branch worktree");
+        assert_eq!(current_dir.as_deref(), Some(repo.as_path()));
+        assert!(current_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &repo)));
+
+        let preset = temp.path().join("preset");
+        let mut preset_dir = Some(preset.clone());
+        let mut preset_env = HashMap::new();
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/ignored"),
+            Some("develop"),
+            &mut preset_dir,
+            &mut preset_env,
+        )
+        .expect("preselected working dir");
+        assert_eq!(preset_dir.as_deref(), Some(preset.as_path()));
+        assert!(preset_env.is_empty());
+
+        let status = Command::new("git")
+            .args(["branch", "feature/existing"])
+            .current_dir(&repo)
+            .status()
+            .expect("create feature branch");
+        assert!(status.success(), "create feature branch failed");
+        let existing_worktree = temp.path().join("feature-existing");
+        let status = Command::new("git")
+            .args(["worktree", "add"])
+            .arg(&existing_worktree)
+            .arg("feature/existing")
+            .current_dir(&repo)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add failed");
+
+        let mut existing_dir = None;
+        let mut existing_env = HashMap::new();
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/existing"),
+            Some("develop"),
+            &mut existing_dir,
+            &mut existing_env,
+        )
+        .expect("existing worktree");
+        assert_eq!(existing_dir.as_deref(), Some(existing_worktree.as_path()));
+        assert!(existing_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
+
+        let err = super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/missing-base"),
+            Some("release"),
+            &mut None,
+            &mut HashMap::new(),
+        )
+        .expect_err("missing base branch");
+        assert!(err.contains("remote base branch does not exist"));
+
+        let mut created_dir = None;
+        let mut created_env = HashMap::new();
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/created"),
+            Some("develop"),
+            &mut created_dir,
+            &mut created_env,
+        )
+        .expect("remote-backed worktree");
+        let created_dir = created_dir.expect("created worktree dir");
+        assert!(created_dir.exists());
+        assert!(created_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &created_dir)));
+
+        let output = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&created_dir)
+            .output()
+            .expect("current branch in created worktree");
+        assert!(output.status.success(), "git branch --show-current failed");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "feature/created"
+        );
+
+        let mut launch_config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .branch("feature/existing")
+            .base_branch("develop")
+            .build();
+        launch_config.working_dir = None;
+        launch_config.env_vars = HashMap::new();
+        super::resolve_launch_worktree(&repo, &mut launch_config).expect("agent launch wrapper");
+        assert_eq!(
+            launch_config.working_dir.as_deref(),
+            Some(existing_worktree.as_path())
+        );
+
+        let mut shell_config = ShellLaunchConfig {
+            working_dir: None,
+            branch: Some("feature/existing".to_string()),
+            base_branch: Some("develop".to_string()),
+            display_name: "Shell".to_string(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            env_vars: HashMap::new(),
+        };
+        super::resolve_shell_launch_worktree(&repo, &mut shell_config)
+            .expect("shell launch wrapper");
+        assert_eq!(
+            shell_config.working_dir.as_deref(),
+            Some(existing_worktree.as_path())
+        );
+    }
+
+    #[test]
+    fn docker_launch_plan_and_helper_logic_cover_defaults_and_errors() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let devcontainer_dir = project.join(".devcontainer");
+        fs::create_dir_all(&devcontainer_dir).expect("create devcontainer dir");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    volumes:\n      - .:/workspace/app\n  worker:\n    image: alpine:3.19\n    working_dir: /srv/worker\n",
+        )
+        .expect("write compose file");
+        fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace/dev"
+}"#,
+        )
+        .expect("write devcontainer");
+
+        let plan = super::resolve_docker_launch_plan(&project, None).expect("launch plan");
+        assert_eq!(plan.service, "app");
+        assert_eq!(plan.container_cwd, "/workspace/dev");
+        assert_eq!(plan.compose_file, project.join("docker-compose.yml"));
+
+        let (context, status) = super::detect_wizard_docker_context_and_status(&project);
+        let context = context.expect("docker context");
+        assert!(context.services.contains(&"app".to_string()));
+        assert_eq!(context.suggested_service.as_deref(), Some("app"));
+        assert_eq!(status, gwt_docker::ComposeServiceStatus::NotFound);
+
+        let multi = temp.path().join("multi");
+        fs::create_dir_all(&multi).expect("create multi project");
+        fs::write(
+            multi.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n  worker:\n    image: alpine:3.19\n",
+        )
+        .expect("write multi compose");
+        let multi_err = super::resolve_docker_launch_plan(&multi, None).expect_err("multi service");
+        assert!(multi_err.contains("Multiple Docker services detected"));
+
+        let invalid_service = super::resolve_docker_launch_plan(&project, Some("missing"))
+            .expect_err("missing docker service");
+        assert!(invalid_service.contains("Selected Docker service was not found"));
+
+        let no_cwd = temp.path().join("no-cwd");
+        fs::create_dir_all(&no_cwd).expect("create no-cwd project");
+        fs::write(
+            no_cwd.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n",
+        )
+        .expect("write no-cwd compose");
+        let no_cwd_err =
+            super::resolve_docker_launch_plan(&no_cwd, Some("app")).expect_err("no cwd");
+        assert!(no_cwd_err.contains("missing working_dir/workspaceFolder"));
+
+        let missing_compose =
+            super::resolve_docker_launch_plan(temp.path(), None).expect_err("missing compose");
+        assert!(missing_compose.contains("docker-compose.yml"));
+
+        assert_eq!(
+            super::normalize_docker_launch_action(
+                DockerLifecycleIntent::Restart,
+                gwt_docker::ComposeServiceStatus::Running,
+            ),
+            super::DockerLaunchServiceAction::Restart
+        );
+        assert_eq!(
+            super::normalize_docker_launch_action(
+                DockerLifecycleIntent::CreateAndStart,
+                gwt_docker::ComposeServiceStatus::Exited,
+            ),
+            super::DockerLaunchServiceAction::Start
+        );
+        assert_eq!(
+            super::normalize_docker_launch_action(
+                DockerLifecycleIntent::Recreate,
+                gwt_docker::ComposeServiceStatus::Stopped,
+            ),
+            super::DockerLaunchServiceAction::Recreate
+        );
+
+        assert_eq!(super::origin_remote_ref("develop"), "origin/develop");
+        assert_eq!(
+            super::origin_remote_ref("refs/remotes/origin/main"),
+            "origin/main"
+        );
+        assert!(super::command_matches_runner("C:/tools/bunx.cmd", "bunx"));
+        assert!(!super::command_matches_runner("C:/tools/node.exe", "bunx"));
+
+        let version_spec = super::package_runner_version_spec(&sample_versioned_launch_config())
+            .expect("version spec");
+        assert_eq!(version_spec, "@anthropic-ai/claude-code@latest");
+        assert_eq!(
+            super::strip_package_runner_args(
+                &[
+                    "--yes".to_string(),
+                    version_spec.clone(),
+                    "--print".to_string(),
+                ],
+                &version_spec,
+            ),
+            vec!["--print".to_string()]
+        );
+        assert_eq!(
+            super::strip_package_runner_args(
+                &[version_spec.clone(), "--print".to_string()],
+                &version_spec,
+            ),
+            vec!["--print".to_string()]
+        );
+        assert_eq!(
+            super::strip_package_runner_args(&["--print".to_string()], &version_spec),
+            vec!["--print".to_string()]
+        );
+
+        let old_docker_bin = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", "podman");
+        assert_eq!(super::docker_binary_for_launch(), "podman");
+        match old_docker_bin {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+    }
+
+    #[test]
+    fn branch_selection_and_mount_helpers_cover_preferred_paths() {
+        assert_eq!(
+            super::normalize_branch_name("refs/remotes/origin/feature/coverage"),
+            "feature/coverage"
+        );
+        assert_eq!(super::normalize_branch_name("origin/main"), "main");
+        assert_eq!(
+            super::normalize_branch_name("feature/coverage"),
+            "feature/coverage"
+        );
+
+        let mut head = sample_branch_entry("feature/current");
+        head.is_head = true;
+        let entries = vec![sample_branch_entry("main"), head.clone()];
+        assert_eq!(
+            super::preferred_issue_launch_branch(&entries).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            super::preferred_issue_launch_branch(&[head.clone()]).as_deref(),
+            Some("feature/current")
+        );
+        assert!(super::preferred_issue_launch_branch(&[]).is_none());
+
+        assert_eq!(
+            super::knowledge_kind_for_preset(WindowPreset::Issue),
+            Some(KnowledgeKind::Issue)
+        );
+        assert_eq!(
+            super::knowledge_kind_for_preset(WindowPreset::Spec),
+            Some(KnowledgeKind::Spec)
+        );
+        assert_eq!(
+            super::knowledge_kind_for_preset(WindowPreset::Pr),
+            Some(KnowledgeKind::Pr)
+        );
+        assert_eq!(super::knowledge_kind_for_preset(WindowPreset::Shell), None);
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        fs::create_dir_all(&project_root).expect("create project root");
+        assert!(super::mount_source_matches_project_root(".", &project_root));
+        assert!(super::mount_source_matches_project_root(
+            "$PWD",
+            &project_root
+        ));
+        assert!(super::mount_source_matches_project_root(
+            &project_root.display().to_string(),
+            &project_root,
+        ));
+        assert!(!super::mount_source_matches_project_root(
+            "/tmp/somewhere-else",
+            &project_root,
+        ));
+
+        let service = gwt_docker::ComposeService {
+            name: "app".to_string(),
+            image: Some("alpine:3.19".to_string()),
+            ports: Vec::new(),
+            depends_on: Vec::new(),
+            working_dir: Some("/workspace".to_string()),
+            volumes: vec![gwt_docker::compose::ComposeVolumeMount {
+                source: ".".to_string(),
+                target: "/workspace".to_string(),
+                mode: None,
+            }],
+        };
+        assert_eq!(
+            super::compose_workspace_mount_target(&project_root, &service).as_deref(),
+            Some("/workspace")
+        );
+
+        let preferred = temp.path().join("feature");
+        fs::create_dir_all(&preferred).expect("create preferred worktree path");
+        let occupied = vec![gwt_git::WorktreeInfo {
+            path: temp.path().join("feature-2"),
+            branch: Some("feature/other".to_string()),
+            locked: false,
+            prunable: false,
+        }];
+        assert_eq!(
+            super::suffixed_worktree_path(&preferred, 3).unwrap(),
+            temp.path().join("feature-3")
+        );
+        assert_eq!(
+            super::first_available_worktree_path(&preferred, &occupied).unwrap(),
+            temp.path().join("feature-3")
+        );
+        assert!(super::worktree_path_is_occupied(
+            &temp.path().join("feature-2"),
+            &occupied,
+        ));
+        assert!(super::same_worktree_path(&project_root, &project_root));
+    }
+
+    #[test]
+    fn git_and_cli_metadata_helpers_cover_parsing_geometry_and_repo_state() {
+        let env = super::spawn_env();
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+
+        let geometry = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        assert_eq!(super::geometry_to_pty_size(&geometry), (46, 11));
+
+        assert_eq!(
+            super::parse_github_remote_url("git@github.com:akiojin/gwt.git"),
+            Some(("akiojin".to_string(), "gwt".to_string()))
+        );
+        assert_eq!(
+            super::parse_github_remote_url("https://github.com/akiojin/gwt/"),
+            Some(("akiojin".to_string(), "gwt".to_string()))
+        );
+        assert_eq!(
+            super::parse_github_remote_url("https://example.com/repo"),
+            None
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed");
+        let remote = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/akiojin/gwt.git",
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("git remote");
+        assert!(remote.status.success(), "git remote add failed");
+        let branch = Command::new("git")
+            .args(["checkout", "-b", "feature/coverage"])
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout");
+        assert!(branch.status.success(), "git checkout failed");
+        let config_name = Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config user.name");
+        assert!(config_name.status.success(), "git config user.name failed");
+        let config_email = Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config user.email");
+        assert!(
+            config_email.status.success(),
+            "git config user.email failed"
+        );
+        fs::write(repo.join("README.md"), "hello\n").expect("write README");
+        let add = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        assert!(add.status.success(), "git add failed");
+        let commit = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success(), "git commit failed");
+
+        assert_eq!(super::origin_remote_ref("main"), "origin/main");
+        assert_eq!(
+            super::current_git_branch(&repo).as_deref(),
+            Ok("feature/coverage")
+        );
+        assert_eq!(
+            super::local_branch_exists(&repo, "feature/coverage"),
+            Ok(true)
+        );
+        assert_eq!(super::local_branch_exists(&repo, "missing"), Ok(false));
     }
 }
 

@@ -2641,6 +2641,48 @@ mod tests {
         session.save(dir).expect("save session");
     }
 
+    fn quick_start_entry(
+        session_id: &str,
+        agent_id: &str,
+        resume_session_id: Option<&str>,
+        live_window_id: Option<&str>,
+        runtime_target: gwt_agent::LaunchRuntimeTarget,
+        docker_service: Option<&str>,
+    ) -> QuickStartEntry {
+        let (tool_label, model, reasoning, version, codex_fast_mode) = match agent_id {
+            "claude" => (
+                "Claude Code",
+                Some("sonnet"),
+                Some("medium"),
+                Some("latest"),
+                false,
+            ),
+            "codex" => (
+                "Codex",
+                Some("gpt-5.4"),
+                Some("high"),
+                Some("0.110.0"),
+                true,
+            ),
+            _ => ("Custom", None, None, None, false),
+        };
+        QuickStartEntry {
+            session_id: session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            tool_label: tool_label.to_string(),
+            model: model.map(str::to_string),
+            reasoning: reasoning.map(str::to_string),
+            version: version.map(str::to_string),
+            resume_session_id: resume_session_id.map(str::to_string),
+            live_window_id: live_window_id.map(str::to_string),
+            skip_permissions: true,
+            codex_fast_mode,
+            runtime_target,
+            docker_service: docker_service.map(str::to_string),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+        }
+    }
+
     #[test]
     fn open_local_branch_without_quick_start_starts_at_branch_action() {
         let state = LaunchWizardState::open_with(
@@ -2988,6 +3030,228 @@ mod tests {
     }
 
     #[test]
+    fn mutator_methods_validate_and_normalize_launch_options() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("worker".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        state.set_branch_mode(true);
+        assert!(state.is_new_branch);
+        assert_eq!(state.base_branch_name.as_deref(), Some("feature/gui"));
+        assert_eq!(state.branch_name, "feature/");
+
+        state.branch_name = "feature/coverage".to_string();
+        state.set_branch_type("bugfix/");
+        assert_eq!(state.branch_name, "bugfix/coverage");
+        state.set_branch_type("fix/");
+        assert_eq!(state.error.as_deref(), Some("Branch type is unavailable"));
+
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("resume-1".to_string());
+        state.skip_permissions = true;
+        state.codex_fast_mode = true;
+        state.set_launch_target(LaunchTargetKind::Shell);
+        assert_eq!(state.mode, "normal");
+        assert!(state.resume_session_id.is_none());
+        assert!(!state.skip_permissions);
+        assert!(!state.codex_fast_mode);
+
+        state.set_launch_target(LaunchTargetKind::Agent);
+        state.set_agent_id("codex");
+        assert_eq!(state.agent_id, "codex");
+        state.set_agent_id("missing");
+        assert_eq!(state.error.as_deref(), Some("Agent option is unavailable"));
+
+        state.set_model("gpt-5.4");
+        assert_eq!(state.model, "gpt-5.4");
+        state.set_model("bad-model");
+        assert_eq!(state.error.as_deref(), Some("Model option is unavailable"));
+
+        state.set_reasoning("high");
+        assert_eq!(state.reasoning, "high");
+        state.set_reasoning("extreme");
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Reasoning option is unavailable")
+        );
+
+        state.set_runtime_target(gwt_agent::LaunchRuntimeTarget::Docker);
+        assert_eq!(state.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+        assert_eq!(state.docker_service.as_deref(), Some("worker"));
+
+        state.set_docker_service("api");
+        assert_eq!(state.docker_service.as_deref(), Some("api"));
+        state.set_docker_service("missing");
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Docker service is unavailable")
+        );
+
+        state.set_docker_lifecycle(gwt_agent::DockerLifecycleIntent::Connect);
+        assert_eq!(
+            state.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Connect
+        );
+        state.set_docker_lifecycle(gwt_agent::DockerLifecycleIntent::CreateAndStart);
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Docker lifecycle option is unavailable")
+        );
+
+        state.error = None;
+        state.set_version("0.110.0");
+        assert_eq!(state.version, "0.110.0");
+        state.set_version("definitely-missing");
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Version option is unavailable")
+        );
+
+        state.resume_session_id = Some("resume-2".to_string());
+        state.error = None;
+        state.set_execution_mode("continue");
+        assert_eq!(state.mode, "continue");
+        assert!(state.resume_session_id.is_none());
+        state.set_execution_mode("invalid");
+        assert_eq!(
+            state.error.as_deref(),
+            Some("Execution mode is unavailable")
+        );
+    }
+
+    #[test]
+    fn private_selection_and_completion_helpers_cover_focus_and_submit_paths() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("api".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-1".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+        }];
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        state.step = LaunchWizardStep::FocusExistingSession;
+        state.selected = 0;
+        state.apply_selection();
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::FocusWindow { window_id }) if window_id == "window-1"
+        ));
+
+        state.completion = None;
+        state.selected = 9;
+        state.apply_selection();
+        assert_eq!(
+            state.error.as_deref(),
+            Some("No running session is available")
+        );
+
+        state.step = LaunchWizardStep::BranchAction;
+        state.selected = 1;
+        state.apply_selection();
+        assert!(state.is_new_branch);
+
+        state.step = LaunchWizardStep::BranchTypeSelect;
+        state.selected = 1;
+        state.apply_selection();
+        assert!(state.branch_name.starts_with("bugfix/"));
+
+        state.step = LaunchWizardStep::LaunchTarget;
+        state.selected = 1;
+        state.apply_selection();
+        assert!(state.launch_target_is_shell());
+
+        state.step = LaunchWizardStep::LaunchTarget;
+        state.selected = 0;
+        state.apply_selection();
+        state.step = LaunchWizardStep::AgentSelect;
+        state.selected = 1;
+        state.apply_selection();
+        assert_eq!(state.agent_id, "codex");
+
+        state.step = LaunchWizardStep::ModelSelect;
+        state.selected = 1;
+        state.apply_selection();
+        assert_eq!(state.model, "gpt-5.4");
+
+        state.step = LaunchWizardStep::ReasoningLevel;
+        state.selected = 1;
+        state.apply_selection();
+        assert!(!state.reasoning.is_empty());
+
+        state.step = LaunchWizardStep::RuntimeTarget;
+        state.selected = 1;
+        state.apply_selection();
+        assert_eq!(state.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+
+        state.step = LaunchWizardStep::DockerServiceSelect;
+        state.selected = 0;
+        state.apply_selection();
+        assert_eq!(state.docker_service.as_deref(), Some("api"));
+
+        state.step = LaunchWizardStep::DockerLifecycle;
+        state.selected = 0;
+        state.apply_selection();
+
+        state.step = LaunchWizardStep::VersionSelect;
+        state.selected = 0;
+        state.apply_selection();
+        assert!(!state.version.is_empty());
+
+        state.step = LaunchWizardStep::ExecutionMode;
+        state.selected = 1;
+        state.apply_selection();
+        assert_eq!(state.mode, "continue");
+
+        state.step = LaunchWizardStep::SkipPermissions;
+        state.selected = 0;
+        state.apply_selection();
+        assert!(state.skip_permissions);
+
+        state.step = LaunchWizardStep::CodexFastMode;
+        state.selected = 0;
+        state.apply_selection();
+        assert!(state.codex_fast_mode);
+
+        state.completion = None;
+        state.step = LaunchWizardStep::CodexFastMode;
+        state.advance_after_current_step();
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Launch(_))
+        ));
+
+        state.completion = None;
+        state.set_launch_target(LaunchTargetKind::Shell);
+        state.submit_panel();
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Launch(config))
+                if matches!(config.as_ref(), LaunchWizardLaunchRequest::Shell(_))
+        ));
+
+        state.step = LaunchWizardStep::BranchNameInput;
+        state.completion = None;
+        state.error = None;
+        state.apply(LaunchWizardAction::SubmitText {
+            value: "  hotfix/coverage  ".to_string(),
+        });
+        assert_eq!(state.branch_name, "hotfix/coverage");
+    }
+
+    #[test]
     fn shell_target_hides_agent_specific_controls_and_builds_shell_request() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
@@ -3048,6 +3312,191 @@ mod tests {
         assert!(state.quick_start_entries.is_empty());
         assert!(!view.show_runtime_target);
         assert!(view.hydration_error.is_none());
+    }
+
+    #[test]
+    fn helper_value_functions_cover_docker_and_agent_variants() {
+        assert_eq!(
+            default_docker_lifecycle_intent(gwt_docker::ComposeServiceStatus::Running),
+            gwt_agent::DockerLifecycleIntent::Connect
+        );
+        assert_eq!(
+            default_docker_lifecycle_intent(gwt_docker::ComposeServiceStatus::Stopped),
+            gwt_agent::DockerLifecycleIntent::Start
+        );
+        assert_eq!(
+            default_docker_lifecycle_intent(gwt_docker::ComposeServiceStatus::NotFound),
+            gwt_agent::DockerLifecycleIntent::CreateAndStart
+        );
+        assert_eq!(launch_target_value(LaunchTargetKind::Agent), "agent");
+        assert_eq!(launch_target_value(LaunchTargetKind::Shell), "shell");
+        assert_eq!(
+            runtime_target_value(gwt_agent::LaunchRuntimeTarget::Host),
+            "host"
+        );
+        assert_eq!(
+            runtime_target_value(gwt_agent::LaunchRuntimeTarget::Docker),
+            "docker"
+        );
+        assert_eq!(
+            docker_lifecycle_value(gwt_agent::DockerLifecycleIntent::Restart),
+            "restart"
+        );
+        assert_eq!(
+            docker_lifecycle_value(gwt_agent::DockerLifecycleIntent::CreateAndStart),
+            "create_and_start"
+        );
+        assert_eq!(
+            apply_branch_prefix("feature/coverage", "fix/"),
+            "fix/coverage"
+        );
+        assert_eq!(apply_branch_prefix("  ", "chore/"), "chore/");
+        assert!(is_explicit_model_selection("gpt-5.4"));
+        assert!(!is_explicit_model_selection("Default (Installed)"));
+        assert!(agent_has_npm_package("codex"));
+        assert!(!agent_has_npm_package("custom"));
+        assert_eq!(agent_id_from_key("gh"), gwt_agent::AgentId::Copilot);
+        assert_eq!(
+            agent_id_from_key("custom"),
+            gwt_agent::AgentId::Custom("custom".to_string())
+        );
+        assert_eq!(
+            agent_description(&sample_agent_options()[0]),
+            "Installed · 1.0.0".to_string()
+        );
+    }
+
+    #[test]
+    fn option_views_and_model_catalogs_expose_expected_labels() {
+        let branch_types = branch_type_options_view();
+        assert!(branch_types.iter().any(|option| option.value == "feature/"));
+        assert!(branch_types
+            .iter()
+            .all(|option| option.description.as_deref().is_some()));
+
+        let launch_targets = launch_target_options_view();
+        assert_eq!(launch_targets[0].value, "agent");
+        assert_eq!(launch_targets[1].value, "shell");
+
+        let runtime_targets = runtime_target_options_view();
+        assert!(runtime_targets.iter().any(|option| option.value == "host"));
+        assert!(runtime_targets
+            .iter()
+            .any(|option| option.value == "docker"));
+
+        let execution_modes = execution_mode_options_view();
+        assert!(execution_modes
+            .iter()
+            .any(|option| option.value == "normal"));
+        assert!(execution_modes
+            .iter()
+            .any(|option| option.value == "resume"));
+
+        assert!(current_model_options("claude").contains(&"sonnet"));
+        assert!(current_model_options("codex").contains(&"gpt-5.4"));
+        assert!(current_model_options("gemini").contains(&"gemini-2.5-pro"));
+        assert!(current_model_options("custom").is_empty());
+        assert!(model_display_options("custom").is_empty());
+        assert!(!model_display_options("codex").is_empty());
+    }
+
+    #[test]
+    fn quick_start_summary_includes_runtime_metadata() {
+        let summary = quick_start_summary(&QuickStartEntry {
+            session_id: "gwt-session-1".to_string(),
+            agent_id: "codex".to_string(),
+            tool_label: "Codex".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            reasoning: Some("high".to_string()),
+            version: Some("0.110.0".to_string()),
+            resume_session_id: Some("resume-1".to_string()),
+            live_window_id: None,
+            skip_permissions: true,
+            codex_fast_mode: true,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+            docker_service: Some("gwt".to_string()),
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+        });
+
+        assert_eq!(summary, "Codex · gpt-5.4 · high · 0.110.0 · docker:gwt");
+    }
+
+    #[test]
+    fn step_navigation_and_default_selection_follow_runtime_state() {
+        let mut docker_context = context(branch("feature/gui"), "feature/gui");
+        docker_context.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("worker".to_string()),
+        });
+        docker_context.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state =
+            LaunchWizardState::open_with(docker_context, sample_agent_options(), Vec::new());
+
+        state.selected = 1;
+        assert_eq!(
+            next_step(LaunchWizardStep::BranchAction, &state),
+            Some(LaunchWizardStep::BranchTypeSelect)
+        );
+
+        state.launch_target = LaunchTargetKind::Shell;
+        assert_eq!(
+            next_step(LaunchWizardStep::LaunchTarget, &state),
+            Some(LaunchWizardStep::RuntimeTarget)
+        );
+
+        state.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        assert_eq!(
+            next_step(LaunchWizardStep::RuntimeTarget, &state),
+            Some(LaunchWizardStep::DockerServiceSelect)
+        );
+        assert_eq!(
+            prev_step(LaunchWizardStep::DockerLifecycle, &state),
+            Some(LaunchWizardStep::DockerServiceSelect)
+        );
+        assert_eq!(
+            step_default_selection(LaunchWizardStep::DockerServiceSelect, &state),
+            1
+        );
+
+        state.launch_target = LaunchTargetKind::Agent;
+        state.agent_id = "codex".to_string();
+        state.model = "gpt-5.4".to_string();
+        state.reasoning = "high".to_string();
+        state.version = "0.110.0".to_string();
+        state.mode = "resume".to_string();
+        state.skip_permissions = true;
+        state.codex_fast_mode = true;
+
+        assert_eq!(
+            next_step(LaunchWizardStep::AgentSelect, &state),
+            Some(LaunchWizardStep::ModelSelect)
+        );
+        assert_eq!(
+            next_step(LaunchWizardStep::ModelSelect, &state),
+            Some(LaunchWizardStep::ReasoningLevel)
+        );
+        assert_eq!(
+            step_default_selection(LaunchWizardStep::ModelSelect, &state),
+            current_model_options("codex")
+                .iter()
+                .position(|model| model == &"gpt-5.4")
+                .unwrap()
+        );
+        assert_eq!(
+            step_default_selection(LaunchWizardStep::ExecutionMode, &state),
+            EXECUTION_MODE_OPTIONS
+                .iter()
+                .position(|option| option.value == "resume")
+                .unwrap()
+        );
+        assert_eq!(
+            step_default_selection(LaunchWizardStep::SkipPermissions, &state),
+            0
+        );
+        assert_eq!(
+            step_default_selection(LaunchWizardStep::CodexFastMode, &state),
+            0
+        );
     }
 
     #[test]
@@ -3155,5 +3604,381 @@ mod tests {
             .find(|option| option.is_default)
             .expect("Sonnet reasoning options must have a default row");
         assert_eq!(default.stored_value, "medium");
+    }
+
+    #[test]
+    fn open_and_quick_start_helpers_cover_real_sessions_and_errors() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            "resume-1",
+        );
+
+        let mut ctx = context(branch("origin/feature/gui"), "feature/gui");
+        ctx.quick_start_root = worktree;
+        let mut state = LaunchWizardState::open(ctx, dir.path(), &dir.path().join("versions.json"));
+
+        assert_eq!(state.step, LaunchWizardStep::QuickStart);
+        assert_eq!(state.quick_start_entries.len(), 1);
+        assert!(state.quick_start_entries[0].can_reuse());
+        assert_eq!(
+            state.quick_start_entries[0].reuse_action_label(),
+            Some("Resume")
+        );
+        assert!(matches!(
+            state.quick_start_actions().as_slice(),
+            [
+                QuickStartAction::ReuseEntry { index: 0 },
+                QuickStartAction::StartNewEntry { index: 0 },
+                QuickStartAction::ChooseDifferent
+            ]
+        ));
+        assert!(matches!(
+            state.selected_quick_start_action(),
+            QuickStartAction::ReuseEntry { index: 0 }
+        ));
+        assert_eq!(
+            state
+                .selected_quick_start_entry()
+                .map(|entry| entry.agent_id.as_str()),
+            Some("codex")
+        );
+        assert_eq!(
+            state.view().quick_start_entries[0]
+                .reuse_action_label
+                .as_deref(),
+            Some("Resume")
+        );
+
+        let mut loading = LaunchWizardState::open_loading(
+            context(branch("feature/gui"), "feature/gui"),
+            Vec::new(),
+        );
+        loading.set_hydration_error("network failed".to_string());
+        assert!(!loading.is_hydrating);
+        assert_eq!(loading.hydration_error.as_deref(), Some("network failed"));
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Launch(config))
+                if matches!(
+                    config.as_ref(),
+                    LaunchWizardLaunchRequest::Agent(config)
+                        if config.resume_session_id.as_deref() == Some("resume-1")
+                )
+        ));
+
+        let mut missing = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-2",
+                "codex",
+                None,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+        missing.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+        assert_eq!(
+            missing.error.as_deref(),
+            Some("No saved session is available")
+        );
+    }
+
+    #[test]
+    fn current_options_cover_all_steps_and_reasoning_variants() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-live".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+        }];
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("worker".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![
+                quick_start_entry(
+                    "session-1",
+                    "codex",
+                    Some("resume-1"),
+                    Some("window-1"),
+                    gwt_agent::LaunchRuntimeTarget::Docker,
+                    Some("worker"),
+                ),
+                quick_start_entry(
+                    "session-2",
+                    "claude",
+                    None,
+                    None,
+                    gwt_agent::LaunchRuntimeTarget::Host,
+                    None,
+                ),
+            ],
+        );
+
+        let quick_options = state.current_options();
+        assert_eq!(quick_options[0].value, "reuse:0");
+        assert!(quick_options
+            .iter()
+            .any(|option| option.value == "focus_existing"));
+        assert!(quick_options
+            .iter()
+            .any(|option| option.value == "choose_different"));
+        state.selected = 999;
+        assert!(matches!(
+            state.selected_quick_start_action(),
+            QuickStartAction::ChooseDifferent
+        ));
+        assert!(state.selected_quick_start_entry().is_none());
+
+        state.step = LaunchWizardStep::FocusExistingSession;
+        assert_eq!(state.current_options()[0].value, "window-1");
+
+        state.step = LaunchWizardStep::BranchAction;
+        assert_eq!(state.current_options().len(), 2);
+
+        state.step = LaunchWizardStep::BranchTypeSelect;
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "release/"));
+
+        state.step = LaunchWizardStep::LaunchTarget;
+        assert_eq!(state.current_options()[1].value, "shell");
+
+        state.step = LaunchWizardStep::AgentSelect;
+        assert_eq!(state.current_options().len(), 2);
+
+        state.agent_id = "claude".to_string();
+        state.step = LaunchWizardStep::ModelSelect;
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "sonnet"));
+
+        state.model = "opus".to_string();
+        state.step = LaunchWizardStep::ReasoningLevel;
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "xhigh"));
+
+        state.model = "sonnet".to_string();
+        assert!(!state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "xhigh"));
+
+        state.step = LaunchWizardStep::RuntimeTarget;
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "docker"));
+
+        state.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        state.step = LaunchWizardStep::DockerServiceSelect;
+        assert_eq!(state.current_options()[1].value, "worker");
+
+        state.step = LaunchWizardStep::DockerLifecycle;
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "connect"));
+
+        state.context.docker_service_status = gwt_docker::ComposeServiceStatus::Exited;
+        assert_eq!(state.current_options()[0].value, "start");
+
+        state.context.docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
+        assert_eq!(state.current_options()[0].value, "create_and_start");
+
+        state.context.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        state.agent_id = "missing".to_string();
+        state.step = LaunchWizardStep::VersionSelect;
+        assert!(state.current_options().is_empty());
+
+        state.agent_id = "codex".to_string();
+        state.version = "0.110.0".to_string();
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "0.110.0" || option.value == "latest"));
+
+        state.step = LaunchWizardStep::ExecutionMode;
+        assert!(state
+            .current_options()
+            .iter()
+            .any(|option| option.value == "resume"));
+
+        state.step = LaunchWizardStep::SkipPermissions;
+        assert_eq!(state.current_options()[0].value, "yes");
+
+        state.step = LaunchWizardStep::CodexFastMode;
+        assert_eq!(state.current_options()[0].value, "on");
+
+        state.step = LaunchWizardStep::BranchNameInput;
+        assert!(state.current_options().is_empty());
+    }
+
+    #[test]
+    fn navigation_and_apply_actions_cover_cancel_back_and_focus_paths() {
+        let mut quick_ctx = context(branch("feature/gui"), "feature/gui");
+        quick_ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-live".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+        }];
+        let mut state = LaunchWizardState::open_with(
+            quick_ctx,
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-1",
+                "codex",
+                Some("resume-1"),
+                Some("window-1"),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+
+        assert_eq!(
+            next_step(LaunchWizardStep::QuickStart, &state),
+            Some(LaunchWizardStep::SkipPermissions)
+        );
+        state.selected = 2;
+        assert_eq!(
+            next_step(LaunchWizardStep::QuickStart, &state),
+            Some(LaunchWizardStep::FocusExistingSession)
+        );
+        state.selected = 3;
+        assert_eq!(
+            next_step(LaunchWizardStep::QuickStart, &state),
+            Some(LaunchWizardStep::BranchAction)
+        );
+        assert_eq!(
+            prev_step(LaunchWizardStep::BranchAction, &state),
+            Some(LaunchWizardStep::QuickStart)
+        );
+        assert_eq!(
+            prev_step(LaunchWizardStep::FocusExistingSession, &state),
+            Some(LaunchWizardStep::QuickStart)
+        );
+
+        state.apply(LaunchWizardAction::FocusExistingSession { index: 0 });
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::FocusWindow { window_id }) if window_id == "window-1"
+        ));
+
+        state.completion = None;
+        state.error = None;
+        state.apply(LaunchWizardAction::FocusExistingSession { index: 99 });
+        assert_eq!(
+            state.error.as_deref(),
+            Some("No running session is available")
+        );
+
+        state.completion = None;
+        state.step = LaunchWizardStep::QuickStart;
+        state.apply(LaunchWizardAction::Back);
+        assert!(matches!(
+            state.completion.as_ref(),
+            Some(LaunchWizardCompletion::Cancelled)
+        ));
+
+        let mut plain = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        assert_eq!(
+            next_step(LaunchWizardStep::LaunchTarget, &plain),
+            Some(LaunchWizardStep::AgentSelect)
+        );
+        plain.launch_target = LaunchTargetKind::Shell;
+        assert_eq!(next_step(LaunchWizardStep::LaunchTarget, &plain), None);
+        plain.apply(LaunchWizardAction::SetLinkedIssue { issue_number: 42 });
+        assert_eq!(plain.linked_issue_number, Some(42));
+        plain.apply(LaunchWizardAction::ClearLinkedIssue);
+        assert_eq!(plain.linked_issue_number, None);
+        plain.step = LaunchWizardStep::BranchNameInput;
+        plain.apply(LaunchWizardAction::SubmitText {
+            value: "   ".to_string(),
+        });
+        assert_eq!(plain.error.as_deref(), Some("Branch name is required"));
+        plain.error = None;
+        plain.step = LaunchWizardStep::BranchAction;
+        plain.apply(LaunchWizardAction::SubmitText {
+            value: "ignored".to_string(),
+        });
+        assert!(plain.error.is_none());
+        assert_eq!(plain.branch_name, "feature/gui");
+
+        let mut docker_ctx = context(branch("feature/gui"), "feature/gui");
+        docker_ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("worker".to_string()),
+        });
+        docker_ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let mut docker =
+            LaunchWizardState::open_with(docker_ctx, sample_agent_options(), Vec::new());
+        docker.agent_id = "claude".to_string();
+        docker.model = "sonnet".to_string();
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        assert_eq!(
+            prev_step(LaunchWizardStep::RuntimeTarget, &docker),
+            Some(LaunchWizardStep::ReasoningLevel)
+        );
+        assert_eq!(
+            prev_step(LaunchWizardStep::DockerLifecycle, &docker),
+            Some(LaunchWizardStep::DockerServiceSelect)
+        );
+
+        docker.apply(LaunchWizardAction::SetBranchType {
+            prefix: "release/".to_string(),
+        });
+        assert!(docker.branch_name.starts_with("release/"));
+        docker.apply(LaunchWizardAction::SetDockerService {
+            service: "api".to_string(),
+        });
+        assert_eq!(docker.docker_service.as_deref(), Some("api"));
+        docker.apply(LaunchWizardAction::SetDockerLifecycle {
+            intent: gwt_agent::DockerLifecycleIntent::Restart,
+        });
+        assert_eq!(
+            docker.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+        docker.apply(LaunchWizardAction::SetExecutionMode {
+            mode: "continue".to_string(),
+        });
+        assert_eq!(docker.mode, "continue");
     }
 }

@@ -61,20 +61,64 @@ pub fn parse_clipboard_paste(text: &str) -> ClipboardPasteContent {
 }
 
 fn parse_clipboard_path_line(line: &str) -> Option<PathBuf> {
-    if let Some(path) = parse_file_url(line) {
-        return Some(path);
-    }
-
-    let path = PathBuf::from(line);
-    path.is_absolute().then_some(path)
+    parse_file_url(line).or_else(|| parse_absolute_path_literal(line))
 }
 
 fn parse_file_url(line: &str) -> Option<PathBuf> {
-    let raw_path = line.strip_prefix("file://")?;
-    let raw_path = raw_path.strip_prefix("localhost").unwrap_or(raw_path);
-    let decoded = percent_decode(raw_path)?;
-    let path = PathBuf::from(decoded);
-    path.is_absolute().then_some(path)
+    let raw = line.strip_prefix("file://")?;
+    let decoded = if let Some(path) = raw.strip_prefix("localhost/") {
+        percent_decode(&format!("/{path}"))?
+    } else if raw.starts_with('/') {
+        percent_decode(raw)?
+    } else {
+        let (authority, path) = raw.split_once('/')?;
+        percent_decode(&format!("//{authority}/{path}"))?
+    };
+    let normalized = normalize_file_url_path(decoded);
+    parse_absolute_path_literal(&normalized)
+}
+
+fn parse_absolute_path_literal(line: &str) -> Option<PathBuf> {
+    is_absolute_path_literal(line).then(|| PathBuf::from(line))
+}
+
+fn is_absolute_path_literal(line: &str) -> bool {
+    is_posix_absolute_path_literal(line)
+        || is_windows_drive_absolute_path_literal(line)
+        || is_unc_path_literal(line)
+}
+
+fn is_posix_absolute_path_literal(line: &str) -> bool {
+    line.starts_with('/')
+}
+
+fn is_windows_drive_absolute_path_literal(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+fn is_unc_path_literal(line: &str) -> bool {
+    line.starts_with("\\\\") || line.starts_with("//")
+}
+
+fn normalize_file_url_path(decoded: String) -> String {
+    if looks_like_windows_file_url_path(&decoded) {
+        decoded[1..].to_string()
+    } else {
+        decoded
+    }
+}
+
+fn looks_like_windows_file_url_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 4
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+        && matches!(bytes[3], b'\\' | b'/')
 }
 
 fn percent_decode(input: &str) -> Option<String> {
@@ -290,6 +334,39 @@ mod tests {
                     PathBuf::from("/Users/alice/Documents/one.txt"),
                     PathBuf::from("/Users/alice/Documents/two.txt"),
                 ]
+        ));
+    }
+
+    #[test]
+    fn parse_clipboard_paste_accepts_windows_drive_paths_independent_of_host_os() {
+        let parsed = parse_clipboard_paste("C:/Users/alice/Documents/one.txt\nD:\\logs\\two.txt\n");
+        assert!(matches!(
+            parsed,
+            ClipboardPasteContent::FilePaths(paths)
+                if paths == vec![
+                    PathBuf::from("C:/Users/alice/Documents/one.txt"),
+                    PathBuf::from("D:\\logs\\two.txt"),
+                ]
+        ));
+    }
+
+    #[test]
+    fn parse_clipboard_paste_returns_windows_drive_path_for_file_url() {
+        let parsed = parse_clipboard_paste("file:///C:/Users/alice/Documents/report%20draft.txt\n");
+        assert!(matches!(
+            parsed,
+            ClipboardPasteContent::FilePaths(paths)
+                if paths == vec![PathBuf::from("C:/Users/alice/Documents/report draft.txt")]
+        ));
+    }
+
+    #[test]
+    fn parse_clipboard_paste_returns_unc_path_for_file_url_authority() {
+        let parsed = parse_clipboard_paste("file://fileserver/share/report.txt\n");
+        assert!(matches!(
+            parsed,
+            ClipboardPasteContent::FilePaths(paths)
+                if paths == vec![PathBuf::from("//fileserver/share/report.txt")]
         ));
     }
 }

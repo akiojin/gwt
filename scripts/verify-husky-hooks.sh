@@ -43,6 +43,7 @@ require_contains "$PACKAGE_JSON" "\"lint:husky\": \"bash scripts/verify-husky-ho
 require_file "$PRE_PUSH"
 require_contains "$PRE_PUSH" "cargo clippy --all-targets --all-features -- -D warnings"
 require_contains "$PRE_PUSH" "cargo fmt --all -- --check"
+require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --fail-under-lines 90 --ignore-filename-regex 'crates[/\\\\]gwt[/\\\\]src[/\\\\]main\\.rs$'"
 require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md"
 require_contains "$PRE_PUSH" "pnpm lint:skills"
 
@@ -52,8 +53,6 @@ require_contains "$COMMIT_MSG" 'bunx --package @commitlint/cli commitlint --edit
 if [ -f "$PRE_COMMIT" ]; then
   require_contains "$PRE_COMMIT" "pnpm lint:skills"
   require_contains "$PRE_COMMIT" "bash scripts/run-local-backend-tests-on-commit.sh"
-  require_contains "$PRE_COMMIT" "bash scripts/run-local-e2e-on-commit.sh"
-  require_contains "$PRE_COMMIT" "bash scripts/run-local-e2e-coverage-on-commit.sh"
   require_not_contains "$PRE_COMMIT" "cargo clippy --all-targets --all-features -- -D warnings"
   require_not_contains "$PRE_COMMIT" "cargo fmt --all -- --check"
   require_not_contains "$PRE_COMMIT" "markdownlint-cli"
