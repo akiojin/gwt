@@ -5056,8 +5056,9 @@
           case "branch_entries": {
             const state = ensureBranchListState(event.id);
             state.entries = event.entries;
-            state.phase = event.phase || "hydrated";
-            state.loading = event.phase !== "hydrated";
+            const phase = String(event.phase || "hydrated").toLowerCase();
+            state.phase = phase;
+            state.loading = phase !== "hydrated";
             state.receivedFreshEntries = true;
             state.error = "";
             state.notice = "";

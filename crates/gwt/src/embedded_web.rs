@@ -224,8 +224,12 @@ mod tests {
             "expected embedded html to branch on cleanup hydration readiness",
         );
         assert!(
-            html.contains("state.loading = event.phase !== \"hydrated\";"),
-            "expected branch entries handler to derive loading state from explicit event phase",
+            html.contains("const phase = String(event.phase || \"hydrated\").toLowerCase();"),
+            "expected branch entries handler to normalize the explicit event phase before using it",
+        );
+        assert!(
+            html.contains("state.loading = phase !== \"hydrated\";"),
+            "expected branch entries handler to derive loading state from the normalized phase",
         );
         assert!(
             html.contains("Loading branch details"),
