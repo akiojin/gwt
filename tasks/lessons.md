@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: vt100 の列 shrink は trailing wide cell orphan を残さない形で扱う
+
+### 事象
+
+Windows で `gwt` 起動直後、PowerShell prompt に全角文字を含む行が terminal 右端付近にある状態で
+window fit / reconnect snapshot 後に `vt100` が panic した。
+panic は `vt100-0.16.2/src/row.rs` の `clear_wide()` で発生し、
+`len == index` の末尾外参照になっていた。
+
+### 原因
+
+- `vt100::Screen::set_size()` の列 shrink は内部的に row を短くするが、
+  右端で wide glyph の continuation cell が落ちると leading cell だけが残ることがある。
+- その invalid state のまま後続の erase/delete/snapshot 系の処理が走ると、
+  trailing continuation を前提にした `clear_wide()` が panic する。
+- gwt 側は resize をそのまま `set_size()` に委譲しており、wide glyph の末尾境界を補正していなかった。
+
+### 再発防止策
+
+1. terminal width を shrink するときは `vt100` 画面をそのまま縮めず、
+   右端ではみ出す wide glyph を落とした可視状態へ再構築してから新サイズを適用する。
+2. wide glyph 対応は renderer だけでなく resize / snapshot / reconnect 経路も同じ owner SPEC で管理する。
+3. 回帰テストでは「shrink 後の follow-up erase」と「snapshot 取得」の両方を固定する。
+
 ## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
 
 ### 事象

@@ -27,6 +27,93 @@ pub struct Pane {
     line_buf: String,
 }
 
+fn cursor_move_escape(row: u16, col: u16) -> String {
+    format!("\x1b[{};{}H", row + 1, col + 1)
+}
+
+fn cursor_visibility_escape(hide_cursor: bool) -> &'static [u8] {
+    if hide_cursor {
+        b"\x1b[?25l"
+    } else {
+        b"\x1b[?25h"
+    }
+}
+
+fn row_has_truncated_trailing_wide_glyph(screen: &vt100::Screen, row: u16, cols: u16) -> bool {
+    cols > 0
+        && screen
+            .cell(row, cols - 1)
+            .is_some_and(|cell| cell.is_wide())
+}
+
+fn plain_row_contents(screen: &vt100::Screen, row: u16, cols: u16) -> String {
+    let mut contents = String::new();
+    let mut prev_col = 0;
+    let mut col = 0;
+
+    while col < cols {
+        let Some(cell) = screen.cell(row, col) else {
+            break;
+        };
+        if cell.is_wide_continuation() {
+            col += 1;
+            continue;
+        }
+        if cell.is_wide() && col + 1 >= cols {
+            break;
+        }
+        if cell.has_contents() {
+            for _ in prev_col..col {
+                contents.push(' ');
+            }
+            contents.push_str(cell.contents());
+            prev_col = col + if cell.is_wide() { 2 } else { 1 };
+        }
+        col += 1;
+    }
+
+    contents
+}
+
+fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
+    let (current_rows, current_cols) = parser.screen().size();
+    if cols >= current_cols {
+        parser.screen_mut().set_size(rows, cols);
+        return;
+    }
+
+    // vt100 0.16 can leave a trailing wide glyph without its continuation
+    // cell when shrinking columns in place. Rebuild the visible screen at the
+    // narrower width so follow-up erase/delete sequences stay valid.
+    let screen = parser.screen().clone();
+    let formatted_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
+    let mut rebuilt = vt100::Parser::new(current_rows, cols, 0);
+    for (row, formatted_row) in formatted_rows.into_iter().enumerate() {
+        let row = row as u16;
+        rebuilt.process(cursor_move_escape(row, 0).as_bytes());
+        if row_has_truncated_trailing_wide_glyph(&screen, row, cols) {
+            let plain_row = plain_row_contents(&screen, row, cols);
+            rebuilt.process(plain_row.as_bytes());
+        } else {
+            rebuilt.process(&formatted_row);
+        }
+    }
+    rebuilt.process(&screen.input_mode_formatted());
+    rebuilt.process(cursor_visibility_escape(screen.hide_cursor()));
+
+    let (cursor_row, cursor_col) = screen.cursor_position();
+    let clamped_row = cursor_row.min(current_rows.saturating_sub(1));
+    let clamped_col = cursor_col.min(cols.saturating_sub(1));
+    rebuilt.process(cursor_move_escape(clamped_row, clamped_col).as_bytes());
+    rebuilt.process(&screen.attributes_formatted());
+
+    if rows != current_rows {
+        rebuilt.screen_mut().set_size(rows, cols);
+    }
+
+    *parser = rebuilt;
+}
+
 impl Pane {
     /// Create a new pane by spawning a PTY process.
     pub fn new(
@@ -143,7 +230,7 @@ impl Pane {
     /// Resize the pane (PTY + vt100 parser).
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         self.pty.resize(cols, rows)?;
-        self.parser.screen_mut().set_size(rows, cols);
+        resize_parser_preserving_state(&mut self.parser, rows, cols);
         Ok(())
     }
 
@@ -279,6 +366,43 @@ mod tests {
         assert_eq!(screen.size(), (48, 120));
 
         let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_resize_parser_handles_wide_char_shrink_without_followup_panic() {
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process("ab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 1, 3);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parser.process(b"\x1b[1;3H\x1b[K");
+            parser.screen().contents()
+        }));
+
+        assert!(
+            result.is_ok(),
+            "shrinking after a trailing wide glyph must not panic on follow-up erase"
+        );
+        assert_eq!(parser.screen().size(), (1, 3));
+    }
+
+    #[test]
+    fn test_resize_parser_drops_truncated_wide_glyph_from_snapshot() {
+        let mut parser = vt100::Parser::new(2, 4, 0);
+        parser.process("ab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 2, 3);
+
+        let snapshot = parser.screen().contents();
+        assert!(
+            snapshot.starts_with("ab"),
+            "snapshot should preserve visible prefix"
+        );
+        assert!(
+            !snapshot.contains('漢'),
+            "snapshot must drop a wide glyph that no longer fits in the narrower width"
+        );
     }
 
     #[test]
