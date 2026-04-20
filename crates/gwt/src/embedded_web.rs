@@ -216,6 +216,24 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_branches_surface_keeps_loading_while_cleanup_hydration_is_pending() {
+        let html = index_html();
+
+        assert!(
+            html.contains("!entry.cleanup_ready"),
+            "expected embedded html to branch on cleanup hydration readiness",
+        );
+        assert!(
+            html.contains("state.loading = state.entries.some((entry) => !entry.cleanup_ready);"),
+            "expected branch entries handler to keep loading active until hydration finishes",
+        );
+        assert!(
+            html.contains("Loading branch details"),
+            "expected embedded html to surface loading copy while branch hydration continues",
+        );
+    }
+
+    #[test]
     fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
         let html = index_html();
 
