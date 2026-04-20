@@ -13,9 +13,10 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -25,9 +26,10 @@ use gwt::{
     load_knowledge_bridge, load_restored_workspace_state, load_session_state,
     migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
     save_session_state, save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry,
-    DockerWizardContext, FrontendEvent, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardCompletion,
+    LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState,
+    LiveSessionEntry, RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -203,6 +205,7 @@ struct AppRuntime {
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    hook_forward_target: Option<HookForwardTarget>,
     /// Cached update state so late-connecting WebView clients get the toast.
     pending_update: Option<gwt_core::update::UpdateState>,
 }
@@ -259,6 +262,7 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            hook_forward_target: None,
             pending_update: None,
         };
         app.rebuild_window_lookup();
@@ -287,6 +291,10 @@ impl AppRuntime {
             let _ = self.start_window(&tab_id, &window.id, window.preset, window.geometry.clone());
         }
         let _ = self.persist();
+    }
+
+    fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
+        self.hook_forward_target = Some(target);
     }
 
     fn handle_frontend_event(
@@ -1780,9 +1788,17 @@ impl AppRuntime {
 
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
+        let hook_forward_target = self.hook_forward_target.clone();
 
         thread::spawn(move || {
-            Self::spawn_agent_window_async(proxy, sessions_dir, project_root, window_id, config)
+            Self::spawn_agent_window_async(
+                proxy,
+                sessions_dir,
+                project_root,
+                window_id,
+                config,
+                hook_forward_target,
+            )
         });
 
         Ok(events)
@@ -1841,6 +1857,7 @@ impl AppRuntime {
         project_root: String,
         window_id: String,
         mut config: gwt_agent::LaunchConfig,
+        hook_forward_target: Option<HookForwardTarget>,
     ) {
         let result = (|| {
             let _ = proxy.send_event(UserEvent::LaunchProgress {
@@ -1907,6 +1924,15 @@ impl AppRuntime {
                 gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
                 runtime_path.display().to_string(),
             );
+            if let Some(target) = hook_forward_target {
+                config
+                    .env_vars
+                    .insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
+                config.env_vars.insert(
+                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                    target.token,
+                );
+            }
             config
                 .env_vars
                 .entry("COLORTERM".to_string())
@@ -2387,22 +2413,24 @@ fn app_state_view_from_parts(
 mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use tempfile::tempdir;
 
     use gwt::{
         empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
-        PersistedWindowState, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
-        WorkspaceState,
+        PersistedWindowState, RuntimeHookEvent, RuntimeHookEventKind, ShellLaunchConfig,
+        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_terminal::PaneStatus;
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        build_shell_process_launch, close_window_from_workspace, combined_window_id,
-        knowledge_kind_for_preset, preferred_issue_launch_branch, resolve_project_target,
-        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        ProjectTabRuntime, WindowAddress,
+        broadcast_runtime_hook_event, build_shell_process_launch, close_window_from_workspace,
+        combined_window_id, hook_forward_authorized, knowledge_kind_for_preset,
+        preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, ClientHub, ProjectTabRuntime,
+        WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2423,6 +2451,47 @@ mod tests {
             pre_maximize_geometry: None,
             persist: true,
         }
+    }
+
+    #[test]
+    fn runtime_hook_event_broadcast_reaches_all_registered_clients() {
+        let clients = ClientHub::default();
+        let mut native = clients.register("native".to_string());
+        let mut browser = clients.register("browser".to_string());
+
+        broadcast_runtime_hook_event(
+            &clients,
+            RuntimeHookEvent {
+                kind: RuntimeHookEventKind::RuntimeState,
+                source_event: Some("PreToolUse".to_string()),
+                gwt_session_id: Some("session-1".to_string()),
+                agent_session_id: Some("agent-1".to_string()),
+                project_root: Some("E:/gwt/test-repo".to_string()),
+                branch: Some("feature/runtime".to_string()),
+                status: Some("Running".to_string()),
+                tool_name: Some("Bash".to_string()),
+                message: None,
+                occurred_at: "2026-04-20T00:00:00Z".to_string(),
+            },
+        );
+
+        let native_payload = native.try_recv().expect("native payload");
+        let browser_payload = browser.try_recv().expect("browser payload");
+        assert_eq!(native_payload, browser_payload);
+        assert!(native_payload.contains("\"kind\":\"runtime_hook_event\""));
+        assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
+    }
+
+    #[test]
+    fn hook_forward_authorized_accepts_matching_bearer_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret-token"),
+        );
+
+        assert!(hook_forward_authorized(&headers, "secret-token"));
+        assert!(!hook_forward_authorized(&headers, "other-token"));
     }
 
     #[test]
@@ -2897,10 +2966,12 @@ impl ClientHub {
 struct ServerState {
     proxy: EventLoopProxy<UserEvent>,
     clients: ClientHub,
+    hook_forward_token: String,
 }
 
 struct EmbeddedServer {
     url: String,
+    hook_forward_token: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -2913,12 +2984,18 @@ impl EmbeddedServer {
         let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0)))?;
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let hook_forward_token = Uuid::new_v4().to_string();
 
         let app = Router::new()
             .route("/", get(embedded_web::index_handler))
             .route("/healthz", get(health_handler))
+            .route("/internal/hook-live", post(hook_live_handler))
             .route("/ws", get(websocket_handler))
-            .with_state(ServerState { proxy, clients });
+            .with_state(ServerState {
+                proxy,
+                clients,
+                hook_forward_token: hook_forward_token.clone(),
+            });
 
         runtime.spawn(async move {
             let server = axum::serve(listener, app).with_graceful_shutdown(async {
@@ -2931,6 +3008,7 @@ impl EmbeddedServer {
 
         Ok(Self {
             url: format!("http://127.0.0.1:{}/", addr.port()),
+            hook_forward_token,
             shutdown_tx: Some(shutdown_tx),
         })
     }
@@ -2944,6 +3022,13 @@ impl EmbeddedServer {
             let _ = tx.send(());
         }
     }
+
+    fn hook_forward_target(&self) -> HookForwardTarget {
+        HookForwardTarget {
+            url: format!("{}internal/hook-live", self.url),
+            token: self.hook_forward_token.clone(),
+        }
+    }
 }
 
 async fn health_handler() -> &'static str {
@@ -2955,6 +3040,19 @@ async fn websocket_handler(
     State(state): State<ServerState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| client_session(socket, state))
+}
+
+async fn hook_live_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(event): Json<RuntimeHookEvent>,
+) -> StatusCode {
+    if !hook_forward_authorized(&headers, &state.hook_forward_token) {
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    broadcast_runtime_hook_event(&state.clients, event);
+    StatusCode::NO_CONTENT
 }
 
 async fn client_session(socket: WebSocket, state: ServerState) {
@@ -2999,6 +3097,20 @@ async fn client_session(socket: WebSocket, state: ServerState) {
     }
 
     state.clients.unregister(&client_id);
+}
+
+fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected_token)
+}
+
+fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
+    clients.dispatch(vec![OutboundEvent::broadcast(
+        BackendEvent::RuntimeHookEvent { event },
+    )]);
 }
 
 fn normalize_branch_name(branch_name: &str) -> String {
@@ -4134,6 +4246,7 @@ fn main() -> wry::Result<()> {
 
     let mut server =
         EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
+    app.set_hook_forward_target(server.hook_forward_target());
     eprintln!("gwt browser URL: {}", server.url());
 
     // Startup update check (T-031): runs in background; broadcasts UpdateState::Available if a

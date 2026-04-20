@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
+    daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -223,6 +224,9 @@ pub enum BackendEvent {
     LaunchProgress {
         id: String,
         message: String,
+    },
+    RuntimeHookEvent {
+        event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
 }
