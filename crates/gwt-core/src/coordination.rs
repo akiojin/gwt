@@ -11,7 +11,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{paths::gwt_coordination_dir_for_repo_path, GwtError, Result};
+use crate::{paths::gwt_project_dir_for_repo_path, GwtError, Result};
 
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
@@ -247,7 +247,7 @@ pub struct CoordinationSnapshot {
 }
 
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
-    gwt_coordination_dir_for_repo_path(worktree_root)
+    coordination_project_dir(worktree_root)
         .unwrap_or_else(|| legacy_coordination_dir(worktree_root))
 }
 
@@ -264,7 +264,7 @@ fn coordination_lock_path(worktree_root: &Path) -> PathBuf {
 }
 
 pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
-    if let Some(project_dir) = gwt_coordination_dir_for_repo_path(worktree_root) {
+    if let Some(project_dir) = coordination_project_dir(worktree_root) {
         let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
         migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
     }
@@ -489,6 +489,29 @@ fn legacy_coordination_dir(worktree_root: &Path) -> PathBuf {
     worktree_root.join(COORDINATION_RELATIVE_DIR)
 }
 
+fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
+    let repo_root = coordination_repo_root(worktree_root)?;
+    Some(gwt_project_dir_for_repo_path(&repo_root).join("coordination"))
+}
+
+fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(worktree_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let repo_root = stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(dunce::canonicalize(repo_root).unwrap_or_else(|_| PathBuf::from(repo_root)))
+}
+
 fn coordination_migration_marker_path(project_dir: &Path) -> PathBuf {
     project_dir.join(MIGRATION_MARKER_FILE_NAME)
 }
@@ -656,11 +679,44 @@ fn json_error(err: serde_json::Error) -> GwtError {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread};
+    use std::{
+        ffi::OsString,
+        sync::{Arc, Mutex, OnceLock},
+        thread,
+    };
 
     use chrono::TimeZone;
 
     use super::*;
+    use crate::paths::gwt_project_dir_for_repo_path;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn load_snapshot_bootstraps_empty_files() {
@@ -784,6 +840,36 @@ mod tests {
     }
 
     #[test]
+    fn git_repo_without_origin_uses_project_scoped_coordination_dir() {
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let snapshot = load_snapshot(&repo).unwrap();
+        assert!(snapshot.board.entries.is_empty());
+
+        let project_dir = gwt_project_dir_for_repo_path(&repo).join("coordination");
+        assert_eq!(coordination_dir(&repo), project_dir);
+        assert!(project_dir.join(EVENTS_FILE_NAME).exists());
+        assert!(project_dir.join(BOARD_PROJECTION_FILE_NAME).exists());
+        assert!(!legacy_coordination_dir(&repo).exists());
+    }
+
+    #[test]
     fn repeated_projection_writes_leave_no_tmp_files() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -824,7 +910,7 @@ mod tests {
     #[test]
     fn migrate_legacy_coordination_dirs_merges_events_and_deletes_sources() {
         let dir = tempfile::tempdir().unwrap();
-        let project_dir = dir.path().join("home/.gwt/coordination/repo-hash");
+        let project_dir = dir.path().join("home/.gwt/projects/repo-hash/coordination");
         let legacy_one = dir.path().join("repo/.gwt/coordination");
         let legacy_two = dir.path().join("wt/.gwt/coordination");
 
@@ -891,7 +977,7 @@ mod tests {
     #[test]
     fn migrate_legacy_coordination_dirs_normalizes_legacy_board_post_events() {
         let dir = tempfile::tempdir().unwrap();
-        let project_dir = dir.path().join("home/.gwt/coordination/repo-hash");
+        let project_dir = dir.path().join("home/.gwt/projects/repo-hash/coordination");
         let legacy_dir = dir.path().join("repo/.gwt/coordination");
 
         std::fs::create_dir_all(&legacy_dir).unwrap();

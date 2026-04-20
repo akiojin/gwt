@@ -138,7 +138,7 @@ impl Platform {
     fn artifact(&self) -> Option<&'static str> {
         match (self.os.as_str(), self.arch.as_str()) {
             ("linux", "x86_64") => Some("linux-x86_64"),
-            ("linux", "aarch64") => Some("linux-arm64"),
+            ("linux", "aarch64") => Some("linux-aarch64"),
             ("macos", "x86_64") => Some("macos-x86_64"),
             ("macos", "aarch64") => Some("macos-arm64"),
             ("windows", "x86_64") => Some("windows-x86_64"),
@@ -1429,6 +1429,35 @@ mod tests {
                 url: "https://example.com/gwt_7.1.0_aarch64.dmg".to_string(),
                 kind: InstallerKind::MacDmg,
             })
+        );
+    }
+
+    #[test]
+    fn portable_asset_name_matches_release_contract() {
+        let linux_aarch64 = Platform {
+            os: "linux".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let macos_arm64 = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let windows_x64 = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+
+        assert_eq!(
+            linux_aarch64.portable_asset_name().as_deref(),
+            Some("gwt-linux-aarch64.tar.gz")
+        );
+        assert_eq!(
+            macos_arm64.portable_asset_name().as_deref(),
+            Some("gwt-macos-arm64.tar.gz")
+        );
+        assert_eq!(
+            windows_x64.portable_asset_name().as_deref(),
+            Some("gwt-windows-x86_64.zip")
         );
     }
 
