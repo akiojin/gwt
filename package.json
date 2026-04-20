@@ -7,7 +7,7 @@
     "gwt": "bin/gwt.cjs"
   },
   "scripts": {
-    "postinstall": "node scripts/postinstall.js",
+    "postinstall": "node scripts/postinstall.cjs",
     "dev": "cargo run -p gwt",
     "build": "cargo build --release -p gwt",
     "test": "cargo test -p gwt-core -p gwt --all-features",
