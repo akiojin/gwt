@@ -3,7 +3,7 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpsc as std_mpsc, atomic::AtomicU64, Arc, Mutex},
+    sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
