@@ -132,22 +132,23 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - name: Build gwt binary
         run: cargo build --release -p gwt --target ${{ matrix.target }}
-      - name: Prepare artifact
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.binary }}"
+          Compress-Archive -Path "dist/${{ matrix.binary }}" -DestinationPath "dist/${{ matrix.archive_name }}" -Force
+          Remove-Item "dist/${{ matrix.binary }}"
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
           cd dist
           cp ../target/${{ matrix.target }}/release/${{ matrix.binary }} .
-          case "${{ matrix.platform }}" in
-            windows-*)
-              zip -q ${{ matrix.archive_name }} ${{ matrix.binary }}
-              rm ${{ matrix.binary }}
-              ;;
-            *)
-              tar -czf ${{ matrix.archive_name }} ${{ matrix.binary }}
-              rm ${{ matrix.binary }}
-              ;;
-          esac
+          tar -czf ${{ matrix.archive_name }} ${{ matrix.binary }}
+          rm ${{ matrix.binary }}
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
