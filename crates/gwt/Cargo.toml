@@ -19,6 +19,8 @@ path = "src/bin/gwtd.rs"
 
 [dependencies]
 gwt-agent.workspace = true
+gwt-ai.workspace = true
+gwt-config.workspace = true
 gwt-core.workspace = true
 gwt-docker.workspace = true
 gwt-git.workspace = true

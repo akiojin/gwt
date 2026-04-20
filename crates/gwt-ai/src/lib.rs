@@ -11,12 +11,17 @@ pub mod branch_suggest;
 pub mod client;
 pub mod error;
 pub mod issue_classify;
+pub mod models_probe;
 pub mod session_converter;
 
 pub use branch_suggest::{parse_suggestions, suggest_branch_name};
 pub use client::{AIClient, ChatMessage};
 pub use error::AIError;
 pub use issue_classify::{classify_issue, parse_classify_response};
+pub use models_probe::{
+    is_valid_base_url, list_model_ids_blocking, list_models_blocking, parse_models_response,
+    ModelInfo, ProbeError, PROBE_TIMEOUT,
+};
 pub use session_converter::{
     convert_session, get_encoder, ClaudeEncoder, CodexEncoder, GeminiEncoder, OpenCodeEncoder,
     Role, SessionEncoder, SessionMessage,

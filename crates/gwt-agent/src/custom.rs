@@ -177,4 +177,75 @@ mod tests {
             "\"bunx\""
         );
     }
+
+    #[test]
+    fn toml_roundtrip_preserves_env_subtable() {
+        let mut agent = sample_agent();
+        agent.env.clear();
+        agent
+            .env
+            .insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
+        agent.env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "http://proxy.local:32768".to_string(),
+        );
+        agent.env.insert(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            "openai/gpt-oss-20b".to_string(),
+        );
+
+        let toml_text = toml::to_string(&agent).expect("serialize to TOML");
+        let decoded: CustomCodingAgent = toml::from_str(&toml_text).expect("deserialize TOML");
+
+        assert_eq!(decoded.id, agent.id);
+        assert_eq!(decoded.env.len(), 3);
+        assert_eq!(decoded.env.get("ANTHROPIC_API_KEY").unwrap(), "sk-test");
+        assert_eq!(
+            decoded.env.get("ANTHROPIC_BASE_URL").unwrap(),
+            "http://proxy.local:32768"
+        );
+        assert_eq!(
+            decoded.env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").unwrap(),
+            "openai/gpt-oss-20b"
+        );
+    }
+
+    #[test]
+    fn toml_without_env_deserializes_with_empty_map() {
+        // Legacy custom agent TOML without an [env] table must remain
+        // readable (FR-059: backwards-compatible with existing custom agent rows).
+        let toml_text = r#"
+id = "legacy-agent"
+display_name = "Legacy"
+type = "command"
+command = "legacy-cli"
+"#;
+        let decoded: CustomCodingAgent =
+            toml::from_str(toml_text).expect("legacy TOML deserializes");
+        assert_eq!(decoded.id, "legacy-agent");
+        assert!(
+            decoded.env.is_empty(),
+            "missing env sub-table must default to empty map"
+        );
+    }
+
+    #[test]
+    fn toml_env_roundtrip_is_stable_across_multiple_cycles() {
+        let mut agent = sample_agent();
+        agent.env.clear();
+        for i in 0..10 {
+            agent.env.insert(format!("KEY_{i}"), format!("value_{i}"));
+        }
+        let t1 = toml::to_string(&agent).unwrap();
+        let decoded1: CustomCodingAgent = toml::from_str(&t1).unwrap();
+        let t2 = toml::to_string(&decoded1).unwrap();
+        let decoded2: CustomCodingAgent = toml::from_str(&t2).unwrap();
+        assert_eq!(decoded2.env.len(), 10);
+        for i in 0..10 {
+            assert_eq!(
+                decoded2.env.get(&format!("KEY_{i}")).unwrap(),
+                &format!("value_{i}")
+            );
+        }
+    }
 }
