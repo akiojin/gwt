@@ -3,7 +3,7 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex},
+    sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -31,7 +31,7 @@ use gwt::{
     LiveSessionEntry, RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset,
     WindowProcessStatus, WorkspaceState, APP_NAME,
 };
-use gwt_terminal::{Pane, PaneStatus};
+use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
@@ -59,6 +59,18 @@ struct DockerBundleMounts {
     host_gwt: PathBuf,
     host_gwtd: PathBuf,
 }
+
+/// Shared lock-free PTY writer registry used by the WebSocket fast-path.
+///
+/// The WS receiver task (tokio async) looks up the `Arc<PtyHandle>` by window
+/// id and calls `write_input` directly, bypassing the tao event loop and the
+/// surrounding `Mutex<Pane>` guard. This eliminates the two main contention
+/// sources for intermittent key drops under heavy output bursts
+/// (bugfix/input-key): (a) FIFO queue behind many `RuntimeOutput` events on
+/// the single-threaded tao main loop, and (b) pane mutex held by the reader
+/// thread while parsing vt100 chunks. Reads are hot (every keystroke), writes
+/// are rare (pane create/destroy), so `RwLock` is the natural fit.
+type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
 #[derive(Debug, Clone)]
 enum UserEvent {
@@ -218,6 +230,8 @@ struct AppRuntime {
     hook_forward_target: Option<HookForwardTarget>,
     /// Cached update state so late-connecting WebView clients get the toast.
     pending_update: Option<gwt_core::update::UpdateState>,
+    /// Shared PTY writer registry published to the WebSocket fast-path.
+    pty_writers: PtyWriterRegistry,
 }
 
 impl ProjectTabRuntime {
@@ -236,7 +250,10 @@ impl ProjectTabRuntime {
 }
 
 impl AppRuntime {
-    fn new(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<Self> {
+    fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        pty_writers: PtyWriterRegistry,
+    ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let legacy_target = resolve_project_target(&launch_dir)
@@ -274,6 +291,7 @@ impl AppRuntime {
             active_agent_sessions: HashMap::new(),
             hook_forward_target: None,
             pending_update: None,
+            pty_writers,
         };
         app.rebuild_window_lookup();
         app.seed_restored_window_details();
@@ -1509,6 +1527,7 @@ impl AppRuntime {
         let should_auto_close =
             should_auto_close_agent_window(&self.active_agent_sessions, &id, &status);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
+            self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
             return Vec::new();
@@ -1783,6 +1802,12 @@ impl AppRuntime {
             );
         }
         self.window_details.remove(id);
+        // Publish the PTY handle to the WebSocket fast-path registry BEFORE
+        // inserting the runtime so that the first `terminal_input` from the
+        // frontend (which can arrive immediately after `TerminalStatus`) has a
+        // target to write to. Registry holds a cloned `Arc<PtyHandle>`; the
+        // real owner remains the `Mutex<Pane>` in `WindowRuntime`.
+        self.register_pty_writer(id, &pane);
         self.runtimes.insert(
             id.to_string(),
             WindowRuntime {
@@ -2081,8 +2106,54 @@ impl AppRuntime {
         );
     }
 
+    fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+        let Ok(pane_guard) = pane.lock() else {
+            tracing::warn!(
+                target: "gwt_input_trace",
+                stage = "registry_lock_poisoned",
+                window_id = %id,
+                "failed to register PTY writer: pane mutex poisoned"
+            );
+            return;
+        };
+        let pty = pane_guard.shared_pty();
+        drop(pane_guard);
+        match self.pty_writers.write() {
+            Ok(mut guard) => {
+                guard.insert(id.to_string(), pty);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_input_trace",
+                    stage = "registry_write_poisoned",
+                    window_id = %id,
+                    error = %error,
+                    "failed to register PTY writer: registry poisoned"
+                );
+            }
+        }
+    }
+
+    fn deregister_pty_writer(&self, id: &str) {
+        match self.pty_writers.write() {
+            Ok(mut guard) => {
+                guard.remove(id);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_input_trace",
+                    stage = "registry_deregister_poisoned",
+                    window_id = %id,
+                    error = %error,
+                    "failed to deregister PTY writer: registry poisoned"
+                );
+            }
+        }
+    }
+
     fn stop_window_runtime(&mut self, window_id: &str) {
         self.mark_agent_session_stopped(window_id);
+        self.deregister_pty_writer(window_id);
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
@@ -3076,6 +3147,8 @@ struct ServerState {
     proxy: EventLoopProxy<UserEvent>,
     clients: ClientHub,
     hook_forward_token: String,
+    /// Shared PTY writer registry for the `terminal_input` fast-path.
+    pty_writers: PtyWriterRegistry,
 }
 
 struct EmbeddedServer {
@@ -3089,6 +3162,7 @@ impl EmbeddedServer {
         runtime: &Runtime,
         proxy: EventLoopProxy<UserEvent>,
         clients: ClientHub,
+        pty_writers: PtyWriterRegistry,
     ) -> std::io::Result<Self> {
         let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0)))?;
         let addr = listener.local_addr()?;
@@ -3104,6 +3178,7 @@ impl EmbeddedServer {
                 proxy,
                 clients,
                 hook_forward_token: hook_forward_token.clone(),
+                pty_writers,
             });
 
         runtime.spawn(async move {
@@ -3190,42 +3265,13 @@ async fn client_session(socket: WebSocket, state: ServerState) {
                         let text_len = text.len();
                         match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
                             Ok(event) => {
-                                let (ti_seq, ti_id, ti_len) = match &event {
-                                    FrontendEvent::TerminalInput { id, data } => {
-                                        let seq = input_seq.fetch_add(
-                                            1,
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        ) + 1;
-                                        tracing::debug!(
-                                            target: "gwt_input_trace",
-                                            stage = "ws_recv",
-                                            client_id = %client_id,
-                                            seq,
-                                            window_id = %id,
-                                            data_len = data.len(),
-                                            text_len,
-                                            "terminal_input received over WebSocket"
-                                        );
-                                        (Some(seq), Some(id.clone()), Some(data.len()))
-                                    }
-                                    _ => (None, None, None),
-                                };
-                                let send_result = state.proxy.send_event(UserEvent::Frontend {
-                                    client_id: client_id.clone(),
+                                handle_frontend_message(
+                                    &state,
+                                    &client_id,
+                                    &input_seq,
+                                    text_len,
                                     event,
-                                });
-                                if let (Some(seq), Some(id), Some(len)) = (ti_seq, ti_id, ti_len) {
-                                    tracing::debug!(
-                                        target: "gwt_input_trace",
-                                        stage = "ws_dispatch",
-                                        client_id = %client_id,
-                                        seq,
-                                        window_id = %id,
-                                        data_len = len,
-                                        ok = send_result.is_ok(),
-                                        "terminal_input forwarded to event loop proxy"
-                                    );
-                                }
+                                );
                             }
                             Err(error) => {
                                 eprintln!("invalid frontend message: {error}");
@@ -3244,6 +3290,127 @@ async fn client_session(socket: WebSocket, state: ServerState) {
     }
 
     state.clients.unregister(&client_id);
+}
+
+/// Dispatch a parsed `FrontendEvent` from the WebSocket receiver task.
+///
+/// `TerminalInput` takes the fast-path: the pane's PTY handle is looked up in
+/// the shared registry and written to directly, bypassing the single-threaded
+/// tao event loop. Other events still flow through `UserEvent::Frontend` so
+/// they can mutate `AppRuntime` on the main thread.
+///
+/// If the fast-path fails (unknown window, PTY write error, or poisoned
+/// registry lock), the input is forwarded to the proxy so the existing
+/// error-reporting path in `terminal_input_events` still runs.
+fn handle_frontend_message(
+    state: &ServerState,
+    client_id: &str,
+    input_seq: &AtomicU64,
+    text_len: usize,
+    event: FrontendEvent,
+) {
+    // Fast-path only applies to TerminalInput. For every other variant, just
+    // forward to the main-thread event loop as before.
+    let (id, data) = match event {
+        FrontendEvent::TerminalInput { id, data } => (id, data),
+        other => {
+            let _ = state.proxy.send_event(UserEvent::Frontend {
+                client_id: client_id.to_string(),
+                event: other,
+            });
+            return;
+        }
+    };
+
+    let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let data_len = data.len();
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "ws_recv",
+        client_id = %client_id,
+        seq,
+        window_id = %id,
+        data_len,
+        text_len,
+        "terminal_input received over WebSocket"
+    );
+
+    let pty_handle = match state.pty_writers.read() {
+        Ok(guard) => guard.get(&id).cloned(),
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt_input_trace",
+                stage = "fast_path_lock_poisoned",
+                client_id = %client_id,
+                seq,
+                window_id = %id,
+                error = %error,
+                "pty_writers read lock poisoned; falling back to event loop"
+            );
+            None
+        }
+    };
+
+    if let Some(pty) = pty_handle {
+        let write_started = Instant::now();
+        match pty.write_input(data.as_bytes()) {
+            Ok(()) => {
+                tracing::debug!(
+                    target: "gwt_input_trace",
+                    stage = "fast_path_write",
+                    client_id = %client_id,
+                    seq,
+                    window_id = %id,
+                    data_len,
+                    write_us = write_started.elapsed().as_micros() as u64,
+                    "terminal_input written to PTY via WS fast-path"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gwt_input_trace",
+                    stage = "fast_path_write_err",
+                    client_id = %client_id,
+                    seq,
+                    window_id = %id,
+                    data_len,
+                    error = %error,
+                    "fast-path PTY write failed; forwarding to event loop for error handling"
+                );
+                // fall through to proxy path so `terminal_input_events` can
+                // route the error through `handle_runtime_status`.
+            }
+        }
+    } else {
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "fast_path_miss",
+            client_id = %client_id,
+            seq,
+            window_id = %id,
+            data_len,
+            "pty_writers registry miss; falling back to event loop"
+        );
+    }
+
+    let send_result = state.proxy.send_event(UserEvent::Frontend {
+        client_id: client_id.to_string(),
+        event: FrontendEvent::TerminalInput {
+            id: id.clone(),
+            data,
+        },
+    });
+    tracing::debug!(
+        target: "gwt_input_trace",
+        stage = "ws_dispatch",
+        client_id = %client_id,
+        seq,
+        window_id = %id,
+        data_len,
+        ok = send_result.is_ok(),
+        "terminal_input forwarded to event loop proxy (fallback)"
+    );
 }
 
 fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
@@ -4483,11 +4650,17 @@ fn main() -> wry::Result<()> {
     let clients = ClientHub::default();
     #[cfg(target_os = "macos")]
     let clients = ClientHub::default();
-    let mut app = AppRuntime::new(proxy.clone()).expect("app runtime");
+    let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let mut app = AppRuntime::new(proxy.clone(), pty_writers.clone()).expect("app runtime");
     app.bootstrap();
 
-    let mut server =
-        EmbeddedServer::start(&runtime, proxy.clone(), clients.clone()).expect("embedded server");
+    let mut server = EmbeddedServer::start(
+        &runtime,
+        proxy.clone(),
+        clients.clone(),
+        pty_writers.clone(),
+    )
+    .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());
     eprintln!("gwt browser URL: {}", server.url());
 
