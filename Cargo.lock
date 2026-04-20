@@ -1193,6 +1193,8 @@ dependencies = [
  "dunce",
  "futures-util",
  "gwt-agent",
+ "gwt-ai",
+ "gwt-config",
  "gwt-core",
  "gwt-docker",
  "gwt-git",

@@ -473,6 +473,32 @@ impl AppRuntime {
                 std::thread::spawn(apply_update_and_exit);
                 vec![]
             }
+            FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
+                client_id,
+                gwt::custom_agents_dispatch::list_event(),
+            )],
+            FrontendEvent::ListCustomAgentPresets => vec![OutboundEvent::reply(
+                client_id,
+                gwt::custom_agents_dispatch::list_presets_event(),
+            )],
+            FrontendEvent::AddCustomAgentFromPreset { input } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::custom_agents_dispatch::add_from_preset_event(input),
+            )],
+            FrontendEvent::UpdateCustomAgent { agent } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::custom_agents_dispatch::update_event(*agent),
+            )],
+            FrontendEvent::DeleteCustomAgent { agent_id } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::custom_agents_dispatch::delete_event(agent_id),
+            )],
+            FrontendEvent::TestBackendConnection { base_url, api_key } => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    gwt::custom_agents_dispatch::test_connection_event(&base_url, &api_key),
+                )]
+            }
         }
     }
 

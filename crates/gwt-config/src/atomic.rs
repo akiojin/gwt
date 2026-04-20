@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
 use tracing::warn;
 
 use crate::error::{ConfigError, Result};
