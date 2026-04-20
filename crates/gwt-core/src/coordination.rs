@@ -1,6 +1,7 @@
 //! Repo-local coordination storage for a shared board chat timeline.
 
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -701,6 +702,81 @@ fn json_error(err: serde_json::Error) -> GwtError {
     GwtError::Other(err.to_string())
 }
 
+// --- Phase 8.1: diff-injection / reminders sidecar APIs ---
+
+/// Per-agent-session reminder state persisted at
+/// `~/.gwt/projects/<hash>/coordination/reminders/<agent-session-id>.json`.
+///
+/// Owned by the `board-reminder` hook; not part of the shared Board projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemindersState {
+    #[serde(default)]
+    pub last_injected_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
+}
+
+/// Directory that stores per-agent-session reminder sidecar files.
+pub fn reminders_dir(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join("reminders")
+}
+
+fn reminders_path(worktree_root: &Path, agent_session_id: &str) -> PathBuf {
+    reminders_dir(worktree_root).join(format!("{agent_session_id}.json"))
+}
+
+/// Load reminder state for the given agent session. Returns a default state
+/// when no sidecar file exists yet.
+pub fn load_reminders_state(
+    worktree_root: &Path,
+    agent_session_id: &str,
+) -> Result<RemindersState> {
+    load_json_or_default(&reminders_path(worktree_root, agent_session_id))
+}
+
+/// Atomically persist reminder state for the given agent session.
+pub fn write_reminders_state(
+    worktree_root: &Path,
+    agent_session_id: &str,
+    state: &RemindersState,
+) -> Result<()> {
+    let path = reminders_path(worktree_root, agent_session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_atomic_json(&path, state)
+}
+
+/// Return Board entries whose `updated_at` is strictly later than `since`,
+/// sorted chronologically (same ordering as the projection).
+pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
+    let snapshot = load_snapshot(worktree_root)?;
+    Ok(snapshot
+        .board
+        .entries
+        .into_iter()
+        .filter(|entry| entry.updated_at > since)
+        .collect())
+}
+
+/// Check whether `author` has posted a message of the given `kind` within the
+/// trailing `within` duration. Used by `board-reminder` for redundancy
+/// suppression.
+pub fn has_recent_post_by(
+    worktree_root: &Path,
+    author: &str,
+    kind: &BoardEntryKind,
+    within: chrono::Duration,
+) -> Result<bool> {
+    let snapshot = load_snapshot(worktree_root)?;
+    let threshold = Utc::now() - within;
+    Ok(snapshot
+        .board
+        .entries
+        .iter()
+        .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1042,6 +1118,122 @@ mod tests {
             serde_json::to_writer(&mut file, event).unwrap();
             file.write_all(b"\n").unwrap();
         }
+    }
+
+    #[test]
+    fn load_entries_since_returns_only_newer_entries() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut old_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "old post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        old_entry.updated_at = old_entry.created_at;
+        post_entry(dir.path(), old_entry).unwrap();
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "new post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+        post_entry(dir.path(), new_entry).unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "new post");
+    }
+
+    #[test]
+    fn has_recent_post_by_respects_within_window() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let now = chrono::Utc::now();
+        let recent = now - chrono::Duration::minutes(5);
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "recent status",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = recent;
+        entry.updated_at = recent;
+        post_entry(dir.path(), entry).unwrap();
+
+        assert!(has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+
+        assert!(!has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
+            chrono::Duration::minutes(1)
+        )
+        .unwrap());
+
+        assert!(!has_recent_post_by(
+            dir.path(),
+            "Claude",
+            &BoardEntryKind::Status,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+
+        assert!(!has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Decision,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn reminders_sidecar_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_session_id = "sess-test-123";
+
+        let empty = load_reminders_state(dir.path(), agent_session_id).unwrap();
+        assert!(empty.last_injected_at.is_none());
+        assert!(empty.last_reminded_kind.is_empty());
+
+        let now = chrono::Utc::now();
+        let state = RemindersState {
+            last_injected_at: Some(now),
+            last_reminded_kind: HashMap::from([("status".to_string(), now)]),
+        };
+        write_reminders_state(dir.path(), agent_session_id, &state).unwrap();
+
+        let loaded = load_reminders_state(dir.path(), agent_session_id).unwrap();
+        assert_eq!(loaded.last_injected_at, Some(now));
+        assert_eq!(loaded.last_reminded_kind.get("status").copied(), Some(now));
+
+        let sidecar_path = reminders_dir(dir.path()).join("sess-test-123.json");
+        assert!(sidecar_path.exists());
     }
 
     #[test]
