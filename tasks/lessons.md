@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: canvas window ID を「同 preset 件数 + 1」で採番すると欠番で live window に衝突する
+
+### 事象
+
+Launch Wizard の `Start new` から別ブランチの Agent window を開いたとき、
+既存の Agent window が新しいブランチ内容で上書きされた。実際には
+`agent-1` を閉じて `agent-2` だけ残っている状態で次の新規 Agent も
+`agent-2` として生成され、window/runtime/session の紐付けが衝突していた。
+
+### 原因
+
+- `crates/gwt/src/workspace.rs` の window ID 採番が
+  「同じ preset の live window 件数 + 1」だった。
+- 同じ preset に欠番があると、件数ベース採番が既存 live window の suffix と一致し、
+  frontend の `windowMap`、backend の `window_lookup`、active session が
+  同じ ID で上書きされた。
+
+### 再発防止策
+
+1. floating window の ID は件数ではなく既存 live window の ID 集合から決める。
+   少なくとも同 preset の最大 suffix + 1 など、live window と衝突しない方式を使う。
+2. 「閉じた window がある状態で同 preset を新規作成する」回帰テストを
+   `WorkspaceState` に必ず追加する。
+3. Quick Start の `Start new` と既存ウィンドウ再利用導線は意味を分離し、
+   live window がある場合は `Focus` と明示する。
+
 ## 2026-04-20 — fix: Windows shim 解析は「実行ファイルがある」だけで確定せず、runtime と script の組み合わせを見る
 
 ### 事象
