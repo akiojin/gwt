@@ -1,6 +1,7 @@
 pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
+pub mod daemon_runtime;
 mod discussion_resume;
 pub mod file_tree;
 pub mod index_worker;
@@ -22,6 +23,7 @@ pub use branch_list::{
     list_branch_entries_with_active_sessions, BranchCleanupAvailability,
     BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
 };
+pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use knowledge_bridge::{
     load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,

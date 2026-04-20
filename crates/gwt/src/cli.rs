@@ -1457,10 +1457,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{
-        block_bash_policy, coordination_event, forward, runtime_state, workflow_policy,
-        BlockDecision, HookKind,
-    };
+    use crate::cli::hook::{block_bash_policy, workflow_policy, BlockDecision, HookKind};
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1498,7 +1495,7 @@ pub fn run_daemon_hook<E: CliEnv>(
                 );
                 return Ok(2);
             };
-            match runtime_state::handle_with_input(event, &stdin) {
+            match crate::daemon_runtime::handle_runtime_state(event, &stdin) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -1511,7 +1508,7 @@ pub fn run_daemon_hook<E: CliEnv>(
                 );
                 return Ok(2);
             };
-            match coordination_event::handle(event) {
+            match crate::daemon_runtime::handle_coordination_event(event, &stdin) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -1526,7 +1523,7 @@ pub fn run_daemon_hook<E: CliEnv>(
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
-        HookKind::Forward => match forward::handle_with_input(&stdin) {
+        HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
             Ok(()) => Ok(0),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },

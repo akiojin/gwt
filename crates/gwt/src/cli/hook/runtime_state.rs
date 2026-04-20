@@ -128,7 +128,7 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     let hook_event = HookEvent::read_from_str(input)?;
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let sessions_dir = sessions_dir_for_current_runtime();
     let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
     let agent_session_id = hook_event
         .as_ref()
@@ -140,6 +140,19 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     };
     let path = PathBuf::from(path);
     write_for_event(&path, event)
+}
+
+fn sessions_dir_for_current_runtime() -> PathBuf {
+    let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
+        return gwt_core::paths::gwt_sessions_dir();
+    };
+    let runtime_path = PathBuf::from(runtime_path);
+    runtime_path
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(gwt_core::paths::gwt_sessions_dir)
 }
 
 #[cfg(test)]
