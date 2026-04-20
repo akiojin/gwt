@@ -1888,10 +1888,10 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_repo_browser_scroll_surfaces_bypass_canvas_pan() {
+    fn embedded_web_repo_browser_scroll_surfaces_block_canvas_pan_at_edges() {
         let html = include_str!("../web/index.html");
         let scroll_gate = regex::Regex::new(
-            r"nativeWheelScrollSurface\s*&&\s*canScrollSurfaceConsumeWheelDelta\(\s*nativeWheelScrollSurface,\s*event\s*\)",
+            r"if\s*\(\s*!event\.ctrlKey\s*&&\s*!event\.metaKey\s*&&\s*nativeWheelScrollSurface\s*\)\s*\{\s*return;\s*\}",
         )
         .expect("valid regex");
 
@@ -1900,21 +1900,20 @@ mod tests {
             "expected embedded html to define a repo browser wheel routing helper",
         );
         assert!(
-            html.contains("function canScrollSurfaceConsumeWheelDelta"),
-            "expected embedded html to gate native scrolling on actual scrollability",
-        );
-        assert!(
             html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
             "expected embedded html to reference repo browser scroll containers",
         );
         assert!(
-            html.contains("surface.scrollHeight > surface.clientHeight")
-                && html.contains("surface.scrollWidth > surface.clientWidth"),
-            "expected wheel helper to inspect vertical and horizontal overflow before bypassing canvas pan",
+            html.contains("const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);"),
+            "expected plain wheel handling to route repo browser surfaces through the shared helper",
         );
         assert!(
             scroll_gate.is_match(html),
-            "expected plain wheel input to bypass canvas pan only when the repo browser surface can consume the delta",
+            "expected plain wheel input on repo browser surfaces to stay within the window even at scroll edges",
+        );
+        assert!(
+            !html.contains("canScrollSurfaceConsumeWheelDelta"),
+            "expected repo browser wheel routing to stop using edge fallback heuristics",
         );
     }
 }

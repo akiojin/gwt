@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: repo browser の wheel ownership を generic な edge fallback へ一般化しない
+
+### 事象
+
+Branches ウィンドウで一覧を最上端/最下端までスクロールしたあと、さらに同じ方向へ wheel/trackpad scroll すると、
+内部リストは止まる一方で canvas pan が始まり、repo browser surface 上の操作が window 内で完結しなかった。
+
+### 原因
+
+- 4/17 の修正で「surface が delta を実際に消費できるときだけ native scroll を優先する」という一般則を入れた。
+- この一般則を repo browser surface にもそのまま適用した結果、scroll edge では capture-phase handler が
+  canvas pan 経路へフォールバックしてしまった。
+- Branches / File Tree の UX では、surface 上の plain wheel は canvas に流さず no-op に留める契約だった。
+
+### 再発防止策
+
+1. wheel ownership は surface ごとに決める。repo browser list は「scroll 可能時は native scroll、edge では no-op」、canvas 背景だけが pan owner。
+2. `can surface consume delta? -> else canvas` のような generic fallback を、window 内 scroll surface へ無条件に再利用しない。
+3. repo browser の回帰テストには「内部スクロール可能」「edge で no-op」「canvas 背景で pan」の 3 観点をセットで入れる。
+
 ## 2026-04-17 — fix: scrollable pane の wheel 奪取は「surface が実際に消費できる delta」だけに限定する
 
 ### 事象

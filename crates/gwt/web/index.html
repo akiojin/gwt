@@ -3808,37 +3808,6 @@
         return element.closest(".branch-scroll, .file-tree-scroll");
       }
 
-      function canScrollSurfaceConsumeWheelDelta(surface, event) {
-        const maxScrollTop = Math.max(0, surface.scrollHeight - surface.clientHeight);
-        const maxScrollLeft = Math.max(0, surface.scrollWidth - surface.clientWidth);
-        const epsilon = 1;
-
-        const canScrollDown =
-          surface.scrollHeight > surface.clientHeight &&
-          surface.scrollTop < maxScrollTop - epsilon;
-        const canScrollUp =
-          surface.scrollHeight > surface.clientHeight && surface.scrollTop > epsilon;
-        const canScrollRight =
-          surface.scrollWidth > surface.clientWidth &&
-          surface.scrollLeft < maxScrollLeft - epsilon;
-        const canScrollLeft =
-          surface.scrollWidth > surface.clientWidth && surface.scrollLeft > epsilon;
-
-        if (event.deltaY > 0 && canScrollDown) {
-          return true;
-        }
-        if (event.deltaY < 0 && canScrollUp) {
-          return true;
-        }
-        if (event.deltaX > 0 && canScrollRight) {
-          return true;
-        }
-        if (event.deltaX < 0 && canScrollLeft) {
-          return true;
-        }
-        return false;
-      }
-
       // Capture phase so wheel events on child elements (windows, terminals)
       // are intercepted before they reach xterm.js or other consumers.
       document.addEventListener(
@@ -3856,14 +3825,8 @@
           ) {
             return;
           }
-          const nativeWheelScrollSurface =
-            !event.ctrlKey && !event.metaKey
-              ? findNativeWheelScrollSurface(targetElement)
-              : null;
-          if (
-            nativeWheelScrollSurface &&
-            canScrollSurfaceConsumeWheelDelta(nativeWheelScrollSurface, event)
-          ) {
+          const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);
+          if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface) {
             return;
           }
           if (event.ctrlKey || event.metaKey) {
