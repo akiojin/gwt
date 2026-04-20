@@ -11,6 +11,7 @@ break down coarse tasks through a two-phase interactive workshop.
 
 - Invoke with `gwt-discussion --deepen SPEC-N`.
 - Or when the user requests deeper exploration after clarification.
+- Escalate from the normal discussion flow into deepening when clarification leaves high-impact assumptions, alternatives, or edge cases unresolved.
 - Goes beyond clarify: it questions premises, not just fills gaps.
 
 ## Prerequisites
@@ -80,6 +81,7 @@ Look for:
 ```
 
 After presenting the report, ask the user which points to deep-dive on.
+Before asking the user to choose points, narrow the list to the top 3 highest-impact points.
 Accept numbers, ranges (e.g., "1-3"), or "all".
 
 ## Phase 5.2: Interactive deep-dive

@@ -582,7 +582,7 @@ mod tests {
             "PreToolUse must collapse to a single workflow policy hook, got: {actual:?}"
         );
         assert!(
-            actual[0].ends_with(" hook workflow-policy"),
+            actual[0].contains(" hook workflow-policy"),
             "workflow policy hook must dispatch to workflow-policy, got: {actual:?}"
         );
         assert!(

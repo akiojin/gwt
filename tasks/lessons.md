@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: discussion の深さは「継続質問する」と書くだけでは維持できない
+
+### 事象
+
+`gwt-discussion` に「次の高インパクト質問を続ける」と書いていても、実際の会話は
+数問で終わりやすく、深掘りが必要な論点が残ったまま exit していた。
+
+### 原因
+
+- 深さの停止条件が弱く、どの coverage を埋めるまで続けるかが曖昧だった。
+- clarification に固定 question cap が残っており、discussion 本体の継続方針と
+  矛盾していた。
+- Plan Mode で始めて Plan Mode を抜ける handoff までを契約化しておらず、
+  discussion の終わり方が曖昧だった。
+- asset contract test が depth gate / coverage / exit blocker を拘束していなかった。
+
+### 再発防止策
+
+1. discussion 系 asset では「継続する」と書くだけでなく、Coverage Checks と
+   Exit Blockers を明示して exit 条件を固定する。
+2. clarification / deepening / intake など周辺 reference の停止条件も同じ変更セットで
+   揃え、固定上限や浅い exit を残さない。
+3. Plan Mode で開始し、最終 handoff で leave Plan Mode できるところまでを
+   command / skill / test で同時に拘束する。
+
 ## 2026-04-20 — ci(release): cross-platform archive step は shell と runner の同梱コマンド差分を前提に分ける
 
 ### 事象
