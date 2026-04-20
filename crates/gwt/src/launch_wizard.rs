@@ -185,6 +185,7 @@ pub struct LaunchWizardHydration {
     pub quick_start_root: PathBuf,
     pub docker_context: Option<DockerWizardContext>,
     pub docker_service_status: gwt_docker::ComposeServiceStatus,
+    pub agent_options: Vec<AgentOption>,
     pub quick_start_entries: Vec<QuickStartEntry>,
 }
 
@@ -445,6 +446,7 @@ impl LaunchWizardState {
             quick_start_root,
             docker_context,
             docker_service_status,
+            agent_options,
             mut quick_start_entries,
         } = hydration;
         if let Some(selected_branch) = selected_branch {
@@ -455,6 +457,7 @@ impl LaunchWizardState {
         self.context.quick_start_root = quick_start_root;
         self.context.docker_context = docker_context;
         self.context.docker_service_status = docker_service_status;
+        self.detected_agents = agent_options;
         Self::hydrate_live_window_ids(&self.context, &mut quick_start_entries);
         self.quick_start_entries = quick_start_entries;
         self.is_hydrating = false;
@@ -473,6 +476,7 @@ impl LaunchWizardState {
             self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
             self.docker_service = None;
         }
+        self.sync_selected_agent_options();
         self.sync_docker_lifecycle_default();
         self.selected = self
             .selected
@@ -2744,7 +2748,7 @@ mod tests {
     fn open_loading_marks_wizard_as_hydrating() {
         let state = LaunchWizardState::open_loading(
             context(branch("feature/gui"), "feature/gui"),
-            sample_agent_options(),
+            Vec::new(),
         );
 
         let view = state.view();
@@ -2759,7 +2763,7 @@ mod tests {
     fn apply_hydration_updates_docker_defaults_and_quick_start_entries() {
         let mut state = LaunchWizardState::open_loading(
             context(branch("feature/gui"), "feature/gui"),
-            sample_agent_options(),
+            Vec::new(),
         );
         let worktree = PathBuf::from("/tmp/repo-feature");
         state.apply_hydration(LaunchWizardHydration {
@@ -2772,6 +2776,7 @@ mod tests {
                 suggested_service: Some("app".to_string()),
             }),
             docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
             quick_start_entries: vec![QuickStartEntry {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
@@ -2805,6 +2810,8 @@ mod tests {
         assert_eq!(state.quick_start_entries.len(), 1);
         assert!(view.show_runtime_target);
         assert!(!view.is_hydrating);
+        assert_eq!(view.selected_agent_id, "claude");
+        assert_eq!(view.agent_options.len(), 2);
         assert_eq!(view.selected_runtime_target, "docker");
     }
 
@@ -2812,7 +2819,7 @@ mod tests {
     fn build_launch_config_rejects_loading_state() {
         let state = LaunchWizardState::open_loading(
             context(branch("feature/gui"), "feature/gui"),
-            sample_agent_options(),
+            Vec::new(),
         );
 
         let error = state
