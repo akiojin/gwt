@@ -57,16 +57,62 @@ fn hook_event_command_returns_none_when_command_field_is_not_a_string() {
 }
 
 #[test]
-fn block_decision_new_serializes_with_camelcase_stop_reason() {
+fn block_decision_serializes_as_hook_specific_output() {
+    // Claude Code PreToolUse contract: the hook must emit
+    // `hookSpecificOutput.permissionDecisionReason` so the reason text is
+    // actually surfaced to the LLM/user. The legacy `decision`/`reason`/
+    // `stopReason` top-level fields are intentionally dropped because
+    // `stopReason` is ignored on PreToolUse and only `reason` was visible.
     let decision = BlockDecision::new("forbidden command", "policy violation");
     let json = serde_json::to_value(&decision).unwrap();
-    assert_eq!(json["decision"], "block");
-    assert_eq!(json["reason"], "forbidden command");
-    assert_eq!(json["stopReason"], "policy violation");
+
+    assert!(
+        json.get("decision").is_none(),
+        "legacy top-level `decision` field must not be emitted, got: {json}"
+    );
+    assert!(
+        json.get("reason").is_none(),
+        "legacy top-level `reason` field must not be emitted"
+    );
+    assert!(
+        json.get("stopReason").is_none(),
+        "legacy top-level `stopReason` field must not be emitted (Stop-hook only)"
+    );
     assert!(
         json.get("stop_reason").is_none(),
-        "must not expose snake_case field"
+        "snake_case field must never leak into the wire format"
     );
+
+    let hook_output = json
+        .get("hookSpecificOutput")
+        .expect("hookSpecificOutput must be the top-level payload");
+    assert_eq!(hook_output["hookEventName"], "PreToolUse");
+    assert_eq!(hook_output["permissionDecision"], "deny");
+
+    let reason = hook_output["permissionDecisionReason"]
+        .as_str()
+        .expect("permissionDecisionReason must be a string");
+    assert!(
+        reason.contains("forbidden command"),
+        "summary must be part of the visible reason, got: {reason}"
+    );
+    assert!(
+        reason.contains("policy violation"),
+        "detail must be part of the visible reason, got: {reason}"
+    );
+}
+
+#[test]
+fn block_decision_accessors_expose_summary_and_detail() {
+    let decision = BlockDecision::new("forbidden command", "policy violation");
+    assert_eq!(decision.summary(), "forbidden command");
+    assert_eq!(decision.detail(), "policy violation");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("forbidden command"));
+    assert!(decision
+        .permission_decision_reason()
+        .contains("policy violation"));
 }
 
 #[test]

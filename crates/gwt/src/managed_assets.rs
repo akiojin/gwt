@@ -30,14 +30,20 @@ fn install_hook_bin_override() -> io::Result<EnvVarGuard> {
     if std::env::var_os("GWT_HOOK_BIN").is_some() {
         return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
     }
-    let current_exe = std::env::current_exe()
-        .map_err(|error| io::Error::other(format!("current_exe: {error}")))?;
-    let hook_bin =
-        resolve_managed_hook_bin_with_lookup(&current_exe, |command| which::which(command).ok());
+    let hook_bin = resolve_public_gwt_bin_path()?;
     Ok(EnvVarGuard::set("GWT_HOOK_BIN", hook_bin))
 }
 
-fn resolve_managed_hook_bin_with_lookup(
+pub fn resolve_public_gwt_bin_path() -> io::Result<PathBuf> {
+    let current_exe = std::env::current_exe()
+        .map_err(|error| io::Error::other(format!("current_exe: {error}")))?;
+    Ok(resolve_public_gwt_bin_with_lookup(
+        &current_exe,
+        |command| which::which(command).ok(),
+    ))
+}
+
+pub fn resolve_public_gwt_bin_with_lookup(
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
@@ -132,7 +138,7 @@ mod tests {
 
     use super::{
         is_bunx_temp_executable, is_named_gwt_binary, normalized_path_segments,
-        resolve_managed_hook_bin_with_lookup, same_path, should_prefer_path_gwt, EnvVarGuard,
+        resolve_public_gwt_bin_with_lookup, same_path, should_prefer_path_gwt, EnvVarGuard,
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -144,7 +150,7 @@ mod tests {
         );
         let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe");
 
-        let resolved = resolve_managed_hook_bin_with_lookup(current_exe, |command| {
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |command| {
             assert_eq!(command, "gwt");
             Some(stable.clone())
         });
@@ -156,7 +162,7 @@ mod tests {
     fn stable_gwt_current_exe_is_kept_without_path_lookup() {
         let current_exe = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
 
-        let resolved = resolve_managed_hook_bin_with_lookup(current_exe, |_command| {
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| {
             panic!("stable gwt binary should not hit PATH lookup");
         });
 
@@ -172,7 +178,7 @@ mod tests {
             r"C:\Users\Example\AppData\Local\Temp\bunx-2222222222-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
         );
 
-        let resolved = resolve_managed_hook_bin_with_lookup(current_exe, |_command| {
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| {
             Some(path_candidate.clone())
         });
 

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
+    daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -24,6 +25,13 @@ pub enum ArrangeMode {
 pub enum FocusCycleDirection {
     Forward,
     Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchEntriesPhase {
+    Inventory,
+    Hydrated,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,6 +194,7 @@ pub enum BackendEvent {
     },
     BranchEntries {
         id: String,
+        phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
     },
     KnowledgeEntries {
@@ -224,5 +233,34 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
+    RuntimeHookEvent {
+        event: RuntimeHookEvent,
+    },
     UpdateState(gwt_core::update::UpdateState),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::{BackendEvent, BranchEntriesPhase};
+
+    #[test]
+    fn branch_entries_serializes_explicit_phase_contract() {
+        let event = BackendEvent::BranchEntries {
+            id: "branches-1".to_string(),
+            phase: BranchEntriesPhase::Inventory,
+            entries: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize branch entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("branch_entries".to_string()))
+        );
+        assert_eq!(
+            value.get("phase"),
+            Some(&Value::String("inventory".to_string()))
+        );
+    }
 }

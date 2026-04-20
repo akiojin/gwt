@@ -371,12 +371,10 @@ impl UpdateManager {
             extract_archive(&dest, &extract_dir)?;
             let platform = Platform::detect();
             let binary_name = platform.binary_name();
-            let Some(binary_path) = find_extracted_binary(&extract_dir, &binary_name)? else {
-                return Err(format!(
-                    "Extracted payload does not contain expected binary: {binary_name}"
-                ));
-            };
+            let (binary_path, daemon_path) =
+                find_extracted_bundle_binaries(&extract_dir, &binary_name)?;
             ensure_executable(&binary_path)?;
+            ensure_executable(&daemon_path)?;
             return Ok(PreparedPayload::PortableBinary { path: binary_path });
         }
 
@@ -588,7 +586,7 @@ pub fn internal_apply_update(
 ) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300))?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
-    replace_executable(target_exe, source_exe)?;
+    replace_bundle_executables(target_exe, source_exe)?;
 
     std::process::Command::new(target_exe)
         .args(args)
@@ -964,6 +962,26 @@ fn find_extracted_binary(extract_dir: &Path, binary_name: &str) -> Result<Option
     Ok(None)
 }
 
+fn find_extracted_bundle_binaries(
+    extract_dir: &Path,
+    primary_binary_name: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let Some(primary_path) = find_extracted_binary(extract_dir, primary_binary_name)? else {
+        return Err(format!(
+            "Extracted payload does not contain expected binary: {primary_binary_name}"
+        ));
+    };
+
+    let daemon_binary_name = companion_binary_name(primary_binary_name);
+    let Some(daemon_path) = find_extracted_binary(extract_dir, &daemon_binary_name)? else {
+        return Err(format!(
+            "Extracted payload does not contain expected daemon binary: {daemon_binary_name}"
+        ));
+    };
+
+    Ok((primary_path, daemon_path))
+}
+
 fn ensure_executable(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -1270,10 +1288,67 @@ fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn replace_executable(target_exe: &Path, source_exe: &Path) -> Result<(), String> {
+#[derive(Debug, Clone)]
+struct PlannedReplacement {
+    target: PathBuf,
+    backup: PathBuf,
+    tmp: PathBuf,
+    had_target: bool,
+}
+
+fn replace_bundle_executables(target_exe: &Path, source_exe: &Path) -> Result<(), String> {
+    let target_daemon = companion_binary_path(target_exe)?;
+    let source_daemon = companion_binary_path(source_exe)?;
+    replace_executables_with_retry(&[
+        (target_daemon.as_path(), source_daemon.as_path()),
+        (target_exe, source_exe),
+    ])
+}
+
+fn replace_executables_with_retry(pairs: &[(&Path, &Path)]) -> Result<(), String> {
+    // Windows: file replacement can fail while the parent app is still shutting down.
+    const MAX_RETRIES: usize = 200;
+    const SLEEP_MS: u64 = 50;
+
+    for attempt in 0..MAX_RETRIES {
+        let replacements = stage_replacement_plan(pairs)?;
+        match apply_replacement_plan(&replacements) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt + 1 == MAX_RETRIES {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(SLEEP_MS));
+            }
+        }
+    }
+
+    Err("Failed to replace executable".to_string())
+}
+
+fn companion_binary_name(primary_binary_name: &str) -> String {
+    if primary_binary_name.ends_with(".exe") {
+        "gwtd.exe".to_string()
+    } else {
+        "gwtd".to_string()
+    }
+}
+
+fn companion_binary_path(primary_binary_path: &Path) -> Result<PathBuf, String> {
+    let file_name = primary_binary_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "Target executable has invalid filename".to_string())?;
+    Ok(primary_binary_path.with_file_name(companion_binary_name(file_name)))
+}
+
+fn stage_replacement(target_exe: &Path, source_exe: &Path) -> Result<PlannedReplacement, String> {
     let source_meta = fs::metadata(source_exe).map_err(|e| format!("Source missing: {e}"))?;
     if source_meta.len() == 0 {
-        return Err("Source executable is empty".to_string());
+        return Err(format!(
+            "Source executable is empty: {}",
+            source_exe.display()
+        ));
     }
 
     let target_dir = target_exe
@@ -1282,7 +1357,11 @@ fn replace_executable(target_exe: &Path, source_exe: &Path) -> Result<(), String
     fs::create_dir_all(target_dir)
         .map_err(|e| format!("Failed to ensure target dir exists: {e}"))?;
 
-    let tmp_name = format!(".gwt-update-{}.tmp", std::process::id());
+    let file_name = target_exe
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "Target executable has invalid filename".to_string())?;
+    let tmp_name = format!(".{file_name}.gwt-update-{}.tmp", std::process::id());
     let tmp_path = target_dir.join(tmp_name);
     let _ = fs::remove_file(&tmp_path);
     fs::copy(source_exe, &tmp_path).map_err(|e| format!("Failed to copy new executable: {e}"))?;
@@ -1301,31 +1380,66 @@ fn replace_executable(target_exe: &Path, source_exe: &Path) -> Result<(), String
         let _ = fs::set_permissions(&tmp_path, perms);
     }
 
-    let file_name = target_exe
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(|| "Target executable has invalid filename".to_string())?;
     let backup_path = target_dir.join(format!("{file_name}.old"));
     let _ = fs::remove_file(&backup_path);
 
-    // Windows: file replacement can fail while the parent app is still shutting down.
-    const MAX_RETRIES: usize = 200;
-    const SLEEP_MS: u64 = 50;
+    Ok(PlannedReplacement {
+        target: target_exe.to_path_buf(),
+        backup: backup_path,
+        tmp: tmp_path,
+        had_target: target_exe.exists(),
+    })
+}
 
-    for attempt in 0..MAX_RETRIES {
-        match replace_paths(target_exe, &backup_path, &tmp_path) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                if attempt + 1 == MAX_RETRIES {
-                    let _ = fs::remove_file(&tmp_path);
-                    return Err(format!("Failed to replace executable: {e}"));
-                }
-                std::thread::sleep(Duration::from_millis(SLEEP_MS));
+fn stage_replacement_plan(pairs: &[(&Path, &Path)]) -> Result<Vec<PlannedReplacement>, String> {
+    let mut staged = Vec::with_capacity(pairs.len());
+    for (target, source) in pairs {
+        match stage_replacement(target, source) {
+            Ok(replacement) => staged.push(replacement),
+            Err(err) => {
+                cleanup_staged_replacements(&staged);
+                return Err(err);
             }
         }
     }
+    Ok(staged)
+}
 
-    Err("Failed to replace executable".to_string())
+fn cleanup_staged_replacements(replacements: &[PlannedReplacement]) {
+    for replacement in replacements {
+        let _ = fs::remove_file(&replacement.tmp);
+    }
+}
+
+fn rollback_applied_replacements(replacements: &[PlannedReplacement]) {
+    for replacement in replacements.iter().rev() {
+        let _ = fs::remove_file(&replacement.target);
+        if replacement.had_target && replacement.backup.exists() {
+            let _ = fs::rename(&replacement.backup, &replacement.target);
+        }
+    }
+}
+
+fn apply_replacement_plan(replacements: &[PlannedReplacement]) -> Result<(), String> {
+    apply_replacement_plan_with(replacements, replace_paths)
+}
+
+fn apply_replacement_plan_with<F>(
+    replacements: &[PlannedReplacement],
+    mut replace_one: F,
+) -> Result<(), String>
+where
+    F: FnMut(&Path, &Path, &Path) -> io::Result<()>,
+{
+    for (idx, replacement) in replacements.iter().enumerate() {
+        if let Err(err) = replace_one(&replacement.target, &replacement.backup, &replacement.tmp) {
+            let _ = fs::remove_file(&replacement.tmp);
+            cleanup_staged_replacements(&replacements[idx + 1..]);
+            rollback_applied_replacements(&replacements[..idx]);
+            return Err(format!("Failed to replace executable: {err}"));
+        }
+    }
+    Ok(())
 }
 
 fn replace_paths(target_exe: &Path, backup_path: &Path, tmp_path: &Path) -> io::Result<()> {
@@ -1389,6 +1503,13 @@ mod tests {
             .start_file(file_name, zip::write::FileOptions::<()>::default())
             .expect("start zip file");
         writer.write_all(contents).expect("write zip body");
+        let daemon_name = companion_binary_name(file_name);
+        writer
+            .start_file(daemon_name, zip::write::FileOptions::<()>::default())
+            .expect("start daemon zip file");
+        writer
+            .write_all(b"zip-daemon")
+            .expect("write daemon zip body");
         writer.finish().expect("finish zip").into_inner()
     }
 
@@ -1816,6 +1937,62 @@ mod tests {
         assert_eq!(url.as_deref(), Some("https://example.com/macos-arm64.dmg"));
     }
 
+    #[test]
+    fn find_extracted_bundle_binaries_requires_primary_and_daemon() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("gwt"), b"bundle-gwt").unwrap();
+
+        let err = find_extracted_bundle_binaries(temp.path(), "gwt")
+            .expect_err("bundle without gwtd companion must fail");
+        assert!(
+            err.contains("gwtd"),
+            "missing daemon companion must be named in the error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_replacement_plan_rolls_back_when_later_bundle_swap_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_dir = temp.path().join("install");
+        let bundle_dir = temp.path().join("bundle");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::create_dir_all(&bundle_dir).unwrap();
+
+        let target_gwt = install_dir.join("gwt");
+        let target_gwtd = install_dir.join("gwtd");
+        let source_gwt = bundle_dir.join("gwt");
+        let source_gwtd = bundle_dir.join("gwtd");
+
+        fs::write(&target_gwt, b"old-gwt").unwrap();
+        fs::write(&target_gwtd, b"old-gwtd").unwrap();
+        fs::write(&source_gwt, b"new-gwt").unwrap();
+        fs::write(&source_gwtd, b"new-gwtd").unwrap();
+
+        let replacements = stage_replacement_plan(&[
+            (target_gwt.as_path(), source_gwt.as_path()),
+            (target_gwtd.as_path(), source_gwtd.as_path()),
+        ])
+        .expect("stage bundle replacements");
+
+        let mut calls = 0usize;
+        let err = apply_replacement_plan_with(&replacements, |target, backup, tmp| {
+            calls += 1;
+            if calls == 1 {
+                replace_paths(target, backup, tmp)
+            } else {
+                Err(io::Error::other("simulated second swap failure"))
+            }
+        })
+        .expect_err("second replacement failure must bubble up");
+
+        assert!(
+            err.contains("simulated second swap failure"),
+            "expected injected failure, got: {err}"
+        );
+        assert_eq!(fs::read_to_string(&target_gwt).unwrap(), "old-gwt");
+        assert_eq!(fs::read_to_string(&target_gwtd).unwrap(), "old-gwtd");
+    }
+
     #[cfg(unix)]
     #[test]
     fn find_extracted_binary_skips_unreadable_dirs() {
@@ -2097,6 +2274,7 @@ mod tests {
                 flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
             let mut archive = tar::Builder::new(encoder);
             let binary_name = Platform::detect().binary_name();
+            let daemon_name = companion_binary_name(&binary_name);
             let bytes = b"tar-gz-bin";
             let mut header = tar::Header::new_gnu();
             header.set_size(bytes.len() as u64);
@@ -2104,6 +2282,18 @@ mod tests {
             header.set_cksum();
             archive
                 .append_data(&mut header, format!("nested/{binary_name}"), &bytes[..])
+                .unwrap();
+            let daemon_bytes = b"tar-gz-daemon";
+            let mut daemon_header = tar::Header::new_gnu();
+            daemon_header.set_size(daemon_bytes.len() as u64);
+            daemon_header.set_mode(0o755);
+            daemon_header.set_cksum();
+            archive
+                .append_data(
+                    &mut daemon_header,
+                    format!("nested/{daemon_name}"),
+                    &daemon_bytes[..],
+                )
                 .unwrap();
             archive.into_inner().unwrap().finish().unwrap();
         }
@@ -2187,7 +2377,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_executable_validates_source_and_swaps_files() {
+    fn replace_executables_with_retry_validates_source_and_swaps_files() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp
             .path()
@@ -2197,20 +2387,20 @@ mod tests {
             .path()
             .join(if cfg!(windows) { "new.exe" } else { "new" });
 
-        let missing_err = replace_executable(&target, &source).unwrap_err();
+        let missing_err = replace_executables_with_retry(&[(&target, &source)]).unwrap_err();
         assert!(missing_err.contains("Source missing"));
 
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, b"old").unwrap();
         fs::write(&source, b"new-binary").unwrap();
-        replace_executable(&target, &source).unwrap();
+        replace_executables_with_retry(&[(&target, &source)]).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"new-binary");
 
         let empty = temp
             .path()
             .join(if cfg!(windows) { "empty.exe" } else { "empty" });
         fs::write(&empty, b"").unwrap();
-        let empty_err = replace_executable(&target, &empty).unwrap_err();
+        let empty_err = replace_executables_with_retry(&[(&target, &empty)]).unwrap_err();
         assert!(empty_err.contains("Source executable is empty"));
     }
 

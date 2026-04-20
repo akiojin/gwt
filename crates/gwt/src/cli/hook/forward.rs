@@ -1,9 +1,9 @@
-//! `gwt hook forward` — stub.
+//! `gwt hook forward` payload parser.
 //!
-//! A follow-up SPEC will wire Claude Code hook events through to other
-//! consumers (another gwt session, external IDE
-//! listeners, etc). Until then this handler is a silent no-op that
-//! exits 0, so settings_local.rs can reference it without breakage.
+//! The public CLI surface stays fail-open and only drains/parses the hook
+//! payload. Runtime fanout to the daemon-owned live event bridge is layered in
+//! `crate::daemon_runtime`, so this module remains a no-op on malformed or
+//! absent input.
 
 use super::{HookError, HookEvent};
 use std::io::Read;

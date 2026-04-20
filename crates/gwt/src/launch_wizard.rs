@@ -2599,6 +2599,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             last_commit_date: None,
+            cleanup_ready: true,
             cleanup: crate::BranchCleanupInfo::default(),
         }
     }

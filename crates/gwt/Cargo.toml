@@ -13,6 +13,10 @@ default-run = "gwt"
 name = "gwt"
 path = "src/main.rs"
 
+[[bin]]
+name = "gwtd"
+path = "src/bin/gwtd.rs"
+
 [dependencies]
 gwt-agent.workspace = true
 gwt-core.workspace = true
@@ -21,6 +25,7 @@ gwt-git.workspace = true
 gwt-github.workspace = true
 gwt-skills.workspace = true
 gwt-terminal.workspace = true
+tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -39,13 +44,13 @@ tao = "0.35"
 base64.workspace = true
 regex.workspace = true
 rfd = "0.17"
+reqwest.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.17"
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest.workspace = true
 
 [package.metadata.bundle]
 name = "GWT"
