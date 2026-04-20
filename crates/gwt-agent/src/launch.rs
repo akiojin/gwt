@@ -78,6 +78,31 @@ fn codex_runner_prefix_len(command: &str, args: &[String]) -> Option<usize> {
     }
 }
 
+/// Canonical source of truth for agent-neutral default launch arguments.
+///
+/// Every agent launch entry point — wizard (`AgentLaunchBuilder::build`),
+/// preset spawn (`crates/gwt/src/preset.rs`), and persisted session migration
+/// (`Session::migrate_legacy_launch_args`) — routes through this function so
+/// a default like `--no-alt-screen` cannot silently miss an entry point.
+/// See SPEC-1921 FR-064 / Issue #2091 for background.
+///
+/// This returns only the *agent-neutral* positional defaults. Agent-specific
+/// env vars and conditional flags (model, session-mode, fast-mode, reasoning,
+/// etc.) remain the responsibility of the agent-specific builder methods.
+pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
+    match agent {
+        // Keep Codex out of the alternate screen so the PTY emits normal
+        // scrollback instead of redraw-only fullscreen frames. Matches the
+        // CLI's documented inline mode for preserving terminal history.
+        AgentId::Codex => vec!["--no-alt-screen".to_string()],
+        AgentId::ClaudeCode
+        | AgentId::Gemini
+        | AgentId::OpenCode
+        | AgentId::Copilot
+        | AgentId::Custom(_) => Vec::new(),
+    }
+}
+
 pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<String>) {
     if !matches!(agent_id, AgentId::Codex) {
         return;
@@ -85,10 +110,12 @@ pub fn normalize_launch_args(agent_id: &AgentId, command: &str, args: &mut Vec<S
     let Some(insert_index) = codex_runner_prefix_len(command, args) else {
         return;
     };
-    if args.iter().any(|arg| arg == "--no-alt-screen") {
-        return;
+    for canonical in canonical_launch_args(agent_id).iter().rev() {
+        if args.iter().any(|existing| existing == canonical) {
+            continue;
+        }
+        args.insert(insert_index, canonical.clone());
     }
-    args.insert(insert_index, "--no-alt-screen".to_string());
 }
 
 /// Resolve the runner command based on version selection.
@@ -481,10 +508,7 @@ impl AgentLaunchBuilder {
             "1".to_string(),
         );
 
-        // Keep Codex out of the alternate screen so the PTY emits normal scrollback
-        // instead of redraw-only fullscreen frames. This matches the CLI's documented
-        // inline mode for preserving terminal history.
-        args.push("--no-alt-screen".to_string());
+        args.extend(canonical_launch_args(&AgentId::Codex));
         match self.session_mode {
             SessionMode::Continue => {
                 args.push("resume".to_string());
@@ -597,6 +621,40 @@ impl AgentLaunchBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SPEC-1921 Phase 53 / Issue #2091: canonical_launch_args is the single
+    // source of truth for agent-neutral default args across all launch entry
+    // points (wizard, preset, session-load migration). Regression guard for
+    // the preset-path gap that caused Codex Plan-mode scroll to die.
+
+    #[test]
+    fn canonical_launch_args_for_codex_contains_no_alt_screen() {
+        let args = canonical_launch_args(&AgentId::Codex);
+        assert!(
+            args.iter().any(|arg| arg == "--no-alt-screen"),
+            "Codex canonical args must include --no-alt-screen (FR-064, Issue #2091)"
+        );
+    }
+
+    #[test]
+    fn canonical_launch_args_for_non_codex_agents_is_empty() {
+        // Claude/Gemini/OpenCode/Copilot/Custom have no agent-neutral positional
+        // defaults today. Agent-specific env vars and conditional args belong in
+        // the agent-specific builder, not the canonical default list.
+        assert!(canonical_launch_args(&AgentId::ClaudeCode).is_empty());
+        assert!(canonical_launch_args(&AgentId::Gemini).is_empty());
+        assert!(canonical_launch_args(&AgentId::OpenCode).is_empty());
+        assert!(canonical_launch_args(&AgentId::Copilot).is_empty());
+        assert!(canonical_launch_args(&AgentId::Custom("aider".into())).is_empty());
+    }
+
+    #[test]
+    fn canonical_launch_args_is_deterministic() {
+        // FR-064: same AgentId always yields the same Vec<String>.
+        let first = canonical_launch_args(&AgentId::Codex);
+        let second = canonical_launch_args(&AgentId::Codex);
+        assert_eq!(first, second);
+    }
 
     #[test]
     fn builder_default_state() {
