@@ -57,4 +57,41 @@ fn frontend_event_deserializes_window_state_commands() {
         FrontendEvent::ListWindows => {}
         other => panic!("unexpected event: {other:?}"),
     }
+
+    let knowledge = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "load_knowledge_bridge",
+        "id": "project-1::issue-1",
+        "knowledge_kind": "issue",
+        "selected_number": 2017,
+        "refresh": true
+    }))
+    .expect("load_knowledge_bridge should deserialize");
+    match knowledge {
+        FrontendEvent::LoadKnowledgeBridge {
+            id,
+            knowledge_kind,
+            selected_number,
+            refresh,
+        } => {
+            assert_eq!(id, "project-1::issue-1");
+            assert_eq!(knowledge_kind, gwt::KnowledgeKind::Issue);
+            assert_eq!(selected_number, Some(2017));
+            assert!(refresh);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let launch = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "open_issue_launch_wizard",
+        "id": "project-1::issue-1",
+        "issue_number": 2017
+    }))
+    .expect("open_issue_launch_wizard should deserialize");
+    match launch {
+        FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
+            assert_eq!(id, "project-1::issue-1");
+            assert_eq!(issue_number, 2017);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }

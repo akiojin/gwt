@@ -665,13 +665,11 @@ mod tests {
     #[test]
     fn build_claude_with_model() {
         let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
-            .model("claude-sonnet-4-20250514")
+            .model("claude-opus-4-7")
             .build();
 
         assert!(config.args.contains(&"--model".to_string()));
-        assert!(config
-            .args
-            .contains(&"claude-sonnet-4-20250514".to_string()));
+        assert!(config.args.contains(&"claude-opus-4-7".to_string()));
     }
 
     #[test]
@@ -695,6 +693,34 @@ mod tests {
         assert_eq!(
             config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
             Some(&"high".to_string())
+        );
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_xhigh_reasoning_exports_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("xhigh")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"xhigh".to_string())
+        );
+        assert!(!config.args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn build_claude_with_max_reasoning_exports_effort_env() {
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .reasoning_level("max")
+            .build();
+
+        assert_eq!(config.reasoning_level.as_deref(), Some("max"));
+        assert_eq!(
+            config.env_vars.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            Some(&"max".to_string())
         );
         assert!(!config.args.contains(&"--effort".to_string()));
     }

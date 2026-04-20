@@ -1,9 +1,11 @@
+pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
 mod discussion_resume;
 pub mod file_tree;
 pub mod index_worker;
 mod issue_cache;
+pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;
 pub mod native_app;
@@ -12,8 +14,19 @@ pub mod preset;
 pub mod protocol;
 pub mod workspace;
 
+pub use branch_cleanup::{
+    cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
+};
 pub use branch_list::{list_branch_entries, BranchListEntry, BranchScope};
+pub use branch_list::{
+    list_branch_entries_with_active_sessions, BranchCleanupAvailability,
+    BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
+};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
+pub use knowledge_bridge::{
+    load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
+    KnowledgeKind, KnowledgeListItem,
+};
 pub use launch_wizard::{
     build_builtin_agent_options, default_wizard_version_cache_path, AgentOption,
     DockerWizardContext, LaunchWizardAction, LaunchWizardCompletion, LaunchWizardContext,

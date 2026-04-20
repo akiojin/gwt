@@ -92,6 +92,10 @@ gwt hook workflow-policy
 `Shell` と `Agent` は実プロセスを持つウィンドウです。`File Tree` は実装済みの
 read-only ツリーです。それ以外は現時点では mock surface です。
 
+ターミナルウィンドウでは、テキストをドラッグ選択してマウスボタンを離すとコピー
+できます。Windows / Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
+`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
+
 ## キャンバス操作
 
 - 画面上の zoom ボタンでキャンバスを拡大・縮小

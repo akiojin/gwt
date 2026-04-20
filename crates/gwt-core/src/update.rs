@@ -608,11 +608,14 @@ pub fn internal_run_installer(
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        match installer_kind {
+        let restart_exe = match installer_kind {
             InstallerKind::MacDmg => {
                 #[cfg(target_os = "macos")]
                 {
-                    run_macos_dmg_installer_with_privileges(installer, target_exe)?;
+                    let target_app =
+                        run_macos_dmg_installer_with_privileges(installer, target_exe)?;
+                    app_bundle_executable_path(&target_app, target_exe)
+                        .unwrap_or_else(|| target_exe.to_path_buf())
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -623,6 +626,7 @@ pub fn internal_run_installer(
                 #[cfg(target_os = "macos")]
                 {
                     run_macos_pkg_installer_with_privileges(installer)?;
+                    resolve_macos_restart_executable(Path::new("/Applications"), target_exe, None)
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -633,16 +637,18 @@ pub fn internal_run_installer(
                 #[cfg(target_os = "windows")]
                 {
                     run_windows_msi_with_uac(installer)?;
+                    target_exe.to_path_buf()
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
                     return Err("windows_msi installer can only run on Windows".to_string());
                 }
             }
-        }
+        };
 
+        let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
         let args = UpdateManager::read_restart_args_file(args_file)?;
-        std::process::Command::new(target_exe)
+        std::process::Command::new(&restart_exe)
             .args(args)
             .spawn()
             .map_err(|e| format!("Failed to restart: {e}"))?;
@@ -794,11 +800,19 @@ fn choose_apply_plan(
 ) -> Option<ApplyPlan> {
     // macOS: prefer installer when available to preserve codesign/notarization integrity.
     if platform.os == "macos" {
-        if let Some(url) = installer_url {
-            let kind = installer_kind_for_url(platform, url)?;
-            return Some(ApplyPlan::Installer {
+        let running_from_app_bundle =
+            current_exe.and_then(app_bundle_from_executable).is_some() || current_exe.is_none();
+        if running_from_app_bundle {
+            if let Some(url) = installer_url {
+                let kind = installer_kind_for_url(platform, url)?;
+                return Some(ApplyPlan::Installer {
+                    url: url.to_string(),
+                    kind,
+                });
+            }
+        } else if let Some(url) = portable_url {
+            return Some(ApplyPlan::Portable {
                 url: url.to_string(),
-                kind,
             });
         }
     }
@@ -984,7 +998,7 @@ fn is_process_running(pid: u32) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn sh_single_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -1015,12 +1029,125 @@ fn run_shell_with_admin_privileges(shell_cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn app_bundle_from_executable(target_exe: &Path) -> Option<PathBuf> {
     target_exe
         .ancestors()
         .find(|p| p.extension() == Some(OsStr::new("app")))
         .map(Path::to_path_buf)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn app_bundle_executable_path(app_bundle: &Path, target_exe: &Path) -> Option<PathBuf> {
+    let contents_dir = app_bundle.join("Contents").join("MacOS");
+    if let Some(file_name) = target_exe.file_name() {
+        let candidate = contents_dir.join(file_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let mut entries = fs::read_dir(&contents_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.into_iter().next()
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn find_matching_app_bundle(root: &Path, target_exe: &Path) -> Option<PathBuf> {
+    let expected_name = target_exe.file_name()?;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.extension() == Some(OsStr::new("app")) {
+                if path
+                    .join("Contents")
+                    .join("MacOS")
+                    .join(expected_name)
+                    .exists()
+                {
+                    return Some(path);
+                }
+                continue;
+            }
+            stack.push(path);
+        }
+    }
+    None
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn resolve_macos_restart_executable(
+    applications_dir: &Path,
+    target_exe: &Path,
+    preferred_bundle_name: Option<&OsStr>,
+) -> PathBuf {
+    if let Some(bundle_name) = preferred_bundle_name {
+        let preferred_bundle = applications_dir.join(bundle_name);
+        if let Some(restart_exe) = app_bundle_executable_path(&preferred_bundle, target_exe) {
+            return restart_exe;
+        }
+    }
+    if let Some(bundle) = find_matching_app_bundle(applications_dir, target_exe) {
+        if let Some(restart_exe) = app_bundle_executable_path(&bundle, target_exe) {
+            return restart_exe;
+        }
+    }
+    target_exe.to_path_buf()
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn build_macos_dmg_install_shell_cmd(
+    source_app: &Path,
+    target_app: &Path,
+    temp_app: &Path,
+    backup_app: &Path,
+) -> String {
+    let source = sh_single_quote(&source_app.to_string_lossy());
+    let target = sh_single_quote(&target_app.to_string_lossy());
+    let temp = sh_single_quote(&temp_app.to_string_lossy());
+    let backup = sh_single_quote(&backup_app.to_string_lossy());
+    format!(
+        "set -e\n\
+         /bin/rm -rf {temp} {backup}\n\
+         /usr/bin/ditto {source} {temp}\n\
+         if [ -e {target} ]; then\n\
+           /bin/mv {target} {backup}\n\
+         fi\n\
+         if ! /bin/mv {temp} {target}; then\n\
+           if [ -e {backup} ] && [ ! -e {target} ]; then\n\
+             /bin/mv {backup} {target} || true\n\
+           fi\n\
+           /bin/rm -rf {temp}\n\
+           exit 1\n\
+         fi\n\
+         /bin/rm -rf {backup}"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_swap_bundle_paths(target_app: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let parent = target_app
+        .parent()
+        .ok_or_else(|| "Target app bundle path has no parent dir".to_string())?;
+    let stem = target_app
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("gwt");
+    let pid = std::process::id();
+    let temp_app = parent.join(format!(".{stem}.gwt-update-{pid}.new.app"));
+    let backup_app = parent.join(format!(".{stem}.gwt-update-{pid}.old.app"));
+    Ok((temp_app, backup_app))
 }
 
 #[cfg(target_os = "macos")]
@@ -1055,7 +1182,7 @@ fn run_macos_pkg_installer_with_privileges(installer: &Path) -> Result<(), Strin
 fn run_macos_dmg_installer_with_privileges(
     installer: &Path,
     target_exe: &Path,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     let mount_dir = std::env::temp_dir().join(format!("gwt-update-dmg-{}", std::process::id()));
     let _ = fs::remove_dir_all(&mount_dir);
     fs::create_dir_all(&mount_dir).map_err(|e| format!("Failed to create mount dir: {e}"))?;
@@ -1074,7 +1201,7 @@ fn run_macos_dmg_installer_with_privileges(
         return Err(format!("hdiutil attach exited with {attach_status}"));
     }
 
-    let install_result = (|| {
+    let install_result: Result<PathBuf, String> = (|| {
         let source_app = find_first_app_bundle(&mount_dir)?
             .ok_or_else(|| "Mounted dmg does not contain an .app bundle".to_string())?;
         let source_name = source_app
@@ -1082,14 +1209,12 @@ fn run_macos_dmg_installer_with_privileges(
             .ok_or_else(|| "Mounted app bundle has an invalid name".to_string())?;
         let target_app = app_bundle_from_executable(target_exe)
             .unwrap_or_else(|| PathBuf::from("/Applications").join(source_name));
+        let (temp_app, backup_app) = macos_swap_bundle_paths(&target_app)?;
 
-        let shell_cmd = format!(
-            "rm -rf {} && /usr/bin/ditto {} {}",
-            sh_single_quote(&target_app.to_string_lossy()),
-            sh_single_quote(&source_app.to_string_lossy()),
-            sh_single_quote(&target_app.to_string_lossy())
-        );
-        run_shell_with_admin_privileges(&shell_cmd)
+        let shell_cmd =
+            build_macos_dmg_install_shell_cmd(&source_app, &target_app, &temp_app, &backup_app);
+        run_shell_with_admin_privileges(&shell_cmd)?;
+        Ok(target_app)
     })();
 
     let detach_status = std::process::Command::new("hdiutil")
@@ -1100,11 +1225,11 @@ fn run_macos_dmg_installer_with_privileges(
         .map_err(|e| format!("Failed to unmount dmg: {e}"))?;
     let _ = fs::remove_dir_all(&mount_dir);
 
-    install_result?;
+    let target_app = install_result?;
     if !detach_status.success() {
         return Err(format!("hdiutil detach exited with {detach_status}"));
     }
-    Ok(())
+    Ok(target_app)
 }
 
 #[cfg(target_os = "windows")]
@@ -1316,6 +1441,60 @@ mod tests {
             windows_x64.portable_asset_name().as_deref(),
             Some("gwt-windows-x86_64.zip")
         );
+    }
+
+    #[test]
+    fn choose_apply_plan_prefers_portable_for_macos_cli_install() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+
+        let plan = choose_apply_plan(
+            &platform,
+            Some(Path::new("/usr/local/bin/gwt")),
+            Some("https://example.com/gwt-macos-arm64.tar.gz"),
+            Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
+        );
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Portable {
+                url: "https://example.com/gwt-macos-arm64.tar.gz".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_macos_restart_executable_scans_applications_for_matching_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let other_bundle = temp.path().join("Other.app").join("Contents").join("MacOS");
+        fs::create_dir_all(&other_bundle).unwrap();
+        fs::write(other_bundle.join("other"), b"bin").unwrap();
+
+        let gwt_bundle = temp.path().join("GWT.app").join("Contents").join("MacOS");
+        fs::create_dir_all(&gwt_bundle).unwrap();
+        fs::write(gwt_bundle.join("gwt"), b"bin").unwrap();
+
+        let restart_exe =
+            resolve_macos_restart_executable(temp.path(), Path::new("/usr/local/bin/gwt"), None);
+
+        assert_eq!(restart_exe, gwt_bundle.join("gwt"));
+    }
+
+    #[test]
+    fn build_macos_dmg_install_shell_cmd_swaps_after_successful_copy() {
+        let script = build_macos_dmg_install_shell_cmd(
+            Path::new("/Volumes/GWT/GWT.app"),
+            Path::new("/Applications/GWT.app"),
+            Path::new("/Applications/.gwt-update-new.app"),
+            Path::new("/Applications/.gwt-update-old.app"),
+        );
+
+        assert!(script.contains("ditto '/Volumes/GWT/GWT.app' '/Applications/.gwt-update-new.app'"));
+        assert!(script.contains("mv '/Applications/GWT.app' '/Applications/.gwt-update-old.app'"));
+        assert!(script.contains("mv '/Applications/.gwt-update-new.app' '/Applications/GWT.app'"));
+        assert!(!script.contains("rm -rf '/Applications/GWT.app'"));
     }
 
     #[test]

@@ -1,0 +1,71 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - button "gwt Close gwt" [ref=e30] [cursor=pointer]:
+          - generic [ref=e31]: gwt
+          - button "Close gwt" [ref=e32]: ×
+        - button "llmlb Close llmlb" [ref=e33] [cursor=pointer]:
+          - generic [ref=e34]: llmlb
+          - button "Close llmlb" [ref=e35]: ×
+      - button "Open project" [ref=e13] [cursor=pointer]: Open Project
+    - generic [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e17]: Connected
+        - generic [ref=e18]: Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom
+      - generic [ref=e21]:
+        - button "Tile windows" [ref=e22] [cursor=pointer]: Tile
+        - button "Stack windows" [ref=e23] [cursor=pointer]: Stack
+        - button "List windows" [ref=e25] [cursor=pointer]: Windows
+        - button "Zoom out" [ref=e26] [cursor=pointer]: "-"
+        - button "Reset zoom" [ref=e27] [cursor=pointer]: 100%
+        - button "Zoom in" [ref=e28] [cursor=pointer]: +
+        - button "Add window" [active] [ref=e29] [cursor=pointer]: +
+  - generic [ref=e37]:
+    - heading "Add window" [level=2] [ref=e38]
+    - generic [ref=e39]:
+      - generic [ref=e40]: Terminal
+      - generic [ref=e41]:
+        - button "Shell Open a standard shell terminal" [ref=e42] [cursor=pointer]:
+          - strong [ref=e43]: Shell
+          - generic [ref=e44]: Open a standard shell terminal
+        - button "Claude Start the Claude CLI when available" [ref=e45] [cursor=pointer]:
+          - strong [ref=e46]: Claude
+          - generic [ref=e47]: Start the Claude CLI when available
+        - button "Codex Start the Codex CLI when available" [ref=e48] [cursor=pointer]:
+          - strong [ref=e49]: Codex
+          - generic [ref=e50]: Start the Codex CLI when available
+    - generic [ref=e51]:
+      - generic [ref=e52]: Workspace
+      - generic [ref=e53]:
+        - button "File Tree Browse repository files in a read-only tree" [ref=e54] [cursor=pointer]:
+          - strong [ref=e55]: File Tree
+          - generic [ref=e56]: Browse repository files in a read-only tree
+        - button "Branches Browse repository branches and launch agents" [ref=e57] [cursor=pointer]:
+          - strong [ref=e58]: Branches
+          - generic [ref=e59]: Browse repository branches and launch agents
+        - button "Settings Open the settings surface" [ref=e60] [cursor=pointer]:
+          - strong [ref=e61]: Settings
+          - generic [ref=e62]: Open the settings surface
+        - button "Memo Open a notes surface" [ref=e63] [cursor=pointer]:
+          - strong [ref=e64]: Memo
+          - generic [ref=e65]: Open a notes surface
+        - button "Profile Open the active profile surface" [ref=e66] [cursor=pointer]:
+          - strong [ref=e67]: Profile
+          - generic [ref=e68]: Open the active profile surface
+        - button "Logs Open the logs surface" [ref=e69] [cursor=pointer]:
+          - strong [ref=e70]: Logs
+          - generic [ref=e71]: Open the logs surface
+        - button "Issue Open the issue surface" [ref=e72] [cursor=pointer]:
+          - strong [ref=e73]: Issue
+          - generic [ref=e74]: Open the issue surface
+        - button "SPEC Open the SPEC surface" [ref=e75] [cursor=pointer]:
+          - strong [ref=e76]: SPEC
+          - generic [ref=e77]: Open the SPEC surface
+        - button "Board Open the board surface" [ref=e78] [cursor=pointer]:
+          - strong [ref=e79]: Board
+          - generic [ref=e80]: Open the board surface
+        - button "PR Open the PR surface" [ref=e81] [cursor=pointer]:
+          - strong [ref=e82]: PR
+          - generic [ref=e83]: Open the PR surface
+    - button "Cancel" [ref=e85] [cursor=pointer]

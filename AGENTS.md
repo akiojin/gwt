@@ -209,19 +209,6 @@
 
 - README.mdには設計などは書いてはいけない。プロジェクトの説明やディレクトリ構成などの説明のみに徹底する。設計などは、適切なファイルへのリンクを書く。
 
-## リリースワークフロー
-
-- feature/\* ブランチは develop への PR を作成し、オーナー承認後にマージする。develop で次回リリース候補を蓄積する。
-- **main への PR は develop からのみ許可。** それ以外のブランチ（feature/\*、release-\* 等）から main への直接 PR は禁止。CI（`pr-source-check.yml`）でも拒否される。
-- `/release` コマンドで Release PR を作成:
-  - Conventional Commits を解析してバージョン自動判定（feat→minor, fix→patch, !→major）
-  - git-cliff で CHANGELOG.md を更新
-  - Cargo.toml, package.json のバージョンを更新
-  - develop → main への PR を作成（リリースブランチは作成しない）
-- Release PR が main にマージされると `.github/workflows/release.yml` が以下を自動実行:
-  - タグ・GitHub Release を作成
-  - ビルド済みバイナリを GitHub Release にアップロード
-
 ## パッケージ公開状況
 
 | プラットフォーム | 確認コマンド |
@@ -230,7 +217,7 @@
 
 ## 使用中の技術
 
-- Rust 2021 Edition (stable) + ratatui, crossterm, vt100, portable-pty, serde, tokio
+- Rust 2021 Edition (stable) + vt100, portable-pty, serde, tokio, axum, wry/tao, xterm.js (GUI terminal)
 - ローカルファイルと Git メタデータ（DB なし）
 
 ## プロジェクト構成
@@ -279,7 +266,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal user interfaces with ratatui, crossterm, and xterm.js. |
+| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal UI surfaces for the xterm.js-based GUI terminal. |
 
 ### Recommended Workflow
 

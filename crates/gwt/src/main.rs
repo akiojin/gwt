@@ -1,11 +1,11 @@
 use std::{
     collections::HashMap,
-    fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex},
-    thread,
+    process::{Command, Stdio},
+    sync::{mpsc as std_mpsc, Arc, Mutex},
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use axum::{
@@ -13,20 +13,20 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::{Html, IntoResponse},
+    response::IntoResponse,
     routing::get,
     Router,
 };
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    default_wizard_version_cache_path, detect_shell_program, list_branch_entries,
-    list_directory_entries, load_restored_workspace_state, load_session_state,
-    migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
-    save_session_state, save_workspace_state, workspace_state_path, BackendEvent,
-    DockerWizardContext, FrontendEvent, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardState, LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus,
-    WorkspaceState, APP_NAME,
+    cleanup_selected_branches, default_wizard_version_cache_path, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
+    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
+    refresh_managed_gwt_assets_for_worktree, resolve_launch_spec, save_session_state,
+    save_workspace_state, workspace_state_path, BackendEvent, DockerWizardContext, FrontendEvent,
+    KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
+    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -41,6 +41,8 @@ use tokio::{
 };
 use uuid::Uuid;
 use wry::WebViewBuilder;
+
+mod embedded_web;
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -60,6 +62,25 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    LaunchProgress {
+        window_id: String,
+        message: String,
+    },
+    LaunchComplete {
+        window_id: String,
+        result: Result<
+            (
+                ProcessLaunch,
+                String,
+                String,
+                String,
+                PathBuf,
+                gwt_agent::AgentId,
+            ),
+            String,
+        >,
+    },
+    Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
@@ -67,6 +88,10 @@ enum UserEvent {
 
 struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
+    /// Handle to the background reader thread that forwards PTY output.
+    /// Taken and joined during `stop_window_runtime` so the reader releases
+    /// its Arc clone of `pane` before the runtime is fully torn down.
+    output_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -255,8 +280,10 @@ impl AppRuntime {
             }
             FrontendEvent::SelectProjectTab { tab_id } => self.select_project_tab_events(&tab_id),
             FrontendEvent::CloseProjectTab { tab_id } => self.close_project_tab_events(&tab_id),
-            FrontendEvent::CreateWindow { preset } => self.create_window_events(preset),
-            FrontendEvent::FocusWindow { id } => self.focus_window_events(&id),
+            FrontendEvent::CreateWindow { preset, bounds } => {
+                self.create_window_events(preset, bounds)
+            }
+            FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
             FrontendEvent::CycleFocus { direction, bounds } => {
                 self.cycle_focus_events(direction, bounds)
             }
@@ -293,13 +320,44 @@ impl AppRuntime {
                     self.load_branches_event(&id),
                 )]
             }
+            FrontendEvent::LoadKnowledgeBridge {
+                id,
+                knowledge_kind,
+                selected_number,
+                refresh,
+            } => self.load_knowledge_bridge_events(
+                &client_id,
+                &id,
+                knowledge_kind,
+                selected_number,
+                refresh,
+            ),
+            FrontendEvent::SelectKnowledgeBridgeEntry {
+                id,
+                knowledge_kind,
+                number,
+            } => self.load_knowledge_bridge_events(
+                &client_id,
+                &id,
+                knowledge_kind,
+                Some(number),
+                false,
+            ),
+            FrontendEvent::RunBranchCleanup {
+                id,
+                branches,
+                delete_remote,
+            } => self.run_branch_cleanup_events(&client_id, &id, &branches, delete_remote),
+            FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
+                self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
+            }
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
                 linked_issue_number,
             } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
-            FrontendEvent::LaunchWizardAction { action } => {
-                self.handle_launch_wizard_action(action)
+            FrontendEvent::LaunchWizardAction { action, bounds } => {
+                self.handle_launch_wizard_action(action, bounds)
             }
             FrontendEvent::ApplyUpdate => {
                 std::thread::spawn(apply_update_and_exit);
@@ -498,7 +556,11 @@ impl AppRuntime {
         events
     }
 
-    fn create_window_events(&mut self, preset: WindowPreset) -> Vec<OutboundEvent> {
+    fn create_window_events(
+        &mut self,
+        preset: WindowPreset,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
@@ -506,7 +568,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset)
+            tab.workspace.add_window(preset, bounds)
         };
         self.register_window(&tab_id, &window.id);
         let runtime_event = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -518,14 +580,18 @@ impl AppRuntime {
         events
     }
 
-    fn focus_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+    fn focus_window_events(
+        &mut self,
+        id: &str,
+        bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        if !tab.workspace.focus_window(&address.raw_id) {
+        if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
         }
         self.active_tab_id = Some(address.tab_id);
@@ -794,7 +860,9 @@ impl AppRuntime {
             };
         }
 
-        match list_branch_entries(&tab.project_root) {
+        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
+        match list_branch_entries_with_active_sessions(&tab.project_root, &active_session_branches)
+        {
             Ok(entries) => BackendEvent::BranchEntries {
                 id: id.to_string(),
                 entries,
@@ -804,6 +872,206 @@ impl AppRuntime {
                 message: error.to_string(),
             },
         }
+    }
+
+    fn load_knowledge_bridge_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        kind: KnowledgeKind,
+        selected_number: Option<u64>,
+        refresh: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if knowledge_kind_for_preset(window.preset) != Some(kind) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Window is not a knowledge bridge".to_string(),
+                },
+            )];
+        }
+
+        match load_knowledge_bridge(&tab.project_root, kind, selected_number, refresh) {
+            Ok(view) => vec![
+                OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::KnowledgeEntries {
+                        id: id.to_string(),
+                        knowledge_kind: kind,
+                        entries: view.entries,
+                        selected_number: view.selected_number,
+                        empty_message: view.empty_message,
+                        refresh_enabled: view.refresh_enabled,
+                    },
+                ),
+                OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::KnowledgeDetail {
+                        id: id.to_string(),
+                        knowledge_kind: kind,
+                        detail: view.detail,
+                    },
+                ),
+            ],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: error,
+                },
+            )],
+        }
+    }
+
+    fn run_branch_cleanup_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        branches: &[String],
+        delete_remote: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+
+        if window.preset != WindowPreset::Branches {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window is not a branches list".to_string(),
+                },
+            )];
+        }
+
+        Self::spawn_branch_cleanup_async(
+            self.proxy.clone(),
+            client_id.to_string(),
+            id.to_string(),
+            tab.project_root.clone(),
+            self.active_session_branches_for_tab(&address.tab_id),
+            branches.to_vec(),
+            delete_remote,
+        );
+        Vec::new()
+    }
+
+    fn spawn_branch_cleanup_async(
+        proxy: EventLoopProxy<UserEvent>,
+        client_id: ClientId,
+        window_id: String,
+        project_root: PathBuf,
+        active_session_branches: std::collections::HashSet<String>,
+        branches: Vec<String>,
+        delete_remote: bool,
+    ) {
+        thread::spawn(move || {
+            let events = match list_branch_entries_with_active_sessions(
+                &project_root,
+                &active_session_branches,
+            ) {
+                Ok(entries) => {
+                    let results = cleanup_selected_branches(
+                        &project_root,
+                        &entries,
+                        &branches,
+                        delete_remote,
+                    );
+                    let mut events = vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::BranchCleanupResult {
+                            id: window_id.clone(),
+                            results,
+                        },
+                    )];
+                    match list_branch_entries_with_active_sessions(
+                        &project_root,
+                        &active_session_branches,
+                    ) {
+                        Ok(entries) => events.push(OutboundEvent::reply(
+                            client_id.clone(),
+                            BackendEvent::BranchEntries {
+                                id: window_id.clone(),
+                                entries,
+                            },
+                        )),
+                        Err(error) => events.push(OutboundEvent::reply(
+                            client_id.clone(),
+                            BackendEvent::BranchError {
+                                id: window_id.clone(),
+                                message: error.to_string(),
+                            },
+                        )),
+                    }
+                    events
+                }
+                Err(error) => vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BranchError {
+                        id: window_id,
+                        message: error.to_string(),
+                    },
+                )],
+            };
+            let _ = proxy.send_event(UserEvent::Dispatch(events));
+        });
     }
 
     fn open_launch_wizard(
@@ -838,34 +1106,48 @@ impl AppRuntime {
             })];
         }
 
-        let entries = match list_branch_entries(&tab.project_root) {
-            Ok(entries) => entries,
-            Err(error) => {
-                return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                })];
-            }
-        };
-
-        let Some(selected_branch) = entries.into_iter().find(|entry| entry.name == branch_name)
-        else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+        let project_root = tab.project_root.clone();
+        let tab_id = address.tab_id.clone();
+        match self.open_launch_wizard_for_branch(
+            &tab_id,
+            &project_root,
+            branch_name,
+            linked_issue_number,
+        ) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
-                message: format!("Branch not found: {branch_name}"),
-            })];
-        };
+                message: error,
+            })],
+        }
+    }
+
+    fn open_launch_wizard_for_branch(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Result<(), String> {
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        let entries =
+            list_branch_entries_with_active_sessions(project_root, &active_session_branches)
+                .map_err(|error| error.to_string())?;
+        let selected_branch = entries
+            .into_iter()
+            .find(|entry| entry.name == branch_name)
+            .ok_or_else(|| format!("Branch not found: {branch_name}"))?;
 
         let normalized_branch_name = normalize_branch_name(&selected_branch.name);
-        let worktree_path = branch_worktree_path(&tab.project_root, &normalized_branch_name);
+        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
         let quick_start_root = worktree_path
             .clone()
-            .unwrap_or_else(|| tab.project_root.clone());
-        let live_sessions = self.live_sessions_for_branch(&address.tab_id, &normalized_branch_name);
+            .unwrap_or_else(|| project_root.to_path_buf());
+        let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);
         self.launch_wizard = Some(LaunchWizardSession {
-            tab_id: address.tab_id,
+            tab_id: tab_id.to_string(),
             wizard: LaunchWizardState::open(
                 LaunchWizardContext {
                     selected_branch,
@@ -882,12 +1164,108 @@ impl AppRuntime {
             ),
         });
 
-        vec![self.launch_wizard_state_outbound()]
+        Ok(())
+    }
+
+    fn open_issue_launch_wizard_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        issue_number: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(kind) = knowledge_kind_for_preset(window.preset) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Window is not a knowledge bridge".to_string(),
+                },
+            )];
+        };
+
+        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
+        let branches = match list_branch_entries_with_active_sessions(
+            &tab.project_root,
+            &active_session_branches,
+        ) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::KnowledgeError {
+                        id: id.to_string(),
+                        knowledge_kind: kind,
+                        message: error.to_string(),
+                    },
+                )]
+            }
+        };
+        let Some(branch_name) = preferred_issue_launch_branch(&branches) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "No local branch is available for launch".to_string(),
+                },
+            )];
+        };
+
+        let project_root = tab.project_root.clone();
+        let tab_id = address.tab_id.clone();
+        match self.open_launch_wizard_for_branch(
+            &tab_id,
+            &project_root,
+            &branch_name,
+            Some(issue_number),
+        ) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: error,
+                },
+            )],
+        }
     }
 
     fn handle_launch_wizard_action(
         &mut self,
         action: gwt::LaunchWizardAction,
+        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
         let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
@@ -908,7 +1286,7 @@ impl AppRuntime {
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
                     return Vec::new();
                 };
-                if !tab.workspace.focus_window(&address.raw_id) {
+                if !tab.workspace.focus_window(&address.raw_id, None) {
                     session.wizard.error =
                         Some("The selected session window is no longer available".to_string());
                     self.launch_wizard = Some(session);
@@ -922,7 +1300,7 @@ impl AppRuntime {
                 ]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
-                match self.spawn_agent_window(&session.tab_id, *config) {
+                match self.spawn_agent_window(&session.tab_id, *config, bounds) {
                     Ok(mut events) => {
                         events.push(self.launch_wizard_state_broadcast(None));
                         events
@@ -958,6 +1336,14 @@ impl AppRuntime {
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.name.cmp(&right.name));
         entries
+    }
+
+    fn active_session_branches_for_tab(&self, tab_id: &str) -> std::collections::HashSet<String> {
+        self.active_agent_sessions
+            .values()
+            .filter(|session| session.tab_id == tab_id)
+            .map(|session| session.branch_name.clone())
+            .collect()
     }
 
     fn handle_runtime_output(&mut self, id: String, data: Vec<u8>) -> Vec<OutboundEvent> {
@@ -1006,6 +1392,88 @@ impl AppRuntime {
             self.workspace_state_broadcast(),
             OutboundEvent::broadcast(BackendEvent::TerminalStatus { id, status, detail }),
         ]
+    }
+
+    fn handle_launch_complete(
+        &mut self,
+        window_id: String,
+        result: Result<
+            (
+                ProcessLaunch,
+                String,
+                String,
+                String,
+                PathBuf,
+                gwt_agent::AgentId,
+            ),
+            String,
+        >,
+    ) -> Vec<OutboundEvent> {
+        match result {
+            Ok((
+                process_launch,
+                session_id,
+                branch_name,
+                display_name,
+                worktree_path,
+                agent_id,
+            )) => {
+                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Window not found".to_string()),
+                    })];
+                };
+                let Some(tab) = self.tab(&address.tab_id) else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Project tab not found".to_string()),
+                    })];
+                };
+                let Some(window) = tab.workspace.window(&address.raw_id) else {
+                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some("Window not found".to_string()),
+                    })];
+                };
+                let geometry = window.geometry.clone();
+
+                self.active_agent_sessions.insert(
+                    window_id.clone(),
+                    ActiveAgentSession {
+                        window_id: window_id.clone(),
+                        session_id,
+                        agent_id: agent_id.to_string(),
+                        branch_name,
+                        display_name,
+                        worktree_path,
+                        tab_id: address.tab_id,
+                    },
+                );
+
+                let _ = self.persist();
+
+                match self.spawn_process_window(&window_id, geometry, process_launch) {
+                    Ok(event) => vec![
+                        self.workspace_state_broadcast(),
+                        OutboundEvent::broadcast(event),
+                    ],
+                    Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                        id: window_id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(error),
+                    })],
+                }
+            }
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id,
+                status: WindowProcessStatus::Error,
+                detail: Some(error),
+            })],
+        }
     }
 
     fn start_window(
@@ -1097,7 +1565,7 @@ impl AppRuntime {
         .map_err(|error| error.to_string())?;
         let pane = Arc::new(Mutex::new(pane));
 
-        self.spawn_output_thread(id.to_string(), pane.clone());
+        let output_thread = self.spawn_output_thread(id.to_string(), pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.set_window_status(
                 &address.tab_id,
@@ -1106,7 +1574,13 @@ impl AppRuntime {
             );
         }
         self.window_details.remove(id);
-        self.runtimes.insert(id.to_string(), WindowRuntime { pane });
+        self.runtimes.insert(
+            id.to_string(),
+            WindowRuntime {
+                pane,
+                output_thread: Some(output_thread),
+            },
+        );
         Ok(BackendEvent::TerminalStatus {
             id: id.to_string(),
             status: WindowProcessStatus::Running,
@@ -1117,158 +1591,181 @@ impl AppRuntime {
     fn spawn_agent_window(
         &mut self,
         tab_id: &str,
-        mut config: gwt_agent::LaunchConfig,
+        config: gwt_agent::LaunchConfig,
+        bounds: Option<WindowGeometry>,
     ) -> Result<Vec<OutboundEvent>, String> {
-        let project_root = self
-            .tab(tab_id)
-            .map(|tab| tab.project_root.clone())
+        let tab = self
+            .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        resolve_launch_worktree(&project_root, &mut config)?;
-        apply_docker_runtime_to_launch_config(&project_root, &mut config)?;
-
-        let worktree_path = config
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| project_root.clone());
-        refresh_managed_gwt_assets_for_worktree(&worktree_path)
-            .map_err(|error| error.to_string())?;
-        let branch_name = config
-            .branch
-            .clone()
-            .unwrap_or_else(|| "workspace".to_string());
-
-        let mut session =
-            gwt_agent::Session::new(&worktree_path, branch_name.clone(), config.agent_id.clone());
-        session.display_name = config.display_name.clone();
-        session.tool_version = config.tool_version.clone();
-        session.model = config.model.clone();
-        session.reasoning_level = config.reasoning_level.clone();
-        session.skip_permissions = config.skip_permissions;
-        session.codex_fast_mode = config.codex_fast_mode;
-        session.runtime_target = config.runtime_target;
-        session.docker_service = config.docker_service.clone();
-        session.docker_lifecycle_intent = config.docker_lifecycle_intent;
-        session.linked_issue_number = config.linked_issue_number;
-        session.launch_command = config.command.clone();
-        session.launch_args = config.args.clone();
-        session.update_status(gwt_agent::AgentStatus::Running);
-
-        let runtime_path = gwt_agent::runtime_state_path(&self.sessions_dir, &session.id);
-        config.env_vars.insert(
-            gwt_agent::GWT_SESSION_ID_ENV.to_string(),
-            session.id.clone(),
+        let project_root = tab.project_root.display().to_string();
+        let title = format!(
+            "{} · {}",
+            config.display_name,
+            config.branch.as_ref().unwrap_or(&"workspace".to_string())
         );
-        config.env_vars.insert(
-            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
-            runtime_path.display().to_string(),
-        );
-        if let Ok(gwt_bin) = std::env::current_exe() {
-            config.env_vars.insert(
-                gwt_agent::session::GWT_BIN_PATH_ENV.to_string(),
-                gwt_bin.display().to_string(),
-            );
-        }
-        config
-            .env_vars
-            .entry("COLORTERM".to_string())
-            .or_insert_with(|| "truecolor".to_string());
-
-        let title = format!("{} · {}", config.display_name, branch_name);
-        let window = {
-            let Some(tab) = self.tab_mut(tab_id) else {
-                return Err("Project tab not found".to_string());
-            };
-            tab.workspace
-                .add_window_with_title(WindowPreset::Agent, title, false)
+        let default_bounds = WindowGeometry {
+            x: 100.0,
+            y: 40.0,
+            width: 1000.0,
+            height: 760.0,
         };
+        let window = tab.workspace.add_window_with_title(
+            WindowPreset::Agent,
+            title.clone(),
+            false,
+            bounds.unwrap_or(default_bounds),
+        );
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
-        let runtime_event = match self.spawn_process_window(
-            &window_id,
-            window.geometry.clone(),
-            ProcessLaunch {
+
+        let events = vec![
+            self.workspace_state_broadcast(),
+            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id.clone(),
+                status: WindowProcessStatus::Starting,
+                detail: None,
+            }),
+        ];
+
+        let proxy = self.proxy.clone();
+        let sessions_dir = self.sessions_dir.clone();
+
+        thread::spawn(move || {
+            Self::spawn_agent_window_async(proxy, sessions_dir, project_root, window_id, config)
+        });
+
+        Ok(events)
+    }
+
+    fn spawn_agent_window_async(
+        proxy: EventLoopProxy<UserEvent>,
+        sessions_dir: PathBuf,
+        project_root: String,
+        window_id: String,
+        mut config: gwt_agent::LaunchConfig,
+    ) {
+        let result = (|| {
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Preparing worktree...".to_string(),
+            });
+            resolve_launch_worktree(Path::new(&project_root), &mut config)?;
+
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Starting Docker service...".to_string(),
+            });
+            apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+
+            let _ = proxy.send_event(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Configuring workspace...".to_string(),
+            });
+            let worktree_path = config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&project_root));
+            refresh_managed_gwt_assets_for_worktree(&worktree_path)
+                .map_err(|error| error.to_string())?;
+
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
+                && apply_host_package_runner_fallback(&mut config)
+            {
+                let _ = proxy.send_event(UserEvent::LaunchProgress {
+                    window_id: window_id.clone(),
+                    message: "bunx unavailable, switching to npx...".to_string(),
+                });
+            }
+
+            let branch_name = config
+                .branch
+                .clone()
+                .unwrap_or_else(|| "workspace".to_string());
+
+            let agent_id = config.agent_id.clone();
+            let mut session =
+                gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
+            session.display_name = config.display_name.clone();
+            session.tool_version = config.tool_version.clone();
+            session.model = config.model.clone();
+            session.reasoning_level = config.reasoning_level.clone();
+            session.skip_permissions = config.skip_permissions;
+            session.codex_fast_mode = config.codex_fast_mode;
+            session.runtime_target = config.runtime_target;
+            session.docker_service = config.docker_service.clone();
+            session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+            session.linked_issue_number = config.linked_issue_number;
+            session.launch_command = config.command.clone();
+            session.launch_args = config.args.clone();
+            session.update_status(gwt_agent::AgentStatus::Running);
+
+            let session_id = session.id.clone();
+            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+            config.env_vars.insert(
+                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                session_id.clone(),
+            );
+            config.env_vars.insert(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+                runtime_path.display().to_string(),
+            );
+            config
+                .env_vars
+                .entry("COLORTERM".to_string())
+                .or_insert_with(|| "truecolor".to_string());
+
+            session
+                .save(&sessions_dir)
+                .map_err(|error| error.to_string())?;
+            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
+                .save(&runtime_path)
+                .map_err(|error| error.to_string())?;
+
+            let process_launch = ProcessLaunch {
                 command: config.command.clone(),
                 args: config.args.clone(),
                 env: config.env_vars.clone(),
                 cwd: config.working_dir.clone(),
-            },
-        ) {
-            Ok(event) => event,
-            Err(error) => {
-                if let Some(tab) = self.tab_mut(tab_id) {
-                    let _ = tab.workspace.close_window(&window.id);
-                }
-                self.window_lookup.remove(&window_id);
-                return Err(error);
+            };
+
+            Ok((
+                process_launch,
+                session_id,
+                branch_name,
+                config.display_name,
+                worktree_path,
+                agent_id,
+            ))
+        })();
+
+        match result {
+            Ok((
+                process_launch,
+                session_id,
+                branch_name,
+                display_name,
+                worktree_path,
+                agent_id,
+            )) => {
+                let _ = proxy.send_event(UserEvent::LaunchComplete {
+                    window_id,
+                    result: Ok((
+                        process_launch,
+                        session_id,
+                        branch_name,
+                        display_name,
+                        worktree_path,
+                        agent_id,
+                    )),
+                });
             }
-        };
-
-        session
-            .save(&self.sessions_dir)
-            .map_err(|error| error.to_string())?;
-        gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-            .save(&runtime_path)
-            .map_err(|error| error.to_string())?;
-
-        if let Some(issue_number) = config.linked_issue_number {
-            if let Some(branch) = config.branch.as_deref() {
-                let _ = {
-                    use gwt::index_worker::detect_repo_hash;
-                    use gwt_core::paths::gwt_cache_dir;
-                    use serde_json::json;
-
-                    if let Some(repo_hash) = detect_repo_hash(&worktree_path) {
-                        let cache_dir = gwt_cache_dir().join("issue-links");
-                        let _ = fs::create_dir_all(&cache_dir);
-
-                        let hash_str = repo_hash.as_str();
-                        let cache_file = cache_dir.join(format!("{}.json", hash_str));
-
-                        let mut linkage_map: serde_json::Map<String, serde_json::Value> =
-                            if cache_file.exists() {
-                                let content = fs::read_to_string(&cache_file).unwrap_or_default();
-                                serde_json::from_str(&content).unwrap_or_default()
-                            } else {
-                                serde_json::Map::new()
-                            };
-
-                        let mut branches: serde_json::Map<String, serde_json::Value> = linkage_map
-                            .get("branches")
-                            .and_then(|v| v.as_object())
-                            .cloned()
-                            .unwrap_or_default();
-
-                        branches.insert(branch.to_string(), json!(issue_number));
-                        linkage_map
-                            .insert("branches".to_string(), serde_json::Value::Object(branches));
-
-                        let json_content =
-                            serde_json::to_string_pretty(&linkage_map).unwrap_or_default();
-                        let _ = fs::write(&cache_file, json_content);
-                    }
-                    Ok::<(), String>(())
-                };
+            Err(error) => {
+                let _ = proxy.send_event(UserEvent::LaunchComplete {
+                    window_id,
+                    result: Err(error),
+                });
             }
         }
-
-        self.active_agent_sessions.insert(
-            window_id.clone(),
-            ActiveAgentSession {
-                window_id: window_id.clone(),
-                session_id: session.id.clone(),
-                agent_id: config.agent_id.command().to_string(),
-                branch_name,
-                display_name: config.display_name.clone(),
-                worktree_path,
-                tab_id: tab_id.to_string(),
-            },
-        );
-
-        let _ = self.persist();
-        Ok(vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(runtime_event),
-        ])
     }
 
     fn mark_agent_session_stopped(&mut self, window_id: &str) {
@@ -1284,15 +1781,43 @@ impl AppRuntime {
 
     fn stop_window_runtime(&mut self, window_id: &str) {
         self.mark_agent_session_stopped(window_id);
-        if let Some(runtime) = self.runtimes.remove(window_id) {
+        if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
                 let _ = pane.kill();
+            }
+            if let Some(handle) = runtime.output_thread.take() {
+                // PTY and its process group were already terminated by
+                // `pane.kill()`, so the reader should see EOF quickly. Cap
+                // the wait anyway so shutdown never stalls the event loop
+                // if a stuck syscall keeps the reader in `read`. If the
+                // timeout elapses the reader thread is detached; its Arc
+                // clone of the Pane will still be released when the thread
+                // does finally observe EOF.
+                let (tx, rx) = std_mpsc::channel();
+                thread::spawn(move || {
+                    let _ = handle.join();
+                    let _ = tx.send(());
+                });
+                if rx.recv_timeout(Duration::from_millis(500)).is_err() {
+                    eprintln!(
+                        "output reader thread for window {window_id} did not exit within 500ms; detaching"
+                    );
+                }
             }
         }
         self.window_details.remove(window_id);
     }
 
-    fn spawn_output_thread(&self, id: String, pane: Arc<Mutex<Pane>>) {
+    /// Stop every active window runtime. Called from the application shutdown
+    /// paths so no PTY / agent process outlives the GUI.
+    fn stop_all_runtimes(&mut self) {
+        let ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        for id in ids {
+            self.stop_window_runtime(&id);
+        }
+    }
+
+    fn spawn_output_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
         let proxy = self.proxy.clone();
         thread::spawn(move || {
             let reader = match pane
@@ -1369,7 +1894,7 @@ impl AppRuntime {
                     });
                 }
             }
-        });
+        })
     }
 
     fn app_state_view(&self) -> gwt::AppStateView {
@@ -1590,12 +2115,19 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
-    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
+    use gwt::{
+        BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind, PersistedWindowState,
+        WindowGeometry, WindowPreset, WindowProcessStatus,
+    };
+    use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use tempfile::tempdir;
 
-    use super::{resolve_project_target, should_auto_start_restored_window};
+    use super::{
+        apply_host_package_runner_fallback_with_probe, knowledge_kind_for_preset,
+        preferred_issue_launch_branch, resolve_project_target, should_auto_start_restored_window,
+    };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -1662,6 +2194,156 @@ mod tests {
         assert_eq!(
             target.project_root,
             dunce::canonicalize(&repo).expect("canonical repo root"),
+        );
+    }
+    fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir("E:/gwt/develop")
+            .version("latest")
+            .build();
+        config.command = "bunx".to_string();
+        config.args = vec![
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--print".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
+        config
+    }
+
+    #[test]
+    fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
+        let mut config = sample_versioned_launch_config();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |command, args, _env, cwd| {
+                assert_eq!(command, "bunx");
+                assert_eq!(
+                    args,
+                    vec![
+                        "@anthropic-ai/claude-code@latest".to_string(),
+                        "--version".to_string(),
+                    ]
+                );
+                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
+                false
+            },
+        );
+
+        assert!(changed, "expected bunx failure to switch to npx");
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_package_runner_fallback_keeps_bunx_when_probe_succeeds() {
+        let mut config = sample_versioned_launch_config();
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |_command, _args, _env, _cwd| true,
+        );
+
+        assert!(!changed, "successful bunx probe should keep bunx");
+        assert_eq!(config.command, original_command);
+        assert_eq!(config.args, original_args);
+    }
+
+    #[test]
+    fn host_package_runner_fallback_ignores_direct_installed_command() {
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .working_dir("E:/gwt/develop")
+            .version("installed")
+            .build();
+        let original_command = config.command.clone();
+        let original_args = config.args.clone();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |_command, _args, _env, _cwd| {
+                panic!("installed command should not probe bunx");
+            },
+        );
+
+        assert!(!changed);
+        assert_eq!(config.command, original_command);
+        assert_eq!(config.args, original_args);
+    }
+
+    #[test]
+    fn issue_and_spec_presets_route_to_knowledge_bridge_kind() {
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Issue),
+            Some(KnowledgeKind::Issue)
+        );
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Spec),
+            Some(KnowledgeKind::Spec)
+        );
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Pr),
+            Some(KnowledgeKind::Pr)
+        );
+        assert_eq!(knowledge_kind_for_preset(WindowPreset::Branches), None);
+    }
+
+    #[test]
+    fn preferred_issue_launch_branch_prefers_develop_then_head_then_first_local() {
+        let entries = vec![
+            BranchListEntry {
+                name: "feature/demo".to_string(),
+                scope: BranchScope::Local,
+                is_head: true,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup: BranchCleanupInfo::default(),
+            },
+            BranchListEntry {
+                name: "develop".to_string(),
+                scope: BranchScope::Local,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup: BranchCleanupInfo::default(),
+            },
+        ];
+        assert_eq!(
+            preferred_issue_launch_branch(&entries),
+            Some("develop".to_string())
+        );
+
+        let head_only = vec![BranchListEntry {
+            name: "feature/demo".to_string(),
+            scope: BranchScope::Local,
+            is_head: true,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: None,
+            cleanup: BranchCleanupInfo::default(),
+        }];
+        assert_eq!(
+            preferred_issue_launch_branch(&head_only),
+            Some("feature/demo".to_string())
         );
     }
 }
@@ -1801,7 +2483,7 @@ impl EmbeddedServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let app = Router::new()
-            .route("/", get(index_handler))
+            .route("/", get(embedded_web::index_handler))
             .route("/healthz", get(health_handler))
             .route("/ws", get(websocket_handler))
             .with_state(ServerState { proxy, clients });
@@ -1830,10 +2512,6 @@ impl EmbeddedServer {
             let _ = tx.send(());
         }
     }
-}
-
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
 }
 
 async fn health_handler() -> &'static str {
@@ -1899,6 +2577,35 @@ fn normalize_branch_name(branch_name: &str) -> String {
         return name.to_string();
     }
     branch_name.to_string()
+}
+
+fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
+    match preset {
+        WindowPreset::Issue => Some(KnowledgeKind::Issue),
+        WindowPreset::Spec => Some(KnowledgeKind::Spec),
+        WindowPreset::Pr => Some(KnowledgeKind::Pr),
+        _ => None,
+    }
+}
+
+fn preferred_issue_launch_branch(entries: &[gwt::BranchListEntry]) -> Option<String> {
+    use gwt::BranchScope;
+
+    let mut locals = entries
+        .iter()
+        .filter(|entry| entry.scope == BranchScope::Local)
+        .collect::<Vec<_>>();
+    locals.sort_by(|left, right| left.name.cmp(&right.name));
+
+    for preferred in ["develop", "main", "master"] {
+        if let Some(entry) = locals.iter().find(|entry| entry.name == preferred) {
+            return Some(entry.name.clone());
+        }
+    }
+    if let Some(entry) = locals.iter().find(|entry| entry.is_head) {
+        return Some(entry.name.clone());
+    }
+    locals.first().map(|entry| entry.name.clone())
 }
 
 fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
@@ -2083,6 +2790,12 @@ struct DockerPackageRunnerCandidate {
     base_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageRunnerProgram {
+    executable: String,
+    args: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct DevContainerLaunchDefaults {
     service: Option<String>,
@@ -2134,6 +2847,87 @@ fn apply_docker_runtime_to_launch_config(
     );
     config.docker_service = Some(launch.service);
     Ok(())
+}
+
+fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
+    apply_host_package_runner_fallback_with_probe(
+        config,
+        "npx".to_string(),
+        probe_host_package_runner,
+    )
+}
+
+fn apply_host_package_runner_fallback_with_probe<F>(
+    config: &mut gwt_agent::LaunchConfig,
+    fallback_executable: String,
+    mut probe: F,
+) -> bool
+where
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+{
+    let Some(program) =
+        resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
+    else {
+        return false;
+    };
+    config.command = program.executable;
+    config.args = program.args;
+    true
+}
+
+fn resolve_host_package_runner_with_probe<F>(
+    config: &gwt_agent::LaunchConfig,
+    fallback_executable: String,
+    probe: &mut F,
+) -> Option<PackageRunnerProgram>
+where
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+{
+    let version_spec = package_runner_version_spec(config)?;
+    if !command_matches_runner(&config.command, "bunx") {
+        return None;
+    }
+
+    let probe_args = vec![version_spec.clone(), "--version".to_string()];
+    let cwd = config.working_dir.clone();
+    if probe(&config.command, probe_args, &config.env_vars, cwd) {
+        return None;
+    }
+
+    let agent_args = strip_package_runner_args(&config.args, &version_spec);
+    let mut args = vec!["--yes".to_string(), version_spec];
+    args.extend(agent_args);
+    Some(PackageRunnerProgram {
+        executable: fallback_executable,
+        args,
+    })
+}
+
+fn probe_host_package_runner(
+    command: &str,
+    args: Vec<String>,
+    env_vars: &HashMap<String, String>,
+    cwd: Option<PathBuf>,
+) -> bool {
+    let mut process = Command::new(command);
+    process
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .envs(env_vars);
+    if let Some(cwd) = cwd {
+        process.current_dir(cwd);
+    }
+    process.status().is_ok_and(|status| status.success())
+}
+
+fn command_matches_runner(command: &str, runner: &str) -> bool {
+    let path = Path::new(command);
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
@@ -2257,7 +3051,7 @@ fn resolve_docker_exec_program(
     launch: &DockerLaunchPlan,
     config: &gwt_agent::LaunchConfig,
 ) -> Result<DockerExecProgram, String> {
-    let Some(version_spec) = docker_package_version_spec(config) else {
+    let Some(version_spec) = package_runner_version_spec(config) else {
         ensure_docker_launch_command_ready(launch, &config.command)?;
         return Ok(DockerExecProgram {
             executable: config.command.clone(),
@@ -2267,7 +3061,7 @@ fn resolve_docker_exec_program(
     resolve_docker_package_runner(launch, config, &version_spec)
 }
 
-fn docker_package_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
+fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
     let package = config.agent_id.package_name()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
@@ -2285,7 +3079,7 @@ fn resolve_docker_package_runner(
     config: &gwt_agent::LaunchConfig,
     version_spec: &str,
 ) -> Result<DockerExecProgram, String> {
-    let agent_args = strip_docker_package_runner_args(&config.args, version_spec);
+    let agent_args = strip_package_runner_args(&config.args, version_spec);
     let candidates = vec![
         DockerPackageRunnerCandidate {
             executable: "bunx",
@@ -2316,7 +3110,7 @@ fn resolve_docker_package_runner(
     ))
 }
 
-fn strip_docker_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
+fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
     if args.first().is_some_and(|first| first == "--yes")
         && args.get(1).is_some_and(|arg| arg == version_spec)
     {
@@ -2845,6 +3639,9 @@ fn main() -> wry::Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                // Kill every PTY / agent before the event loop exits so no
+                // child process outlives the window.
+                app.stop_all_runtimes();
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
@@ -2858,6 +3655,21 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::LaunchProgress {
+                        id: window_id,
+                        message,
+                    },
+                )]);
+            }
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
+                let events = app.handle_launch_complete(window_id, result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
@@ -2881,6 +3693,9 @@ fn main() -> wry::Result<()> {
                 }
             }
             Event::LoopDestroyed => {
+                // Belt-and-suspenders: if the event loop is torn down via a
+                // path other than CloseRequested, still release PTY children.
+                app.stop_all_runtimes();
                 server.shutdown();
             }
             _ => {}
