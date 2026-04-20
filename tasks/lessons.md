@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: preset 経由の agent launch で wizard 側の default arg が抜ける
+
+### 事象
+
+preset ボタンから起動した Codex は、wizard 経由の launch と違い
+`--no-alt-screen` が抜けた状態で spawn されていた。結果 alternate screen に入り、
+xterm.js の scrollback ring に行が蓄積されず、Plan mode 入力待ちに入ると
+マウスホイールが完全 no-op になった (Issue #2091)。
+
+### 原因
+
+- agent-specific な launch 既定値 (`--no-alt-screen` 等) は
+  `gwt-agent/src/launch.rs` の `build_codex_args` にしか書かれておらず、
+  preset resolver (`crates/gwt/src/preset.rs`) は bare command で spawn していた。
+- `normalize_launch_args` はセッション永続化のロード経路でのみ呼ばれていて、
+  fresh preset spawn には適用されていなかった。
+- agent 起動経路が「wizard」「preset」「persisted session load」で分岐しており、
+  既定引数の one source of truth が存在しなかった。
+
+### 再発防止策
+
+1. agent 固有の起動既定値を変更する際は、wizard / preset / session load の
+   3 経路すべてに適用されていることを確認する。
+2. preset 経由の agent spawn では、対応する agent の既定引数 (`--no-alt-screen`
+   等) を必ず組み込む。regression テストを preset unit test に追加する。
+3. 「wizard では動くが preset では動かない」系の挙動差分は、経路ごとの
+   `LaunchSpec` / `LaunchConfig` を突き合わせて探す。
+
 ## 2026-04-20 — fix: discussion の深さは「継続質問する」と書くだけでは維持できない
 
 ### 事象
