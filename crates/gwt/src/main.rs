@@ -2235,6 +2235,8 @@ mod tests {
     use std::{collections::HashMap, fs, path::PathBuf, process::Command};
 
     use tao::event_loop::EventLoopBuilder;
+    #[cfg(unix)]
+    use tao::platform::unix::EventLoopBuilderExtUnix;
     #[cfg(target_os = "windows")]
     use tao::platform::windows::EventLoopBuilderExtWindows;
     use tempfile::tempdir;
@@ -2331,6 +2333,8 @@ mod tests {
 
     fn test_proxy() -> tao::event_loop::EventLoopProxy<UserEvent> {
         let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
+        #[cfg(unix)]
+        builder.with_any_thread(true);
         #[cfg(target_os = "windows")]
         builder.with_any_thread(true);
         builder.build().create_proxy()
