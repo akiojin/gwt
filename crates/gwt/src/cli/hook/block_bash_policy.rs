@@ -3,7 +3,7 @@
 //! Evaluates the existing Bash safety rules in a fixed order and returns the
 //! first blocking decision, if any.
 
-use std::path::Path;
+use std::{io::Read, path::Path};
 
 use super::{
     block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, BlockDecision,
@@ -32,7 +32,13 @@ pub fn evaluate(
 }
 
 pub fn handle() -> Result<Option<BlockDecision>, HookError> {
-    let Some(event) = HookEvent::read_from_stdin()? else {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    handle_with_input(&input)
+}
+
+pub fn handle_with_input(input: &str) -> Result<Option<BlockDecision>, HookError> {
+    let Some(event) = HookEvent::read_from_str(input)? else {
         return Ok(None);
     };
     let root = crate::cli::hook::worktree::detect_worktree_root();

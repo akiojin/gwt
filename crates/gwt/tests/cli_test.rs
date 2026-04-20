@@ -54,6 +54,12 @@ fn red_70_should_dispatch_cli_when_first_arg_is_cli_verb() {
         "coordination-event",
         "SessionStart"
     ])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt",
+        "__internal",
+        "daemon-hook",
+        "forward"
+    ])));
     assert!(!should_dispatch_cli(&argv(&["gwt"])));
     assert!(!should_dispatch_cli(&argv(&["gwt", "/some/repo/path"])));
 }
@@ -144,6 +150,17 @@ fn dispatch_hook_runtime_state_without_env_is_silent_ok() {
         err_text.is_empty(),
         "runtime-state no-op must not print to stderr, got {err_text:?}"
     );
+    assert_eq!(env.internal_command_call_log.len(), 1);
+    assert_eq!(
+        env.internal_command_call_log[0].args,
+        argv(&[
+            "gwt",
+            "__internal",
+            "daemon-hook",
+            "runtime-state",
+            "PreToolUse"
+        ])
+    );
 }
 
 #[test]
@@ -182,6 +199,22 @@ fn dispatch_hook_coordination_event_missing_event_exits_2() {
     assert!(
         err_text.contains("missing <event> argument"),
         "stderr should explain the missing argument, got {err_text:?}"
+    );
+}
+
+#[test]
+fn dispatch_internal_daemon_hook_runs_as_cli_helper() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "__internal", "daemon-hook", "forward"]),
+    );
+    assert_eq!(code, 0, "hidden daemon helper should stay on the CLI path");
+    assert!(
+        env.stderr.is_empty(),
+        "daemon helper must not require GUI fallback, got stderr {:?}",
+        String::from_utf8_lossy(&env.stderr)
     );
 }
 

@@ -104,4 +104,38 @@ fn forward_hook_exits_zero() {
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let code = dispatch(&mut env, &argv(&["gwt", "hook", "forward"]));
     assert_eq!(code, 0, "forward stub must always allow (exit 0)");
+    assert_eq!(env.internal_command_call_log.len(), 1);
+    assert_eq!(
+        env.internal_command_call_log[0].args,
+        argv(&["gwt", "__internal", "daemon-hook", "forward"])
+    );
+}
+
+#[test]
+fn delegated_block_hook_preserves_block_json_contract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "gh issue view 123"
+        }
+    })
+    .to_string();
+
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "block-bash-policy"]));
+
+    assert_eq!(code, 2, "blocked hook must still exit 2 after delegation");
+    assert_eq!(env.internal_command_call_log.len(), 1);
+    assert_eq!(
+        env.internal_command_call_log[0].args,
+        argv(&["gwt", "__internal", "daemon-hook", "block-bash-policy"])
+    );
+
+    let stdout = String::from_utf8(env.stdout).unwrap();
+    assert!(
+        stdout.contains("\"decision\":\"block\""),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("Direct GitHub workflow CLI commands are not allowed"));
 }

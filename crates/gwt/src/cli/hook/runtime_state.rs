@@ -7,6 +7,7 @@
 
 use std::{
     io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -120,7 +121,13 @@ fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 /// sessions launched outside of gwt (e.g. a raw `claude` invocation) are
 /// not broken by a hook we shipped.
 pub fn handle(event: &str) -> Result<(), HookError> {
-    let hook_event = HookEvent::read_from_stdin()?;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    handle_with_input(event, &input)
+}
+
+pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
+    let hook_event = HookEvent::read_from_str(input)?;
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
     let agent_session_id = hook_event

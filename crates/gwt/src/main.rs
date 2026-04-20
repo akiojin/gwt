@@ -4110,6 +4110,12 @@ fn main() -> wry::Result<()> {
         }
     }
 
+    if let Ok(project_root) = std::env::current_dir() {
+        if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&project_root) {
+            eprintln!("gwt daemon bootstrap: {error}");
+        }
+    }
+
     let runtime = Runtime::new().expect("tokio runtime");
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
