@@ -8,7 +8,7 @@
 //!   sections before code implementation proceeds
 //! - allow read-only investigation and docs/chore-style edits
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, io::Read, path::Path};
 
 use gwt_agent::{
     session::{Session, GWT_SESSION_ID_ENV},
@@ -97,7 +97,13 @@ pub fn evaluate(
 }
 
 pub fn handle() -> Result<Option<BlockDecision>, HookError> {
-    let Some(event) = HookEvent::read_from_stdin()? else {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    handle_with_input(&input)
+}
+
+pub fn handle_with_input(input: &str) -> Result<Option<BlockDecision>, HookError> {
+    let Some(event) = HookEvent::read_from_str(input)? else {
         return Ok(None);
     };
     let root = crate::cli::hook::worktree::detect_worktree_root();
