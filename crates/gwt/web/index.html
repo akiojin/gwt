@@ -3214,6 +3214,7 @@
           wizardError.hidden = true;
           wizardError.textContent = "";
           wizardSubmitButton.textContent = "Launch";
+          wizardSubmitButton.disabled = false;
           syncWizardDraftState();
           return;
         }
@@ -3224,14 +3225,17 @@
         wizardMeta.textContent = `Selected branch · ${
           launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
         }`;
-        wizardSubmitButton.textContent =
-          launchWizard.branch_mode === "create_new"
+        wizardSubmitButton.textContent = launchWizard.is_hydrating
+          ? "Loading..."
+          : launchWizard.branch_mode === "create_new"
             ? "Create and launch"
             : "Launch";
+        wizardSubmitButton.disabled = Boolean(launchWizard.is_hydrating);
 
-        if (launchWizard.error) {
+        if (launchWizard.error || launchWizard.hydration_error) {
           wizardError.hidden = false;
-          wizardError.textContent = launchWizard.error;
+          wizardError.textContent =
+            launchWizard.error || launchWizard.hydration_error;
         } else {
           wizardError.hidden = true;
           wizardError.textContent = "";
@@ -3240,6 +3244,15 @@
         renderWizardSummary();
         wizardBody.innerHTML = "";
         const panel = createNode("div", "launch-panel");
+        if (launchWizard.is_hydrating) {
+          panel.appendChild(
+            createNode(
+              "div",
+              "launch-note",
+              "Loading branch workspace, recent sessions, and Docker options...",
+            ),
+          );
+        }
 
         if (
           (launchWizard.quick_start_entries || []).length > 0 ||
