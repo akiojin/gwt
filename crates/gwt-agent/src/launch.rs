@@ -204,6 +204,12 @@ pub struct AgentLaunchBuilder {
     resume_session_id: Option<String>,
     permission_mode: Option<PermissionMode>,
     env_overrides: HashMap<String, String>,
+    /// Env table from a `CustomCodingAgent`. Merged into the spawn env AFTER
+    /// the SPEC-1921 Common family (TERM / GWT_*) and agent-specific env
+    /// (Claude / Codex / …), and BEFORE [`env_overrides`], so preset-seeded
+    /// custom entries win over built-in defaults but never clobber explicit
+    /// caller-provided overrides.
+    custom_agent_env: HashMap<String, String>,
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
@@ -227,6 +233,7 @@ impl AgentLaunchBuilder {
             resume_session_id: None,
             permission_mode: None,
             env_overrides: HashMap::new(),
+            custom_agent_env: HashMap::new(),
             extra_args: Vec::new(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
@@ -288,6 +295,16 @@ impl AgentLaunchBuilder {
 
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_overrides.insert(key.into(), value.into());
+        self
+    }
+
+    /// Supply a `CustomCodingAgent.env` table that should flow into the
+    /// spawn env. Intended for SPEC-1921 FR-063: preset-seeded env tables
+    /// merge AFTER Common and agent-specific env, BEFORE [`env_overrides`],
+    /// so preset entries win over built-in defaults but never clobber
+    /// explicit caller overrides.
+    pub fn custom_agent_env(mut self, env: HashMap<String, String>) -> Self {
+        self.custom_agent_env = env;
         self
     }
 
@@ -375,6 +392,11 @@ impl AgentLaunchBuilder {
         args.extend(self.extra_args);
 
         normalize_launch_args(&self.agent_id, &runner.executable, &mut args);
+
+        // SPEC-1921 FR-063: merge CustomCodingAgent.env AFTER Common and
+        // agent-specific env so preset entries win over built-in defaults
+        // but BEFORE env_overrides (explicit caller overrides still win).
+        env_vars.extend(self.custom_agent_env);
 
         // Apply env overrides last (user wins)
         env_vars.extend(self.env_overrides);
@@ -1102,5 +1124,101 @@ mod tests {
         assert_eq!(config.display_name, "aider");
         assert_eq!(config.color, AgentColor::Gray);
         assert!(config.args.contains(&"--no-git".to_string()));
+    }
+
+    #[test]
+    fn custom_agent_env_is_merged_into_spawn_env() {
+        let mut env = HashMap::new();
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "http://proxy.local:32768".to_string(),
+        );
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
+
+        let config = AgentLaunchBuilder::new(AgentId::Custom("my-custom".into()))
+            .custom_agent_env(env)
+            .build();
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_BASE_URL")
+                .map(String::as_str),
+            Some("http://proxy.local:32768")
+        );
+        assert_eq!(
+            config.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+    }
+
+    #[test]
+    fn custom_agent_env_wins_over_common_env_on_collision() {
+        // TERM is set by the Common env layer to xterm-256color.
+        // A custom agent env entry for TERM must override it (FR-063 merge order).
+        let mut env = HashMap::new();
+        env.insert("TERM".to_string(), "xterm-kitty".to_string());
+
+        let config = AgentLaunchBuilder::new(AgentId::Custom("x".into()))
+            .custom_agent_env(env)
+            .build();
+
+        assert_eq!(
+            config.env_vars.get("TERM").map(String::as_str),
+            Some("xterm-kitty"),
+            "custom env must win over Common env (FR-063 merge order)"
+        );
+    }
+
+    #[test]
+    fn env_override_still_wins_over_custom_agent_env() {
+        // env() override is the explicit caller-provided layer and must remain
+        // authoritative over preset-seeded custom agent env (FR-063).
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "from-custom".to_string());
+
+        let config = AgentLaunchBuilder::new(AgentId::Custom("x".into()))
+            .custom_agent_env(env)
+            .env("FOO", "from-override")
+            .build();
+
+        assert_eq!(
+            config.env_vars.get("FOO").map(String::as_str),
+            Some("from-override"),
+            "env_overrides must remain authoritative over custom_agent_env"
+        );
+    }
+
+    #[test]
+    fn custom_agent_env_can_override_claude_builtin_env() {
+        // If a user somehow applies custom_agent_env to a built-in Claude
+        // launch, the custom value should win over the built-in Claude
+        // defaults. This is consistent with FR-063 "custom wins over Common".
+        let mut env = HashMap::new();
+        env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "0".to_string());
+
+        let config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .custom_agent_env(env)
+            .build();
+
+        assert_eq!(
+            config
+                .env_vars
+                .get("CLAUDE_CODE_NO_FLICKER")
+                .map(String::as_str),
+            Some("0"),
+            "custom_agent_env must win over agent-specific built-in env"
+        );
+    }
+
+    #[test]
+    fn custom_agent_env_empty_does_not_affect_other_env() {
+        // Absent custom_agent_env (default empty HashMap) must not change
+        // the env_vars produced for a built-in Claude launch.
+        let without = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        let with_empty = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .custom_agent_env(HashMap::new())
+            .build();
+        assert_eq!(without.env_vars, with_empty.env_vars);
     }
 }

@@ -10,6 +10,7 @@ pub mod detect;
 pub mod launch;
 pub mod presets;
 pub mod session;
+pub mod store;
 pub mod types;
 pub mod version_cache;
 
@@ -26,6 +27,10 @@ pub use session::{
     runtime_state_path_for_pid, PendingDiscussionResume, Session, SessionRuntimeState,
     GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
+};
+pub use store::{
+    load_custom_agents_from_path, load_stored_custom_agents_from_path,
+    save_stored_custom_agents_to_path, StoredCustomAgent, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
 };
 pub use types::{
     AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget,
