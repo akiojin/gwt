@@ -66,6 +66,36 @@ fn refresh_managed_gwt_assets_reports_the_failed_step() {
         .contains("failed to distribute gwt managed assets"));
 }
 
+#[test]
+fn refresh_managed_gwt_assets_keeps_command_assets_on_gwt_bin_path_front_door() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+
+    refresh_managed_gwt_assets_for_worktree(dir.path()).expect("refresh managed assets");
+
+    let manage_pr = std::fs::read_to_string(dir.path().join(".claude/commands/gwt-manage-pr.md"))
+        .expect("read gwt-manage-pr");
+    assert!(
+        manage_pr.contains("GWT_BIN_PATH"),
+        "PR command asset should tell managed sessions to use GWT_BIN_PATH, got: {manage_pr}"
+    );
+    assert!(
+        !manage_pr.contains("gwtd"),
+        "PR command asset must not expose gwtd, got: {manage_pr}"
+    );
+
+    let release = std::fs::read_to_string(dir.path().join(".claude/commands/release.md"))
+        .expect("read release command");
+    assert!(
+        release.contains("GWT_BIN_PATH"),
+        "release command asset should shell out through GWT_BIN_PATH, got: {release}"
+    );
+    assert!(
+        !release.contains("gwtd"),
+        "release command asset must not expose gwtd, got: {release}"
+    );
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)
