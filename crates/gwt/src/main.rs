@@ -21,12 +21,12 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
     cleanup_selected_branches, default_wizard_version_cache_path, detect_shell_program,
-    list_branch_entries_with_active_sessions, list_directory_entries,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
     load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
     refresh_managed_gwt_assets_for_worktree, resolve_launch_spec, save_session_state,
     save_workspace_state, workspace_state_path, BackendEvent, DockerWizardContext, FrontendEvent,
-    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState, LiveSessionEntry,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardState,
+    LiveSessionEntry, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -318,11 +318,37 @@ impl AppRuntime {
                     self.load_branches_event(&id),
                 )]
             }
+            FrontendEvent::LoadKnowledgeBridge {
+                id,
+                knowledge_kind,
+                selected_number,
+                refresh,
+            } => self.load_knowledge_bridge_events(
+                &client_id,
+                &id,
+                knowledge_kind,
+                selected_number,
+                refresh,
+            ),
+            FrontendEvent::SelectKnowledgeBridgeEntry {
+                id,
+                knowledge_kind,
+                number,
+            } => self.load_knowledge_bridge_events(
+                &client_id,
+                &id,
+                knowledge_kind,
+                Some(number),
+                false,
+            ),
             FrontendEvent::RunBranchCleanup {
                 id,
                 branches,
                 delete_remote,
             } => self.run_branch_cleanup_events(&client_id, &id, &branches, delete_remote),
+            FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
+                self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
+            }
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
@@ -846,6 +872,88 @@ impl AppRuntime {
         }
     }
 
+    fn load_knowledge_bridge_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        kind: KnowledgeKind,
+        selected_number: Option<u64>,
+        refresh: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if knowledge_kind_for_preset(window.preset) != Some(kind) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "Window is not a knowledge bridge".to_string(),
+                },
+            )];
+        }
+
+        match load_knowledge_bridge(&tab.project_root, kind, selected_number, refresh) {
+            Ok(view) => vec![
+                OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::KnowledgeEntries {
+                        id: id.to_string(),
+                        knowledge_kind: kind,
+                        entries: view.entries,
+                        selected_number: view.selected_number,
+                        empty_message: view.empty_message,
+                        refresh_enabled: view.refresh_enabled,
+                    },
+                ),
+                OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::KnowledgeDetail {
+                        id: id.to_string(),
+                        knowledge_kind: kind,
+                        detail: view.detail,
+                    },
+                ),
+            ],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: error,
+                },
+            )],
+        }
+    }
+
     fn run_branch_cleanup_events(
         &self,
         client_id: &str,
@@ -996,38 +1104,48 @@ impl AppRuntime {
             })];
         }
 
-        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
-        let entries = match list_branch_entries_with_active_sessions(
-            &tab.project_root,
-            &active_session_branches,
+        let project_root = tab.project_root.clone();
+        let tab_id = address.tab_id.clone();
+        match self.open_launch_wizard_for_branch(
+            &tab_id,
+            &project_root,
+            branch_name,
+            linked_issue_number,
         ) {
-            Ok(entries) => entries,
-            Err(error) => {
-                return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                })];
-            }
-        };
-
-        let Some(selected_branch) = entries.into_iter().find(|entry| entry.name == branch_name)
-        else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
                 id: id.to_string(),
-                message: format!("Branch not found: {branch_name}"),
-            })];
-        };
+                message: error,
+            })],
+        }
+    }
+
+    fn open_launch_wizard_for_branch(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Result<(), String> {
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        let entries =
+            list_branch_entries_with_active_sessions(project_root, &active_session_branches)
+                .map_err(|error| error.to_string())?;
+        let selected_branch = entries
+            .into_iter()
+            .find(|entry| entry.name == branch_name)
+            .ok_or_else(|| format!("Branch not found: {branch_name}"))?;
 
         let normalized_branch_name = normalize_branch_name(&selected_branch.name);
-        let worktree_path = branch_worktree_path(&tab.project_root, &normalized_branch_name);
+        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
         let quick_start_root = worktree_path
             .clone()
-            .unwrap_or_else(|| tab.project_root.clone());
-        let live_sessions = self.live_sessions_for_branch(&address.tab_id, &normalized_branch_name);
+            .unwrap_or_else(|| project_root.to_path_buf());
+        let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);
         self.launch_wizard = Some(LaunchWizardSession {
-            tab_id: address.tab_id,
+            tab_id: tab_id.to_string(),
             wizard: LaunchWizardState::open(
                 LaunchWizardContext {
                     selected_branch,
@@ -1044,7 +1162,102 @@ impl AppRuntime {
             ),
         });
 
-        vec![self.launch_wizard_state_outbound()]
+        Ok(())
+    }
+
+    fn open_issue_launch_wizard_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        issue_number: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(kind) = knowledge_kind_for_preset(window.preset) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: KnowledgeKind::Issue,
+                    message: "Window is not a knowledge bridge".to_string(),
+                },
+            )];
+        };
+
+        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
+        let branches = match list_branch_entries_with_active_sessions(
+            &tab.project_root,
+            &active_session_branches,
+        ) {
+            Ok(entries) => entries,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::KnowledgeError {
+                        id: id.to_string(),
+                        knowledge_kind: kind,
+                        message: error.to_string(),
+                    },
+                )]
+            }
+        };
+        let Some(branch_name) = preferred_issue_launch_branch(&branches) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: "No local branch is available for launch".to_string(),
+                },
+            )];
+        };
+
+        let project_root = tab.project_root.clone();
+        let tab_id = address.tab_id.clone();
+        match self.open_launch_wizard_for_branch(
+            &tab_id,
+            &project_root,
+            &branch_name,
+            Some(issue_number),
+        ) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::KnowledgeError {
+                    id: id.to_string(),
+                    knowledge_kind: kind,
+                    message: error,
+                },
+            )],
+        }
     }
 
     fn handle_launch_wizard_action(
@@ -1893,10 +2106,16 @@ fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool
 mod tests {
     use std::{fs, process::Command};
 
-    use gwt::{PersistedWindowState, WindowGeometry, WindowPreset, WindowProcessStatus};
+    use gwt::{
+        BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind, PersistedWindowState,
+        WindowGeometry, WindowPreset, WindowProcessStatus,
+    };
     use tempfile::tempdir;
 
-    use super::{resolve_project_target, should_auto_start_restored_window};
+    use super::{
+        knowledge_kind_for_preset, preferred_issue_launch_branch, resolve_project_target,
+        should_auto_start_restored_window,
+    };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
         PersistedWindowState {
@@ -2089,6 +2308,90 @@ mod tests {
         assert!(
             html.contains("branch_cleanup_result"),
             "expected branch cleanup result handler in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
+        let html = include_str!("../web/index.html");
+
+        assert!(
+            html.contains("knowledge-root"),
+            "expected knowledge bridge root scaffold in embedded html",
+        );
+        assert!(
+            html.contains("load_knowledge_bridge"),
+            "expected knowledge bridge load event in embedded html",
+        );
+        assert!(
+            html.contains("select_knowledge_bridge_entry"),
+            "expected knowledge bridge detail selection event in embedded html",
+        );
+        assert!(
+            html.contains("open_issue_launch_wizard"),
+            "expected issue launch wizard event in embedded html",
+        );
+    }
+
+    #[test]
+    fn issue_and_spec_presets_route_to_knowledge_bridge_kind() {
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Issue),
+            Some(KnowledgeKind::Issue)
+        );
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Spec),
+            Some(KnowledgeKind::Spec)
+        );
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Pr),
+            Some(KnowledgeKind::Pr)
+        );
+        assert_eq!(knowledge_kind_for_preset(WindowPreset::Branches), None);
+    }
+
+    #[test]
+    fn preferred_issue_launch_branch_prefers_develop_then_head_then_first_local() {
+        let entries = vec![
+            BranchListEntry {
+                name: "feature/demo".to_string(),
+                scope: BranchScope::Local,
+                is_head: true,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup: BranchCleanupInfo::default(),
+            },
+            BranchListEntry {
+                name: "develop".to_string(),
+                scope: BranchScope::Local,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup: BranchCleanupInfo::default(),
+            },
+        ];
+        assert_eq!(
+            preferred_issue_launch_branch(&entries),
+            Some("develop".to_string())
+        );
+
+        let head_only = vec![BranchListEntry {
+            name: "feature/demo".to_string(),
+            scope: BranchScope::Local,
+            is_head: true,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: None,
+            cleanup: BranchCleanupInfo::default(),
+        }];
+        assert_eq!(
+            preferred_issue_launch_branch(&head_only),
+            Some("feature/demo".to_string())
         );
     }
 }
@@ -2326,6 +2629,35 @@ fn normalize_branch_name(branch_name: &str) -> String {
         return name.to_string();
     }
     branch_name.to_string()
+}
+
+fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
+    match preset {
+        WindowPreset::Issue => Some(KnowledgeKind::Issue),
+        WindowPreset::Spec => Some(KnowledgeKind::Spec),
+        WindowPreset::Pr => Some(KnowledgeKind::Pr),
+        _ => None,
+    }
+}
+
+fn preferred_issue_launch_branch(entries: &[gwt::BranchListEntry]) -> Option<String> {
+    use gwt::BranchScope;
+
+    let mut locals = entries
+        .iter()
+        .filter(|entry| entry.scope == BranchScope::Local)
+        .collect::<Vec<_>>();
+    locals.sort_by(|left, right| left.name.cmp(&right.name));
+
+    for preferred in ["develop", "main", "master"] {
+        if let Some(entry) = locals.iter().find(|entry| entry.name == preferred) {
+            return Some(entry.name.clone());
+        }
+    }
+    if let Some(entry) = locals.iter().find(|entry| entry.is_head) {
+        return Some(entry.name.clone());
+    }
+    locals.first().map(|entry| entry.name.clone())
 }
 
 fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {

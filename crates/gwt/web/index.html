@@ -372,6 +372,7 @@
 
       .surface-file-tree .status-chip,
       .surface-branches .status-chip,
+      .surface-knowledge .status-chip,
       .surface-mock .status-chip {
         color: #334155;
       }
@@ -420,6 +421,7 @@
 
       .surface-file-tree .icon-button,
       .surface-branches .icon-button,
+      .surface-knowledge .icon-button,
       .surface-mock .icon-button {
         color: #334155;
       }
@@ -448,6 +450,7 @@
 
       .surface-file-tree .window-body,
       .surface-branches .window-body,
+      .surface-knowledge .window-body,
       .surface-mock .window-body {
         background: #ffffff;
       }
@@ -507,6 +510,7 @@
 
       .file-tree-root,
       .branch-list-root,
+      .knowledge-root,
       .mock-root {
         position: absolute;
         inset: 0;
@@ -516,6 +520,7 @@
 
       .file-tree-toolbar,
       .branch-toolbar,
+      .knowledge-toolbar,
       .mock-toolbar {
         display: flex;
         align-items: center;
@@ -542,6 +547,23 @@
         gap: 8px;
         flex-wrap: wrap;
         justify-content: flex-end;
+      }
+
+      .knowledge-toolbar {
+        align-items: flex-start;
+      }
+
+      .knowledge-toolbar-main {
+        min-width: 0;
+        flex: 1;
+        display: grid;
+        gap: 8px;
+      }
+
+      .knowledge-toolbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
 
       .branch-filter-group {
@@ -576,6 +598,7 @@
 
       .file-tree-path,
       .branch-heading,
+      .knowledge-heading,
       .mock-heading {
         min-width: 0;
         font-size: 12px;
@@ -591,6 +614,224 @@
       .mock-scroll {
         flex: 1;
         overflow: auto;
+      }
+
+      .knowledge-search {
+        width: min(320px, 100%);
+        min-width: 0;
+        height: 32px;
+        padding: 0 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
+        font-size: 12px;
+        color: #0f172a;
+      }
+
+      .knowledge-status {
+        display: none;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        font-size: 12px;
+      }
+
+      .knowledge-status.visible {
+        display: block;
+      }
+
+      .knowledge-status.info {
+        background: rgba(59, 130, 246, 0.08);
+        color: #1d4ed8;
+      }
+
+      .knowledge-status.error {
+        background: rgba(239, 68, 68, 0.08);
+        color: #b91c1c;
+      }
+
+      .knowledge-split {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(220px, 38%) minmax(0, 1fr);
+      }
+
+      .knowledge-list-pane,
+      .knowledge-detail-pane {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .knowledge-list-pane {
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+        overflow: auto;
+      }
+
+      .knowledge-detail-pane {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .knowledge-list {
+        display: grid;
+      }
+
+      .knowledge-row {
+        display: grid;
+        gap: 6px;
+        width: 100%;
+        padding: 12px;
+        border: none;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        background: transparent;
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .knowledge-row:hover {
+        background: rgba(59, 130, 246, 0.06);
+      }
+
+      .knowledge-row.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .knowledge-row:last-child {
+        border-bottom: none;
+      }
+
+      .knowledge-row-main,
+      .knowledge-row-meta,
+      .knowledge-detail-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .knowledge-row-main {
+        align-items: flex-start;
+      }
+
+      .knowledge-row-title {
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+        overflow-wrap: anywhere;
+      }
+
+      .knowledge-row-number,
+      .knowledge-detail-subtitle {
+        font-size: 11px;
+        color: #64748b;
+      }
+
+      .knowledge-row-meta {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+      }
+
+      .knowledge-meta-copy {
+        font-size: 11px;
+        color: #475569;
+      }
+
+      .knowledge-chip,
+      .knowledge-state-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+      }
+
+      .knowledge-chip {
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+      }
+
+      .knowledge-state-chip.open {
+        background: rgba(16, 185, 129, 0.12);
+        color: #047857;
+      }
+
+      .knowledge-state-chip.closed {
+        background: rgba(148, 163, 184, 0.18);
+        color: #475569;
+      }
+
+      .knowledge-state-chip.unavailable,
+      .knowledge-state-chip.idle {
+        background: rgba(245, 158, 11, 0.14);
+        color: #b45309;
+      }
+
+      .knowledge-detail-empty,
+      .knowledge-empty {
+        padding: 16px 12px;
+        font-size: 12px;
+        color: #64748b;
+      }
+
+      .knowledge-detail-header {
+        padding: 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        display: grid;
+        gap: 8px;
+      }
+
+      .knowledge-detail-title {
+        margin: 0;
+        font-size: 16px;
+        color: #0f172a;
+      }
+
+      .knowledge-detail-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .knowledge-label-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .knowledge-detail-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        display: grid;
+        gap: 12px;
+        padding: 12px;
+      }
+
+      .knowledge-section {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        background: #f8fafc;
+      }
+
+      .knowledge-section-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #334155;
+        text-transform: none;
+      }
+
+      .knowledge-section-body {
+        margin: 0;
+        font-family: inherit;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #334155;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
       }
 
       .file-tree-list,
@@ -1668,6 +1909,7 @@
       const windowMap = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
+      const knowledgeBridgeStateMap = new Map();
       const pendingMessages = [];
 
       let socket = null;
@@ -1706,7 +1948,17 @@
         if (preset === "branches") {
           return "branches";
         }
+        if (preset === "issue" || preset === "spec" || preset === "pr") {
+          return "knowledge";
+        }
         return "mock";
+      }
+
+      function knowledgeKindForPreset(preset) {
+        if (preset === "issue" || preset === "spec" || preset === "pr") {
+          return preset;
+        }
+        return null;
       }
 
       function send(message) {
@@ -2660,6 +2912,26 @@
         return branchListStateMap.get(windowId);
       }
 
+      function ensureKnowledgeBridgeState(windowId, knowledgeKind) {
+        if (!knowledgeBridgeStateMap.has(windowId)) {
+          knowledgeBridgeStateMap.set(windowId, {
+            kind: knowledgeKind,
+            entries: [],
+            selectedNumber: null,
+            detail: null,
+            query: "",
+            loading: false,
+            detailLoading: false,
+            error: "",
+            emptyMessage: "",
+            refreshEnabled: true,
+          });
+        }
+        const state = knowledgeBridgeStateMap.get(windowId);
+        state.kind = knowledgeKind || state.kind;
+        return state;
+      }
+
       function requestFileTree(windowId, path = "") {
         const state = ensureFileTreeState(windowId);
         if (state.loading.has(path)) {
@@ -2682,6 +2954,42 @@
         send({
           kind: "load_branches",
           id: windowId,
+        });
+      }
+
+      function requestKnowledgeBridge(windowId, knowledgeKind, refresh = false) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        if (state.loading) {
+          return;
+        }
+        state.loading = true;
+        state.error = "";
+        send({
+          kind: "load_knowledge_bridge",
+          id: windowId,
+          knowledge_kind: knowledgeKind,
+          selected_number: state.selectedNumber ?? null,
+          refresh,
+        });
+      }
+
+      function requestKnowledgeDetail(windowId, knowledgeKind, number) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        state.selectedNumber = number;
+        state.detailLoading = true;
+        send({
+          kind: "select_knowledge_bridge_entry",
+          id: windowId,
+          knowledge_kind: knowledgeKind,
+          number,
+        });
+      }
+
+      function openIssueLaunchWizard(windowId, issueNumber) {
+        send({
+          kind: "open_issue_launch_wizard",
+          id: windowId,
+          issue_number: issueNumber,
         });
       }
 
@@ -3567,6 +3875,213 @@
         renderBranchCleanupModal();
       }
 
+      function knowledgeHeading(kind) {
+        switch (kind) {
+          case "issue":
+            return "Cached issues";
+          case "spec":
+            return "Cached SPECs";
+          case "pr":
+            return "PR bridge";
+          default:
+            return "Knowledge Bridge";
+        }
+      }
+
+      function knowledgeSearchPlaceholder(kind) {
+        switch (kind) {
+          case "issue":
+            return "Search cached issues";
+          case "spec":
+            return "Search cached SPECs";
+          case "pr":
+            return "Search unavailable";
+          default:
+            return "Search";
+        }
+      }
+
+      function filteredKnowledgeEntries(state) {
+        const query = state.query.trim().toLowerCase();
+        if (!query) {
+          return state.entries;
+        }
+        return state.entries.filter((entry) =>
+          [
+            `#${entry.number}`,
+            entry.title,
+            entry.meta,
+            ...(entry.labels || []),
+          ]
+            .join(" ")
+            .toLowerCase()
+            .includes(query),
+        );
+      }
+
+      function renderKnowledgeBridge(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const state = ensureKnowledgeBridgeState(
+          windowId,
+          knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
+        );
+        const list = element.querySelector(".knowledge-list");
+        const detailPane = element.querySelector(".knowledge-detail-pane");
+        const status = element.querySelector(".knowledge-status");
+        const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
+        const searchInput = element.querySelector(".knowledge-search");
+        if (!list || !detailPane || !status || !refreshButton || !searchInput) {
+          return;
+        }
+
+        refreshButton.disabled = !state.refreshEnabled || state.loading;
+        searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
+
+        status.className = "knowledge-status";
+        status.textContent = "";
+        if (state.error) {
+          status.classList.add("visible", "error");
+          status.textContent = state.error;
+        } else if (state.loading && state.entries.length === 0) {
+          status.classList.add("visible", "info");
+          status.textContent = "Loading cache-backed data";
+        } else if (state.emptyMessage && state.entries.length === 0) {
+          status.classList.add("visible", "info");
+          status.textContent = state.emptyMessage;
+        }
+
+        list.innerHTML = "";
+        const visibleEntries = filteredKnowledgeEntries(state);
+        if (visibleEntries.length === 0) {
+          const empty = createNode("div", "knowledge-empty");
+          if (state.entries.length === 0) {
+            empty.textContent = state.emptyMessage || "No cached items";
+          } else {
+            empty.textContent = "No matching cached items";
+          }
+          list.appendChild(empty);
+        } else {
+          for (const entry of visibleEntries) {
+            const row = createNode("button", "knowledge-row");
+            row.type = "button";
+            if (state.selectedNumber === entry.number) {
+              row.classList.add("selected");
+            }
+            const main = createNode("div", "knowledge-row-main");
+            const titleWrap = createNode("div", "");
+            titleWrap.appendChild(
+              createNode("div", "knowledge-row-number", `#${entry.number}`),
+            );
+            titleWrap.appendChild(
+              createNode("div", "knowledge-row-title", entry.title),
+            );
+            main.appendChild(titleWrap);
+            const stateChip = createNode(
+              "span",
+              `knowledge-state-chip ${entry.state}`,
+              entry.state,
+            );
+            main.appendChild(stateChip);
+            row.appendChild(main);
+
+            const meta = createNode("div", "knowledge-row-meta");
+            meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
+            if ((entry.linked_branch_count || 0) > 0) {
+              meta.appendChild(
+                createNode(
+                  "span",
+                  "knowledge-chip",
+                  `${entry.linked_branch_count} linked branch${entry.linked_branch_count === 1 ? "" : "es"}`,
+                ),
+              );
+            }
+            for (const label of entry.labels || []) {
+              meta.appendChild(createNode("span", "knowledge-chip", label));
+            }
+            row.appendChild(meta);
+            row.addEventListener("click", () => {
+              if (state.selectedNumber === entry.number && !state.detailLoading) {
+                return;
+              }
+              requestKnowledgeDetail(windowId, state.kind, entry.number);
+              renderKnowledgeBridge(windowId);
+            });
+            list.appendChild(row);
+          }
+        }
+
+        detailPane.innerHTML = "";
+        const detail = state.detail;
+        if (!detail) {
+          detailPane.appendChild(
+            createNode("div", "knowledge-detail-empty", "Select a cached item"),
+          );
+          return;
+        }
+
+        const header = createNode("div", "knowledge-detail-header");
+        const head = createNode("div", "");
+        const headRow = createNode("div", "knowledge-detail-head");
+        headRow.appendChild(createNode("h3", "knowledge-detail-title", detail.title));
+        headRow.appendChild(
+          createNode("span", `knowledge-state-chip ${detail.state}`, detail.state),
+        );
+        head.appendChild(headRow);
+        if (detail.subtitle) {
+          head.appendChild(
+            createNode("div", "knowledge-detail-subtitle", detail.subtitle),
+          );
+        }
+        if ((detail.labels || []).length > 0) {
+          const labelRow = createNode("div", "knowledge-label-row");
+          for (const label of detail.labels) {
+            labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          head.appendChild(labelRow);
+        }
+        header.appendChild(head);
+
+        const actions = createNode("div", "knowledge-detail-actions");
+        if (detail.launch_issue_number !== null && detail.launch_issue_number !== undefined) {
+          const launchButton = createNode("button", "wizard-button primary", "Launch Agent");
+          launchButton.type = "button";
+          launchButton.addEventListener("click", () =>
+            openIssueLaunchWizard(windowId, detail.launch_issue_number),
+          );
+          actions.appendChild(launchButton);
+        }
+        if (actions.childElementCount > 0) {
+          header.appendChild(actions);
+        }
+        detailPane.appendChild(header);
+
+        const scroll = createNode("div", "knowledge-detail-scroll");
+        if (state.detailLoading) {
+          scroll.appendChild(
+            createNode("div", "knowledge-detail-empty", "Loading detail"),
+          );
+        }
+        for (const section of detail.sections || []) {
+          const card = createNode("section", "knowledge-section");
+          card.appendChild(
+            createNode("div", "knowledge-section-title", section.title),
+          );
+          card.appendChild(
+            createNode("pre", "knowledge-section-body", section.body),
+          );
+          scroll.appendChild(card);
+        }
+        if (scroll.childElementCount === 0) {
+          scroll.appendChild(
+            createNode("div", "knowledge-detail-empty", "No cached detail available"),
+          );
+        }
+        detailPane.appendChild(scroll);
+      }
+
       function filteredBranchEntries(state) {
         if (state.filter === "all") {
           return state.entries;
@@ -3969,6 +4484,7 @@
           "surface-terminal",
           "surface-file-tree",
           "surface-branches",
+          "surface-knowledge",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
@@ -4093,6 +4609,53 @@
             requestBranches(windowData.id);
           }
           renderBranches(windowData.id);
+          return;
+        }
+
+        if (surface === "knowledge") {
+          const knowledgeKind = knowledgeKindForPreset(windowData.preset);
+          body.innerHTML = `
+            <div class="knowledge-root">
+              <div class="knowledge-toolbar">
+                <div class="knowledge-toolbar-main">
+                  <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
+                  <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
+                </div>
+                <div class="knowledge-toolbar-actions">
+                  <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached knowledge">↻</button>
+                </div>
+              </div>
+              <div class="knowledge-status"></div>
+              <div class="knowledge-split">
+                <div class="knowledge-list-pane">
+                  <div class="knowledge-list"></div>
+                </div>
+                <div class="knowledge-detail-pane"></div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+          const state = ensureKnowledgeBridgeState(windowData.id, knowledgeKind);
+          const search = body.querySelector(".knowledge-search");
+          search.value = state.query;
+          search.addEventListener("input", () => {
+            state.query = search.value;
+            renderKnowledgeBridge(windowData.id);
+          });
+          body
+            .querySelector("[data-action='refresh-knowledge']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              requestKnowledgeBridge(windowData.id, knowledgeKind, true);
+              renderKnowledgeBridge(windowData.id);
+            });
+          if (!state.detail && !state.loading) {
+            requestKnowledgeBridge(windowData.id, knowledgeKind, false);
+          }
+          renderKnowledgeBridge(windowData.id);
           return;
         }
 
@@ -4250,6 +4813,7 @@
           pendingSnapshotMap.delete(windowId);
           fileTreeStateMap.delete(windowId);
           branchListStateMap.delete(windowId);
+          knowledgeBridgeStateMap.delete(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
@@ -4329,6 +4893,26 @@
             renderBranches(event.id);
             break;
           }
+          case "knowledge_entries": {
+            const state = ensureKnowledgeBridgeState(event.id, event.knowledge_kind);
+            state.entries = event.entries || [];
+            state.selectedNumber = event.selected_number ?? null;
+            state.emptyMessage = event.empty_message || "";
+            state.refreshEnabled = Boolean(event.refresh_enabled);
+            state.loading = false;
+            state.error = "";
+            renderKnowledgeBridge(event.id);
+            break;
+          }
+          case "knowledge_detail": {
+            const state = ensureKnowledgeBridgeState(event.id, event.knowledge_kind);
+            state.detail = event.detail;
+            state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
+            state.loading = false;
+            state.detailLoading = false;
+            renderKnowledgeBridge(event.id);
+            break;
+          }
           case "branch_cleanup_result": {
             const state = ensureBranchListState(event.id);
             clearBranchCleanupTimeout(state);
@@ -4350,6 +4934,14 @@
             }
             state.error = event.message;
             renderBranches(event.id);
+            break;
+          }
+          case "knowledge_error": {
+            const state = ensureKnowledgeBridgeState(event.id, event.knowledge_kind);
+            state.loading = false;
+            state.detailLoading = false;
+            state.error = event.message;
+            renderKnowledgeBridge(event.id);
             break;
           }
           case "project_open_error":
