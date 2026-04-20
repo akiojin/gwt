@@ -4782,6 +4782,11 @@
           return;
         }
 
+        if (windowData.preset === "settings") {
+          renderSettingsWindow(body, windowData);
+          return;
+        }
+
         const mock = mockContentForPreset(windowData.preset);
         body.innerHTML = `
           <div class="mock-root">
@@ -4809,6 +4814,212 @@
           `;
           scroll.appendChild(section);
         }
+      }
+
+      // SPEC-1921 Phase 52 — Settings > Custom Agents backend bridge.
+      //
+      // All DOM nodes are built via createElement + textContent to avoid
+      // innerHTML with mixed trust. The UI is intentionally minimal (prompt()
+      // driven) so the backend protocol can be exercised end-to-end before a
+      // richer form layout is designed.
+      const customAgentsState = {
+        agents: [],
+        loading: false,
+        statusMessage: "",
+        statusKind: "",
+      };
+      const settingsWindowBodies = new Set();
+      let pendingAddFromPreset = null;
+
+      function createDiv(className) {
+        const el = document.createElement("div");
+        if (className) el.className = className;
+        return el;
+      }
+
+      function renderSettingsWindow(body, windowData) {
+        while (body.firstChild) body.removeChild(body.firstChild);
+        const root = createDiv("mock-root");
+        const toolbar = createDiv("mock-toolbar");
+        const heading = createDiv("mock-heading");
+        heading.textContent = "Custom Agents";
+        const chip = document.createElement("span");
+        chip.className = "mock-chip";
+        chip.textContent = windowData.title || "Settings";
+        toolbar.appendChild(heading);
+        toolbar.appendChild(chip);
+        const scroll = createDiv("mock-scroll");
+        scroll.dataset.role = "settings-scroll";
+        root.appendChild(toolbar);
+        root.appendChild(scroll);
+        body.appendChild(root);
+
+        body.addEventListener("mousedown", () => {
+          focusWindowLocally(windowData.id);
+          send({ kind: "focus_window", id: windowData.id });
+        });
+        settingsWindowBodies.add(body);
+        renderSettingsAgentList();
+        if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
+          customAgentsState.loading = true;
+          send({ kind: "list_custom_agents" });
+        }
+      }
+
+      function renderSettingsAgentList() {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) {
+            settingsWindowBodies.delete(body);
+            continue;
+          }
+          const scroll = body.querySelector("[data-role='settings-scroll']");
+          if (!scroll) continue;
+          while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
+
+          const addBtn = document.createElement("button");
+          addBtn.className = "wizard-button";
+          addBtn.style.margin = "8px 0";
+          addBtn.textContent = "＋ Add Claude Code (OpenAI-compat backend)";
+          addBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            startAddClaudeCodeOpenaiCompatFlow();
+          });
+          scroll.appendChild(addBtn);
+
+          if (customAgentsState.statusMessage) {
+            const section = createDiv("mock-section");
+            const label = createDiv("mock-label");
+            label.textContent = "Status";
+            label.style.color =
+              customAgentsState.statusKind === "error"
+                ? "#ff6b6b"
+                : customAgentsState.statusKind === "success"
+                  ? "#7abf7a"
+                  : "#999";
+            section.appendChild(label);
+            const row = createDiv("mock-row");
+            const text = document.createElement("span");
+            text.textContent = customAgentsState.statusMessage;
+            row.appendChild(text);
+            section.appendChild(row);
+            scroll.appendChild(section);
+          }
+
+          if (customAgentsState.loading && customAgentsState.agents.length === 0) {
+            const section = createDiv("mock-section");
+            const row = createDiv("mock-row");
+            const text = document.createElement("span");
+            text.textContent = "Loading custom agents…";
+            row.appendChild(text);
+            section.appendChild(row);
+            scroll.appendChild(section);
+            continue;
+          }
+
+          if (customAgentsState.agents.length === 0) {
+            const section = createDiv("mock-section");
+            const row = createDiv("mock-row");
+            const text = document.createElement("span");
+            text.textContent = "No custom agents configured yet.";
+            row.appendChild(text);
+            section.appendChild(row);
+            scroll.appendChild(section);
+            continue;
+          }
+
+          for (const agent of customAgentsState.agents) {
+            const section = createDiv("mock-section");
+            const label = createDiv("mock-label");
+            label.textContent = agent.display_name || agent.id;
+            section.appendChild(label);
+            const row = createDiv("mock-row");
+            const text = document.createElement("span");
+            const envCount = Object.keys(agent.env || {}).length;
+            const baseUrl =
+              agent.env && agent.env.ANTHROPIC_BASE_URL
+                ? ` · ${agent.env.ANTHROPIC_BASE_URL}`
+                : "";
+            text.textContent = `${agent.id} · ${agent.command} · ${envCount} env entries${baseUrl}`;
+            row.appendChild(text);
+            const delBtn = document.createElement("button");
+            delBtn.className = "icon-button";
+            delBtn.setAttribute("aria-label", "Delete agent");
+            delBtn.textContent = "×";
+            delBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              if (window.confirm(`Delete custom agent "${agent.id}"?`)) {
+                send({ kind: "delete_custom_agent", agent_id: agent.id });
+              }
+            });
+            row.appendChild(delBtn);
+            section.appendChild(row);
+            scroll.appendChild(section);
+          }
+        }
+      }
+
+      function startAddClaudeCodeOpenaiCompatFlow() {
+        const baseUrl = window.prompt(
+          "Upstream base_url (http:// or https://)\n\nExample: http://192.168.100.166:32768",
+          "http://",
+        );
+        if (!baseUrl) return;
+        const apiKey = window.prompt(
+          "API key (forwarded as Bearer on /v1/models probe and ANTHROPIC_API_KEY at launch):",
+        );
+        if (!apiKey) return;
+        setSettingsStatus("Probing /v1/models…", "info");
+        pendingAddFromPreset = { baseUrl, apiKey };
+        send({ kind: "test_backend_connection", base_url: baseUrl, api_key: apiKey });
+      }
+
+      function setSettingsStatus(message, kind) {
+        customAgentsState.statusMessage = message;
+        customAgentsState.statusKind = kind;
+        renderSettingsAgentList();
+      }
+
+      function completeAddFromPreset(discoveredModels) {
+        if (!pendingAddFromPreset) return;
+        if (!discoveredModels || discoveredModels.length === 0) {
+          setSettingsStatus("Upstream /v1/models returned no entries.", "error");
+          pendingAddFromPreset = null;
+          return;
+        }
+        const modelList = discoveredModels.join("\n");
+        const model = window.prompt(
+          `Discovered ${discoveredModels.length} model(s). Choose default_model (copy one ID):\n\n${modelList}`,
+          discoveredModels[0],
+        );
+        if (!model) {
+          pendingAddFromPreset = null;
+          setSettingsStatus("Cancelled.", "info");
+          return;
+        }
+        const id = window.prompt("Custom agent id (alphanumeric + `-`):", "claude-code-openai");
+        if (!id) {
+          pendingAddFromPreset = null;
+          setSettingsStatus("Cancelled.", "info");
+          return;
+        }
+        const displayName = window.prompt("Display name:", "Claude Code (OpenAI-compat)");
+        if (!displayName) {
+          pendingAddFromPreset = null;
+          setSettingsStatus("Cancelled.", "info");
+          return;
+        }
+        setSettingsStatus("Saving preset…", "info");
+        send({
+          kind: "add_custom_agent_from_preset",
+          input: {
+            id,
+            display_name: displayName,
+            base_url: pendingAddFromPreset.baseUrl,
+            api_key: pendingAddFromPreset.apiKey,
+            default_model: model,
+          },
+        });
+        pendingAddFromPreset = null;
       }
 
       function ensureWindow(windowData) {
@@ -5081,6 +5292,50 @@
               setVersionState(event.current, event.latest);
               showUpdateToast(event.latest);
             }
+            break;
+          case "custom_agent_list":
+            customAgentsState.agents = event.agents || [];
+            customAgentsState.loading = false;
+            renderSettingsAgentList();
+            break;
+          case "custom_agent_saved":
+            if (event.agent) {
+              const idx = customAgentsState.agents.findIndex(
+                (a) => a.id === event.agent.id,
+              );
+              if (idx >= 0) {
+                customAgentsState.agents[idx] = event.agent;
+              } else {
+                customAgentsState.agents.push(event.agent);
+              }
+            }
+            customAgentsState.loading = false;
+            setSettingsStatus(
+              `Saved custom agent "${event.agent ? event.agent.id : "?"}".`,
+              "success",
+            );
+            break;
+          case "custom_agent_deleted":
+            customAgentsState.agents = customAgentsState.agents.filter(
+              (a) => a.id !== event.agent_id,
+            );
+            setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
+            break;
+          case "backend_connection_result":
+            setSettingsStatus(
+              `/v1/models returned ${event.models.length} model(s).`,
+              "success",
+            );
+            completeAddFromPreset(event.models);
+            break;
+          case "custom_agent_preset_list":
+            // Reserved for a future "Add from preset" picker — the current
+            // UI hardcodes the one preset.
+            break;
+          case "custom_agent_error":
+            customAgentsState.loading = false;
+            pendingAddFromPreset = null;
+            setSettingsStatus(`Error [${event.code}]: ${event.message}`, "error");
             break;
         }
       }
