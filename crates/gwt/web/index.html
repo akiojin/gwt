@@ -1538,32 +1538,39 @@
         return url.toString();
       }
 
+      function handleSocketOpen() {
+        setConnectionState(true);
+        send({ kind: "frontend_ready" });
+        while (pendingMessages.length > 0) {
+          socket.send(JSON.stringify(pendingMessages.shift()));
+        }
+      }
+
+      function handleSocketMessage(event) {
+        receive(JSON.parse(event.data));
+      }
+
+      function handleSocketClose() {
+        setConnectionState(false);
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+        }
+        reconnectTimer = window.setTimeout(connectSocket, 1000);
+      }
+
+      function installSocketEventHandlers(activeSocket) {
+        activeSocket.addEventListener("open", handleSocketOpen);
+        activeSocket.addEventListener("message", handleSocketMessage);
+        activeSocket.addEventListener("close", handleSocketClose);
+      }
+
       function connectSocket() {
         if (socket && socket.readyState <= WebSocket.OPEN) {
           return;
         }
         socket = new WebSocket(websocketUrl());
         setConnectionState(false);
-
-        socket.addEventListener("open", () => {
-          setConnectionState(true);
-          send({ kind: "frontend_ready" });
-          while (pendingMessages.length > 0) {
-            socket.send(JSON.stringify(pendingMessages.shift()));
-          }
-        });
-
-        socket.addEventListener("message", (event) => {
-          receive(JSON.parse(event.data));
-        });
-
-        socket.addEventListener("close", () => {
-          setConnectionState(false);
-          if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-          }
-          reconnectTimer = window.setTimeout(connectSocket, 1000);
-        });
+        installSocketEventHandlers(socket);
       }
 
       function emptyWorkspace() {
@@ -3808,48 +3815,50 @@
         return element.closest(".branch-scroll, .file-tree-scroll");
       }
 
-      // Capture phase so wheel events on child elements (windows, terminals)
-      // are intercepted before they reach xterm.js or other consumers.
-      document.addEventListener(
-        "wheel",
-        (event) => {
-          const targetElement = eventTargetElement(event.target);
-          if (!targetElement || !canvas.contains(targetElement)) {
-            return;
-          }
-          // Let terminal windows handle their own scroll (xterm.js scrollback)
-          if (
-            !event.ctrlKey &&
-            !event.metaKey &&
-            targetElement.closest(".surface-terminal")
-          ) {
-            return;
-          }
-          const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);
-          if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface) {
-            return;
-          }
-          if (event.ctrlKey || event.metaKey) {
-            // Ctrl/Cmd + wheel = zoom
-            event.preventDefault();
-            event.stopPropagation();
-            const rect = canvas.getBoundingClientRect();
-            const anchorX = event.clientX - rect.left;
-            const anchorY = event.clientY - rect.top;
-            const factor = event.deltaY < 0 ? 1.1 : 0.9;
-            zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
-          } else {
-            // Plain wheel (trackpad two-finger scroll) = pan
-            event.preventDefault();
-            event.stopPropagation();
-            viewport.x -= event.deltaX;
-            viewport.y -= event.deltaY;
-            applyViewport();
-            persistViewport();
-          }
-        },
-        { capture: true, passive: false },
-      );
+      function handleCanvasWheelEvent(event) {
+        const targetElement = eventTargetElement(event.target);
+        if (!targetElement || !canvas.contains(targetElement)) {
+          return;
+        }
+        // Let terminal windows handle their own scroll (xterm.js scrollback)
+        if (
+          !event.ctrlKey &&
+          !event.metaKey &&
+          targetElement.closest(".surface-terminal")
+        ) {
+          return;
+        }
+        const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);
+        if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface) {
+          return;
+        }
+        if (event.ctrlKey || event.metaKey) {
+          // Ctrl/Cmd + wheel = zoom
+          event.preventDefault();
+          event.stopPropagation();
+          const rect = canvas.getBoundingClientRect();
+          const anchorX = event.clientX - rect.left;
+          const anchorY = event.clientY - rect.top;
+          const factor = event.deltaY < 0 ? 1.1 : 0.9;
+          zoomCanvasAt(anchorX, anchorY, viewport.zoom * factor);
+        } else {
+          // Plain wheel (trackpad two-finger scroll) = pan
+          event.preventDefault();
+          event.stopPropagation();
+          viewport.x -= event.deltaX;
+          viewport.y -= event.deltaY;
+          applyViewport();
+          persistViewport();
+        }
+      }
+
+      function installCanvasWheelRouting() {
+        // Capture phase so wheel events on child elements (windows, terminals)
+        // are intercepted before they reach xterm.js or other consumers.
+        document.addEventListener("wheel", handleCanvasWheelEvent, { capture: true, passive: false });
+      }
+
+      installCanvasWheelRouting();
 
       window.addEventListener(
         "keydown",

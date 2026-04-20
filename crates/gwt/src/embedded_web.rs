@@ -102,4 +102,50 @@ mod tests {
             "expected repo browser wheel routing to stop using edge fallback heuristics",
         );
     }
+
+    #[test]
+    fn embedded_web_canvas_wheel_routing_is_installed_through_named_handler() {
+        let html = index_html();
+
+        assert!(
+            html.contains("function handleCanvasWheelEvent(event)"),
+            "expected canvas wheel routing to live in a named handler",
+        );
+        assert!(
+            html.contains("function installCanvasWheelRouting()"),
+            "expected wheel routing bootstrap to be isolated behind an installer",
+        );
+        assert!(
+            html.contains("document.addEventListener(\"wheel\", handleCanvasWheelEvent, { capture: true, passive: false })"),
+            "expected capture-phase wheel routing to be installed through the named handler",
+        );
+    }
+
+    #[test]
+    fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
+        let html = index_html();
+
+        assert!(
+            html.contains("function handleSocketOpen()"),
+            "expected socket open flow to live in a named handler",
+        );
+        assert!(
+            html.contains("function handleSocketMessage(event)"),
+            "expected socket message flow to live in a named handler",
+        );
+        assert!(
+            html.contains("function handleSocketClose()"),
+            "expected socket close flow to live in a named handler",
+        );
+        assert!(
+            html.contains("function installSocketEventHandlers(activeSocket)"),
+            "expected socket listener registration to be isolated behind an installer",
+        );
+        assert!(
+            html.contains("activeSocket.addEventListener(\"open\", handleSocketOpen)")
+                && html.contains("activeSocket.addEventListener(\"message\", handleSocketMessage)")
+                && html.contains("activeSocket.addEventListener(\"close\", handleSocketClose)"),
+            "expected socket listeners to be registered through named handlers",
+        );
+    }
 }
