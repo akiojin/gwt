@@ -2932,6 +2932,33 @@ v9.2.0 リリース実行中に `/release` コマンドの Step 9.2（`scripts/r
 4. release.md の Step 9 冒頭に「GitHub 自動クローズは Issue のみが対象であり、PR 番号は無視される」と注釈を追加し、PR/Issue 分類の重要性を強調する
 5. `tasks/lessons.md` にこの教訓を記録し、同種の長時間手順コマンド設計時の参考にする
 
+## 2026-04-20 — fix: agent auto-close は共有 status ではなく active agent ownership で絞る
+
+### 事象
+
+agent の正常終了で window を自動 close したい変更を入れる際、
+`WindowProcessStatus::Exited` だけを条件にすると shell など他の process window まで
+一緒に閉じる危険があった。あわせて、起動直後に window を閉じたとき
+reader detach timeout の best-effort cleanup が stderr に
+`did not exit within 500ms; detaching` を出し、失敗のように見えていた。
+
+### 原因
+
+- `Exited` は agent 専用ではなく、一般 terminal window も共有する process status だった。
+- close 契約を window の owner ではなく共通 status enum だけで分岐すると、
+  別 surface の lifecycle まで巻き込む。
+- `stop_window_runtime()` は timeout 後 detach を許容する設計なのに、
+  その通常回復経路を stderr に出していた。
+
+### 再発防止策
+
+1. process status を契機に UI surface を消す変更では、status だけでなく
+   domain ownership（例: active agent session）を必ず条件に含める。
+2. auto-close 系の回帰テストでは、対象の正例だけでなく
+   `Error` と non-agent window の負例を必ず固定する。
+3. best-effort cleanup が timeout 後 detach を許容する設計なら、
+   irrecoverable failure でない限り user-visible な stderr を出さない。
+
 ## 2026-04-17 — fix: clipboard fallback は focus を奪ったら必ず terminal へ戻す
 
 ### 事象
