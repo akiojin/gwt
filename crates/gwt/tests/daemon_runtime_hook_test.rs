@@ -43,6 +43,13 @@ impl EnvGuard {
         }
         std::env::set_var(key, value.into());
     }
+
+    fn unset(&mut self, key: &'static str) {
+        if !self.saved.iter().any(|(saved, _)| *saved == key) {
+            self.saved.push((key, std::env::var_os(key)));
+        }
+        std::env::remove_var(key);
+    }
 }
 
 impl Drop for EnvGuard {
@@ -281,4 +288,50 @@ fn forward_owner_forwards_live_event_to_loopback_target() {
     assert_eq!(payload["gwt_session_id"], session.id);
     assert_eq!(payload["agent_session_id"], "agent-session-2");
     assert_eq!(payload["tool_name"], "Bash");
+}
+
+#[test]
+fn forward_owner_is_fail_open_without_live_target_env() {
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    env.unset("GWT_HOOK_FORWARD_URL");
+    env.unset("GWT_HOOK_FORWARD_TOKEN");
+
+    let input = serde_json::json!({
+        "session_id": "agent-session-missing-target",
+        "cwd": "E:/gwt/feature/gwt-cli",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "echo ok"
+        }
+    })
+    .to_string();
+
+    handle_forward(&input).expect("missing live target env must fail open");
+}
+
+#[test]
+fn forward_owner_is_fail_open_when_live_target_is_unreachable() {
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve loopback port");
+    let port = listener.local_addr().expect("listener addr").port();
+    drop(listener);
+    env.set(
+        "GWT_HOOK_FORWARD_URL",
+        format!("http://127.0.0.1:{port}/hook-live"),
+    );
+    env.set("GWT_HOOK_FORWARD_TOKEN", "secret-token");
+
+    let input = serde_json::json!({
+        "session_id": "agent-session-unreachable-target",
+        "cwd": "E:/gwt/feature/gwt-cli",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "echo ok"
+        }
+    })
+    .to_string();
+
+    handle_forward(&input).expect("unreachable live target must fail open");
 }
