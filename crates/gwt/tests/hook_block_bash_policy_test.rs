@@ -76,38 +76,27 @@ fn blocks_workflow_focused_github_cli_commands() {
 
 #[test]
 fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
-    // All guidance must land inside `permissionDecisionReason` because the
-    // legacy `stopReason` field is ignored on PreToolUse hooks. If the
-    // canonical `gwt` alternatives are not in that single visible field,
-    // the LLM/user sees only the short summary and has no idea how to
-    // recover.
+    // `permissionDecisionReason` is the single field PreToolUse actually
+    // surfaces, so the canonical alternatives and the blocked command
+    // must all land inside it — otherwise the LLM/user only sees the
+    // short rule name and has no recovery path.
     let decision = block_bash_policy::evaluate_bash_command("gh pr view 1949", &root())
         .expect("workflow gh command must block");
     let visible = decision.permission_decision_reason();
-    assert!(
-        visible.contains("GitHub workflow CLI"),
-        "summary must appear in permissionDecisionReason, got: {visible}"
-    );
-    assert!(
-        visible.contains("gwt issue view"),
-        "gwt issue view alternative missing from visible reason: {visible}"
-    );
-    assert!(
-        visible.contains("gwt pr view"),
-        "gwt pr view alternative missing from visible reason: {visible}"
-    );
-    assert!(
-        visible.contains("gwt actions logs"),
-        "gwt actions logs alternative missing from visible reason: {visible}"
-    );
-    assert!(
-        visible.contains("gwt-search"),
-        "gwt-search alternative missing from visible reason: {visible}"
-    );
-    assert!(
-        visible.contains("Blocked command: gh pr view 1949"),
-        "the blocked command must be echoed in the visible reason: {visible}"
-    );
+
+    for required in [
+        "GitHub workflow CLI",
+        "gwt issue view",
+        "gwt pr view",
+        "gwt actions logs",
+        "gwt-search",
+        "Blocked command: gh pr view 1949",
+    ] {
+        assert!(
+            visible.contains(required),
+            "{required:?} missing from permission_decision_reason: {visible}"
+        );
+    }
 }
 
 #[test]

@@ -105,8 +105,8 @@ fn block_decision_serializes_as_hook_specific_output() {
 #[test]
 fn block_decision_accessors_expose_summary_and_detail() {
     let decision = BlockDecision::new("forbidden command", "policy violation");
-    assert_eq!(decision.reason, "forbidden command");
-    assert_eq!(decision.stop_reason, "policy violation");
+    assert_eq!(decision.summary(), "forbidden command");
+    assert_eq!(decision.detail(), "policy violation");
     assert!(decision
         .permission_decision_reason()
         .contains("forbidden command"));
