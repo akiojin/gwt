@@ -1163,10 +1163,7 @@ impl AppRuntime {
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number,
                 },
-                build_builtin_agent_options(
-                    gwt_agent::AgentDetector::detect_all(),
-                    &gwt_agent::VersionCache::load(&default_wizard_version_cache_path()),
-                ),
+                Vec::new(),
             ),
         });
 
@@ -3033,6 +3030,10 @@ fn resolve_launch_wizard_hydration(
     active_session_branches: &std::collections::HashSet<String>,
     sessions_dir: &Path,
 ) -> Result<LaunchWizardHydration, String> {
+    let agent_options = build_builtin_agent_options(
+        gwt_agent::AgentDetector::detect_all(),
+        &gwt_agent::VersionCache::load(&default_wizard_version_cache_path()),
+    );
     let entries = list_branch_entries_with_active_sessions(project_root, active_session_branches)
         .map_err(|error| error.to_string())?;
     let selected_branch = entries
@@ -3059,6 +3060,7 @@ fn resolve_launch_wizard_hydration(
         quick_start_root,
         docker_context,
         docker_service_status,
+        agent_options,
         quick_start_entries,
     })
 }
