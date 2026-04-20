@@ -54,6 +54,9 @@ Stop when all of these are true:
 - The first slice has a visible success condition.
 - High-impact scope ambiguity has been resolved by the user.
 - The SPEC vs Issue decision is justified.
+- Do not stop after the first slice success condition alone. Also resolve the
+  integration target, explicit non-goals, and verification signal for the
+  chosen slice before leaving intake.
 
 ### Broad request handling
 
