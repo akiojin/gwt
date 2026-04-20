@@ -4,6 +4,7 @@ use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
     file_tree::FileTreeEntry,
+    knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
@@ -89,10 +90,25 @@ pub enum FrontendEvent {
     LoadBranches {
         id: String,
     },
+    LoadKnowledgeBridge {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        selected_number: Option<u64>,
+        refresh: bool,
+    },
+    SelectKnowledgeBridgeEntry {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        number: u64,
+    },
     RunBranchCleanup {
         id: String,
         branches: Vec<String>,
         delete_remote: bool,
+    },
+    OpenIssueLaunchWizard {
+        id: String,
+        issue_number: u64,
     },
     OpenLaunchWizard {
         id: String,
@@ -171,12 +187,30 @@ pub enum BackendEvent {
         id: String,
         entries: Vec<BranchListEntry>,
     },
+    KnowledgeEntries {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        entries: Vec<KnowledgeListItem>,
+        selected_number: Option<u64>,
+        empty_message: Option<String>,
+        refresh_enabled: bool,
+    },
+    KnowledgeDetail {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        detail: KnowledgeDetailView,
+    },
     BranchCleanupResult {
         id: String,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchError {
         id: String,
+        message: String,
+    },
+    KnowledgeError {
+        id: String,
+        knowledge_kind: KnowledgeKind,
         message: String,
     },
     ProjectOpenError {

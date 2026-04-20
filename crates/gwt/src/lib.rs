@@ -5,6 +5,7 @@ mod discussion_resume;
 pub mod file_tree;
 pub mod index_worker;
 mod issue_cache;
+pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;
 pub mod native_app;
@@ -22,6 +23,10 @@ pub use branch_list::{
     BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
 };
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
+pub use knowledge_bridge::{
+    load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
+    KnowledgeKind, KnowledgeListItem,
+};
 pub use launch_wizard::{
     build_builtin_agent_options, default_wizard_version_cache_path, AgentOption,
     DockerWizardContext, LaunchWizardAction, LaunchWizardCompletion, LaunchWizardContext,

@@ -184,4 +184,26 @@ mod tests {
             "expected branch cleanup result handler in embedded html",
         );
     }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
+        let html = index_html();
+
+        assert!(
+            html.contains("knowledge-root"),
+            "expected knowledge bridge root scaffold in embedded html",
+        );
+        assert!(
+            html.contains("load_knowledge_bridge"),
+            "expected knowledge bridge load event in embedded html",
+        );
+        assert!(
+            html.contains("select_knowledge_bridge_entry"),
+            "expected knowledge bridge detail selection event in embedded html",
+        );
+        assert!(
+            html.contains("open_issue_launch_wizard"),
+            "expected issue launch wizard event in embedded html",
+        );
+    }
 }
