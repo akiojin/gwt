@@ -1912,6 +1912,11 @@
       const knowledgeBridgeStateMap = new Map();
       const pendingMessages = [];
 
+      // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
+      // Incremented on every `terminal.onData` firing so layer-by-layer counts
+      // can be diffed against backend `gwt_input_trace` logs.
+      let inputTraceSeq = 0;
+
       let socket = null;
       let reconnectTimer = null;
       let focusedId = null;
@@ -2752,6 +2757,14 @@
         terminal.open(terminalContainer);
         const cleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         terminal.onData((data) => {
+          inputTraceSeq += 1;
+          const wsState = socket ? socket.readyState : -1;
+          console.debug("[gwt_input_trace:onData]", {
+            seq: inputTraceSeq,
+            windowId,
+            dataLen: data.length,
+            wsState,
+          });
           send({ kind: "terminal_input", id: windowId, data });
         });
         const runtime = { terminal, fitAddon, cleanup };

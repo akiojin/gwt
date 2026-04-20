@@ -21,6 +21,7 @@ gwt-git.workspace = true
 gwt-github.workspace = true
 gwt-skills.workspace = true
 gwt-terminal.workspace = true
+tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
