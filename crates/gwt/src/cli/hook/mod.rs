@@ -121,6 +121,8 @@ pub enum HookError {
     Io(#[from] std::io::Error),
     #[error("invalid hook event json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("coordination error: {0}")]
+    Coordination(#[from] gwt_core::GwtError),
     #[error("unknown hook: {0}")]
     UnknownHook(String),
     #[error("missing environment variable: {0}")]
