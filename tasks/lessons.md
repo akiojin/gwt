@@ -1,5 +1,48 @@
 # Lessons Learned
 
+## 2026-04-20 — fix: OS 固有実装を足したら import も同じ cfg 境界に置く
+
+### 事象
+
+Windows PTY shim 修正後、PR #2063 の `Clippy & Rustfmt` が Linux CI で失敗した。
+原因は `crates/gwt-terminal/src/pty.rs` の `Path` import がトップレベルにあり、
+Windows 専用関数でしか使わないのに Linux では unused import になっていたことだった。
+
+### 原因
+
+- 実装本体は `#[cfg(windows)]` で囲っていたが、use 宣言の cfg 境界を揃えていなかった。
+- 手元確認が Windows 実行中心で、Linux compile/lint 時の未使用 import を見落とした。
+
+### 再発防止策
+
+1. OS 固有 helper を追加するときは、type import / helper function / test を同じ cfg 境界で揃える。
+2. `cfg(windows)` 専用コードを触った後でも、CI と同じ package 指定の `cargo clippy` を必ず回す。
+3. クロスプラットフォーム crate のトップレベル import 追加では、「他 OS で unused にならないか」を差分確認に含める。
+
+## 2026-04-20 — fix: Windows PTY で PATH 解決をそのまま信じると npm shim に吸われる
+
+### 事象
+
+Windows で installed Claude agent を PTY 起動すると、`CreateProcessW` が
+`%APPDATA%\\npm\\claude` を直接実行しようとして `os error 193`
+(`%1 は有効な Win32 アプリケーションではありません`) で失敗した。
+
+### 原因
+
+- `portable-pty` の Windows `search_path()` は PATHEXT 候補より先に「拡張子なしの実在ファイル」を返す。
+- npm global install は `claude` / `codex` の拡張子なし shim を配置するため、
+  Win32 実行可能ファイルではない shell shim が最優先になっていた。
+- `cmd.exe` ラップに逃がすだけでは ConPTY 上で挙動が不安定なケースがあり、
+  実体の `.exe` / `node + .js` まで解決した方が安定する。
+
+### 再発防止策
+
+1. Windows で PATH 検索結果を PTY に渡す前に、npm shim を実体コマンドへ正規化する。
+2. `.exe` / `.com` は直起動し、shell shim が `node_modules/.../*.js` を指す場合は
+   `node` と script path に分解して起動する。
+3. Windows の PTY 起動修正では、少なくとも「shim 解決」「spawn 成功」の両方を
+   回帰テストで固定する。
+
 ## 2026-04-17 — fix: scrollable pane の wheel 奪取は「surface が実際に消費できる delta」だけに限定する
 
 ### 事象
