@@ -8,6 +8,9 @@ use std::{
     time::Duration,
 };
 
+use crate::repo_browser::{
+    preferred_issue_launch_branch, spawn_branch_cleanup_async, spawn_branch_load_async,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,16 +24,15 @@ use axum::{
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
-    build_builtin_agent_options, cleanup_selected_branches, default_wizard_version_cache_path,
-    detect_shell_program, hydrate_branch_entries_with_active_sessions,
-    list_branch_entries_with_active_sessions, list_branch_inventory, list_directory_entries,
-    load_knowledge_bridge, load_restored_workspace_state, load_session_state,
-    migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
-    save_session_state, save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry,
-    DockerWizardContext, FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardCompletion,
-    LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState,
-    LiveSessionEntry, RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WorkspaceState, APP_NAME,
+    build_builtin_agent_options, default_wizard_version_cache_path, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_knowledge_bridge,
+    load_restored_workspace_state, load_session_state, migrate_legacy_workspace_state,
+    refresh_managed_gwt_assets_for_worktree, resolve_launch_spec, save_session_state,
+    save_workspace_state, workspace_state_path, BackendEvent, BranchListEntry, DockerWizardContext,
+    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
+    LaunchWizardHydration, LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry,
+    RuntimeHookEvent, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
+    WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus};
 use tao::{
@@ -47,6 +49,7 @@ use uuid::Uuid;
 use wry::WebViewBuilder;
 
 mod embedded_web;
+mod repo_browser;
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -893,7 +896,7 @@ impl AppRuntime {
             )];
         }
 
-        Self::spawn_branch_load_async(
+        spawn_branch_load_async(
             self.proxy.clone(),
             client_id.to_string(),
             id.to_string(),
@@ -1030,7 +1033,7 @@ impl AppRuntime {
             )];
         }
 
-        Self::spawn_branch_cleanup_async(
+        spawn_branch_cleanup_async(
             self.proxy.clone(),
             client_id.to_string(),
             id.to_string(),
@@ -1041,141 +1044,6 @@ impl AppRuntime {
         );
         Vec::new()
     }
-
-    fn spawn_branch_cleanup_async(
-        proxy: EventLoopProxy<UserEvent>,
-        client_id: ClientId,
-        window_id: String,
-        project_root: PathBuf,
-        active_session_branches: std::collections::HashSet<String>,
-        branches: Vec<String>,
-        delete_remote: bool,
-    ) {
-        thread::spawn(move || {
-            let events = match list_branch_entries_with_active_sessions(
-                &project_root,
-                &active_session_branches,
-            ) {
-                Ok(entries) => {
-                    let results = cleanup_selected_branches(
-                        &project_root,
-                        &entries,
-                        &branches,
-                        delete_remote,
-                    );
-                    dispatch_async_events(
-                        &proxy,
-                        vec![OutboundEvent::reply(
-                            client_id.clone(),
-                            BackendEvent::BranchCleanupResult {
-                                id: window_id.clone(),
-                                results,
-                            },
-                        )],
-                    );
-                    dispatch_branch_load_progressive(
-                        &proxy,
-                        &client_id,
-                        &window_id,
-                        &project_root,
-                        &active_session_branches,
-                    );
-                    Vec::new()
-                }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BranchError {
-                        id: window_id,
-                        message: error.to_string(),
-                    },
-                )],
-            };
-            if !events.is_empty() {
-                let _ = proxy.send_event(UserEvent::Dispatch(events));
-            }
-        });
-    }
-
-    fn spawn_branch_load_async(
-        proxy: EventLoopProxy<UserEvent>,
-        client_id: ClientId,
-        window_id: String,
-        project_root: PathBuf,
-        active_session_branches: std::collections::HashSet<String>,
-    ) {
-        thread::spawn(move || {
-            dispatch_branch_load_progressive(
-                &proxy,
-                &client_id,
-                &window_id,
-                &project_root,
-                &active_session_branches,
-            );
-        });
-    }
-}
-
-fn dispatch_branch_load_progressive(
-    proxy: &EventLoopProxy<UserEvent>,
-    client_id: &ClientId,
-    window_id: &str,
-    project_root: &Path,
-    active_session_branches: &std::collections::HashSet<String>,
-) {
-    match list_branch_inventory(project_root) {
-        Ok(entries) => {
-            dispatch_async_events(
-                proxy,
-                vec![OutboundEvent::reply(
-                    client_id.clone(),
-                    BackendEvent::BranchEntries {
-                        id: window_id.to_string(),
-                        entries: entries.clone(),
-                    },
-                )],
-            );
-            match hydrate_branch_entries_with_active_sessions(
-                project_root,
-                entries,
-                active_session_branches,
-            ) {
-                Ok(entries) => dispatch_async_events(
-                    proxy,
-                    vec![OutboundEvent::reply(
-                        client_id.clone(),
-                        BackendEvent::BranchEntries {
-                            id: window_id.to_string(),
-                            entries,
-                        },
-                    )],
-                ),
-                Err(error) => dispatch_async_events(
-                    proxy,
-                    vec![OutboundEvent::reply(
-                        client_id.clone(),
-                        BackendEvent::BranchError {
-                            id: window_id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )],
-                ),
-            }
-        }
-        Err(error) => dispatch_async_events(
-            proxy,
-            vec![OutboundEvent::reply(
-                client_id.clone(),
-                BackendEvent::BranchError {
-                    id: window_id.to_string(),
-                    message: error.to_string(),
-                },
-            )],
-        ),
-    }
-}
-
-fn dispatch_async_events(proxy: &EventLoopProxy<UserEvent>, events: Vec<OutboundEvent>) {
-    let _ = proxy.send_event(UserEvent::Dispatch(events));
 }
 
 impl AppRuntime {
@@ -2497,9 +2365,9 @@ mod tests {
     use tempfile::tempdir;
 
     use gwt::{
-        empty_workspace_state, BranchCleanupInfo, BranchListEntry, BranchScope, KnowledgeKind,
-        PersistedWindowState, RuntimeHookEvent, RuntimeHookEventKind, ShellLaunchConfig,
-        WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
+        empty_workspace_state, KnowledgeKind, PersistedWindowState, RuntimeHookEvent,
+        RuntimeHookEventKind, ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus,
+        WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_terminal::PaneStatus;
@@ -2508,9 +2376,8 @@ mod tests {
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
         broadcast_runtime_hook_event, build_shell_process_launch, close_window_from_workspace,
         combined_window_id, hook_forward_authorized, knowledge_kind_for_preset,
-        preferred_issue_launch_branch, resolve_project_target, should_auto_close_agent_window,
-        should_auto_start_restored_window, ActiveAgentSession, ClientHub, ProjectTabRuntime,
-        WindowAddress,
+        resolve_project_target, should_auto_close_agent_window, should_auto_start_restored_window,
+        ActiveAgentSession, ClientHub, ProjectTabRuntime, WindowAddress,
     };
 
     fn sample_window(preset: WindowPreset, status: WindowProcessStatus) -> PersistedWindowState {
@@ -2882,54 +2749,6 @@ mod tests {
         );
         assert_eq!(knowledge_kind_for_preset(WindowPreset::Branches), None);
     }
-
-    #[test]
-    fn preferred_issue_launch_branch_prefers_develop_then_head_then_first_local() {
-        let entries = vec![
-            BranchListEntry {
-                name: "feature/demo".to_string(),
-                scope: BranchScope::Local,
-                is_head: true,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: None,
-                cleanup_ready: true,
-                cleanup: BranchCleanupInfo::default(),
-            },
-            BranchListEntry {
-                name: "develop".to_string(),
-                scope: BranchScope::Local,
-                is_head: false,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: None,
-                cleanup_ready: true,
-                cleanup: BranchCleanupInfo::default(),
-            },
-        ];
-        assert_eq!(
-            preferred_issue_launch_branch(&entries),
-            Some("develop".to_string())
-        );
-
-        let head_only = vec![BranchListEntry {
-            name: "feature/demo".to_string(),
-            scope: BranchScope::Local,
-            is_head: true,
-            upstream: None,
-            ahead: 0,
-            behind: 0,
-            last_commit_date: None,
-            cleanup_ready: true,
-            cleanup: BranchCleanupInfo::default(),
-        }];
-        assert_eq!(
-            preferred_issue_launch_branch(&head_only),
-            Some("feature/demo".to_string())
-        );
-    }
 }
 
 fn normalize_active_tab_id(
@@ -3268,26 +3087,6 @@ fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
         WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
     }
-}
-
-fn preferred_issue_launch_branch(entries: &[gwt::BranchListEntry]) -> Option<String> {
-    use gwt::BranchScope;
-
-    let mut locals = entries
-        .iter()
-        .filter(|entry| entry.scope == BranchScope::Local)
-        .collect::<Vec<_>>();
-    locals.sort_by(|left, right| left.name.cmp(&right.name));
-
-    for preferred in ["develop", "main", "master"] {
-        if let Some(entry) = locals.iter().find(|entry| entry.name == preferred) {
-            return Some(entry.name.clone());
-        }
-    }
-    if let Some(entry) = locals.iter().find(|entry| entry.is_head) {
-        return Some(entry.name.clone());
-    }
-    locals.first().map(|entry| entry.name.clone())
 }
 
 fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
