@@ -421,6 +421,33 @@ impl AppRuntime {
                 std::thread::spawn(apply_update_and_exit);
                 vec![]
             }
+            FrontendEvent::ListCustomAgents => {
+                vec![OutboundEvent::reply(client_id, list_custom_agents_event())]
+            }
+            FrontendEvent::ListCustomAgentPresets => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::CustomAgentPresetList {
+                    presets: gwt::list_presets(),
+                },
+            )],
+            FrontendEvent::AddCustomAgentFromPreset { input } => vec![OutboundEvent::reply(
+                client_id,
+                add_custom_agent_from_preset_event(input),
+            )],
+            FrontendEvent::UpdateCustomAgent { agent } => vec![OutboundEvent::reply(
+                client_id,
+                update_custom_agent_event(*agent),
+            )],
+            FrontendEvent::DeleteCustomAgent { agent_id } => vec![OutboundEvent::reply(
+                client_id,
+                delete_custom_agent_event(agent_id),
+            )],
+            FrontendEvent::TestBackendConnection { base_url, api_key } => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    test_backend_connection_event(&base_url, &api_key),
+                )]
+            }
         }
     }
 
@@ -4832,6 +4859,76 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
+}
+
+/// Resolve the custom-agent config file path. Falls back to `./config.toml`
+/// if the home directory cannot be discovered so the code path remains
+/// exercisable in sandbox environments.
+fn custom_agents_config_path() -> std::path::PathBuf {
+    gwt_config::Settings::global_config_path()
+        .unwrap_or_else(|| std::path::PathBuf::from("config.toml"))
+}
+
+fn map_custom_agent_error(err: gwt::CustomAgentsServiceError) -> BackendEvent {
+    use gwt::CustomAgentsServiceError as E;
+    let code = match &err {
+        E::Storage(_) => "storage",
+        E::Duplicate(_) => "duplicate",
+        E::InvalidInput(_) => "invalid_input",
+        E::NotFound(_) => "not_found",
+        E::Probe(_) => "probe",
+    };
+    BackendEvent::CustomAgentError {
+        code: code.to_string(),
+        message: err.to_string(),
+    }
+}
+
+fn list_custom_agents_event() -> BackendEvent {
+    let path = custom_agents_config_path();
+    match gwt::list_custom_agents(&path) {
+        Ok(agents) => BackendEvent::CustomAgentList { agents },
+        Err(err) => map_custom_agent_error(err),
+    }
+}
+
+fn add_custom_agent_from_preset_event(input: gwt::ClaudeCodeOpenaiCompatInput) -> BackendEvent {
+    let path = custom_agents_config_path();
+    match gwt::add_from_claude_code_openai_compat_preset(&path, &input) {
+        Ok(agent) => BackendEvent::CustomAgentSaved {
+            agent: Box::new(agent),
+        },
+        Err(err) => map_custom_agent_error(err),
+    }
+}
+
+fn update_custom_agent_event(agent: gwt_agent::CustomCodingAgent) -> BackendEvent {
+    let path = custom_agents_config_path();
+    let agent_clone = agent.clone();
+    match gwt::update_custom_agent(&path, agent) {
+        Ok(()) => BackendEvent::CustomAgentSaved {
+            agent: Box::new(agent_clone),
+        },
+        Err(err) => map_custom_agent_error(err),
+    }
+}
+
+fn delete_custom_agent_event(agent_id: String) -> BackendEvent {
+    let path = custom_agents_config_path();
+    match gwt::delete_custom_agent(&path, &agent_id) {
+        Ok(()) => BackendEvent::CustomAgentDeleted { agent_id },
+        Err(err) => map_custom_agent_error(err),
+    }
+}
+
+fn test_backend_connection_event(base_url: &str, api_key: &str) -> BackendEvent {
+    match gwt::probe_backend(base_url, api_key) {
+        Ok(models) => BackendEvent::BackendConnectionResult { models },
+        Err(err) => BackendEvent::CustomAgentError {
+            code: "probe".to_string(),
+            message: err.to_string(),
+        },
+    }
 }
 
 /// Download and apply a pending update, then exit.

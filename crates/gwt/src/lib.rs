@@ -1,6 +1,7 @@
 pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
+pub mod custom_agents_service;
 pub mod daemon_runtime;
 mod discussion_resume;
 pub mod file_tree;
@@ -22,6 +23,11 @@ pub use branch_list::{list_branch_entries, BranchListEntry, BranchScope};
 pub use branch_list::{
     list_branch_entries_with_active_sessions, BranchCleanupAvailability,
     BranchCleanupBlockedReason, BranchCleanupInfo, BranchCleanupRisk,
+};
+pub use custom_agents_service::{
+    add_from_claude_code_openai_compat_preset, delete_custom_agent, list_custom_agents,
+    list_presets, probe_backend, update_custom_agent, ClaudeCodeOpenaiCompatInput,
+    CustomAgentsServiceError, PresetDefinition, PresetId,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
