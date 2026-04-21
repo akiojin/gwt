@@ -337,7 +337,8 @@ mod tests {
             "expected knowledge bridge detail bodies to avoid plain preformatted Markdown output",
         );
         assert!(
-            html.contains("flushList();\n          paragraph.push(line.trim());"),
+            html.contains("flushList();\n          paragraph.push(line.trim());")
+                || html.contains("flushList();\r\n          paragraph.push(line.trim());"),
             "expected pending Markdown lists to flush before a following paragraph preserves source order",
         );
     }

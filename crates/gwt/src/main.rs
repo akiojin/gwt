@@ -2781,9 +2781,8 @@ mod tests {
         record_issue_branch_link_with_cache_dir, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
         AgentLaunchReady, AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub,
-        DispatchTarget,
-        LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent,
-        WindowAddress,
+        DispatchTarget, LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime,
+        UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
