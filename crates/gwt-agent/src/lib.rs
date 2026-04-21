@@ -46,7 +46,7 @@ pub use store::{
     save_stored_custom_agents_to_path, StoredCustomAgent, DISABLE_GLOBAL_CUSTOM_AGENTS_ENV,
 };
 pub use types::{
-    AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget,
-    SessionMode, WorkflowBypass,
+    resolve_agent_id, AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent,
+    LaunchRuntimeTarget, SessionMode, WorkflowBypass,
 };
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

@@ -52,6 +52,21 @@ impl WorkspaceState {
         true
     }
 
+    /// Record the AgentId command name on the given window so later snapshots
+    /// can populate `agent_color` correctly. SPEC #2133 FR-007 / シナリオ 1.
+    pub fn set_agent_id(&mut self, id: &str, agent_id: impl Into<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.agent_id = Some(agent_id.into());
+        true
+    }
+
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
     }
@@ -167,6 +182,8 @@ impl WorkspaceState {
             maximized: false,
             pre_maximize_geometry: None,
             persist,
+            agent_id: None,
+            agent_color: None,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -449,6 +466,8 @@ mod tests {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: false,
+                agent_id: None,
+                agent_color: None,
             }],
             next_z_index: 2,
         });

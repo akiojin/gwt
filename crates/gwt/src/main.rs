@@ -551,6 +551,7 @@ impl AppRuntime {
                 )]
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
+            FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
                 knowledge_kind,
@@ -1219,6 +1220,55 @@ impl AppRuntime {
         Vec::new()
     }
 
+    /// SPEC #2133 FR-006 / シナリオ 3: Board preset の window から
+    /// ロード要求を受けたら `BoardEntry` 一覧をまとめてフロントへ送る。
+    /// 進行中 Board UI 本格実装は別 SPEC。ここでは最低限のスナップ
+    /// ショットだけ送信する。
+    fn load_board_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        match gwt_core::coordination::load_snapshot(&tab.project_root) {
+            Ok(snapshot) => {
+                let entries = snapshot
+                    .board
+                    .entries
+                    .iter()
+                    .map(board_entry_view_from)
+                    .collect();
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardSnapshot {
+                        id: id.to_string(),
+                        entries,
+                    },
+                )]
+            }
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
     fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -1549,6 +1599,13 @@ impl AppRuntime {
                     })];
                 };
                 let geometry = window.geometry.clone();
+                // SPEC #2133: launch 成功時に agent_id を persistence に書き込み、
+                // 以降のスナップショットで agent_color が正しく解決されるようにする。
+                if let Some(tab_mut) = self.tab_mut(&address.tab_id) {
+                    tab_mut
+                        .workspace
+                        .set_agent_id(&address.raw_id, agent_id.command().to_string());
+                }
 
                 match self.spawn_process_window(&window_id, geometry, process_launch) {
                     Ok(event) => {
@@ -2391,9 +2448,48 @@ fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
             .cloned()
             .map(|mut window| {
                 window.id = combined_window_id(&tab.id, &window.id);
+                window.agent_color = resolve_window_agent_color(&window);
                 window
             })
             .collect(),
+    }
+}
+
+/// Compute the wire-only `agent_color` for a window snapshot.
+///
+/// SPEC #2133: agent_id が明示的に設定されていればそれを優先
+/// (resolve_agent_id → default_color)。未設定なら preset の固定
+/// マッピングにフォールバック。どちらでも None なら色無し。
+fn resolve_window_agent_color(window: &gwt::PersistedWindowState) -> Option<gwt_agent::AgentColor> {
+    let by_agent_id = window
+        .agent_id
+        .as_deref()
+        .and_then(gwt_agent::resolve_agent_id);
+    let agent_id = by_agent_id.or_else(|| window.preset.resolved_agent_id());
+    agent_id.map(|id| id.default_color())
+}
+
+/// Project a [`gwt_core::coordination::BoardEntry`] into the wire
+/// [`gwt::BoardEntryView`]. `origin_agent_id` を `gwt_agent::resolve_agent_id`
+/// で正規化し、`default_color()` で `agent_color` を補完する
+/// (SPEC #2133 FR-006 / FR-012)。
+fn board_entry_view_from(entry: &gwt_core::coordination::BoardEntry) -> gwt::BoardEntryView {
+    let agent_color = entry
+        .origin_agent_id
+        .as_deref()
+        .and_then(gwt_agent::resolve_agent_id)
+        .map(|id| id.default_color());
+    gwt::BoardEntryView {
+        id: entry.id.clone(),
+        author_kind: entry.author_kind.clone(),
+        author: entry.author.clone(),
+        kind: entry.kind.clone(),
+        body: entry.body.clone(),
+        created_at: entry.created_at,
+        updated_at: entry.updated_at,
+        origin_branch: entry.origin_branch.clone(),
+        origin_agent_id: entry.origin_agent_id.clone(),
+        agent_color,
     }
 }
 
@@ -2457,14 +2553,14 @@ mod tests {
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, current_git_branch,
-        hook_forward_authorized, knowledge_kind_for_preset,
+        board_entry_view_from, broadcast_runtime_hook_event, build_frontend_sync_events,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        current_git_branch, hook_forward_authorized, knowledge_kind_for_preset,
         record_issue_branch_link_with_cache_dir, resolve_project_target,
-        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        AgentLaunchReady, AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub,
-        DispatchTarget, LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime,
-        UserEvent, WindowAddress,
+        resolve_window_agent_color, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, AgentLaunchReady, AppEventProxy,
+        AppRuntime, BlockingTaskSpawner, ClientHub, DispatchTarget, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -2583,6 +2679,8 @@ mod tests {
             maximized: false,
             pre_maximize_geometry: None,
             persist: true,
+            agent_id: None,
+            agent_color: None,
         }
     }
 
@@ -2752,6 +2850,84 @@ mod tests {
             WindowPreset::Branches,
             WindowProcessStatus::Ready,
         )));
+    }
+
+    #[test]
+    fn resolve_window_agent_color_prefers_explicit_agent_id() {
+        let mut window = sample_window(WindowPreset::Agent, WindowProcessStatus::Running);
+        window.agent_id = Some("gemini".into());
+        assert_eq!(
+            resolve_window_agent_color(&window),
+            Some(gwt_agent::AgentColor::Magenta),
+        );
+    }
+
+    #[test]
+    fn resolve_window_agent_color_falls_back_to_preset() {
+        let mut window = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
+        window.agent_id = None;
+        assert_eq!(
+            resolve_window_agent_color(&window),
+            Some(gwt_agent::AgentColor::Yellow),
+        );
+        let codex = sample_window(WindowPreset::Codex, WindowProcessStatus::Running);
+        assert_eq!(
+            resolve_window_agent_color(&codex),
+            Some(gwt_agent::AgentColor::Cyan),
+        );
+    }
+
+    #[test]
+    fn resolve_window_agent_color_returns_none_for_agent_preset_without_id() {
+        let window = sample_window(WindowPreset::Agent, WindowProcessStatus::Running);
+        assert_eq!(resolve_window_agent_color(&window), None);
+    }
+
+    #[test]
+    fn resolve_window_agent_color_handles_custom_agent_as_gray() {
+        let mut window = sample_window(WindowPreset::Agent, WindowProcessStatus::Running);
+        window.agent_id = Some("my-custom-agent".into());
+        assert_eq!(
+            resolve_window_agent_color(&window),
+            Some(gwt_agent::AgentColor::Gray),
+        );
+    }
+
+    #[test]
+    fn board_entry_view_resolves_origin_agent_id_to_color() {
+        use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "Started task",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_agent_id("codex");
+        let view = board_entry_view_from(&entry);
+        assert_eq!(view.agent_color, Some(gwt_agent::AgentColor::Cyan));
+        assert_eq!(view.origin_agent_id.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn board_entry_view_returns_none_color_for_missing_origin_agent_id() {
+        use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+        let entry = BoardEntry::new(
+            AuthorKind::User,
+            "akio",
+            BoardEntryKind::Request,
+            "Please look into X",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let view = board_entry_view_from(&entry);
+        assert_eq!(view.agent_color, None);
+        assert_eq!(view.origin_agent_id, None);
     }
 
     fn sample_project_tab_with_window(

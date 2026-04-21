@@ -1,4 +1,6 @@
-use gwt_agent::{CustomCodingAgent, PresetDefinition, PresetId};
+use chrono::{DateTime, Utc};
+use gwt_agent::{AgentColor, CustomCodingAgent, PresetDefinition, PresetId};
+use gwt_core::coordination::{AuthorKind, BoardEntryKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -99,6 +101,9 @@ pub enum FrontendEvent {
         path: Option<String>,
     },
     LoadBranches {
+        id: String,
+    },
+    LoadBoard {
         id: String,
     },
     LoadKnowledgeBridge {
@@ -229,6 +234,28 @@ pub struct WorkspaceView {
     pub windows: Vec<PersistedWindowState>,
 }
 
+/// Frontend-facing projection of a [`gwt_core::coordination::BoardEntry`].
+///
+/// 付加した `agent_color` は wire-only。`origin_agent_id` を既知の
+/// [`gwt_agent::AgentId`] に正規化し、`default_color()` をここで
+/// 計算してフロントに渡す (SPEC #2133 FR-006 / FR-012)。
+#[derive(Debug, Clone, Serialize)]
+pub struct BoardEntryView {
+    pub id: String,
+    pub author_kind: AuthorKind,
+    pub author: String,
+    pub kind: BoardEntryKind,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_color: Option<AgentColor>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectTabView {
     pub id: String,
@@ -308,6 +335,14 @@ pub enum BackendEvent {
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchError {
+        id: String,
+        message: String,
+    },
+    BoardSnapshot {
+        id: String,
+        entries: Vec<BoardEntryView>,
+    },
+    BoardError {
         id: String,
         message: String,
     },

@@ -14,6 +14,110 @@
         font-family:
           Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
           "Segoe UI", sans-serif;
+
+        /* SPEC #2133 FR-002: per-agent color palette.
+           色値の正本は Rust (crates/gwt-agent/src/types.rs の AgentColor /
+           AgentId::default_color) で、ここはフロント側の表示チャネル。 */
+        --agent-claude: #f59e0b;   /* ClaudeCode → Yellow */
+        --agent-codex: #06b6d4;    /* Codex → Cyan */
+        --agent-gemini: #c026d3;   /* Gemini → Magenta */
+        --agent-opencode: #16a34a; /* OpenCode → Green */
+        --agent-copilot: #2563eb;  /* Copilot → Blue */
+        --agent-custom: #9ca3af;   /* Custom → Gray */
+      }
+
+      /* Wire `agent_color` 値 (snake_case 小文字の AgentColor) を agent
+         slot に紐付け、`--current-agent` を解決する。該当する
+         data-agent-color を持つ要素とその子孫でドット / アクセント
+         バーが表示される。 */
+      [data-agent-color="yellow"]  { --current-agent: var(--agent-claude); }
+      [data-agent-color="cyan"]    { --current-agent: var(--agent-codex); }
+      [data-agent-color="magenta"] { --current-agent: var(--agent-gemini); }
+      [data-agent-color="green"]   { --current-agent: var(--agent-opencode); }
+      [data-agent-color="blue"]    { --current-agent: var(--agent-copilot); }
+      [data-agent-color="gray"]    { --current-agent: var(--agent-custom); }
+
+      /* FR-003: Workspace window titlebar の左端アクセントバー。
+         data-agent-color が無い window には ::before が出ない。 */
+      .workspace-window[data-agent-color]::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 4px;
+        background: var(--current-agent);
+        z-index: 2;
+        pointer-events: none;
+      }
+
+      /* FR-004: Window List Panel 行左端 */
+      .window-list-row[data-agent-color]::before {
+        content: "";
+        position: absolute;
+        top: 6px;
+        bottom: 6px;
+        left: 0;
+        width: 3px;
+        background: var(--current-agent);
+        border-radius: 0 2px 2px 0;
+      }
+
+      /* FR-005 / FR-006: Launch Wizard + Board 行先頭ドット */
+      .agent-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--current-agent, transparent);
+        margin-right: 6px;
+        flex-shrink: 0;
+        vertical-align: middle;
+      }
+
+      /* Board 最小レンダリング */
+      .board-entries {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 12px;
+        overflow-y: auto;
+        font-size: 13px;
+        color: #1f2937;
+      }
+
+      .board-entry {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        background: rgba(241, 245, 249, 0.6);
+      }
+
+      .board-entry-head {
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .board-entry-body {
+        display: block;
+        margin-top: 2px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: #334155;
+      }
+
+      .board-entry-meta {
+        font-size: 11px;
+        color: #64748b;
+        margin-left: 8px;
+      }
+
+      .board-empty {
+        color: #64748b;
+        font-style: italic;
+        padding: 12px;
       }
 
       * {
@@ -218,6 +322,7 @@
       }
 
       .window-list-row {
+        position: relative;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -230,6 +335,10 @@
         color: #0f172a;
         text-align: left;
         cursor: pointer;
+      }
+
+      .window-list-row[data-agent-color] {
+        padding-left: 14px;
       }
 
       .window-list-row:hover {
@@ -2217,6 +2326,9 @@
       const knowledgeBridgeStateMap = new Map();
       const profileWindowStateMap = new Map();
       const profileWindowBodies = new Map();
+      // SPEC #2133: Board preset の minimum rendering 用状態。
+      const boardWindowStateMap = new Map();
+      const boardWindowBodies = new Map();
       const pendingMessages = [];
 
       // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
@@ -2471,6 +2583,9 @@
           const row = document.createElement("button");
           row.type = "button";
           row.className = "window-list-row";
+          if (entry.agent_color) {
+            row.dataset.agentColor = entry.agent_color;
+          }
           row.innerHTML = `
             <div class="window-list-copy">
               <div class="window-list-title">${entry.title}</div>
@@ -3597,7 +3712,15 @@
         if (selected) {
           button.classList.add("selected");
         }
-        button.appendChild(createNode("span", "launch-choice-title", option.label));
+        const title = createNode("span", "launch-choice-title");
+        // SPEC #2133 FR-005: Launch Wizard 候補行の先頭ドット。
+        // option.color (AgentColor wire 値) が有るときだけ表示する。
+        if (option.color) {
+          button.dataset.agentColor = option.color;
+          title.appendChild(createNode("span", "agent-dot"));
+        }
+        title.appendChild(document.createTextNode(option.label));
+        button.appendChild(title);
         if (option.description) {
           button.appendChild(
             createNode("span", "launch-choice-detail", option.description),
@@ -5295,6 +5418,11 @@
           return;
         }
 
+        if (windowData.preset === "board") {
+          renderBoardWindow(body, windowData);
+          return;
+        }
+
         const mock = mockContentForPreset(windowData.preset);
         body.innerHTML = `
           <div class="mock-root">
@@ -5793,6 +5921,120 @@
         }
       }
 
+      // SPEC #2133 FR-006: Board preset window の最小レンダリング。
+      // BackendEvent::BoardSnapshot を受けると entries が更新され、
+      // 各行の左先頭に agent_color のドットが出る。
+      function ensureBoardWindowState(windowId) {
+        if (!boardWindowStateMap.has(windowId)) {
+          boardWindowStateMap.set(windowId, {
+            entries: [],
+            loading: true,
+            error: "",
+          });
+        }
+        return boardWindowStateMap.get(windowId);
+      }
+
+      function renderBoardWindow(body, windowData) {
+        while (body.firstChild) body.removeChild(body.firstChild);
+        const state = ensureBoardWindowState(windowData.id);
+        boardWindowBodies.set(windowData.id, body);
+
+        const root = createDiv("mock-root");
+        const toolbar = createDiv("mock-toolbar");
+        const heading = createDiv("mock-heading");
+        heading.textContent = "Board";
+        const chip = document.createElement("span");
+        chip.className = "mock-chip";
+        chip.textContent = windowData.title || "Board";
+        toolbar.appendChild(heading);
+        toolbar.appendChild(chip);
+
+        const actions = createDiv("profile-toolbar-actions");
+        const refresh = document.createElement("button");
+        refresh.className = "icon-button";
+        refresh.type = "button";
+        refresh.setAttribute("aria-label", "Refresh board");
+        refresh.textContent = "↻";
+        refresh.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const s = ensureBoardWindowState(windowData.id);
+          s.loading = true;
+          s.error = "";
+          renderBoardEntries(windowData.id);
+          send({ kind: "load_board", id: windowData.id });
+        });
+        actions.appendChild(refresh);
+        toolbar.appendChild(actions);
+        root.appendChild(toolbar);
+
+        const list = createDiv("board-entries");
+        list.dataset.role = "board-entries";
+        root.appendChild(list);
+        body.appendChild(root);
+
+        body.addEventListener("mousedown", () => {
+          focusWindowLocally(windowData.id);
+          send({ kind: "focus_window", id: windowData.id });
+        });
+
+        renderBoardEntries(windowData.id);
+        send({ kind: "load_board", id: windowData.id });
+      }
+
+      function renderBoardEntries(windowId) {
+        const body = boardWindowBodies.get(windowId);
+        if (!body || !body.isConnected) {
+          return;
+        }
+        const list = body.querySelector("[data-role='board-entries']");
+        if (!list) {
+          return;
+        }
+        while (list.firstChild) list.removeChild(list.firstChild);
+        const state = ensureBoardWindowState(windowId);
+        if (state.error) {
+          const err = createDiv("board-empty");
+          err.textContent = `Failed to load: ${state.error}`;
+          list.appendChild(err);
+          return;
+        }
+        if (state.loading) {
+          const loading = createDiv("board-empty");
+          loading.textContent = "Loading board entries...";
+          list.appendChild(loading);
+          return;
+        }
+        if (!state.entries || state.entries.length === 0) {
+          const empty = createDiv("board-empty");
+          empty.textContent = "No board entries yet.";
+          list.appendChild(empty);
+          return;
+        }
+        for (const entry of state.entries) {
+          const row = createDiv("board-entry");
+          if (entry.agent_color) {
+            row.dataset.agentColor = entry.agent_color;
+          }
+          const dot = createDiv("agent-dot");
+          row.appendChild(dot);
+          const content = createDiv();
+          const head = createDiv("board-entry-head");
+          const kind = (entry.kind || "").toString();
+          head.textContent = `${entry.author} · ${kind}`;
+          const meta = document.createElement("span");
+          meta.className = "board-entry-meta";
+          meta.textContent = entry.created_at || "";
+          head.appendChild(meta);
+          content.appendChild(head);
+          const bodyText = createDiv("board-entry-body");
+          bodyText.textContent = entry.body || "";
+          content.appendChild(bodyText);
+          row.appendChild(content);
+          list.appendChild(row);
+        }
+      }
+
       function renderSettingsWindow(body, windowData) {
         // Sweep detached bodies up-front so repeated open/close cycles do
         // not accumulate references.
@@ -6145,6 +6387,13 @@
         element.querySelector(".title-text").textContent = windowData.title;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
+        // SPEC #2133: propagate agent_color so the titlebar accent bar
+        // (.workspace-window[data-agent-color]::before) picks the right color.
+        if (windowData.agent_color) {
+          element.dataset.agentColor = windowData.agent_color;
+        } else {
+          delete element.dataset.agentColor;
+        }
         element.style.left = `${windowData.geometry.x}px`;
         element.style.top = `${windowData.geometry.y}px`;
         element.style.width = `${windowData.geometry.width}px`;
@@ -6279,6 +6528,21 @@
             state.loading = false;
             state.error = "";
             renderKnowledgeBridge(event.id);
+            break;
+          }
+          case "board_snapshot": {
+            const state = ensureBoardWindowState(event.id);
+            state.entries = event.entries || [];
+            state.loading = false;
+            state.error = "";
+            renderBoardEntries(event.id);
+            break;
+          }
+          case "board_error": {
+            const state = ensureBoardWindowState(event.id);
+            state.loading = false;
+            state.error = event.message || "Unknown error";
+            renderBoardEntries(event.id);
             break;
           }
           case "knowledge_detail": {

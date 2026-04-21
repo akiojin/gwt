@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use gwt_agent::AgentId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +142,31 @@ impl WindowPreset {
             Self::Codex => Some("codex"),
             Self::Agent => None,
             Self::FileTree
+            | Self::Branches
+            | Self::Settings
+            | Self::Memo
+            | Self::Profile
+            | Self::Logs
+            | Self::Issue
+            | Self::Spec
+            | Self::Board
+            | Self::Pr => None,
+        }
+    }
+
+    /// Fixed mapping from preset to [`AgentId`] for presets that always
+    /// represent a specific agent. `Claude` / `Codex` are固定; `Agent`
+    /// is wizard-driven and has no deterministic mapping (返り値は None)。
+    ///
+    /// SPEC #2133 FR-011: `agent_id` 未設定の window でも
+    /// preset から色のフォールバックを得るため使用する。
+    pub fn resolved_agent_id(self) -> Option<AgentId> {
+        match self {
+            Self::Claude => Some(AgentId::ClaudeCode),
+            Self::Codex => Some(AgentId::Codex),
+            Self::Shell
+            | Self::Agent
+            | Self::FileTree
             | Self::Branches
             | Self::Settings
             | Self::Memo
@@ -309,6 +335,39 @@ mod tests {
     fn settings_preset_is_mock_surface() {
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
         assert!(!WindowPreset::Settings.requires_process());
+    }
+
+    #[test]
+    fn resolved_agent_id_is_fixed_for_claude_and_codex_only() {
+        assert_eq!(
+            WindowPreset::Claude.resolved_agent_id(),
+            Some(AgentId::ClaudeCode)
+        );
+        assert_eq!(
+            WindowPreset::Codex.resolved_agent_id(),
+            Some(AgentId::Codex)
+        );
+        // 他 preset はすべて None
+        for preset in [
+            WindowPreset::Shell,
+            WindowPreset::Agent,
+            WindowPreset::FileTree,
+            WindowPreset::Branches,
+            WindowPreset::Settings,
+            WindowPreset::Memo,
+            WindowPreset::Profile,
+            WindowPreset::Logs,
+            WindowPreset::Issue,
+            WindowPreset::Spec,
+            WindowPreset::Board,
+            WindowPreset::Pr,
+        ] {
+            assert_eq!(
+                preset.resolved_agent_id(),
+                None,
+                "{preset:?} should not resolve to an AgentId"
+            );
+        }
     }
 
     #[test]
