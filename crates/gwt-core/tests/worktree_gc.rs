@@ -130,3 +130,44 @@ fn legacy_worktree_scoped_specs_directory_is_removed_for_live_worktree() {
     );
     assert!(live_files.exists(), "live files dir must be preserved");
 }
+
+#[test]
+fn legacy_specs_cleanup_preserves_worktree_meta_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+
+    let live_wt = tmp.path().join("live");
+    fs::create_dir(&live_wt).unwrap();
+    let live_hash = compute_worktree_hash(&live_wt).unwrap();
+
+    let worktree_root = index_root
+        .join(repo.as_str())
+        .join("worktrees")
+        .join(live_hash.as_str());
+    fs::create_dir_all(worktree_root.join("specs")).unwrap();
+    fs::write(worktree_root.join("specs").join("chroma.sqlite3"), "data").unwrap();
+    fs::write(worktree_root.join("manifest-specs.json"), "[]").unwrap();
+    fs::write(worktree_root.join("meta.json"), r#"{"schema_version":1}"#).unwrap();
+
+    let opts = ReconcileOptions {
+        index_root,
+        repo_hash: repo,
+        active_worktree_paths: vec![live_wt],
+        legacy_worktree_dirs: Vec::new(),
+    };
+    reconcile_repo(&opts).unwrap();
+
+    assert!(
+        worktree_root.join("meta.json").exists(),
+        "phase 6 worktree meta should survive legacy cleanup"
+    );
+    assert!(
+        !worktree_root.join("specs").exists(),
+        "legacy worktree-scoped specs dir should still be removed"
+    );
+    assert!(
+        !worktree_root.join("manifest-specs.json").exists(),
+        "legacy worktree-scoped specs manifest should still be removed"
+    );
+}

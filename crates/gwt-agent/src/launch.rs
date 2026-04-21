@@ -586,8 +586,6 @@ impl AgentLaunchBuilder {
                 args.push("web_search_request".to_string());
             }
         }
-        args.push("--enable".to_string());
-        args.push("codex_hooks".to_string());
 
         // Sandbox & shell env policies
         args.push("--sandbox".to_string());
@@ -949,10 +947,10 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_enables_hooks_feature_flag() {
+    fn build_codex_does_not_enable_hooks_feature_flag_by_default() {
         let config = AgentLaunchBuilder::new(AgentId::Codex).build();
 
-        assert!(config
+        assert!(!config
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
