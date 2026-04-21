@@ -1208,6 +1208,7 @@ fn resolve_macos_restart_executable(
     target_exe.to_path_buf()
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn resolve_windows_restart_executable(target_exe: &Path) -> PathBuf {
     if let Some(preferred) = windows_per_user_install_executable(target_exe) {
         if preferred.exists() {
@@ -1343,6 +1344,7 @@ fn run_macos_dmg_installer_with_privileges(
     Ok(target_app)
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn windows_msi_argument_list(installer: &Path) -> Vec<String> {
     vec![
         "/i".to_string(),
