@@ -22,6 +22,9 @@ pub mod envelope;
 pub mod forward;
 pub mod runtime_state;
 pub mod segments;
+pub mod skill_build_spec_stop_check;
+pub mod skill_discussion_stop_check;
+pub mod skill_plan_spec_stop_check;
 pub mod workflow_policy;
 pub mod worktree;
 
@@ -43,6 +46,9 @@ pub enum HookKind {
     BlockBashPolicy,
     WorkflowPolicy,
     Forward,
+    SkillDiscussionStopCheck,
+    SkillPlanSpecStopCheck,
+    SkillBuildSpecStopCheck,
 }
 
 impl HookKind {
@@ -58,6 +64,9 @@ impl HookKind {
             "block-bash-policy" => Some(Self::BlockBashPolicy),
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
+            "skill-discussion-stop-check" => Some(Self::SkillDiscussionStopCheck),
+            "skill-plan-spec-stop-check" => Some(Self::SkillPlanSpecStopCheck),
+            "skill-build-spec-stop-check" => Some(Self::SkillBuildSpecStopCheck),
             _ => None,
         }
     }

@@ -492,6 +492,9 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
         "hook" => parse_hook_args(&rest),
+        "discuss" => super::parse_discuss_args(&rest),
+        "plan" => super::parse_plan_args(&rest),
+        "build" => super::parse_build_args(&rest),
         "update" => Ok(super::CliCommand::Update {
             check_only: rest.iter().any(|a| a == "--check"),
         }),
