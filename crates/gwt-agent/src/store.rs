@@ -1,17 +1,14 @@
 //! TOML persistence for custom coding agents.
 //!
 //! Custom agents live under `[tools.customCodingAgents.<id>]` in the gwt
-//! global config TOML (`~/.gwt/config.toml` by default). This module provides
-//! a load/save surface that preserves unknown sibling tables (e.g. `models`)
-//! so third-party additions are not silently dropped on round-trip.
-//!
-//! Ports the behavior that lived in `crates/gwt-tui/src/custom_agents.rs`
-//! before commit 10ff990f ("feat: promote desktop app as gwt") deleted the
-//! legacy TUI crate. See SPEC-1921 US-4 and FR-059.
+//! global config TOML (`~/.gwt/config.toml` by default). The load/save
+//! surface preserves unknown sibling tables (e.g. `models`) so third-party
+//! additions are not silently dropped on round-trip (SPEC-1921 FR-059).
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use gwt_config::atomic::write_atomic as write_atomic_shared;
 use serde::{Deserialize, Serialize};
 use toml::{Table, Value};
 use tracing::warn;
@@ -209,7 +206,12 @@ pub fn save_stored_custom_agents_to_path(
 
     let content = toml::to_string_pretty(&root)
         .map_err(|err| format!("failed to serialize config {}: {err}", path.display()))?;
-    write_atomic(path, &content)
+    // Delegate to the shared atomic writer so custom-agent configs pick up
+    // the same `0o600` permissions hardening that `gwt-config` applies to
+    // other secret-bearing files on Unix. SPEC-1921 FR-063: api_key values
+    // are persisted here.
+    write_atomic_shared(path, &content)
+        .map_err(|err| format!("failed to write config {}: {err}", path.display()))
 }
 
 fn validate_unique_custom_agents(agents: &[StoredCustomAgent]) -> Result<(), String> {
@@ -280,39 +282,6 @@ fn load_root_document(path: &Path) -> Result<Value, String> {
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
     toml::from_str(&content)
         .map_err(|err| format!("failed to parse config {}: {err}", path.display()))
-}
-
-fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create config dir {}: {err}", parent.display()))?;
-    }
-
-    let temp_path = temp_path_for(path);
-    std::fs::write(&temp_path, content)
-        .map_err(|err| format!("failed to write temp config {}: {err}", temp_path.display()))?;
-    std::fs::rename(&temp_path, path).map_err(|err| {
-        format!(
-            "failed to replace config {} with {}: {err}",
-            path.display(),
-            temp_path.display()
-        )
-    })
-}
-
-fn temp_path_for(path: &Path) -> PathBuf {
-    let suffix = format!(
-        "{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0)
-    );
-    path.with_file_name(format!(
-        ".{}.tmp.{suffix}",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ))
 }
 
 #[cfg(test)]

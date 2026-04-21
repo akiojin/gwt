@@ -5,7 +5,7 @@
 
 pub mod agent_config;
 pub mod ai_settings;
-mod atomic;
+pub mod atomic;
 pub mod error;
 pub mod profile;
 pub mod settings;
