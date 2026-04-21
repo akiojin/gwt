@@ -14,6 +14,8 @@ pub mod managed_assets;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
+pub mod profiles_dispatch;
+pub mod profiles_service;
 pub mod protocol;
 pub mod workspace;
 
@@ -63,8 +65,15 @@ pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
     WindowPreset, WindowSurface,
 };
+pub use profiles_service::{
+    add_disabled_env, add_profile, delete_disabled_env, delete_env_var, delete_profile,
+    load_profile_snapshot, set_env_var, switch_profile, update_disabled_env, update_env_var,
+    update_profile, ProfileEnvVarSource, ProfileEnvVarView, ProfileServiceError, ProfileSnapshot,
+    ProfileView,
+};
 pub use protocol::{
     AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FocusCycleDirection, FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
+    FocusCycleDirection, FrontendEvent, ProfileErrorCode, ProjectTabView, RecentProjectView,
+    WorkspaceView,
 };
 pub use workspace::WorkspaceState;

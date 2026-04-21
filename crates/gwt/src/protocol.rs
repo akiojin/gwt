@@ -13,6 +13,7 @@ use crate::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
     },
     preset::WindowPreset,
+    profiles_service::ProfileSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +163,63 @@ pub enum FrontendEvent {
         base_url: String,
         api_key: String,
     },
+    ListProfiles {
+        id: String,
+        selected_profile: Option<String>,
+    },
+    SwitchProfile {
+        id: String,
+        profile_name: String,
+    },
+    AddProfile {
+        id: String,
+        name: String,
+        description: String,
+    },
+    UpdateProfile {
+        id: String,
+        current_name: String,
+        name: String,
+        description: String,
+    },
+    DeleteProfile {
+        id: String,
+        profile_name: String,
+    },
+    SetProfileEnvVar {
+        id: String,
+        profile_name: String,
+        key: String,
+        value: String,
+    },
+    UpdateProfileEnvVar {
+        id: String,
+        profile_name: String,
+        current_key: String,
+        key: String,
+        value: String,
+    },
+    DeleteProfileEnvVar {
+        id: String,
+        profile_name: String,
+        key: String,
+    },
+    AddDisabledEnv {
+        id: String,
+        profile_name: String,
+        key: String,
+    },
+    UpdateDisabledEnv {
+        id: String,
+        profile_name: String,
+        current_key: String,
+        key: String,
+    },
+    DeleteDisabledEnv {
+        id: String,
+        profile_name: String,
+        key: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,6 +356,15 @@ pub enum BackendEvent {
         code: CustomAgentErrorCode,
         message: String,
     },
+    ProfileSnapshot {
+        id: String,
+        snapshot: ProfileSnapshot,
+    },
+    ProfileError {
+        id: String,
+        code: ProfileErrorCode,
+        message: String,
+    },
 }
 
 /// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
@@ -313,9 +380,23 @@ pub enum CustomAgentErrorCode {
     Probe,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileErrorCode {
+    Storage,
+    Duplicate,
+    InvalidInput,
+    NotFound,
+    Protected,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+
+    use crate::profiles_service::{
+        ProfileEnvVarSource, ProfileEnvVarView, ProfileSnapshot, ProfileView,
+    };
 
     use super::{BackendEvent, BranchEntriesPhase};
 
@@ -335,6 +416,43 @@ mod tests {
         assert_eq!(
             value.get("phase"),
             Some(&Value::String("inventory".to_string()))
+        );
+    }
+
+    #[test]
+    fn profile_snapshot_serializes_explicit_contract() {
+        let event = BackendEvent::ProfileSnapshot {
+            id: "profile-1".to_string(),
+            snapshot: ProfileSnapshot {
+                active: "default".to_string(),
+                selected: "default".to_string(),
+                profiles: vec![ProfileView {
+                    name: "default".to_string(),
+                    description: "Default profile".to_string(),
+                    active: true,
+                    env_vars: vec![ProfileEnvVarView {
+                        key: "API_URL".to_string(),
+                        value: "https://example.test".to_string(),
+                        source: ProfileEnvVarSource::Profile,
+                    }],
+                    disabled_env: vec!["SECRET".to_string()],
+                    merged_env: Vec::new(),
+                }],
+            },
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize profile snapshot");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("profile_snapshot".to_string()))
+        );
+        assert_eq!(
+            value.pointer("/snapshot/profiles/0/env_vars/0/source"),
+            Some(&Value::String("profile".to_string()))
+        );
+        assert_eq!(
+            value.pointer("/snapshot/profiles/0/disabled_env/0"),
+            Some(&Value::String("SECRET".to_string()))
         );
     }
 }
