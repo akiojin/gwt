@@ -6,7 +6,7 @@ gwt は Git worktree の管理と、`Claude Code` / `Codex` / `Gemini` /
 ## インストール
 
 [GitHub Releases](https://github.com/akiojin/gwt/releases) からお使いの
-プラットフォーム向けバイナリをダウンロードし、`PATH` に配置してください。
+プラットフォーム向けインストーラーまたは portable archive を取得します。
 
 ### macOS
 
@@ -20,7 +20,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-### Windows / Linux
+### Windows
+
+GitHub Releases から `gwt-windows-x86_64.msi` をダウンロードして実行します。
+インストーラーはユーザー `PATH` への `gwt` 追加と Start Menu エントリ作成を行います。
+
+古い per-machine 版 GWT が `Program Files` 配下に入っている場合は、先に Windows
+Settings からアンインストールしてから MSI を再実行してください。
+
+### Linux
 
 GitHub Releases からバイナリを取得して `PATH` に配置します。
 

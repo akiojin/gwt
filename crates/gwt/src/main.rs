@@ -7403,11 +7403,16 @@ fn main() -> wry::Result<()> {
         });
     }
 
-    let window = WindowBuilder::new()
+    let mut window_builder = WindowBuilder::new()
         .with_title(APP_NAME)
-        .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0))
-        .build(&event_loop)
-        .expect("window");
+        .with_inner_size(tao::dpi::LogicalSize::new(1440.0, 920.0));
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(icon) = gwt::windows_app_icon() {
+            window_builder = window_builder.with_window_icon(Some(icon));
+        }
+    }
+    let window = window_builder.build(&event_loop).expect("window");
     #[cfg(target_os = "macos")]
     let native_menu = {
         let native_menu = gwt::MacosNativeMenu::new();

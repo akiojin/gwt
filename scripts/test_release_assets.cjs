@@ -56,6 +56,24 @@ run("windows installer definition includes the gwtd companion binary", () => {
   assert.match(wix, /gwtd\.exe/);
 });
 
+run("windows icon assets are available for exe and installer branding", () => {
+  for (const asset of ["icon.ico", "icon.png", "icon.icns"]) {
+    const icon = path.join(__dirname, "..", "assets", "icons", asset);
+    assert.ok(fs.statSync(icon).size > 0, `${asset} should be present`);
+  }
+});
+
+run("windows installer is per-user and adds command and start menu entrypoints", () => {
+  const wix = fs.readFileSync(path.join(__dirname, "..", "wix", "main.wxs"), "utf8");
+  assert.match(wix, /Scope="perUser"/);
+  assert.match(wix, /LocalAppDataFolder/);
+  assert.match(wix, /Environment[^>]+Name="PATH"[^>]+Part="last"/);
+  assert.match(wix, /ProgramMenuFolder/);
+  assert.match(wix, /Shortcut[^>]+Id="GwtStartMenuShortcut"[^>]+Name="GWT"/);
+  assert.match(wix, /Icon[^>]+Id="GwtIcon\.exe"/);
+  assert.match(wix, /GWT_LEGACY_PER_MACHINE_EXE/);
+});
+
 run("release workflow packages gwtd alongside gwt", () => {
   const workflow = fs.readFileSync(
     path.join(__dirname, "..", ".github", "workflows", "release.yml"),
