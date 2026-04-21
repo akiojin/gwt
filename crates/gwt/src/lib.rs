@@ -14,6 +14,8 @@ pub mod managed_assets;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
+pub mod profiles_dispatch;
+pub mod profiles_service;
 pub mod protocol;
 pub mod workspace;
 
@@ -26,12 +28,12 @@ pub use branch_list::{
 };
 pub use branch_list::{list_branch_entries, list_branch_inventory, BranchListEntry, BranchScope};
 pub use custom_agents_service::{
-    add_from_claude_code_openai_compat_preset, delete_custom_agent, list_custom_agents,
-    list_presets, probe_backend, update_custom_agent, ClaudeCodeOpenaiCompatInput,
-    CustomAgentsServiceError, PresetDefinition, PresetId,
+    add_from_preset, delete_custom_agent, list_custom_agents, list_presets, probe_backend,
+    update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
+pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use knowledge_bridge::{
     load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
     KnowledgeKind, KnowledgeListItem,
@@ -63,8 +65,15 @@ pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
     WindowPreset, WindowSurface,
 };
+pub use profiles_service::{
+    add_disabled_env, add_profile, delete_disabled_env, delete_env_var, delete_profile,
+    load_profile_snapshot, set_env_var, switch_profile, update_disabled_env, update_env_var,
+    update_profile, ProfileEnvVarSource, ProfileEnvVarView, ProfileServiceError, ProfileSnapshot,
+    ProfileView,
+};
 pub use protocol::{
     AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FocusCycleDirection, FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
+    FocusCycleDirection, FrontendEvent, ProfileErrorCode, ProjectTabView, RecentProjectView,
+    WorkspaceView,
 };
 pub use workspace::WorkspaceState;

@@ -3,74 +3,22 @@
 //! Single library surface that composes:
 //!
 //! - `gwt-agent::store` for TOML persistence
-//! - `gwt-agent::presets::claude_code_openai_compat_preset` for preset seeding
+//! - `gwt-agent::presets` for preset catalog and seed dispatch
 //! - `gwt-ai::models_probe::list_model_ids_blocking` for `/v1/models` probe
 
 use std::path::Path;
 
 use gwt_agent::{
-    claude_code_openai_compat_preset, load_custom_agents_from_path,
-    load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, CustomCodingAgent,
-    StoredCustomAgent,
+    list_presets as agent_list_presets, load_custom_agents_from_path,
+    load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, seed_agent,
+    CustomCodingAgent, PresetDefinition, PresetError, PresetId, StoredCustomAgent,
 };
-use gwt_ai::models_probe::{is_valid_base_url, list_model_ids_blocking, ProbeError};
-use serde::{Deserialize, Serialize};
-
-/// Stable identifier for a built-in preset. Keep this set small — every new
-/// id is a frontend-visible contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PresetId {
-    /// Claude Code routed through an Anthropic Messages API compatible proxy
-    /// that speaks `/v1/models`. SPEC-1921 FR-062.
-    ClaudeCodeOpenaiCompat,
-}
-
-/// Metadata that the Settings UI shows in the "Add from preset" picker.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PresetDefinition {
-    /// Stable id used by the `AddFromPreset` request.
-    pub id: PresetId,
-    /// Display label rendered in the picker.
-    pub label: &'static str,
-    /// Short description rendered below the label in the picker.
-    pub description: &'static str,
-}
-
-impl PresetDefinition {
-    fn catalog() -> [PresetDefinition; 1] {
-        [PresetDefinition {
-            id: PresetId::ClaudeCodeOpenaiCompat,
-            label: "Claude Code (OpenAI-compat backend)",
-            description: concat!(
-                "Route Claude Code to an Anthropic Messages API compatible ",
-                "proxy backed by an OpenAI-compatible upstream."
-            ),
-        }]
-    }
-}
+use gwt_ai::models_probe::{list_model_ids_blocking, ProbeError};
+use serde_json::Value;
 
 /// Return the catalog of built-in presets.
 pub fn list_presets() -> Vec<PresetDefinition> {
-    PresetDefinition::catalog().to_vec()
-}
-
-/// Input payload for adding a custom agent from the
-/// `ClaudeCodeOpenaiCompat` preset. SPEC-1921 FR-060 / FR-062.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ClaudeCodeOpenaiCompatInput {
-    /// TOML key / stable id for the new custom agent. Must match
-    /// `CustomCodingAgent::validate()` (alphanumeric + `-`).
-    pub id: String,
-    /// Human-readable name shown in the agent picker.
-    pub display_name: String,
-    /// Upstream base URL (http/https).
-    pub base_url: String,
-    /// API key forwarded as `Bearer <api_key>` during `/v1/models` probe and
-    /// injected as `ANTHROPIC_API_KEY` at launch.
-    pub api_key: String,
-    /// Model ID chosen from the probe-populated dropdown.
-    pub default_model: String,
+    agent_list_presets()
 }
 
 /// Structured error variant exposed to the Settings UI.
@@ -99,6 +47,12 @@ impl From<String> for CustomAgentsServiceError {
     }
 }
 
+impl From<PresetError> for CustomAgentsServiceError {
+    fn from(value: PresetError) -> Self {
+        Self::InvalidInput(value.to_string())
+    }
+}
+
 /// List every custom agent currently stored in the given config file.
 pub fn list_custom_agents(
     config_path: &Path,
@@ -113,34 +67,21 @@ pub fn probe_backend(base_url: &str, api_key: &str) -> Result<Vec<String>, Probe
     list_model_ids_blocking(base_url, api_key)
 }
 
-/// Persist a new custom agent seeded from the Claude Code (OpenAI-compat
-/// backend) preset. Fails if the id already exists or fails validation.
+/// Persist a new custom agent seeded from the selected preset. Fails if the id
+/// already exists or the preset payload fails validation.
 /// Does NOT re-run the `/v1/models` probe; callers are expected to call
 /// [`probe_backend`] first and only invoke this function once the Save
 /// button's `last_probe_ok` gate is true (SPEC-1921 FR-061).
-pub fn add_from_claude_code_openai_compat_preset(
+pub fn add_from_preset(
     config_path: &Path,
-    input: &ClaudeCodeOpenaiCompatInput,
+    preset_id: PresetId,
+    payload: &Value,
 ) -> Result<CustomCodingAgent, CustomAgentsServiceError> {
-    validate_preset_input(input)?;
+    let agent = seed_agent(preset_id, payload)?;
 
     let mut entries = load_stored_custom_agents_from_path(config_path)?;
-    if entries.iter().any(|entry| entry.agent.id == input.id) {
-        return Err(CustomAgentsServiceError::Duplicate(input.id.clone()));
-    }
-
-    let agent = claude_code_openai_compat_preset(
-        input.id.clone(),
-        input.display_name.clone(),
-        input.base_url.clone(),
-        input.api_key.clone(),
-        input.default_model.clone(),
-    );
-    if !agent.validate() {
-        return Err(CustomAgentsServiceError::InvalidInput(format!(
-            "preset produced an invalid agent id: {}",
-            input.id
-        )));
+    if entries.iter().any(|entry| entry.agent.id == agent.id) {
+        return Err(CustomAgentsServiceError::Duplicate(agent.id));
     }
 
     entries.push(StoredCustomAgent::new(agent.clone()));
@@ -191,41 +132,10 @@ pub fn delete_custom_agent(
     Ok(())
 }
 
-fn require_non_empty(field: &str, value: &str) -> Result<(), CustomAgentsServiceError> {
-    if value.trim().is_empty() {
-        Err(CustomAgentsServiceError::InvalidInput(format!(
-            "{field} must not be empty"
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_preset_input(
-    input: &ClaudeCodeOpenaiCompatInput,
-) -> Result<(), CustomAgentsServiceError> {
-    require_non_empty("id", &input.id)?;
-    if !input.id.chars().all(|c| c.is_alphanumeric() || c == '-') {
-        return Err(CustomAgentsServiceError::InvalidInput(format!(
-            "id `{}` contains invalid characters (allowed: alphanumeric, `-`)",
-            input.id
-        )));
-    }
-    require_non_empty("display_name", &input.display_name)?;
-    if !is_valid_base_url(&input.base_url) {
-        return Err(CustomAgentsServiceError::InvalidInput(format!(
-            "base_url must start with http:// or https://, got: {}",
-            input.base_url
-        )));
-    }
-    require_non_empty("api_key", &input.api_key)?;
-    require_non_empty("default_model", &input.default_model)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_agent::ClaudeCodeOpenaiCompatInput;
 
     fn sample_input() -> ClaudeCodeOpenaiCompatInput {
         ClaudeCodeOpenaiCompatInput {
@@ -235,6 +145,21 @@ mod tests {
             api_key: "sk_cwPkycrPTZBYQ8vFXsc3O0wkrvt36VSh".to_string(),
             default_model: "openai/gpt-oss-20b".to_string(),
         }
+    }
+
+    fn sample_payload(input: &ClaudeCodeOpenaiCompatInput) -> Value {
+        serde_json::to_value(input).unwrap()
+    }
+
+    fn add_sample_from_preset(
+        path: &Path,
+        input: &ClaudeCodeOpenaiCompatInput,
+    ) -> Result<CustomCodingAgent, CustomAgentsServiceError> {
+        add_from_preset(
+            path,
+            PresetId::ClaudeCodeOpenaiCompat,
+            &sample_payload(input),
+        )
     }
 
     #[test]
@@ -251,7 +176,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let input = sample_input();
 
-        let agent = add_from_claude_code_openai_compat_preset(&path, &input).expect("save");
+        let agent = add_sample_from_preset(&path, &input).expect("save");
 
         assert_eq!(agent.id, input.id);
         assert_eq!(agent.env.len(), 13);
@@ -268,13 +193,50 @@ mod tests {
     }
 
     #[test]
+    fn generic_add_from_preset_creates_entry_and_persists_all_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let input = sample_input();
+        let payload = sample_payload(&input);
+
+        let agent =
+            add_from_preset(&path, PresetId::ClaudeCodeOpenaiCompat, &payload).expect("save");
+
+        assert_eq!(agent.id, input.id);
+        assert_eq!(agent.env.len(), 13);
+        assert_eq!(agent.env["ANTHROPIC_API_KEY"], input.api_key);
+        assert_eq!(agent.env["ANTHROPIC_BASE_URL"], input.base_url);
+
+        let reloaded = list_custom_agents(&path).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(
+            reloaded[0].env["ANTHROPIC_DEFAULT_OPUS_MODEL"],
+            input.default_model
+        );
+    }
+
+    #[test]
+    fn generic_add_from_preset_rejects_malformed_payload_as_invalid_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let payload = serde_json::json!({
+            "id": "claude-code-openai"
+        });
+
+        let err = add_from_preset(&path, PresetId::ClaudeCodeOpenaiCompat, &payload).unwrap_err();
+
+        assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
+        assert!(list_custom_agents(&path).unwrap().is_empty());
+    }
+
+    #[test]
     fn add_from_preset_rejects_duplicate_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let input = sample_input();
 
-        add_from_claude_code_openai_compat_preset(&path, &input).expect("first save");
-        let err = add_from_claude_code_openai_compat_preset(&path, &input).unwrap_err();
+        add_sample_from_preset(&path, &input).expect("first save");
+        let err = add_sample_from_preset(&path, &input).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::Duplicate(_)));
     }
 
@@ -284,7 +246,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut input = sample_input();
         input.id = String::new();
-        let err = add_from_claude_code_openai_compat_preset(&path, &input).unwrap_err();
+        let err = add_sample_from_preset(&path, &input).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
     }
 
@@ -294,7 +256,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut input = sample_input();
         input.id = "has spaces".to_string();
-        let err = add_from_claude_code_openai_compat_preset(&path, &input).unwrap_err();
+        let err = add_sample_from_preset(&path, &input).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
     }
 
@@ -304,7 +266,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut input = sample_input();
         input.base_url = "ws://example.com".to_string();
-        let err = add_from_claude_code_openai_compat_preset(&path, &input).unwrap_err();
+        let err = add_sample_from_preset(&path, &input).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
     }
 
@@ -314,7 +276,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut input = sample_input();
         input.api_key = String::new();
-        let err = add_from_claude_code_openai_compat_preset(&path, &input).unwrap_err();
+        let err = add_sample_from_preset(&path, &input).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
     }
 
@@ -324,7 +286,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut input = sample_input();
         input.default_model = String::new();
-        let err = add_from_claude_code_openai_compat_preset(&path, &input).unwrap_err();
+        let err = add_sample_from_preset(&path, &input).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::InvalidInput(_)));
     }
 
@@ -333,7 +295,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let input = sample_input();
-        let mut agent = add_from_claude_code_openai_compat_preset(&path, &input).unwrap();
+        let mut agent = add_sample_from_preset(&path, &input).unwrap();
 
         agent.display_name = "Renamed Claude".to_string();
         agent
@@ -354,7 +316,8 @@ mod tests {
     fn update_custom_agent_returns_not_found_for_unknown_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let mut agent = claude_code_openai_compat_preset("missing", "X", "http://a", "k", "m");
+        let mut agent =
+            gwt_agent::claude_code_openai_compat_preset("missing", "X", "http://a", "k", "m");
         agent.id = "missing".to_string();
         let err = update_custom_agent(&path, agent).unwrap_err();
         assert!(matches!(err, CustomAgentsServiceError::NotFound(_)));
@@ -365,7 +328,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let input = sample_input();
-        add_from_claude_code_openai_compat_preset(&path, &input).unwrap();
+        add_sample_from_preset(&path, &input).unwrap();
 
         delete_custom_agent(&path, &input.id).expect("delete");
         let reloaded = list_custom_agents(&path).unwrap();

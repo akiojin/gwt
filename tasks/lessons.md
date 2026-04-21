@@ -1,5 +1,70 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
+
+### 事象
+
+SPEC-1938 FR-014 は「Issue を選択した launch が成功した場合、local linkage store を更新する」
+を実装済みとしていたが、現在の `crates/gwt/src/main.rs` には
+`~/.gwt/cache/issue-links/<repo_hash>.json` への書き込みが存在しなかった。あわせて
+GUI Issue Bridge は `surface-knowledge` が titlebar/background と wheel routing の対象から漏れ、
+Markdown 詳細も `pre` でプレーン表示されていた。
+
+### 原因
+
+- SPEC/tasks の完了レポートを信じ、現行コードに FR-014 の書き込み経路が残っているかを
+  grep で確認していなかった。
+- Branches / File Tree の scroll surface 追加時に、同じ canvas window 系の
+  Knowledge Bridge surface を wheel ownership の対象に含めていなかった。
+- cache-backed detail の body を Markdown として扱う仕様なのに、WebView 側では
+  text node として安全に表示するだけで renderer 契約を固定していなかった。
+
+### 再発防止策
+
+1. SPEC の「実装済み」状態を見た場合でも、対象 FR の read/write path を `rg` で確認し、
+   code path が消えていないかを実装前チェックに含める。
+2. canvas window に新しい surface class を追加したら、window chrome、status/action style、
+   wheel ownership、cleanup state の対象 selector を同時に点検する。
+3. Markdown を扱う GUI surface では、plain text fallback ではなく renderer の有無を
+   embedded HTML contract test で固定する。
+
+## 2026-04-21 — fix(gui): Issue link は PTY spawn 成功後に記録する
+
+### 事象
+
+Issue Bridge から Launch Agent を開始したとき、worktree 準備と session 保存が成功した時点で
+`issue-links` を更新していた。後続の PTY / command spawn が失敗してもリンク済み扱いになるため、
+Knowledge Bridge や hook fallback が実際には起動していない branch を Issue linked branch として扱えた。
+また、Issue detail の Markdown renderer 化で `branches.join("\n")` の改行が paragraph として潰れ、
+複数 linked branch が 1 行表示に退行した。
+
+### 原因
+
+- Launch の「準備完了」と「プロセス起動成功」を同じ成功境界として扱っていた。
+- `spawn_process_window` 失敗時の状態を、Issue linkage store の更新条件に含めていなかった。
+- Markdown renderer 導入時に、既存の preformatted branch list 表示契約を section body の形式側で
+  Markdown list に変換していなかった。
+
+### 再発防止策
+
+1. 外部プロセス起動を伴う link / active session / lifecycle 副作用は、準備完了ではなく
+   実際の spawn 成功後にだけ実行する。
+2. 起動失敗テストでは、UI status だけでなく downstream store が更新されないことも確認する。
+3. plain text から Markdown 表示へ移行する section は、改行・list・code block など既存の
+   可読性契約を backend payload か renderer contract test で固定する。
+
+### 追記 (2026-04-21 review follow-up)
+
+未リンク状態での launch 成功を「何もしない」と扱うと、過去に保存された
+`issue-links` の branch→Issue mapping が残り、session は未リンクなのに hook fallback だけが
+古い Issue を復元する。`linked_issue_number = None` の launch 成功は、該当 branch の mapping を
+明示的に clear する契約として扱う。また Markdown renderer では、list の直後に空行なしで
+paragraph が続く場合、paragraph を積む前に pending list を flush しないと表示順が逆転する。
+
+再発防止策: Optional なリンク値は `None = no-op` と短絡せず、既存 store の clear が必要かを
+必ず確認する。Markdown parser の flush 順序は、最終 flush だけでなく block type が切り替わる
+瞬間の順序も contract test に含める。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象
