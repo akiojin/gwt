@@ -3186,7 +3186,7 @@ mod tests {
         events: &Arc<Mutex<Vec<UserEvent>>>,
         predicate: impl Fn(&[UserEvent]) -> bool,
     ) {
-        for _ in 0..200 {
+        for _ in 0..800 {
             {
                 let events = events.lock().expect("event log");
                 if predicate(&events) {
