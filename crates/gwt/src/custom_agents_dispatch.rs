@@ -21,6 +21,8 @@ use crate::{
 
 #[cfg(test)]
 thread_local! {
+    // Tests exercise dispatch helpers synchronously; spawned probe paths do
+    // not read this override.
     static TEST_HOME_DIR_OVERRIDE: std::cell::RefCell<Option<Option<PathBuf>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -35,7 +37,7 @@ fn missing_home_dir_error() -> CustomAgentsServiceError {
 
 #[cfg(test)]
 fn config_path_from_home(home: Option<PathBuf>) -> Result<PathBuf, CustomAgentsServiceError> {
-    home.map(|home| home.join(".gwt").join("config.toml"))
+    home.map(|home| Settings::global_config_path_for_home(&home))
         .ok_or_else(missing_home_dir_error)
 }
 
@@ -56,7 +58,7 @@ fn set_test_home_dir_override(home: Option<Option<PathBuf>>) {
 /// `./config.toml` would write `api_key` secrets into the current working
 /// directory, which diverges from the app's canonical `~/.gwt/config.toml`
 /// source of truth.
-pub fn config_path() -> Result<PathBuf, CustomAgentsServiceError> {
+fn config_path() -> Result<PathBuf, CustomAgentsServiceError> {
     #[cfg(test)]
     if let Some(home) = test_home_dir_override() {
         return config_path_from_home(home);
@@ -78,7 +80,7 @@ where
 }
 
 /// Map a service-layer error to a `CustomAgentError` event.
-pub fn error_to_event(err: CustomAgentsServiceError) -> BackendEvent {
+fn error_to_event(err: CustomAgentsServiceError) -> BackendEvent {
     use CustomAgentsServiceError as E;
     let code = match &err {
         E::Storage(_) => CustomAgentErrorCode::Storage,
