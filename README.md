@@ -7,9 +7,8 @@ such as `Claude Code`, `Codex`, `Gemini`, and `OpenCode`.
 
 ## Install
 
-Download the binary for your platform from
-[GitHub Releases](https://github.com/akiojin/gwt/releases) and place it in
-your `PATH`.
+Download the installer or portable archive for your platform from
+[GitHub Releases](https://github.com/akiojin/gwt/releases).
 
 ### macOS
 
@@ -25,7 +24,17 @@ Install a specific version:
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
 ```
 
-### Windows / Linux
+### Windows
+
+Download `gwt-windows-x86_64.msi` from GitHub Releases and run it. The
+installer adds `gwt` to your user `PATH` and creates a Start Menu entry.
+
+If an older per-machine GWT install exists under `Program Files`, a manual MSI
+launch is blocked to avoid side-by-side installs. Existing `Program Files`
+installs can migrate onto the per-user MSI line through `gwt update` or the
+in-app updater.
+
+### Linux
 
 Download the binary from GitHub Releases and add it to your `PATH`.
 

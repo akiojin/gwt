@@ -8,6 +8,7 @@ const {
   binaryNameForPlatform,
   bundleBinaryNamesForPlatform,
   installBundleFromArchive,
+  readReleaseContract,
   releaseAssetName,
 } = require("./release-assets.cjs");
 const postinstall = require("./postinstall.cjs");
@@ -27,11 +28,19 @@ function run(name, fn) {
 }
 
 run("release asset names match the public portable contract", () => {
-  assert.equal(releaseAssetName("darwin", "arm64"), "gwt-macos-arm64.tar.gz");
-  assert.equal(releaseAssetName("darwin", "x64"), "gwt-macos-x86_64.tar.gz");
-  assert.equal(releaseAssetName("linux", "arm64"), "gwt-linux-aarch64.tar.gz");
-  assert.equal(releaseAssetName("linux", "x64"), "gwt-linux-x86_64.tar.gz");
-  assert.equal(releaseAssetName("win32", "x64"), "gwt-windows-x86_64.zip");
+  const contract = readReleaseContract();
+  assert.equal(releaseAssetName("darwin", "arm64"), contract.portable_assets["macos-aarch64"]);
+  assert.equal(releaseAssetName("darwin", "x64"), contract.portable_assets["macos-x86_64"]);
+  assert.equal(releaseAssetName("linux", "arm64"), contract.portable_assets["linux-aarch64"]);
+  assert.equal(releaseAssetName("linux", "x64"), contract.portable_assets["linux-x86_64"]);
+  assert.equal(releaseAssetName("win32", "x64"), contract.portable_assets["windows-x86_64"]);
+});
+
+run("release asset helper reads the shared contract", () => {
+  const contract = readReleaseContract();
+  assert.equal(contract.portable_assets["windows-x86_64"], "gwt-windows-x86_64.zip");
+  assert.equal(contract.installer_assets.windows, "gwt-windows-x86_64.msi");
+  assert.deepEqual(contract.bundle_binaries.windows, ["gwt.exe", "gwtd.exe"]);
 });
 
 run("release helper keeps platform binary names stable", () => {
@@ -41,9 +50,10 @@ run("release helper keeps platform binary names stable", () => {
 });
 
 run("release helper keeps bundle binary names stable", () => {
-  assert.deepEqual(bundleBinaryNamesForPlatform("win32"), ["gwt.exe", "gwtd.exe"]);
-  assert.deepEqual(bundleBinaryNamesForPlatform("linux"), ["gwt", "gwtd"]);
-  assert.deepEqual(bundleBinaryNamesForPlatform("darwin"), ["gwt", "gwtd"]);
+  const contract = readReleaseContract();
+  assert.deepEqual(bundleBinaryNamesForPlatform("win32"), contract.bundle_binaries.windows);
+  assert.deepEqual(bundleBinaryNamesForPlatform("linux"), contract.bundle_binaries.linux);
+  assert.deepEqual(bundleBinaryNamesForPlatform("darwin"), contract.bundle_binaries.macos);
 });
 
 run("installer entrypoints are loadable under package type module", () => {
@@ -56,11 +66,41 @@ run("windows installer definition includes the gwtd companion binary", () => {
   assert.match(wix, /gwtd\.exe/);
 });
 
+run("windows icon assets are available for exe and installer branding", () => {
+  for (const asset of ["icon.ico", "icon.png", "icon.icns"]) {
+    const icon = path.join(__dirname, "..", "assets", "icons", asset);
+    assert.ok(fs.statSync(icon).size > 0, `${asset} should be present`);
+  }
+});
+
+run("windows installer is per-user and keeps updater migration on the MSI path", () => {
+  const wix = fs.readFileSync(path.join(__dirname, "..", "wix", "main.wxs"), "utf8");
+  assert.match(wix, /Scope="perUser"/);
+  assert.match(wix, /LocalAppDataFolder/);
+  assert.match(wix, /Environment[^>]+Name="PATH"[^>]+Part="last"/);
+  assert.match(wix, /ProgramMenuFolder/);
+  assert.match(wix, /Shortcut[^>]+Id="GwtStartMenuShortcut"[^>]+Name="GWT"/);
+  assert.match(wix, /Icon[^>]+Id="GwtIcon\.exe"/);
+  assert.match(wix, /GWT_LEGACY_PER_MACHINE_EXE/);
+  assert.match(wix, /GWT_ALLOW_LEGACY_MIGRATION/);
+  assert.match(
+    wix,
+    /Condition="NOT GWT_LEGACY_PER_MACHINE_EXE OR GWT_ALLOW_LEGACY_MIGRATION = &quot;1&quot;"/
+  );
+});
+
 run("release workflow packages gwtd alongside gwt", () => {
+  const contract = readReleaseContract();
   const workflow = fs.readFileSync(
     path.join(__dirname, "..", ".github", "workflows", "release.yml"),
     "utf8"
   );
+  for (const asset of Object.values(contract.portable_assets)) {
+    assert.match(workflow, new RegExp(asset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  for (const asset of Object.values(contract.installer_assets)) {
+    assert.match(workflow, new RegExp(asset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
   assert.match(workflow, /--bin gwt --bin gwtd/);
   assert.match(workflow, /Compress-Archive -Path @\("dist\/gwt\.exe", "dist\/gwtd\.exe"\)/);
   assert.match(workflow, /tar -czf \$\{\{ matrix\.archive_name \}\} gwt gwtd/);

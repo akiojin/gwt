@@ -7,27 +7,62 @@
     Manufacturer="GWT Contributors"
     UpgradeCode="55555555-5555-5555-5555-555555555555"
     InstallerVersion="500"
-    Scope="perMachine">
+    Scope="perUser">
     <SummaryInformation Description="Canvas-based floating terminal GUI for Git Worktree Manager" />
+    <Property Id="ARPPRODUCTICON" Value="GwtIcon.exe" />
+    <Property Id="GWT_ALLOW_LEGACY_MIGRATION" Secure="yes" />
+    <Property Id="GWT_LEGACY_PER_MACHINE_EXE">
+      <DirectorySearch Id="GwtLegacyProgramFilesSearch" Path="[ProgramFiles6432Folder]GWT" Depth="0">
+        <FileSearch Id="GwtLegacyProgramFilesExeSearch" Name="gwt.exe" />
+      </DirectorySearch>
+    </Property>
+    <Launch
+      Condition="NOT GWT_LEGACY_PER_MACHINE_EXE OR GWT_ALLOW_LEGACY_MIGRATION = &quot;1&quot;"
+      Message="A per-machine GWT installation was found in Program Files. Uninstall the existing GWT from Windows Settings, then run this installer again." />
     <MajorUpgrade DowngradeErrorMessage="A newer version of GWT is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="GWT" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="GwtProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="GWT" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="GWT" />
     </StandardDirectory>
 
     <Feature Id="MainFeature" Title="GWT" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="ShortcutComponents" />
     </Feature>
+
+    <Icon Id="GwtIcon.exe" SourceFile="assets/icons/icon.ico" />
   </Package>
 
   <Fragment>
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-      <Component>
+      <Component Id="GwtExecutableComponent">
         <File Id="GwtExecutable" Source="!(bindpath.gwt)gwt.exe" KeyPath="yes" />
+        <Environment Id="GwtUserPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" />
       </Component>
-      <Component>
+      <Component Id="GwtdExecutableComponent">
         <File Id="GwtdExecutable" Source="!(bindpath.gwt)gwtd.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="ShortcutComponents" Directory="ApplicationProgramsFolder">
+      <Component Id="GwtStartMenuShortcutComponent">
+        <Shortcut
+          Id="GwtStartMenuShortcut"
+          Name="GWT"
+          Description="Open GWT"
+          Target="[#GwtExecutable]"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="GwtIcon.exe"
+          IconIndex="0" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\GWT" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

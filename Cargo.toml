@@ -96,6 +96,12 @@ libc = "0.2"
 # HTTP client (blocking)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
+# Image decoding for native shell assets
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Windows executable resources
+winresource = "0.1.31"
+
 # WebSocket
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
