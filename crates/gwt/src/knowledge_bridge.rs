@@ -273,7 +273,7 @@ fn issue_detail_view(
     if let Some(branches) = linked_branches.filter(|branches| !branches.is_empty()) {
         sections.push(KnowledgeDetailSection {
             title: "Linked branches".to_string(),
-            body: branches.join("\n"),
+            body: linked_branches_markdown(branches),
         });
     }
     if sections.is_empty() {
@@ -297,6 +297,14 @@ fn issue_detail_view(
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
     }
+}
+
+fn linked_branches_markdown(branches: &[String]) -> String {
+    branches
+        .iter()
+        .map(|branch| format!("- `{}`", branch.replace('`', "\\`")))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
@@ -648,7 +656,7 @@ Extra context.
             .sections
             .iter()
             .any(|section| section.title == "Linked branches"
-                && section.body.contains("feature/coverage")));
+                && section.body == "- `feature/coverage`\n- `feature/coverage-followup`"));
 
         let spec_view = load_knowledge_bridge(&repo, KnowledgeKind::Spec, Some(22), false)
             .expect("spec bridge");
