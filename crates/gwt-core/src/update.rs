@@ -30,6 +30,7 @@ const DEFAULT_OWNER: &str = "akiojin";
 const DEFAULT_REPO: &str = "gwt";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 const DEFAULT_API_BASE_URL: &str = "https://api.github.com";
+const DOCKER_LINUX_PRIMARY_BINARY_NAME: &str = "gwt";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -116,6 +117,13 @@ pub enum PreparedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledDockerLinuxBundle {
+    pub version: String,
+    pub gwt_path: PathBuf,
+    pub gwtd_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ApplyPlan {
     Portable { url: String },
     Installer { url: String, kind: InstallerKind },
@@ -161,6 +169,31 @@ impl Platform {
         } else {
             Some(format!("gwt-{artifact}.tar.gz"))
         }
+    }
+}
+
+fn normalize_docker_linux_arch(raw: &str) -> Option<&'static str> {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+    {
+        "x86_64" | "amd64" | "x64" => Some("x86_64"),
+        "aarch64" | "arm64" => Some("aarch64"),
+        _ => None,
+    }
+}
+
+fn docker_linux_bundle_asset_name(arch: &str) -> Result<String, String> {
+    match normalize_docker_linux_arch(arch) {
+        Some("x86_64") => Ok("gwt-linux-x86_64.tar.gz".to_string()),
+        Some("aarch64") => Ok("gwt-linux-aarch64.tar.gz".to_string()),
+        Some(other) => Ok(format!("gwt-linux-{other}.tar.gz")),
+        None => Err(format!(
+            "Unsupported Docker Linux bundle architecture: {arch}. Expected x86_64/amd64 or aarch64/arm64"
+        )),
     }
 }
 
@@ -342,25 +375,7 @@ impl UpdateManager {
         let asset_name = asset_name_from_url(asset_url).unwrap_or_else(|| "gwt-update".to_string());
         let dest = update_dir.join(&asset_name);
 
-        let res = self
-            .client
-            .get(asset_url)
-            .send()
-            .map_err(|e| format!("Download failed: {e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("Download failed with status {}", res.status()));
-        }
-
-        let mut file =
-            fs::File::create(&dest).map_err(|e| format!("Failed to create payload file: {e}"))?;
-        let mut reader = res;
-        io::copy(&mut reader, &mut file).map_err(|e| format!("Failed to write payload: {e}"))?;
-
-        let size = fs::metadata(&dest).map(|m| m.len()).unwrap_or_default();
-        if size == 0 {
-            let _ = fs::remove_file(&dest);
-            return Err("Downloaded payload is empty".to_string());
-        }
+        self.download_asset(asset_url, &dest)?;
 
         let dest_str = dest.to_string_lossy().to_string();
         if dest_str.ends_with(".tar.gz") || dest_str.ends_with(".zip") {
@@ -402,6 +417,108 @@ impl UpdateManager {
         // Portable direct binary.
         ensure_executable(&dest)?;
         Ok(PreparedPayload::PortableBinary { path: dest })
+    }
+
+    pub fn install_latest_docker_linux_bundle(
+        &self,
+        target_arch: &str,
+        target_gwt: &Path,
+        target_gwtd: &Path,
+    ) -> Result<InstalledDockerLinuxBundle, String> {
+        let release = self.fetch_latest_release()?;
+        let version = parse_tag_version(&release.tag_name)
+            .ok_or_else(|| {
+                format!(
+                    "Failed to parse release tag as version: {}",
+                    release.tag_name
+                )
+            })?
+            .to_string();
+        let asset_name = docker_linux_bundle_asset_name(target_arch)?;
+        let asset_url = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == asset_name)
+            .map(|asset| asset.browser_download_url.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Latest release {} does not include required Docker bundle asset {}",
+                    release.html_url, asset_name
+                )
+            })?;
+
+        self.install_docker_linux_bundle_from_url(
+            &version,
+            &asset_name,
+            asset_url,
+            target_gwt,
+            target_gwtd,
+        )
+    }
+
+    fn install_docker_linux_bundle_from_url(
+        &self,
+        version: &str,
+        asset_name: &str,
+        asset_url: &str,
+        target_gwt: &Path,
+        target_gwtd: &Path,
+    ) -> Result<InstalledDockerLinuxBundle, String> {
+        let update_dir = self
+            .updates_dir
+            .join("docker")
+            .join(format!("v{}", version.trim().trim_start_matches('v')));
+        fs::create_dir_all(&update_dir).map_err(|e| format!("Failed to create update dir: {e}"))?;
+
+        let dest = update_dir.join(asset_name);
+        self.download_asset(asset_url, &dest)?;
+
+        let extract_dir = update_dir.join("extract");
+        let _ = fs::remove_dir_all(&extract_dir);
+        fs::create_dir_all(&extract_dir)
+            .map_err(|e| format!("Failed to create extract dir: {e}"))?;
+        extract_archive(&dest, &extract_dir)?;
+        let (gwt_source, gwtd_source) =
+            find_extracted_bundle_binaries(&extract_dir, DOCKER_LINUX_PRIMARY_BINARY_NAME)?;
+        ensure_executable(&gwt_source)?;
+        ensure_executable(&gwtd_source)?;
+        replace_executables_with_retry(&[
+            (target_gwtd, gwtd_source.as_path()),
+            (target_gwt, gwt_source.as_path()),
+        ])?;
+
+        Ok(InstalledDockerLinuxBundle {
+            version: version.to_string(),
+            gwt_path: target_gwt.to_path_buf(),
+            gwtd_path: target_gwtd.to_path_buf(),
+        })
+    }
+
+    fn download_asset(&self, asset_url: &str, dest: &Path) -> Result<(), String> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create payload dir: {e}"))?;
+        }
+
+        let res = self
+            .client
+            .get(asset_url)
+            .send()
+            .map_err(|e| format!("Download failed: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("Download failed with status {}", res.status()));
+        }
+
+        let mut file =
+            fs::File::create(dest).map_err(|e| format!("Failed to create payload file: {e}"))?;
+        let mut reader = res;
+        io::copy(&mut reader, &mut file).map_err(|e| format!("Failed to write payload: {e}"))?;
+
+        let size = fs::metadata(dest).map(|m| m.len()).unwrap_or_default();
+        if size == 0 {
+            let _ = fs::remove_file(dest);
+            return Err("Downloaded payload is empty".to_string());
+        }
+        Ok(())
     }
 
     pub fn write_restart_args_file(&self, path: &Path, args: Vec<String>) -> Result<(), String> {
@@ -1515,6 +1632,35 @@ mod tests {
         writer.finish().expect("finish zip").into_inner()
     }
 
+    fn tar_gz_bundle_body(primary: &[u8], daemon: &[u8]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let encoder = flate2::write::GzEncoder::new(cursor, flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(primary.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "dist/gwt-linux-x86_64/gwt", primary)
+            .expect("append gwt");
+
+        let mut daemon_header = tar::Header::new_gnu();
+        daemon_header.set_size(daemon.len() as u64);
+        daemon_header.set_mode(0o755);
+        daemon_header.set_cksum();
+        archive
+            .append_data(&mut daemon_header, "dist/gwt-linux-x86_64/gwtd", daemon)
+            .expect("append gwtd");
+
+        archive
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip")
+            .into_inner()
+    }
+
     #[test]
     fn parse_tag_version_accepts_v_prefix() {
         assert_eq!(parse_tag_version("v1.2.3"), Some(Version::new(1, 2, 3)));
@@ -1817,6 +1963,19 @@ mod tests {
             windows_x64.portable_asset_name().as_deref(),
             Some("gwt-windows-x86_64.zip")
         );
+    }
+
+    #[test]
+    fn docker_linux_bundle_asset_name_normalizes_common_arch_aliases() {
+        assert_eq!(
+            docker_linux_bundle_asset_name("amd64").as_deref(),
+            Ok("gwt-linux-x86_64.tar.gz")
+        );
+        assert_eq!(
+            docker_linux_bundle_asset_name("arm64/v8").as_deref(),
+            Ok("gwt-linux-aarch64.tar.gz")
+        );
+        assert!(docker_linux_bundle_asset_name("ppc64le").is_err());
     }
 
     #[test]
@@ -2319,6 +2478,94 @@ mod tests {
         let empty_url = serve_once("/empty.bin", "200 OK", "application/octet-stream", vec![]);
         let err = mgr.prepare_update("99.0.6", &empty_url).unwrap_err();
         assert!(err.contains("Downloaded payload is empty"));
+    }
+
+    #[test]
+    fn install_latest_docker_linux_bundle_downloads_release_tarball_to_cache_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let tarball_url = serve_once(
+            "/downloads/gwt-linux-x86_64.tar.gz",
+            "200 OK",
+            "application/gzip",
+            tar_gz_bundle_body(b"docker-gwt", b"docker-gwtd"),
+        );
+        let release_body = format!(
+            r#"{{
+  "tag_name": "v99.1.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v99.1.0",
+  "assets": [
+    {{
+      "name": "gwt-linux-x86_64.tar.gz",
+      "browser_download_url": "{tarball_url}"
+    }}
+  ]
+}}"#
+        );
+        let base_url = serve_once("/", "200 OK", "application/json", release_body.into_bytes());
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let target_gwt = temp.path().join(".gwt").join("bin").join("gwt-linux");
+        let target_gwtd = temp.path().join(".gwt").join("bin").join("gwtd-linux");
+
+        let installed = mgr
+            .install_latest_docker_linux_bundle("x86_64", &target_gwt, &target_gwtd)
+            .expect("install docker bundle");
+
+        assert_eq!(installed.version, "99.1.0");
+        assert_eq!(installed.gwt_path, target_gwt);
+        assert_eq!(installed.gwtd_path, target_gwtd);
+        assert_eq!(fs::read(&installed.gwt_path).unwrap(), b"docker-gwt");
+        assert_eq!(fs::read(&installed.gwtd_path).unwrap(), b"docker-gwtd");
+    }
+
+    #[test]
+    fn install_latest_docker_linux_bundle_uses_requested_arch_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let x64_url = serve_once(
+            "/downloads/gwt-linux-x86_64.tar.gz",
+            "200 OK",
+            "application/gzip",
+            tar_gz_bundle_body(b"x64-gwt", b"x64-gwtd"),
+        );
+        let arm64_url = serve_once(
+            "/downloads/gwt-linux-aarch64.tar.gz",
+            "200 OK",
+            "application/gzip",
+            tar_gz_bundle_body(b"arm64-gwt", b"arm64-gwtd"),
+        );
+        let release_body = format!(
+            r#"{{
+  "tag_name": "v99.1.1",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v99.1.1",
+  "assets": [
+    {{
+      "name": "gwt-linux-x86_64.tar.gz",
+      "browser_download_url": "{x64_url}"
+    }},
+    {{
+      "name": "gwt-linux-aarch64.tar.gz",
+      "browser_download_url": "{arm64_url}"
+    }}
+  ]
+}}"#
+        );
+        let base_url = serve_once("/", "200 OK", "application/json", release_body.into_bytes());
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let target_gwt = temp.path().join(".gwt").join("bin").join("gwt-linux");
+        let target_gwtd = temp.path().join(".gwt").join("bin").join("gwtd-linux");
+
+        let installed = mgr
+            .install_latest_docker_linux_bundle("aarch64", &target_gwt, &target_gwtd)
+            .expect("install docker bundle for aarch64");
+
+        assert_eq!(installed.version, "99.1.1");
+        assert_eq!(fs::read(&installed.gwt_path).unwrap(), b"arm64-gwt");
+        assert_eq!(fs::read(&installed.gwtd_path).unwrap(), b"arm64-gwtd");
     }
 
     #[test]

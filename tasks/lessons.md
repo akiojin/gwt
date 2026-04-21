@@ -1,5 +1,182 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(docker): gwt generated compose mount は user override と分離して所有する
+
+### 事象
+
+Issue #2035 の PR review で、gwt が `docker-compose.override.yml` を直接再生成しており、
+repo 利用者が自分で管理している override を launch 時に上書きし得ることが分かった。
+
+### 原因
+
+- generated mount layer と user-managed override layer の ownership を分離せず、
+  両方を同じ `docker-compose.override.yml` に載せていた。
+- generated file の更新要件だけを見て、既存の user file を gwt が触ってよいという
+  誤った前提で実装していた。
+
+### 再発防止策
+
+1. runtime が自動生成する compose layer は専用 file
+   (`docker-compose.gwt.override.yml`) に分離し、`docker-compose.override.yml` は
+   user-managed file として扱う。
+2. compose file の layering 順を `base -> user override -> generated override` で固定し、
+   既存 repo の local customization を壊さない contract test を追加する。
+3. 既に field に出た legacy generated override は header で判定して読み飛ばし、
+   stale mount を二重適用しない。
+
+## 2026-04-21 — fix(docker): explicit compose platform は unsupported 値で host fallback しない
+
+### 事象
+
+Issue #2035 の PR review で、compose service に `platform:` が明示されていても、
+unsupported value を parse できない場合に host arch fallback していることが分かった。
+そのまま進むと Docker bundle installer が誤った asset を選び、mount 後に
+`exec format error` を起こし得る。
+
+### 原因
+
+- `platform:` の有無と parse 成否を同じ `Option` に畳み込み、`None` を
+  「platform 未指定」と「unsupported platform」の両方に使っていた。
+- fallback を便利側に寄せたまま、explicit user input の validation failure を
+  runtime error として表に出していなかった。
+
+### 再発防止策
+
+1. compose service が `platform:` を明示した場合は、normalize 失敗を
+   即座にエラーとして返し、host fallback は未指定時だけに限定する。
+2. supported arch alias (`x86_64/amd64/x64`, `aarch64/arm64`) と unsupported
+   platform failure の両方を regression test で固定する。
+3. user-supplied runtime selector を parse する helper では、「未指定」と
+   「不正値」を別の戻り値で表現する。
+
+## 2026-04-21 — fix(docker): Linux bundle asset は host 固定ではなく target/container arch で選ぶ
+
+### 事象
+
+Issue #2035 の review follow-up で、Docker bundle auto-download が常に
+`gwt-linux-x86_64.tar.gz` を選んでいた。Apple Silicon / ARM Linux host で
+native arm64 container を起動すると、`/usr/local/bin/gwt` に mount された
+binary が `exec format error` で起動できなかった。
+
+### 原因
+
+- Docker bundle installer が target architecture を引数で受け取らず、
+  release asset 名を x86_64 固定文字列で引いていた。
+- compose service の `platform:` を parse しておらず、container target arch を
+  launch plan に保持していなかった。
+
+### 再発防止策
+
+1. Docker 向け release asset を選ぶ API は、bundle path だけでなく target arch を
+   明示的に受け取る。
+2. compose service が `platform:` を持つ場合はそこから container arch を解決し、
+   未指定時のみ host arch fallback を使う。
+3. x86_64 と aarch64 の両 asset を含む release fixture で、要求した arch の
+   tarball が実際に選ばれる regression test を追加する。
+
+## 2026-04-21 — fix(docker): service 名を埋め込む auto-generated override は内容差分で再生成する
+
+### 事象
+
+Issue #2035 の review follow-up で、`docker-compose.override.yml` が最初に起動した
+service 名のまま固定されることが分かった。multi-service repo で別 service を
+選ぶと、`GWT_BIN_PATH=/usr/local/bin/gwt` だけが新 service に渡り、対応する mount
+は stale override 側の旧 service に残ったままで binary が見つからなかった。
+
+### 原因
+
+- override file の生成条件が `!exists()` だけで、service 名や mount 内容が
+  現在の launch target と一致するかを比較していなかった。
+- 「auto-generated file だから毎回同じ内容」という前提で create-only contract に
+  してしまい、service ごとに内容が変わることを見落としていた。
+
+### 再発防止策
+
+1. service 名や mount path を埋め込む auto-generated file は、存在有無だけでなく
+   expected content との差分で write する。
+2. multi-service repo の regression test では、同じ repo で service を切り替えた
+   2 回目の launch でも generated override が更新されることを確認する。
+3. runtime setup が「初回だけ create」なのか「毎回 reconcile」なのかを review 時に
+   明示し、入力パラメータが変わる file を create-only にしない。
+
+## 2026-04-21 — fix(docker): 生成した compose override は全 Docker compose 経路へ流す
+
+### 事象
+
+Issue #2035 のレビューで、`docker-compose.override.yml` 自体は生成していたが、
+初回 `docker compose up` と後続の `exec` / status 判定が base compose file
+だけを見ており、`/usr/local/bin/gwt` と `/usr/local/bin/gwtd` の bind mount が
+実際には有効になっていなかった。加えて、Docker が存在しない mount source を
+ディレクトリとして自動生成したケースを `exists()` で有効バイナリ扱いしていた。
+
+### 原因
+
+- Docker bundle setup が override path を返さず、launch 側も compose file を
+  単一パスで保持していたため、runtime setup で生成した override を
+  `up` / `restart` / `exec` / probe へ伝播できなかった。
+- Linux bundle cache の健全性判定が `exists()` ベースで、regular file かどうかと
+  中身があるかを確認していなかった。
+
+### 再発防止策
+
+1. runtime 中に compose override を生成する処理は、生成直後の `up` だけでなく
+   status / recreate / exec / command probe まで同じ compose file set
+   (`-f base -f override`) を使う contract test を追加する。
+2. bind mount source として再利用するキャッシュ判定は `exists()` を使わず、
+   regular file かつ非空であることを確認する。
+3. Docker が placeholder directory を作る失敗パスを RED test で固定し、
+   installer の再実行と override 生成の両方を確認してから完了とする。
+
+## 2026-04-21 — test(gwt-docker): Windows の fake docker は Git Bash に渡す script path と埋め込み path を揃える
+
+### 事象
+
+`cargo test -p gwt-docker` を Windows で実行すると、fake docker script を
+そのまま実行していた既存テストが `%1 is not a valid Win32 application`
+(`os error 193`) でまとまって失敗した。Git Bash wrapper を足した後も、
+`\\?\` 付きの Windows path をそのまま `/...` へ変換してしまい、
+`docker.sh: No such file or directory` で落ちた。
+
+### 原因
+
+- test harness が POSIX shell script を前提にしており、Windows 実行パスを
+  用意していなかった。
+- shell script 内に埋め込む log file path と wrapper から Git Bash へ渡す
+  script path の両方で、Windows path をそのまま使っていた。
+
+### 再発防止策
+
+1. Windows で shell-script based fake command を使う test harness では、
+   wrapper (`.cmd`) と Git Bash path 解決を helper に閉じ込める。
+2. shell script に埋め込む file path は helper 経由で Git Bash 互換
+   (`/c/...`) へ正規化し、`\\?\` prefix を落としてから使う。
+3. cross-platform にした test helper を触ったら、対象 crate の full test を
+   Windows でも 1 回回して `os error 193` 系の latent failure を残さない。
+
+## 2026-04-21 — test: process-global HOME/USERPROFILE を読む assertion は並列テスト中に再読しない
+
+### 事象
+
+Issue #2035 の全体検証で `cargo test -p gwt-core -p gwt` を実行したところ、
+`paths::tests::gwt_config_path_ends_with_config_toml` などが失敗した。失敗した
+assertion は `let p = gwt_config_path(); assert!(p.starts_with(gwt_home()))` のように、
+同一 assertion 内で process-global な home 解決を 2 回読んでいた。
+
+### 原因
+
+別の並列テストが `HOME` / `USERPROFILE` を一時変更しており、`p` を作った時点の
+home と assertion 側で再読した `gwt_home()` が一致しなかった。`gwt_home()` 自体の
+契約ではなく、テスト assertion が process-global env の再読に依存していた。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` など process-global env に依存する path test では、
+   1 つの assertion 内で public resolver を再読して比較しない。
+2. path helper の layout test は、必要なら `.gwt/...` の suffix や file name など
+   env 変更に影響されない構造を検証する。
+3. env を実際に mutate するテストを追加する場合は、同じ process 内の path test と
+   競合しないよう、共有 lock か再読しない assertion 形式を先に確認する。
+
 ## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
 
 ### 事象
