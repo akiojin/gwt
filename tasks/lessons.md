@@ -1,5 +1,35 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(review): vt100 shrink crash は parser 再構築で回避しない
+
+### 事象
+
+`Pane::resize()` の release crash workaround として、narrow resize 時に
+新しい `vt100::Parser` を作って可視行だけを replay していた。
+その結果、review で 2 件の回帰が見つかった:
+
+- alternate screen (`CSI ?1049h`) 中に shrink すると、saved primary grid と
+  `MODE_ALTERNATE_SCREEN` が落ち、`CSI ?1049l` で shell buffer へ戻れない。
+- trailing wide glyph を plain text で replay し直すため、その行の SGR /
+  background 属性が default に戻る。
+
+### 原因
+
+- 根本原因は gwt 側ではなく `vt100::row::resize()` にあり、列 shrink 時に
+  wide glyph の continuation cell だけが落ちても leading cell を消していなかった。
+- 依存 crate の内部不整合を、可視画面の再構築で外から補正しようとしたため、
+  `vt100` が内部に持つ alternate grid、saved cursor、active attributes を
+  再現できなかった。
+
+### 再発防止策
+
+1. terminal emulator の内部 state bug は、まず依存側の state machine / data
+   structureを patch できないか確認し、可視画面の replay workaround を最終手段にする。
+2. resize workaround を入れる前に、alternate screen restore と truncated row
+   attribute preservation を回帰テストに含める。
+3. `vt100` の shrink 修正では `Row::truncate()` 相当の sanitization を使い、
+   orphan wide glyph だけを消して残る cell 属性は保持する。
+
 ## 2026-04-21 — fix: release latest のクラッシュは修正ブランチを develop / release ベースに載せてから確認する
 
 ### 事象

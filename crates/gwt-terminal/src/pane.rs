@@ -33,91 +33,8 @@ pub struct Pane {
     line_buf: String,
 }
 
-fn cursor_move_escape(row: u16, col: u16) -> String {
-    format!("\x1b[{};{}H", row + 1, col + 1)
-}
-
-fn cursor_visibility_escape(hide_cursor: bool) -> &'static [u8] {
-    if hide_cursor {
-        b"\x1b[?25l"
-    } else {
-        b"\x1b[?25h"
-    }
-}
-
-fn row_has_truncated_trailing_wide_glyph(screen: &vt100::Screen, row: u16, cols: u16) -> bool {
-    cols > 0
-        && screen
-            .cell(row, cols - 1)
-            .is_some_and(|cell| cell.is_wide())
-}
-
-fn plain_row_contents(screen: &vt100::Screen, row: u16, cols: u16) -> String {
-    let mut contents = String::new();
-    let mut prev_col = 0;
-    let mut col = 0;
-
-    while col < cols {
-        let Some(cell) = screen.cell(row, col) else {
-            break;
-        };
-        if cell.is_wide_continuation() {
-            col += 1;
-            continue;
-        }
-        if cell.is_wide() && col + 1 >= cols {
-            break;
-        }
-        if cell.has_contents() {
-            for _ in prev_col..col {
-                contents.push(' ');
-            }
-            contents.push_str(cell.contents());
-            prev_col = col + if cell.is_wide() { 2 } else { 1 };
-        }
-        col += 1;
-    }
-
-    contents
-}
-
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
-    let (current_rows, current_cols) = parser.screen().size();
-    if cols >= current_cols {
-        parser.screen_mut().set_size(rows, cols);
-        return;
-    }
-
-    // vt100 0.16 can leave a trailing wide glyph without its continuation
-    // cell when shrinking columns in place. Rebuild the visible screen at the
-    // narrower width so follow-up erase/delete sequences stay valid.
-    let screen = parser.screen().clone();
-    let formatted_rows: Vec<Vec<u8>> = screen.rows_formatted(0, cols).collect();
-    let mut rebuilt = vt100::Parser::new(current_rows, cols, 0);
-    for (row, formatted_row) in formatted_rows.into_iter().enumerate() {
-        let row = row as u16;
-        rebuilt.process(cursor_move_escape(row, 0).as_bytes());
-        if row_has_truncated_trailing_wide_glyph(&screen, row, cols) {
-            let plain_row = plain_row_contents(&screen, row, cols);
-            rebuilt.process(plain_row.as_bytes());
-        } else {
-            rebuilt.process(&formatted_row);
-        }
-    }
-    rebuilt.process(&screen.input_mode_formatted());
-    rebuilt.process(cursor_visibility_escape(screen.hide_cursor()));
-
-    let (cursor_row, cursor_col) = screen.cursor_position();
-    let clamped_row = cursor_row.min(current_rows.saturating_sub(1));
-    let clamped_col = cursor_col.min(cols.saturating_sub(1));
-    rebuilt.process(cursor_move_escape(clamped_row, clamped_col).as_bytes());
-    rebuilt.process(&screen.attributes_formatted());
-
-    if rows != current_rows {
-        rebuilt.screen_mut().set_size(rows, cols);
-    }
-
-    *parser = rebuilt;
+    parser.screen_mut().set_size(rows, cols);
 }
 
 impl Pane {
@@ -412,6 +329,63 @@ mod tests {
             "shrinking to 82 columns must not leave a wide glyph at index 81"
         );
         assert_eq!(parser.screen().size(), (1, 82));
+    }
+
+    #[test]
+    fn test_resize_parser_preserves_alternate_screen_restore_state() {
+        let mut parser = vt100::Parser::new(2, 4, 0);
+        parser.process(b"sh\r\n$ ");
+        assert_eq!(parser.screen().cursor_position(), (1, 2));
+
+        parser.process(b"\x1b[?1049h");
+        assert!(parser.screen().alternate_screen());
+        parser.process("ab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 2, 3);
+
+        assert!(
+            parser.screen().alternate_screen(),
+            "narrow resize must keep alternate-screen mode active until ?1049l"
+        );
+        parser.process(b"\x1b[?1049l");
+
+        assert!(
+            !parser.screen().alternate_screen(),
+            "alternate-screen mode must clear only after ?1049l"
+        );
+        assert!(
+            parser.screen().contents().contains("sh"),
+            "restored primary grid should still contain the shell buffer"
+        );
+        assert_eq!(
+            parser.screen().cursor_position(),
+            (1, 2),
+            "saved primary cursor must survive alternate-screen resize"
+        );
+    }
+
+    #[test]
+    fn test_resize_parser_preserves_row_attributes_when_truncating_wide_glyph() {
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process("\x1b[31;44mab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 1, 3);
+
+        let first = parser.screen().cell(0, 0).expect("cell 0");
+        let second = parser.screen().cell(0, 1).expect("cell 1");
+        let trailing = parser.screen().cell(0, 2).expect("cell 2");
+
+        assert_eq!(first.contents(), "a");
+        assert_eq!(second.contents(), "b");
+        assert!(
+            !trailing.has_contents(),
+            "truncated wide glyph must be cleared"
+        );
+
+        for cell in [first, second, trailing] {
+            assert_eq!(cell.fgcolor(), vt100::Color::Idx(1));
+            assert_eq!(cell.bgcolor(), vt100::Color::Idx(4));
+        }
     }
 
     #[test]
