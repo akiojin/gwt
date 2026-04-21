@@ -247,17 +247,21 @@ where
         }),
         WindowPreset::Claude | WindowPreset::Codex => {
             let command = preset.command_name().expect("command preset");
-            if command_exists(command) {
-                Ok(LaunchSpec {
-                    title: preset.title().to_string(),
+            if !command_exists(command) {
+                return Err(PresetResolveError::CommandNotFound {
                     command: command.to_string(),
-                    args: Vec::new(),
-                })
-            } else {
-                Err(PresetResolveError::CommandNotFound {
-                    command: command.to_string(),
-                })
+                });
             }
+            let agent_id = match preset {
+                WindowPreset::Codex => gwt_agent::AgentId::Codex,
+                WindowPreset::Claude => gwt_agent::AgentId::ClaudeCode,
+                _ => unreachable!("outer match narrows to Claude/Codex"),
+            };
+            Ok(LaunchSpec {
+                title: preset.title().to_string(),
+                command: command.to_string(),
+                args: gwt_agent::canonical_launch_args(&agent_id),
+            })
         }
         WindowPreset::Agent
         | WindowPreset::FileTree
@@ -362,6 +366,185 @@ mod tests {
             PresetResolveError::CommandNotFound {
                 command: "codex".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn preset_metadata_exposes_titles_prefixes_and_defaults() {
+        assert_eq!(WindowPreset::ALL.len(), 13);
+        assert_eq!(WindowPreset::Issue.title(), "Issue");
+        assert_eq!(WindowPreset::Spec.title(), "SPEC");
+        assert_eq!(WindowPreset::Pr.title(), "PR");
+        assert_eq!(WindowPreset::Board.id_prefix(), "board");
+        assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
+        assert_eq!(WindowPreset::Memo.surface(), WindowSurface::Mock);
+        assert_eq!(WindowPreset::Logs.default_size(), (420.0, 300.0));
+        assert_eq!(WindowPreset::Shell.default_size(), (720.0, 420.0));
+        assert_eq!(WindowPreset::FileTree.default_size(), (420.0, 520.0));
+        assert_eq!(WindowPreset::Branches.default_size(), (520.0, 420.0));
+        assert_eq!(WindowPreset::Shell.command_name(), None);
+        assert_eq!(WindowPreset::Claude.command_name(), Some("claude"));
+        assert_eq!(WindowPreset::Codex.command_name(), Some("codex"));
+        assert!(!WindowPreset::Issue.requires_process());
+        assert_eq!(
+            WindowPreset::Profile.subtitle(),
+            "Placeholder profile surface"
+        );
+    }
+
+    #[test]
+    fn shell_detection_falls_back_and_errors_when_no_shell_exists() {
+        let shell = detect_shell_program_with(Some("/bin/fish"), false, |candidate| {
+            candidate == "/bin/bash"
+        })
+        .expect("fallback shell");
+        assert_eq!(shell.command, "/bin/bash");
+
+        let error = detect_shell_program_with(None, false, |_| false)
+            .expect_err("missing shell should error");
+        assert_eq!(error, PresetResolveError::ShellNotFound);
+    }
+
+    #[test]
+    fn resolve_launch_spec_rejects_non_process_presets_and_runtime_command_handles_paths() {
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec!["-l".to_string()],
+        };
+        let error = resolve_launch_spec_with(WindowPreset::Issue, &shell, |_| true)
+            .expect_err("issue preset is not launchable");
+        assert_eq!(
+            error,
+            PresetResolveError::NotLaunchable {
+                preset: "Issue".to_string()
+            }
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = temp
+            .path()
+            .join(if cfg!(windows) { "tool.cmd" } else { "tool" });
+        std::fs::write(&tool, b"echo").expect("write tool");
+        assert!(runtime_command_exists(&tool.display().to_string()));
+        assert!(!runtime_command_exists(
+            &temp.path().join("missing").display().to_string()
+        ));
+    }
+
+    #[test]
+    fn window_preset_catalog_covers_all_titles_surfaces_and_commands() {
+        let mut prefixes = std::collections::HashSet::new();
+
+        for preset in WindowPreset::ALL {
+            assert!(
+                prefixes.insert(preset.id_prefix()),
+                "duplicate id prefix for {preset:?}"
+            );
+            assert!(!preset.title().is_empty());
+            assert!(!preset.subtitle().is_empty());
+
+            let (width, height) = preset.default_size();
+            assert!(width >= 420.0);
+            assert!(height >= 300.0);
+
+            match preset {
+                WindowPreset::Shell => {
+                    assert_eq!(preset.surface(), WindowSurface::Terminal);
+                    assert!(preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Claude => {
+                    assert_eq!(preset.surface(), WindowSurface::Terminal);
+                    assert!(preset.requires_process());
+                    assert_eq!(preset.command_name(), Some("claude"));
+                }
+                WindowPreset::Codex => {
+                    assert_eq!(preset.surface(), WindowSurface::Terminal);
+                    assert!(preset.requires_process());
+                    assert_eq!(preset.command_name(), Some("codex"));
+                }
+                WindowPreset::FileTree => {
+                    assert_eq!(preset.surface(), WindowSurface::FileTree);
+                    assert!(!preset.requires_process());
+                }
+                WindowPreset::Branches => {
+                    assert_eq!(preset.surface(), WindowSurface::Branches);
+                    assert!(!preset.requires_process());
+                }
+                WindowPreset::Settings
+                | WindowPreset::Memo
+                | WindowPreset::Profile
+                | WindowPreset::Logs
+                | WindowPreset::Issue
+                | WindowPreset::Spec
+                | WindowPreset::Board
+                | WindowPreset::Pr => {
+                    assert_eq!(preset.surface(), WindowSurface::Mock);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Agent => unreachable!("WindowPreset::ALL excludes Agent"),
+            }
+        }
+
+        assert_eq!(WindowPreset::Agent.surface(), WindowSurface::Terminal);
+        assert!(WindowPreset::Agent.requires_process());
+        assert_eq!(WindowPreset::Agent.command_name(), None);
+        assert_eq!(WindowPreset::Agent.default_size(), (720.0, 420.0));
+    }
+
+    #[test]
+    fn resolve_codex_preset_includes_no_alt_screen_arg() {
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
+                .expect("codex preset should resolve");
+        assert_eq!(result.command, "codex");
+        assert!(
+            result.args.iter().any(|arg| arg == "--no-alt-screen"),
+            "Codex preset must launch with --no-alt-screen so inline scrollback survives \
+             Plan-mode input waits (regression guard for Issue #2091)"
+        );
+    }
+
+    #[test]
+    fn resolve_codex_preset_launch_args_match_canonical_api() {
+        // SPEC-1921 FR-064 / FR-065: preset path must produce exactly the
+        // canonical launch args for the corresponding AgentId — no hard-coded
+        // agent-specific flags allowed on the preset side.
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
+                .expect("codex preset should resolve");
+        assert_eq!(
+            result.args,
+            gwt_agent::canonical_launch_args(&gwt_agent::AgentId::Codex),
+            "preset Codex args must equal canonical_launch_args(&AgentId::Codex)"
+        );
+    }
+
+    #[test]
+    fn resolve_claude_preset_launch_args_match_canonical_api() {
+        // SPEC-1921 FR-064 / FR-065: the preset layer must not hard-code
+        // agent-specific defaults even for agents whose current canonical
+        // list is empty — the equivalence must hold by construction.
+        let shell = ShellProgram {
+            command: "/bin/zsh".to_string(),
+            args: vec![],
+        };
+        let result =
+            resolve_launch_spec_with(WindowPreset::Claude, &shell, |command| command == "claude")
+                .expect("claude preset should resolve");
+        assert_eq!(
+            result.args,
+            gwt_agent::canonical_launch_args(&gwt_agent::AgentId::ClaudeCode),
+            "preset Claude args must equal canonical_launch_args(&AgentId::ClaudeCode)"
         );
     }
 }

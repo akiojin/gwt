@@ -1,6 +1,6 @@
 //! Terminal pane: integrates PTY handle + vt100 parser + scrollback.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
     pty::{PtyHandle, SpawnConfig},
@@ -17,9 +17,15 @@ pub enum PaneStatus {
 }
 
 /// A terminal pane integrating PTY, vt100 parser, and scrollback.
+///
+/// `pty` is wrapped in an `Arc` so that callers who only need to write input
+/// or query process state can hold a lock-free clone without contending with
+/// the reader thread's exclusive `Mutex<Pane>` guard. The gwt GUI binary uses
+/// this to bypass the tao event loop for `terminal_input` hot path (see the
+/// fast-path write in `client_session`).
 pub struct Pane {
     id: String,
-    pty: PtyHandle,
+    pty: Arc<PtyHandle>,
     parser: vt100::Parser,
     scrollback: ScrollbackStorage,
     status: PaneStatus,
@@ -134,7 +140,7 @@ impl Pane {
             remove_env: Vec::new(),
             cwd,
         };
-        let pty = PtyHandle::spawn(config)?;
+        let pty = Arc::new(PtyHandle::spawn(config)?);
         let parser = vt100::Parser::new(rows, cols, 0);
         let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);
 
@@ -156,6 +162,15 @@ impl Pane {
     /// Get a reference to the PTY handle.
     pub fn pty(&self) -> &PtyHandle {
         &self.pty
+    }
+
+    /// Get a shared handle to the underlying PTY.
+    ///
+    /// Callers on threads that do not own the surrounding `Mutex<Pane>` guard
+    /// can clone this `Arc` and invoke `write_input` / `resize` / `process_id`
+    /// without contending with the reader thread.
+    pub fn shared_pty(&self) -> Arc<PtyHandle> {
+        Arc::clone(&self.pty)
     }
 
     /// Feed raw bytes from PTY output through the vt100 parser and scrollback.
@@ -250,21 +265,28 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::test_util::{lock_pty_test, read_with_timeout};
+    use crate::test_util::{
+        answer_cursor_position_query, echo_command, lock_pty_test, read_until_contains,
+        read_with_timeout, sleep_command, stdin_echo_command, success_command, TestCommand,
+    };
 
-    #[test]
-    fn test_pane_creation() {
-        let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-1".to_string(),
-            "/bin/echo".to_string(),
-            vec!["hello".to_string()],
+    fn test_pane(id: &str, command: TestCommand) -> Pane {
+        Pane::new(
+            id.to_string(),
+            command.command,
+            command.args,
             80,
             24,
             HashMap::new(),
             None,
         )
-        .expect("Pane creation failed");
+        .expect("Pane creation failed")
+    }
+
+    #[test]
+    fn test_pane_creation() {
+        let _pty_guard = lock_pty_test();
+        let pane = test_pane("test-1", echo_command("hello"));
 
         assert_eq!(pane.id(), "test-1");
         assert_eq!(pane.status(), &PaneStatus::Running);
@@ -274,16 +296,7 @@ mod tests {
     #[test]
     fn test_process_bytes_updates_screen() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-2".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-2", sleep_command("60"));
 
         // Feed some bytes through the vt100 parser
         pane.process_bytes(b"hello world\r\n");
@@ -301,16 +314,8 @@ mod tests {
     #[test]
     fn test_pane_read_output_through_vt100() {
         let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-3".to_string(),
-            "/bin/echo".to_string(),
-            vec!["vt100-test".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let pane = test_pane("test-3", echo_command("vt100-test"));
+        answer_cursor_position_query(pane.pty());
 
         let reader = pane.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
@@ -324,20 +329,13 @@ mod tests {
     #[test]
     fn test_pane_write_input() {
         let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-4".to_string(),
-            "/bin/cat".to_string(),
-            vec![],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let pane = test_pane("test-4", stdin_echo_command());
+        answer_cursor_position_query(pane.pty());
 
         let reader = pane.reader().expect("reader failed");
         pane.write_input(b"pane-input\n").expect("write failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "pane-input").expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("pane-input"),
@@ -348,16 +346,7 @@ mod tests {
     #[test]
     fn test_pane_resize() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-5".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-5", sleep_command("60"));
 
         pane.resize(120, 48).expect("resize should succeed");
 
@@ -406,18 +395,30 @@ mod tests {
     }
 
     #[test]
+    fn test_resize_parser_handles_release_panic_width_boundary() {
+        let mut parser = vt100::Parser::new(1, 83, 0);
+        let line = format!("{}漢", "a".repeat(81));
+        parser.process(line.as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 1, 82);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parser.process(b"\x1b[1;82H\x1b[K");
+            parser.screen().contents()
+        }));
+
+        assert!(
+            result.is_ok(),
+            "shrinking to 82 columns must not leave a wide glyph at index 81"
+        );
+        assert_eq!(parser.screen().size(), (1, 82));
+    }
+
+    #[test]
     fn test_pane_check_status_completed() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-6".to_string(),
-            "/usr/bin/true".to_string(),
-            vec![],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-6", success_command());
+        answer_cursor_position_query(pane.pty());
 
         assert_eq!(pane.status(), &PaneStatus::Running);
 
@@ -439,16 +440,7 @@ mod tests {
     #[test]
     fn test_pane_mark_error() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-7".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-7", sleep_command("60"));
 
         pane.mark_error("test error");
         assert_eq!(pane.status(), &PaneStatus::Error("test error".to_string()));
@@ -459,16 +451,7 @@ mod tests {
     #[test]
     fn test_pane_kill() {
         let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-8".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let pane = test_pane("test-8", sleep_command("60"));
 
         pane.kill().expect("kill should succeed");
     }

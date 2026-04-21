@@ -6,6 +6,8 @@
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
 - **Self-Improvement Loop:** ユーザー修正、レビュー指摘、失敗から得た再発防止策は `tasks/lessons.md` に記録し、同種の作業を始める前に確認する。
+- **Skill-First Workflow:** 作業開始時に利用可能なスキルを確認し、要求に適合するスキルがある場合は積極的に使用する。検索、調査、Issue/SPEC 運用、設計議論、実装、PR 管理では手動運用より先にスキル適用を検討する。
+- **Skill Authoring Language:** スキルを新規作成・更新する場合、`SKILL.md`、テンプレート、説明文などスキル本体の内容は英語で記述する。通常の対話や補足説明は日本語でよいが、スキル定義の正本は英語とする。
 - **Verification Before Done:** 完了を宣言する前に、変更対象に応じたテスト、lint、型チェック、ログ確認、差分確認を実施し、スタッフエンジニアが承認できる状態かを基準にセルフレビューする。
 - **Subagent Strategy:** 独立した調査、分析、実装、テスト整備はサブエージェントに分割し、メインのコンテキストを不要な詳細で汚さない。担当範囲、完了条件、検証観点を明示して責務を重複させない。
 - **Demand Elegance:** 非自明な変更では、力技で実装する前に 2〜3 のアプローチを比較し、もっともシンプルで保守しやすい案を選ぶ。単純な修正では過剰設計しない。
@@ -56,6 +58,7 @@
 - エラーが発生している状態で完了としないこと。必ずエラーが解消された時点で完了とする。
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
+- gwtプロジェクトでは、単体テスト・結合テスト・E2Eテストを含む全体のテストカバレッジを 90% 以上で維持すること。
 - **完了報告前のセルフチェックリスト（必須）:**
   - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
@@ -237,6 +240,8 @@
 ローカルキャッシュは `~/.gwt/cache/issues/` で UI レイヤーの唯一の真実
 (一方向フロー: GitHub API → cache → UI、SPEC-12 FR-022)。
 
+以下のスキル一覧は実運用の優先導線であり、該当するスキルがある場合は積極的に使用すること。
+
 <!-- BEGIN gwt managed skills -->
 ## Available Skills & Commands (gwt)
 
@@ -261,12 +266,6 @@ Commands can be invoked as `/gwt:<command-name>`.
 |-------|---------|-------------|
 | gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
-
-### TUI Design
-
-| Skill | Command | Description |
-|-------|---------|-------------|
-| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal UI surfaces for the xterm.js-based GUI terminal. |
 
 ### Recommended Workflow
 

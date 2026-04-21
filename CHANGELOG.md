@@ -1,6 +1,137 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.7.0] - 2026-04-21
+
+### Bug Fixes
+
+- Open launch wizard before agent detection
+- Show app version in project bar
+- Allow app version test helper on unix
+- Avoid gui runtime setup in app version test
+- Deepen gwt-discussion planning contract
+- Tighten workflow-policy hook assertion
+- Managed excludeにdocker overrideを追加
+- **gui:** Bypass tao event loop for terminal_input WebSocket hot-path
+- **hooks:** PreToolUse block 理由を hookSpecificOutput で可視化する
+- Branches の一覧ロードを非同期化して新しい順に並べる
+- **skills:** Move .gwt/discussion.md exclude from .gitignore to info/exclude managed block
+- Fresh rows前のbranch load failureをblockingに保つ
+- BranchEntries phase fallbackを正規化する
+- **gui:** Preset経由のCodex起動に--no-alt-screenを付ける
+- **ci:** Avoid unreachable-code in coordination retry helper
+- **ci:** Gate windows-only update test helpers
+- **ci:** Handle platform-specific update tests
+- **ci:** Make coverage gate path-aware
+- **ci:** Drop orphan coordination tests
+- **ci:** Gate update helper error path on windows
+- **ci:** Use current branch in async main test
+- **ci:** Format main test imports
+
+### Documentation
+
+- **lessons:** Record Windows release packaging failure by @akiojin
+- Update skill guidance in agents
+- AGENTS.mdにカバレッジ基準を追記
+- **lessons:** Preset経由agent launchの既定arg抜け落ちを記録
+
+### Features
+
+- Support shell launches from launch wizard
+- Runtime daemon契約基盤を追加
+- Hook front door daemon委譲を追加
+- Daemon runtime hook live event bridgeを追加
+- Managed hookのforward互換移行を追加
+- Gwtとgwtdのbundle配布を追加
+- Skillとdockerのgwt入口契約を追加
+- **agent,ai:** Claude Code OpenAI互換バックエンド用のライブラリ層を追加 (SPEC-1921 Phase 52)
+- **agent:** Custom Agent CRUD のライブラリ層を再構築 (SPEC-1921 T215/T216)
+- **gwt:** Custom Agents の Settings backend protocol を追加 (SPEC-1921 T226-T232 backend slice)
+- **gwt:** Settings ウィンドウに Custom Agents の最小インタラクティブ surface を追加 (SPEC-1921 T226-T232)
+- **coordination:** Add origin metadata to BoardEntry
+- **coordination:** Add diff-injection and reminders sidecar APIs
+- **coordination:** Add board-reminder hook for reasoning visibility
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into feature/version
+- Merge origin/develop into feature/update-gwt-discussion
+- **gui:** Add input-path diagnostic trace for intermittent key drop
+- Merge develop into feature/test-coverge-90
+- Merge latest develop into coverage branch
+
+### Refactor
+
+- **hooks:** BlockDecision の重複状態を整理しテーブル駆動テスト化
+- Repo browser の branch orchestration を分離する
+- BranchEntries の load phase を明示する
+- Frontend sync event の contract を分離する
+- **agent:** Canonical launch args APIを導入し3経路のSoTを統合
+- **gwt:** Arch-review で指摘された H1 / H2 / M1 を解消
+- **coordination:** Retire agent card surface from v1 domain
+- **hooks:** Purify board-reminder compute + enrich HookError
+
+### Styling
+
+- Apply cargo fmt for import ordering
+
+### Testing
+
+- Enforce 90 percent coverage gate
+
+### Ci
+
+- **release:** Use Compress-Archive for Windows artifacts by @akiojin
+
+## [9.6.0] - 2026-04-20
+
+### Bug Fixes
+
+- **update:** Restore macOS installer fallback
+- **branches:** Harden cleanup flow follow-ups
+- **gui:** Keep repo browser wheel local at scroll edges
+- Normalize windows pty shim launches
+- Gate windows-specific pty imports
+- Preserve windows shim script args
+- **agent:** Fallback to npx when bunx probe fails
+- Launch Wizard の起動初期化を非同期化
+- Prevent launch wizard window id collisions
+- Close exited agent windows and silence detach timeout log
+- Keep coordination and hooks on stable paths
+- Normalize hook path heuristics across oses
+- Keep failed agent exits visible
+- **release:** Add MSI and DMG installers, fix portable asset naming
+- **release:** Align installer and portable distribution
+
+### Documentation
+
+- **lessons:** Record branch-head check before issue completion
+
+### Features
+
+- Add branches cleanup flow to web ui
+- **gui:** Add cache-backed knowledge bridge windows
+
+### Miscellaneous Tasks
+
+- **merge:** Sync origin/develop into bugfix/not-work-branches-scroll
+- Merge origin/develop into feature/issues
+- Merge origin/develop into bugfix/agent-not-working
+- Merge origin/develop into feature/issues
+- **merge:** Sync develop into bugfix/issue-2045
+- Merge origin/develop into bugfix/close-agent-finish
+- Merge origin/develop into bugfix/close-agent-finish
+- Merge origin develop
+
+### Refactor
+
+- **gui:** Isolate embedded web contracts from main
+- **gui:** Split embedded web event wiring
+
+### Testing
+
+- **gui:** Make bunx fallback test platform agnostic
+
 ## [9.5.2] - 2026-04-20
 
 ### Bug Fixes

@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -110,15 +110,36 @@ impl PtyHandle {
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        let data_len = data.len();
+        let lock_started = Instant::now();
         let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
             details: format!("lock poisoned: {e}"),
         })?;
-        writer
-            .write_all(data)
-            .map_err(|e| TerminalError::PtyIoError {
-                details: e.to_string(),
-            })?;
-        writer.flush().map_err(|e| TerminalError::PtyIoError {
+        let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+
+        let write_started = Instant::now();
+        let write_result = writer.write_all(data);
+        let write_us = write_started.elapsed().as_micros() as u64;
+        write_result.map_err(|e| TerminalError::PtyIoError {
+            details: e.to_string(),
+        })?;
+
+        let flush_started = Instant::now();
+        let flush_result = writer.flush();
+        let flush_us = flush_started.elapsed().as_micros() as u64;
+
+        tracing::debug!(
+            target: "gwt_input_trace",
+            stage = "pty_writer",
+            data_len,
+            lock_wait_us,
+            write_us,
+            flush_us,
+            ok = flush_result.is_ok(),
+            "PTY writer completed write_all + flush"
+        );
+
+        flush_result.map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })?;
         Ok(())
@@ -544,12 +565,16 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::test_util::{lock_pty_test, read_with_timeout};
+    use crate::test_util::{
+        answer_cursor_position_query, echo_command, env_command, lock_pty_test, pwd_command,
+        read_until_contains, read_with_timeout, sleep_command, stdin_echo_command, success_command,
+        TestCommand,
+    };
 
-    fn echo_config(msg: &str) -> SpawnConfig {
+    fn command_config(command: TestCommand) -> SpawnConfig {
         SpawnConfig {
-            command: "/bin/echo".to_string(),
-            args: vec![msg.to_string()],
+            command: command.command,
+            args: command.args,
             cols: 80,
             rows: 24,
             env: HashMap::new(),
@@ -558,22 +583,19 @@ mod tests {
         }
     }
 
+    fn echo_config(msg: &str) -> SpawnConfig {
+        command_config(echo_command(msg))
+    }
+
     fn sleep_config(secs: &str) -> SpawnConfig {
-        SpawnConfig {
-            command: "/bin/sleep".to_string(),
-            args: vec![secs.to_string()],
-            cols: 80,
-            rows: 24,
-            env: HashMap::new(),
-            remove_env: Vec::new(),
-            cwd: None,
-        }
+        command_config(sleep_command(secs))
     }
 
     #[test]
     fn test_spawn_and_read_output() {
         let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(echo_config("hello")).expect("spawn failed");
+        answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
         let text = String::from_utf8_lossy(&output);
@@ -583,19 +605,13 @@ mod tests {
     #[test]
     fn test_write_input() {
         let _pty_guard = lock_pty_test();
-        let config = SpawnConfig {
-            command: "/bin/cat".to_string(),
-            args: vec![],
-            cols: 80,
-            rows: 24,
-            env: HashMap::new(),
-            remove_env: Vec::new(),
-            cwd: None,
-        };
+        let config = command_config(stdin_echo_command());
         let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
         handle.write_input(b"test-input\n").expect("write failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "test-input").expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("test-input"),
@@ -640,6 +656,7 @@ mod tests {
     fn test_try_wait_completed() {
         let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(echo_config("done")).expect("spawn failed");
+        answer_cursor_position_query(&handle);
         let mut exited = false;
         for _ in 0..50 {
             if let Ok(Some(status)) = handle.try_wait() {
@@ -657,9 +674,10 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let mut env = HashMap::new();
         env.insert("GWT_TEST_VAR".to_string(), "test_value".to_string());
+        let command = env_command();
         let config = SpawnConfig {
-            command: "/usr/bin/env".to_string(),
-            args: vec![],
+            command: command.command,
+            args: command.args,
             cols: 80,
             rows: 24,
             env,
@@ -667,6 +685,7 @@ mod tests {
             cwd: None,
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
         let text = String::from_utf8_lossy(&output);
@@ -680,9 +699,10 @@ mod tests {
     fn test_spawn_with_cwd() {
         let _pty_guard = lock_pty_test();
         let temp = std::env::temp_dir();
+        let command = pwd_command();
         let config = SpawnConfig {
-            command: "/bin/pwd".to_string(),
-            args: vec![],
+            command: command.command,
+            args: command.args,
             cols: 80,
             rows: 24,
             env: HashMap::new(),
@@ -690,6 +710,7 @@ mod tests {
             cwd: Some(temp.clone()),
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
         let text = String::from_utf8_lossy(&output).trim().to_string();
@@ -698,6 +719,10 @@ mod tests {
         let canonical_temp = std::fs::canonicalize(&temp)
             .unwrap_or(temp)
             .display()
+            .to_string();
+        let canonical_temp = canonical_temp
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&canonical_temp)
             .to_string();
         assert!(
             text.contains(&canonical_temp) || canonical_temp.contains(text.trim()),
@@ -726,9 +751,10 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let mut env = HashMap::new();
         env.insert("GWT_REMOVE_CHECK".to_string(), "expected".to_string());
+        let command = env_command();
         let config = SpawnConfig {
-            command: "/usr/bin/env".to_string(),
-            args: vec![],
+            command: command.command,
+            args: command.args,
             cols: 80,
             rows: 24,
             env,
@@ -736,6 +762,7 @@ mod tests {
             cwd: None,
         };
         let handle = PtyHandle::spawn(config).expect("spawn failed");
+        answer_cursor_position_query(&handle);
         let reader = handle.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
         let text = String::from_utf8_lossy(&output);
@@ -747,6 +774,23 @@ mod tests {
             !text.lines().any(|line| line.starts_with("HOME=")),
             "Expected inherited HOME to be removed from: {text}"
         );
+    }
+
+    #[test]
+    fn test_success_command_exits_zero() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(command_config(success_command())).expect("spawn failed");
+        answer_cursor_position_query(&handle);
+        let mut exited = false;
+        for _ in 0..50 {
+            if let Ok(Some(status)) = handle.try_wait() {
+                assert!(status.success());
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(exited, "Process should have completed");
     }
 
     #[cfg(windows)]

@@ -107,8 +107,10 @@ fn remove_legacy_worktree_specs_artifacts(
     Ok(())
 }
 
-/// Synchronously remove the index directory for a single Worktree (used by
-/// the gwt TUI Worktree-remove handler).
+/// Synchronously remove the index directory for a single worktree.
+///
+/// Called by non-interactive worktree lifecycle handlers when a worktree is
+/// removed and its per-worktree file indexes should be deleted eagerly.
 pub fn remove_worktree_index(
     index_root: &Path,
     repo: &RepoHash,

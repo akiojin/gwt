@@ -1,6 +1,9 @@
 //! Utility functions for gwt filesystem paths.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     error::Result,
@@ -9,9 +12,28 @@ use crate::{
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {
-    dirs::home_dir()
+    resolve_home_dir(
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+        dirs::home_dir(),
+    )
+    .join(".gwt")
+}
+
+fn resolve_home_dir(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    fallback: Option<PathBuf>,
+) -> PathBuf {
+    non_empty_os(home)
+        .or_else(|| non_empty_os(userprofile))
+        .map(PathBuf::from)
+        .or(fallback)
         .expect("home directory must be resolvable")
-        .join(".gwt")
+}
+
+fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|value| !value.is_empty())
 }
 
 /// Return the path to the global config file (`~/.gwt/config.toml`).
@@ -138,6 +160,53 @@ mod tests {
     fn gwt_home_ends_with_dot_gwt() {
         let home = gwt_home();
         assert!(home.ends_with(".gwt"));
+    }
+
+    #[test]
+    fn gwt_home_prefers_home_env_over_dirs_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_home = tmp.path().join("custom-home");
+
+        let home = resolve_home_dir(
+            Some(override_home.clone().into_os_string()),
+            Some(tmp.path().join("ignored-userprofile").into_os_string()),
+            None,
+        )
+        .join(".gwt");
+
+        assert_eq!(home, override_home.join(".gwt"));
+    }
+
+    #[test]
+    fn gwt_home_falls_back_to_userprofile_when_home_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_profile = tmp.path().join("custom-userprofile");
+
+        let home = resolve_home_dir(None, Some(override_profile.clone().into_os_string()), None)
+            .join(".gwt");
+
+        assert_eq!(home, override_profile.join(".gwt"));
+    }
+
+    #[test]
+    fn gwt_home_treats_empty_env_values_as_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_profile = tmp.path().join("custom-userprofile");
+        let fallback = tmp.path().join("fallback-home");
+
+        let userprofile_home = resolve_home_dir(
+            Some(OsString::from("")),
+            Some(override_profile.clone().into_os_string()),
+            Some(fallback.clone()),
+        );
+        let fallback_home = resolve_home_dir(
+            Some(OsString::from("")),
+            Some(OsString::from("")),
+            Some(fallback.clone()),
+        );
+
+        assert_eq!(userprofile_home, override_profile);
+        assert_eq!(fallback_home, fallback);
     }
 
     #[test]

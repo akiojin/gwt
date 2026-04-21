@@ -1,4 +1,7 @@
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
@@ -27,9 +30,64 @@ fn install_hook_bin_override() -> io::Result<EnvVarGuard> {
     if std::env::var_os("GWT_HOOK_BIN").is_some() {
         return Ok(EnvVarGuard::noop("GWT_HOOK_BIN"));
     }
+    let hook_bin = resolve_public_gwt_bin_path()?;
+    Ok(EnvVarGuard::set("GWT_HOOK_BIN", hook_bin))
+}
+
+pub fn resolve_public_gwt_bin_path() -> io::Result<PathBuf> {
     let current_exe = std::env::current_exe()
         .map_err(|error| io::Error::other(format!("current_exe: {error}")))?;
-    Ok(EnvVarGuard::set("GWT_HOOK_BIN", current_exe))
+    Ok(resolve_public_gwt_bin_with_lookup(
+        &current_exe,
+        |command| which::which(command).ok(),
+    ))
+}
+
+pub fn resolve_public_gwt_bin_with_lookup(
+    current_exe: &Path,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> PathBuf {
+    if should_prefer_path_gwt(current_exe) {
+        if let Some(candidate) = lookup("gwt").filter(|candidate| {
+            !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
+        }) {
+            return candidate;
+        }
+    }
+    current_exe.to_path_buf()
+}
+
+fn should_prefer_path_gwt(current_exe: &Path) -> bool {
+    is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
+}
+
+fn is_named_gwt_binary(path: &Path) -> bool {
+    normalized_path_segments(path)
+        .into_iter()
+        .next_back()
+        .map(|value| value.trim_end_matches(".exe").to_string())
+        .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
+}
+
+fn is_bunx_temp_executable(path: &Path) -> bool {
+    normalized_path_segments(path)
+        .into_iter()
+        .any(|segment| segment.starts_with("bunx-"))
+}
+
+fn normalized_path_segments(path: &Path) -> Vec<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 struct EnvVarGuard {
@@ -68,5 +126,119 @@ impl Drop for EnvVarGuard {
         } else {
             std::env::remove_var(self.key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    use super::{
+        is_bunx_temp_executable, is_named_gwt_binary, normalized_path_segments,
+        resolve_public_gwt_bin_with_lookup, same_path, should_prefer_path_gwt, EnvVarGuard,
+    };
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn bunx_temp_current_exe_prefers_stable_path_gwt() {
+        let current_exe = Path::new(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |command| {
+            assert_eq!(command, "gwt");
+            Some(stable.clone())
+        });
+
+        assert_eq!(resolved, stable);
+    }
+
+    #[test]
+    fn stable_gwt_current_exe_is_kept_without_path_lookup() {
+        let current_exe = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| {
+            panic!("stable gwt binary should not hit PATH lookup");
+        });
+
+        assert_eq!(resolved, current_exe);
+    }
+
+    #[test]
+    fn bunx_temp_current_exe_keeps_current_when_path_only_returns_bunx_temp() {
+        let current_exe = Path::new(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let path_candidate = PathBuf::from(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-2222222222-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| {
+            Some(path_candidate.clone())
+        });
+
+        assert_eq!(resolved, current_exe);
+    }
+
+    #[test]
+    fn path_helpers_identify_named_binaries_and_temp_layouts() {
+        let stable = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
+        let bunx = Path::new(
+            r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+        );
+        let other = Path::new(r"C:\Users\Example\.bun\bin\other.exe");
+
+        assert!(is_named_gwt_binary(stable));
+        assert!(!is_named_gwt_binary(other));
+        assert!(is_bunx_temp_executable(bunx));
+        assert!(!is_bunx_temp_executable(stable));
+        assert_eq!(
+            normalized_path_segments(Path::new(r"C:\Users\Example\.bun\bin\gwt.exe"))
+                .last()
+                .map(String::as_str),
+            Some("gwt.exe")
+        );
+        assert!(!should_prefer_path_gwt(stable));
+        assert!(should_prefer_path_gwt(bunx));
+        assert!(should_prefer_path_gwt(other));
+    }
+
+    #[test]
+    fn same_path_and_env_var_guard_preserve_previous_values() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested");
+
+        assert!(same_path(&nested, &dir.path().join("nested")));
+
+        std::env::set_var("GWT_MANAGED_ASSETS_TEST", "before");
+        {
+            let _scoped = EnvVarGuard::set("GWT_MANAGED_ASSETS_TEST", "during");
+            assert_eq!(
+                std::env::var("GWT_MANAGED_ASSETS_TEST").as_deref(),
+                Ok("during")
+            );
+        }
+        assert_eq!(
+            std::env::var("GWT_MANAGED_ASSETS_TEST").as_deref(),
+            Ok("before")
+        );
+
+        {
+            let _noop = EnvVarGuard::noop("GWT_MANAGED_ASSETS_TEST");
+            assert_eq!(
+                std::env::var("GWT_MANAGED_ASSETS_TEST").as_deref(),
+                Ok("before")
+            );
+        }
+        std::env::remove_var("GWT_MANAGED_ASSETS_TEST");
     }
 }

@@ -16,6 +16,7 @@ pub mod block_cd_command;
 pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
+pub mod board_reminder;
 pub mod coordination_event;
 pub mod forward;
 pub mod runtime_state;
@@ -35,6 +36,7 @@ use serde::{Deserialize, Serialize};
 pub enum HookKind {
     RuntimeState,
     CoordinationEvent,
+    BoardReminder,
     BlockBashPolicy,
     WorkflowPolicy,
     Forward,
@@ -49,6 +51,7 @@ impl HookKind {
         match name {
             "runtime-state" => Some(Self::RuntimeState),
             "coordination-event" => Some(Self::CoordinationEvent),
+            "board-reminder" => Some(Self::BoardReminder),
             "block-bash-policy" => Some(Self::BlockBashPolicy),
             "workflow-policy" => Some(Self::WorkflowPolicy),
             "forward" => Some(Self::Forward),
@@ -70,6 +73,13 @@ pub struct HookEvent {
 }
 
 impl HookEvent {
+    pub fn read_from_str(input: &str) -> Result<Option<Self>, HookError> {
+        if input.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(input)?))
+    }
+
     /// Read a single JSON payload from stdin.
     ///
     /// - Empty stdin → `Ok(None)` (treated as a no-op by the caller).
@@ -77,10 +87,7 @@ impl HookEvent {
     pub fn read_from_stdin() -> Result<Option<Self>, HookError> {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
-        if buf.trim().is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(serde_json::from_str(&buf)?))
+        Self::read_from_str(&buf)
     }
 
     /// Convenience accessor for `tool_input.command` (Bash tool payloads).
@@ -89,22 +96,70 @@ impl HookEvent {
     }
 }
 
-/// JSON shape a block hook writes to stdout when it vetoes a tool call.
+/// PreToolUse `hookSpecificOutput` denial payload.
+///
+/// The wire format exposes only `permissionDecisionReason` because the
+/// legacy top-level `stopReason` is ignored on PreToolUse and only the
+/// short `reason` was reaching the user before this was introduced.
 #[derive(Debug, Clone, Serialize)]
 pub struct BlockDecision {
-    pub decision: &'static str,
-    pub reason: String,
-    #[serde(rename = "stopReason")]
-    pub stop_reason: String,
+    #[serde(rename = "hookSpecificOutput")]
+    hook_specific_output: HookSpecificOutput,
+    #[serde(skip)]
+    summary: String,
+    #[serde(skip)]
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HookSpecificOutput {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: &'static str,
+    #[serde(rename = "permissionDecision")]
+    permission_decision: &'static str,
+    #[serde(rename = "permissionDecisionReason")]
+    permission_decision_reason: String,
+}
+
+impl HookSpecificOutput {
+    const EVENT_NAME: &'static str = "PreToolUse";
+    const DECISION_DENY: &'static str = "deny";
 }
 
 impl BlockDecision {
-    pub fn new(reason: impl Into<String>, stop_reason: impl Into<String>) -> Self {
+    pub fn new(summary: impl Into<String>, detail: impl Into<String>) -> Self {
+        let summary = summary.into();
+        let detail = detail.into();
+        let permission_decision_reason = match (summary.is_empty(), detail.is_empty()) {
+            (true, _) => detail.clone(),
+            (_, true) => summary.clone(),
+            _ => format!("{summary}\n\n{detail}"),
+        };
         Self {
-            decision: "block",
-            reason: reason.into(),
-            stop_reason: stop_reason.into(),
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: HookSpecificOutput::EVENT_NAME,
+                permission_decision: HookSpecificOutput::DECISION_DENY,
+                permission_decision_reason,
+            },
+            summary,
+            detail,
         }
+    }
+
+    /// Short headline. Kept separate from `detail` so tests can assert the
+    /// rule name without scanning the merged reason.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Full guidance (alternatives, blocked command, etc.).
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// The merged text Claude Code / Codex surface to the LLM and user.
+    pub fn permission_decision_reason(&self) -> &str {
+        &self.hook_specific_output.permission_decision_reason
     }
 }
 
@@ -114,6 +169,8 @@ pub enum HookError {
     Io(#[from] std::io::Error),
     #[error("invalid hook event json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("coordination error: {0}")]
+    Coordination(#[from] gwt_core::GwtError),
     #[error("unknown hook: {0}")]
     UnknownHook(String),
     #[error("missing environment variable: {0}")]
