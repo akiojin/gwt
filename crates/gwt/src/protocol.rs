@@ -295,9 +295,22 @@ pub enum BackendEvent {
     /// Error reply for any custom-agent mutation or probe request.
     /// `code` is a stable machine-readable tag; `message` is human-readable.
     CustomAgentError {
-        code: String,
+        code: CustomAgentErrorCode,
         message: String,
     },
+}
+
+/// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
+/// Serializes as `snake_case` string so the frontend can compare against
+/// literal values without string-matching the human-readable message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomAgentErrorCode {
+    Storage,
+    Duplicate,
+    InvalidInput,
+    NotFound,
+    Probe,
 }
 
 #[cfg(test)]

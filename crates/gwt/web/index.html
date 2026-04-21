@@ -150,7 +150,6 @@
         position: absolute;
         inset: 0;
         transform-origin: 0 0;
-        will-change: transform;
         background-image:
           linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
           linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
@@ -1953,6 +1952,7 @@
       let panState = null;
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
+      let viewportRasterTimer = null;
       let launchWizard = null;
       let wizardWasOpen = false;
       let wizardAdvancedOpen = false;
@@ -2379,6 +2379,14 @@
 
       function applyViewport() {
         stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+        stage.style.willChange = "transform";
+        if (viewportRasterTimer !== null) {
+          clearTimeout(viewportRasterTimer);
+        }
+        viewportRasterTimer = setTimeout(() => {
+          stage.style.willChange = "auto";
+          viewportRasterTimer = null;
+        }, 300);
       }
 
       function persistViewport() {
@@ -4862,12 +4870,9 @@
         }
       }
 
-      // SPEC-1921 Phase 52 — Settings > Custom Agents backend bridge.
-      //
       // All DOM nodes are built via createElement + textContent to avoid
-      // innerHTML with mixed trust. The UI is intentionally minimal (prompt()
-      // driven) so the backend protocol can be exercised end-to-end before a
-      // richer form layout is designed.
+      // innerHTML with mixed trust. Secrets in env tables are redacted by
+      // the backend before reaching this layer (see redact_secrets_in_agent).
       const customAgentsState = {
         agents: [],
         loading: false,
@@ -4883,7 +4888,16 @@
         return el;
       }
 
+      function purgeDetachedSettingsBodies() {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) settingsWindowBodies.delete(body);
+        }
+      }
+
       function renderSettingsWindow(body, windowData) {
+        // Sweep detached bodies up-front so repeated open/close cycles do
+        // not accumulate references.
+        purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
         const root = createDiv("mock-root");
         const toolbar = createDiv("mock-toolbar");

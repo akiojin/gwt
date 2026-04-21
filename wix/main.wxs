@@ -25,7 +25,9 @@
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component>
         <File Id="GwtExecutable" Source="!(bindpath.gwt)gwt.exe" KeyPath="yes" />
-        <File Id="GwtdExecutable" Source="!(bindpath.gwt)gwtd.exe" />
+      </Component>
+      <Component>
+        <File Id="GwtdExecutable" Source="!(bindpath.gwt)gwtd.exe" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>
