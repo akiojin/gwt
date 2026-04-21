@@ -2515,3 +2515,284 @@ impl AppRuntime {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        fs,
+        path::{Path, PathBuf},
+        sync::{Arc, RwLock},
+    };
+
+    use tempfile::tempdir;
+
+    use gwt::{
+        empty_workspace_state, BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope,
+        FrontendEvent, LaunchWizardContext, LaunchWizardState, ProjectKind, WindowGeometry,
+        WindowPreset, WindowProcessStatus, WorkspaceState,
+    };
+
+    use super::{
+        ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
+        LaunchWizardSession, ProjectTabRuntime,
+    };
+    use crate::{combined_window_id, PtyWriterRegistry};
+
+    fn canvas_bounds() -> WindowGeometry {
+        WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1400.0,
+            height: 900.0,
+        }
+    }
+
+    fn sample_window(
+        raw_id: &str,
+        preset: WindowPreset,
+        status: WindowProcessStatus,
+    ) -> gwt::PersistedWindowState {
+        gwt::PersistedWindowState {
+            id: raw_id.to_string(),
+            title: "Sample".to_string(),
+            preset,
+            geometry: WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 420.0,
+            },
+            z_index: 1,
+            status,
+            minimized: false,
+            maximized: false,
+            pre_maximize_geometry: None,
+            persist: true,
+        }
+    }
+
+    fn sample_project_tab_with_window(
+        tab_id: &str,
+        raw_window_id: &str,
+        preset: WindowPreset,
+        status: WindowProcessStatus,
+    ) -> ProjectTabRuntime {
+        let mut persisted = empty_workspace_state();
+        persisted
+            .windows
+            .push(sample_window(raw_window_id, preset, status));
+        persisted.next_z_index = 2;
+        ProjectTabRuntime {
+            id: tab_id.to_string(),
+            title: "Repo".to_string(),
+            project_root: PathBuf::from("E:/gwt/test-repo"),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+        }
+    }
+
+    fn sample_project_tab(
+        tab_id: &str,
+        title: &str,
+        project_root: PathBuf,
+        kind: ProjectKind,
+        presets: &[WindowPreset],
+    ) -> ProjectTabRuntime {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        for preset in presets {
+            let _ = workspace.add_window(*preset, canvas_bounds());
+        }
+        ProjectTabRuntime {
+            id: tab_id.to_string(),
+            title: title.to_string(),
+            project_root,
+            kind,
+            workspace,
+        }
+    }
+
+    fn sample_runtime(
+        temp_root: &Path,
+        tabs: Vec<ProjectTabRuntime>,
+        active_tab_id: Option<&str>,
+    ) -> AppRuntime {
+        let (proxy, _events) = AppEventProxy::stub();
+        let sessions_dir = temp_root.join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let mut runtime = AppRuntime {
+            tabs,
+            active_tab_id: active_tab_id.map(str::to_owned),
+            recent_projects: Vec::new(),
+            runtimes: HashMap::new(),
+            window_details: HashMap::new(),
+            window_lookup: HashMap::new(),
+            session_state_path: temp_root.join("session-state.json"),
+            proxy,
+            blocking_tasks: BlockingTaskSpawner::thread(),
+            sessions_dir,
+            launch_wizard: None,
+            active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+            hook_forward_target: None,
+            pending_update: None,
+            pty_writers,
+        };
+        runtime.rebuild_window_lookup();
+        runtime
+    }
+
+    fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
+        LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id: "wizard-1".to_string(),
+            wizard: LaunchWizardState::open_loading(
+                LaunchWizardContext {
+                    selected_branch: BranchListEntry {
+                        name: "feature/demo".to_string(),
+                        scope: BranchScope::Local,
+                        is_head: false,
+                        upstream: None,
+                        ahead: 0,
+                        behind: 0,
+                        last_commit_date: None,
+                        cleanup_ready: true,
+                        cleanup: BranchCleanupInfo::default(),
+                    },
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: None,
+                    quick_start_root: project_root.to_path_buf(),
+                    live_sessions: Vec::new(),
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                Vec::new(),
+            ),
+        }
+    }
+
+    #[test]
+    fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_workspace() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        runtime
+            .window_details
+            .insert(window_id.clone(), "Shell ready".to_string());
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+        runtime.pending_update = Some(gwt_core::update::UpdateState::UpToDate { checked_at: None });
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        assert!(matches!(
+            events.first(),
+            Some(event)
+                if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
+                    && matches!(event.event, BackendEvent::WorkspaceState { .. })
+        ));
+        assert!(events.iter().all(|event| matches!(
+            &event.target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id
+                    && *status == WindowProcessStatus::Ready
+                    && detail.as_deref() == Some("Shell ready")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
+        )));
+    }
+
+    #[test]
+    fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other).expect("create other");
+        let tabs = vec![
+            sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::Branches],
+            ),
+            sample_project_tab(
+                "tab-2",
+                "Other",
+                other,
+                ProjectKind::NonRepo,
+                &[WindowPreset::FileTree],
+            ),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+
+        let events = runtime.select_project_tab_events("tab-2");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(matches!(events[1].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            events[1].event,
+            BackendEvent::LaunchWizardState { wizard: None }
+        ));
+    }
+
+    #[test]
+    fn app_runtime_runtime_status_broadcasts_workspace_before_terminal_status() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+
+        let events = runtime.handle_runtime_status(
+            window_id.clone(),
+            WindowProcessStatus::Error,
+            Some("boom".to_string()),
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(matches!(events[1].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            &events[1].event,
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id
+                    && *status == WindowProcessStatus::Error
+                    && detail.as_deref() == Some("boom")
+        ));
+    }
+}
