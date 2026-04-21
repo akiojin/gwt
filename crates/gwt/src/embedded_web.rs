@@ -236,7 +236,7 @@ mod tests {
     fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
         let html = index_html();
         let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*renderAppState\(event\.workspace\);\s*break;"#,
+            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);\s*break;"#,
         )
         .expect("valid regex");
 
@@ -261,7 +261,7 @@ mod tests {
         );
         assert!(
             workspace_state_flow.is_match(html),
-            "expected workspace_state events to clear project errors and re-render through renderAppState",
+            "expected workspace_state events to clear project errors and re-render through the app-state workspace helper",
         );
     }
 
@@ -401,11 +401,11 @@ mod tests {
         )
         .expect("valid regex");
         let close_controls = regex::Regex::new(
-            r#"wizardCloseButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*sendWizardAction\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);\s*wizardCancelButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*sendWizardAction\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);"#,
+            r#"wizardCloseButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);\s*wizardCancelButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);"#,
         )
         .expect("valid regex");
         let submit_button = regex::Regex::new(
-            r#"wizardSubmitButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*flushWizardBranchDraft\(\);\s*sendWizardAction\(\{\s*kind:\s*"submit"\s*\}\);\s*\}\);"#,
+            r#"wizardSubmitButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*(?:flushWizardBranchDraft|frontendUnits\.launchWizardSurface\.flushBranchDraft)\(\);\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"submit"\s*\}\);\s*\}\);"#,
         )
         .expect("valid regex");
 
@@ -430,16 +430,79 @@ mod tests {
             submit_button.is_match(html),
             "expected submit control to flush branch draft before dispatching submit",
         );
+        let backdrop_cancel = regex::Regex::new(
+            r#"if\s*\(\s*event\.target === wizardModal\s*\)\s*\{\s*(?:sendWizardAction|frontendUnits\.launchWizardSurface\.sendAction)\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}"#,
+        )
+        .expect("valid regex");
         assert!(
-            html.contains("if (event.target === wizardModal) {")
-                && html.contains("sendWizardAction({ kind: \"cancel\" });"),
+            backdrop_cancel.is_match(html),
             "expected backdrop dismissal to share the same wizard cancel transport",
         );
+        let wizard_state = regex::Regex::new(
+            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+        )
+        .expect("valid regex");
         assert!(
-            html.contains("case \"launch_wizard_state\":")
-                && html.contains("launchWizard = event.wizard;")
-                && html.contains("renderLaunchWizard();"),
+            wizard_state.is_match(html),
             "expected launch wizard state updates to hydrate the shared wizard renderer",
+        );
+    }
+
+    #[test]
+    fn embedded_web_frontend_units_group_stateful_surfaces() {
+        let html = index_html();
+
+        assert!(
+            html.contains("const frontendUnits = Object.freeze({"),
+            "expected embedded html to group frontend responsibilities behind a unit registry",
+        );
+        assert!(
+            html.contains("socketTransport,")
+                && html.contains("projectWorkspaceShell,")
+                && html.contains("workspaceWindowManager,")
+                && html.contains("terminalHost,")
+                && html.contains("launchWizardSurface,")
+                && html.contains("branchesFileTreeSurface,")
+                && html.contains("knowledgeSettingsSurface,"),
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, and knowledge/settings surfaces",
+        );
+        assert!(
+            html.contains("window.__POC__ = { receive, frontendStateOwners, frontendUnits };"),
+            "expected embedded runtime to expose the frontend unit registry for inspection",
+        );
+    }
+
+    #[test]
+    fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
+        let html = index_html();
+        let workspace_event = regex::Regex::new(
+            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);\s*break;"#,
+        )
+        .expect("valid regex");
+        let terminal_event = regex::Regex::new(
+            r#"case\s*"terminal_output":\s*frontendUnits\.terminalHost\.writeOutput\(event\.id,\s*event\.data_base64\);\s*break;\s*case\s*"terminal_snapshot":\s*frontendUnits\.terminalHost\.replaceTerminalSnapshot\(event\.id,\s*event\.data_base64\);\s*break;"#,
+        )
+        .expect("valid regex");
+        let wizard_event = regex::Regex::new(
+            r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("frontendUnits.socketTransport.connect();"),
+            "expected frontend bootstrap to connect through the socket transport unit",
+        );
+        assert!(
+            workspace_event.is_match(html),
+            "expected workspace_state events to flow through the project workspace shell unit",
+        );
+        assert!(
+            terminal_event.is_match(html),
+            "expected terminal output and snapshot events to flow through the terminal host unit",
+        );
+        assert!(
+            wizard_event.is_match(html),
+            "expected launch wizard state events to render through the wizard surface unit",
         );
     }
 }

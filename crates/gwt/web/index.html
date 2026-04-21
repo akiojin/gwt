@@ -4795,13 +4795,13 @@
           overlay.appendChild(message);
           terminalRoot.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
           });
           terminalRoot.addEventListener("click", () => {
             const runtime = terminalMap.get(windowData.id);
             runtime?.terminal.focus();
           });
-          createTerminalRuntime(windowData.id, terminalRoot);
+          frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           return;
         }
 
@@ -4820,25 +4820,32 @@
           `;
           body.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
           });
           body
             .querySelector("[data-action='refresh-tree']")
             .addEventListener("click", (event) => {
               event.stopPropagation();
-              const state = ensureFileTreeState(windowData.id);
+              const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+                windowData.id,
+              );
               state.loaded.clear();
               state.expanded.clear();
               state.loading.clear();
               state.error = "";
-              requestFileTree(windowData.id, "");
-              renderFileTree(windowData.id);
+              frontendUnits.branchesFileTreeSurface.requestFileTree(
+                windowData.id,
+                "",
+              );
+              frontendUnits.branchesFileTreeSurface.renderFileTree(windowData.id);
             });
-          const state = ensureFileTreeState(windowData.id);
+          const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+            windowData.id,
+          );
           if (!state.loaded.has("")) {
-            requestFileTree(windowData.id, "");
+            frontendUnits.branchesFileTreeSurface.requestFileTree(windowData.id, "");
           }
-          renderFileTree(windowData.id);
+          frontendUnits.branchesFileTreeSurface.renderFileTree(windowData.id);
           return;
         }
 
@@ -4867,37 +4874,45 @@
           `;
           body.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
           });
           body
             .querySelector("[data-action='refresh-branches']")
             .addEventListener("click", (event) => {
               event.stopPropagation();
-              const state = ensureBranchListState(windowData.id);
+              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+                windowData.id,
+              );
               state.error = "";
               state.notice = "";
-              requestBranches(windowData.id);
-              renderBranches(windowData.id);
+              frontendUnits.branchesFileTreeSurface.requestBranches(windowData.id);
+              frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           for (const button of body.querySelectorAll("[data-branch-filter]")) {
             button.addEventListener("click", (event) => {
               event.stopPropagation();
-              const state = ensureBranchListState(windowData.id);
+              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+                windowData.id,
+              );
               state.filter = button.dataset.branchFilter;
-              renderBranches(windowData.id);
+              frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           }
           body
             .querySelector("[data-action='open-branch-cleanup']")
             .addEventListener("click", (event) => {
               event.stopPropagation();
-              openBranchCleanupModal(windowData.id);
+              frontendUnits.branchesFileTreeSurface.openBranchCleanupModal(
+                windowData.id,
+              );
             });
-          const state = ensureBranchListState(windowData.id);
+          const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+            windowData.id,
+          );
           if (state.entries.length === 0 && !state.loading && !state.error) {
-            requestBranches(windowData.id);
+            frontendUnits.branchesFileTreeSurface.requestBranches(windowData.id);
           }
-          renderBranches(windowData.id);
+          frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
           return;
         }
 
@@ -4925,31 +4940,51 @@
           `;
           body.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
-            send({ kind: "focus_window", id: windowData.id });
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
           });
-          const state = ensureKnowledgeBridgeState(windowData.id, knowledgeKind);
+          const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
+            windowData.id,
+            knowledgeKind,
+          );
           const search = body.querySelector(".knowledge-search");
           search.value = state.query;
           search.addEventListener("input", () => {
             state.query = search.value;
-            renderKnowledgeBridge(windowData.id);
+            frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
+              windowData.id,
+            );
           });
           body
             .querySelector("[data-action='refresh-knowledge']")
             .addEventListener("click", (event) => {
               event.stopPropagation();
-              requestKnowledgeBridge(windowData.id, knowledgeKind, true);
-              renderKnowledgeBridge(windowData.id);
+              frontendUnits.knowledgeSettingsSurface.requestKnowledgeBridge(
+                windowData.id,
+                knowledgeKind,
+                true,
+              );
+              frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
+                windowData.id,
+              );
             });
           if (!state.detail && !state.loading) {
-            requestKnowledgeBridge(windowData.id, knowledgeKind, false);
+            frontendUnits.knowledgeSettingsSurface.requestKnowledgeBridge(
+              windowData.id,
+              knowledgeKind,
+              false,
+            );
           }
-          renderKnowledgeBridge(windowData.id);
+          frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
+            windowData.id,
+          );
           return;
         }
 
         if (windowData.preset === "settings") {
-          renderSettingsWindow(body, windowData);
+          frontendUnits.knowledgeSettingsSurface.renderSettingsWindow(
+            body,
+            windowData,
+          );
           return;
         }
 
@@ -4966,7 +5001,7 @@
         const scroll = body.querySelector(".mock-scroll");
         body.addEventListener("mousedown", () => {
           focusWindowLocally(windowData.id);
-          send({ kind: "focus_window", id: windowData.id });
+          socketTransport.send({ kind: "focus_window", id: windowData.id });
         });
         for (const [label, value] of mock.rows) {
           const section = document.createElement("div");
@@ -5353,24 +5388,112 @@
         }
       }
 
+      const socketTransport = Object.freeze({
+        send,
+        setConnectionState,
+        websocketUrl,
+        handleOpen: handleSocketOpen,
+        handleMessage: handleSocketMessage,
+        handleClose: handleSocketClose,
+        installEventHandlers: installSocketEventHandlers,
+        connect: connectSocket,
+      });
+
+      const projectWorkspaceShell = Object.freeze({
+        emptyWorkspace,
+        activeProjectTab,
+        activeWorkspace,
+        workspaceWindowById,
+        sendOpenProjectDialog,
+        requestWindowList,
+        renderWindowList,
+        toggleWindowList,
+        renderProjectTabs,
+        renderRecentProjects,
+        renderProjectPicker,
+        renderProjectOnboarding,
+        renderAppState,
+      });
+
+      const workspaceWindowManager = Object.freeze({
+        focusWindowLocally,
+        focusWindowRemotely,
+        mountWindowBody,
+        ensureWindow,
+        renderWorkspace,
+      });
+
+      const terminalHost = Object.freeze({
+        fit: fitTerminal,
+        applyStatus,
+        createRuntime: createTerminalRuntime,
+        writeOutput,
+        replaceTerminalSnapshot,
+      });
+
+      const launchWizardSurface = Object.freeze({
+        openIssueLaunchWizard,
+        sendAction: sendWizardAction,
+        syncDraftState: syncWizardDraftState,
+        flushBranchDraft: flushWizardBranchDraft,
+        render: renderLaunchWizard,
+      });
+
+      const branchesFileTreeSurface = Object.freeze({
+        ensureFileTreeState,
+        ensureBranchListState,
+        requestFileTree,
+        requestBranches,
+        renderFileTree,
+        renderBranches,
+        openBranchCleanupModal,
+        closeBranchCleanupModal,
+        renderBranchCleanupModal,
+      });
+
+      const knowledgeSettingsSurface = Object.freeze({
+        ensureKnowledgeBridgeState,
+        requestKnowledgeBridge,
+        requestKnowledgeDetail,
+        renderKnowledgeBridge,
+        renderSettingsWindow,
+        renderSettingsAgentList,
+        setSettingsStatus,
+        completeAddFromPreset,
+      });
+
+      const frontendUnits = Object.freeze({
+        socketTransport,
+        projectWorkspaceShell,
+        workspaceWindowManager,
+        terminalHost,
+        launchWizardSurface,
+        branchesFileTreeSurface,
+        knowledgeSettingsSurface,
+      });
+
       function receive(event) {
         switch (event.kind) {
           case "workspace_state":
             projectError = "";
-            renderAppState(event.workspace);
+            frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
             break;
           case "window_list":
             windowListEntries = event.windows || [];
-            renderWindowList();
+            frontendUnits.projectWorkspaceShell.renderWindowList();
             break;
           case "terminal_output":
-            writeOutput(event.id, event.data_base64);
+            frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
             break;
           case "terminal_snapshot":
-            replaceTerminalSnapshot(event.id, event.data_base64);
+            frontendUnits.terminalHost.replaceTerminalSnapshot(event.id, event.data_base64);
             break;
           case "terminal_status":
-            applyStatus(event.id, event.status, event.detail);
+            frontendUnits.terminalHost.applyStatus(
+              event.id,
+              event.status,
+              event.detail,
+            );
             break;
           case "launch_progress": {
             const element = windowMap.get(event.id);
@@ -5383,22 +5506,28 @@
             break;
           }
           case "file_tree_entries": {
-            const state = ensureFileTreeState(event.id);
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
             state.loaded.set(event.path, event.entries);
             state.loading.delete(event.path);
             state.error = "";
-            renderFileTree(event.id);
+            frontendUnits.branchesFileTreeSurface.renderFileTree(event.id);
             break;
           }
           case "file_tree_error": {
-            const state = ensureFileTreeState(event.id);
+            const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
+              event.id,
+            );
             state.loading.delete(event.path);
             state.error = event.message;
-            renderFileTree(event.id);
+            frontendUnits.branchesFileTreeSurface.renderFileTree(event.id);
             break;
           }
           case "branch_entries": {
-            const state = ensureBranchListState(event.id);
+            const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+              event.id,
+            );
             state.entries = event.entries;
             const phase = String(event.phase || "hydrated").toLowerCase();
             state.phase = phase;
@@ -5407,46 +5536,56 @@
             state.error = "";
             state.notice = "";
             syncBranchSelectionState(state);
-            renderBranches(event.id);
+            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
           case "knowledge_entries": {
-            const state = ensureKnowledgeBridgeState(event.id, event.knowledge_kind);
+            const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
+              event.id,
+              event.knowledge_kind,
+            );
             state.entries = event.entries || [];
             state.selectedNumber = event.selected_number ?? null;
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.loading = false;
             state.error = "";
-            renderKnowledgeBridge(event.id);
+            frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
           }
           case "knowledge_detail": {
-            const state = ensureKnowledgeBridgeState(event.id, event.knowledge_kind);
+            const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
+              event.id,
+              event.knowledge_kind,
+            );
             state.detail = event.detail;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
             state.loading = false;
             state.detailLoading = false;
-            renderKnowledgeBridge(event.id);
+            frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
           }
           case "branch_cleanup_result": {
-            const state = ensureBranchListState(event.id);
+            const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+              event.id,
+            );
             clearBranchCleanupTimeout(state);
             state.cleanupSelected.clear();
             state.cleanupModal.open = true;
             state.cleanupModal.stage = "result";
             state.cleanupModal.results = event.results || [];
             branchCleanupWindowId = event.id;
-            renderBranches(event.id);
+            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
           case "branch_error": {
-            const state = ensureBranchListState(event.id);
+            const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+              event.id,
+            );
             state.loading = false;
             if (state.cleanupModal.stage === "running") {
               failRunningBranchCleanup(event.id, event.message);
-              renderBranches(event.id);
+              frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
               break;
             }
             if (state.receivedFreshEntries) {
@@ -5455,25 +5594,30 @@
             } else {
               state.error = event.message;
             }
-            renderBranches(event.id);
+            frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
           case "knowledge_error": {
-            const state = ensureKnowledgeBridgeState(event.id, event.knowledge_kind);
+            const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
+              event.id,
+              event.knowledge_kind,
+            );
             state.loading = false;
             state.detailLoading = false;
             state.error = event.message;
-            renderKnowledgeBridge(event.id);
+            frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
           }
           case "project_open_error":
             projectError = event.message;
-            renderProjectPicker();
-            renderProjectOnboarding(activeProjectTab());
+            frontendUnits.projectWorkspaceShell.renderProjectPicker();
+            frontendUnits.projectWorkspaceShell.renderProjectOnboarding(
+              frontendUnits.projectWorkspaceShell.activeProjectTab(),
+            );
             break;
           case "launch_wizard_state":
             launchWizard = event.wizard;
-            renderLaunchWizard();
+            frontendUnits.launchWizardSurface.render();
             break;
           case "update_state":
             if (event.state === "available") {
@@ -5484,7 +5628,7 @@
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
             customAgentsState.loading = false;
-            renderSettingsAgentList();
+            frontendUnits.knowledgeSettingsSurface.renderSettingsAgentList();
             break;
           case "custom_agent_saved":
             if (event.agent) {
@@ -5510,11 +5654,13 @@
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
             break;
           case "backend_connection_result":
-            setSettingsStatus(
+            frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
               `/v1/models returned ${event.models.length} model(s).`,
               "success",
             );
-            completeAddFromPreset(event.models);
+            frontendUnits.knowledgeSettingsSurface.completeAddFromPreset(
+              event.models,
+            );
             break;
           case "custom_agent_preset_list":
             // Reserved for a future "Add from preset" picker — the current
@@ -5523,7 +5669,10 @@
           case "custom_agent_error":
             customAgentsState.loading = false;
             pendingAddFromPreset = null;
-            setSettingsStatus(`Error [${event.code}]: ${event.message}`, "error");
+            frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
+              `Error [${event.code}]: ${event.message}`,
+              "error",
+            );
             break;
         }
       }
@@ -5755,9 +5904,18 @@
         true,
       );
 
-      openProjectButton.addEventListener("click", sendOpenProjectDialog);
-      pickerOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
-      onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
+      openProjectButton.addEventListener(
+        "click",
+        frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
+      );
+      pickerOpenProjectButton.addEventListener(
+        "click",
+        frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
+      );
+      onboardingOpenProjectButton.addEventListener(
+        "click",
+        frontendUnits.projectWorkspaceShell.sendOpenProjectDialog,
+      );
       addButton.addEventListener("click", () => {
         if (addButton.disabled) {
           return;
@@ -5766,7 +5924,10 @@
       });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
-      windowListButton.addEventListener("click", toggleWindowList);
+      windowListButton.addEventListener(
+        "click",
+        frontendUnits.projectWorkspaceShell.toggleWindowList,
+      );
       zoomOutButton.addEventListener("click", () => zoomCanvasByFactor(0.9));
       zoomResetButton.addEventListener("click", resetCanvasZoom);
       zoomInButton.addEventListener("click", () => zoomCanvasByFactor(1.1));
@@ -5777,27 +5938,27 @@
         }
       });
       wizardCloseButton.addEventListener("click", () => {
-        sendWizardAction({ kind: "cancel" });
+        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
       });
       wizardCancelButton.addEventListener("click", () => {
-        sendWizardAction({ kind: "cancel" });
+        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
       });
       wizardSubmitButton.addEventListener("click", () => {
-        flushWizardBranchDraft();
-        sendWizardAction({ kind: "submit" });
+        frontendUnits.launchWizardSurface.flushBranchDraft();
+        frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
       });
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {
-          sendWizardAction({ kind: "cancel" });
+          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
         }
       });
       branchCleanupModal.addEventListener("click", (event) => {
         if (event.target === branchCleanupModal) {
-          closeBranchCleanupModal();
+          frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
         }
       });
       window.addEventListener("resize", () => {
-        renderWindowList();
+        frontendUnits.projectWorkspaceShell.renderWindowList();
         syncMaximizedWindowsToViewport();
       });
       window.addEventListener("pointerdown", (event) => {
@@ -5811,20 +5972,24 @@
           return;
         }
         windowListOpen = false;
-        renderWindowList();
+        frontendUnits.projectWorkspaceShell.renderWindowList();
       });
 
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
-          send({ kind: "create_window", preset: button.dataset.preset, bounds: visibleBounds() });
+          frontendUnits.socketTransport.send({
+            kind: "create_window",
+            preset: button.dataset.preset,
+            bounds: visibleBounds(),
+          });
           closeModal();
         });
       }
 
-      window.__POC__ = { receive, frontendStateOwners };
+      window.__POC__ = { receive, frontendStateOwners, frontendUnits };
 
-      renderAppState(appState);
-      connectSocket();
+      frontendUnits.projectWorkspaceShell.renderAppState(appState);
+      frontendUnits.socketTransport.connect();
     </script>
   </body>
 </html>
