@@ -4875,7 +4875,9 @@
       // the backend before reaching this layer (see redact_secrets_in_agent).
       const customAgentsState = {
         agents: [],
+        presets: [],
         loading: false,
+        presetsLoading: false,
         statusMessage: "",
         statusKind: "",
       };
@@ -4924,6 +4926,13 @@
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
         }
+        if (
+          !customAgentsState.presetsLoading &&
+          customAgentsState.presets.length === 0
+        ) {
+          customAgentsState.presetsLoading = true;
+          send({ kind: "list_custom_agent_presets" });
+        }
       }
 
       function renderSettingsAgentList() {
@@ -4936,15 +4945,17 @@
           if (!scroll) continue;
           while (scroll.firstChild) scroll.removeChild(scroll.firstChild);
 
-          const addBtn = document.createElement("button");
-          addBtn.className = "wizard-button";
-          addBtn.style.margin = "8px 0";
-          addBtn.textContent = "＋ Add Claude Code (OpenAI-compat backend)";
-          addBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            startAddClaudeCodeOpenaiCompatFlow();
-          });
-          scroll.appendChild(addBtn);
+          for (const preset of customAgentsState.presets) {
+            const addBtn = document.createElement("button");
+            addBtn.className = "wizard-button";
+            addBtn.style.margin = "8px 0";
+            addBtn.textContent = `＋ Add ${preset.label}`;
+            addBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              startAddFromPresetFlow(preset);
+            });
+            scroll.appendChild(addBtn);
+          }
 
           if (customAgentsState.statusMessage) {
             const section = createDiv("mock-section");
@@ -5018,7 +5029,7 @@
         }
       }
 
-      function startAddClaudeCodeOpenaiCompatFlow() {
+      function startAddFromPresetFlow(preset) {
         const baseUrl = window.prompt(
           "Upstream base_url (http:// or https://)\n\nExample: http://192.168.100.166:32768",
           "http://",
@@ -5029,7 +5040,7 @@
         );
         if (!apiKey) return;
         setSettingsStatus("Probing /v1/models…", "info");
-        pendingAddFromPreset = { baseUrl, apiKey };
+        pendingAddFromPreset = { presetId: preset.id, baseUrl, apiKey };
         send({ kind: "test_backend_connection", base_url: baseUrl, api_key: apiKey });
       }
 
@@ -5071,7 +5082,7 @@
         setSettingsStatus("Saving preset…", "info");
         send({
           kind: "add_custom_agent_from_preset",
-          preset_id: "claude_code_openai_compat",
+          preset_id: pendingAddFromPreset.presetId,
           payload: {
             id,
             display_name: displayName,
@@ -5399,8 +5410,9 @@
             completeAddFromPreset(event.models);
             break;
           case "custom_agent_preset_list":
-            // Reserved for a future "Add from preset" picker — the current
-            // UI hardcodes the one preset.
+            customAgentsState.presets = event.presets || [];
+            customAgentsState.presetsLoading = false;
+            renderSettingsAgentList();
             break;
           case "custom_agent_error":
             customAgentsState.loading = false;

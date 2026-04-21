@@ -37,7 +37,7 @@ impl fmt::Display for PresetId {
 }
 
 /// Metadata that the Settings UI shows in the "Add from preset" picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PresetDefinition {
     /// Stable id used by the add-from-preset request.
     pub id: PresetId,
