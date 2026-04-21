@@ -19,19 +19,50 @@ use crate::{
     protocol::{BackendEvent, CustomAgentErrorCode},
 };
 
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME_DIR_OVERRIDE: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn missing_home_dir_error() -> CustomAgentsServiceError {
+    CustomAgentsServiceError::Storage(
+        "unable to resolve home directory (`~/.gwt/config.toml`); \
+         set HOME/USERPROFILE before managing custom agents"
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+fn config_path_from_home(home: Option<PathBuf>) -> Result<PathBuf, CustomAgentsServiceError> {
+    home.map(|home| home.join(".gwt").join("config.toml"))
+        .ok_or_else(missing_home_dir_error)
+}
+
+#[cfg(test)]
+fn test_home_dir_override() -> Option<Option<PathBuf>> {
+    TEST_HOME_DIR_OVERRIDE.with(|override_home| override_home.borrow().clone())
+}
+
+#[cfg(test)]
+fn set_test_home_dir_override(home: Option<Option<PathBuf>>) {
+    TEST_HOME_DIR_OVERRIDE.with(|override_home| {
+        *override_home.borrow_mut() = home;
+    });
+}
+
 /// Resolve the custom-agent config file path. Returns `Storage` error when
 /// the home directory cannot be discovered — silently falling back to
 /// `./config.toml` would write `api_key` secrets into the current working
 /// directory, which diverges from the app's canonical `~/.gwt/config.toml`
 /// source of truth.
 pub fn config_path() -> Result<PathBuf, CustomAgentsServiceError> {
-    Settings::global_config_path().ok_or_else(|| {
-        CustomAgentsServiceError::Storage(
-            "unable to resolve home directory (`~/.gwt/config.toml`); \
-             set HOME/USERPROFILE before managing custom agents"
-                .to_string(),
-        )
-    })
+    #[cfg(test)]
+    if let Some(home) = test_home_dir_override() {
+        return config_path_from_home(home);
+    }
+
+    Settings::global_config_path().ok_or_else(missing_home_dir_error)
 }
 
 /// Resolve the config path or produce a `CustomAgentError` event — eliminates
@@ -129,6 +160,57 @@ pub fn test_connection_event(base_url: &str, api_key: &str) -> BackendEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn sample_input() -> ClaudeCodeOpenaiCompatInput {
+        ClaudeCodeOpenaiCompatInput {
+            id: "claude-proxy".to_string(),
+            display_name: "Claude Proxy".to_string(),
+            base_url: "http://proxy.local:32768".to_string(),
+            api_key: "sk-real-secret".to_string(),
+            default_model: "openai/gpt-oss-20b".to_string(),
+        }
+    }
+
+    fn sample_agent(id: &str) -> CustomCodingAgent {
+        gwt_agent::claude_code_openai_compat_preset(
+            id,
+            "Claude Proxy",
+            "http://proxy.local:32768",
+            "sk-real-secret",
+            "openai/gpt-oss-20b",
+        )
+    }
+
+    fn home_config_path(home: PathBuf) -> PathBuf {
+        home.join(".gwt").join("config.toml")
+    }
+
+    struct HomeDirOverrideGuard;
+
+    impl Drop for HomeDirOverrideGuard {
+        fn drop(&mut self) {
+            set_test_home_dir_override(None);
+        }
+    }
+
+    fn override_home_dir(home: Option<PathBuf>) -> HomeDirOverrideGuard {
+        set_test_home_dir_override(Some(home));
+        HomeDirOverrideGuard
+    }
+
+    fn assert_storage_error(event: BackendEvent) {
+        match event {
+            BackendEvent::CustomAgentError { code, message } => {
+                assert_eq!(code, CustomAgentErrorCode::Storage);
+                assert!(
+                    message.contains("unable to resolve home directory"),
+                    "unexpected storage error message: {message}"
+                );
+            }
+            other => panic!("expected CustomAgentError, got {other:?}"),
+        }
+    }
 
     #[test]
     fn error_to_event_preserves_code_per_variant() {
@@ -192,5 +274,109 @@ mod tests {
         assert_eq!(wired.env["ANTHROPIC_API_KEY"], REDACTED_PLACEHOLDER);
         // Non-secret entries pass through.
         assert_eq!(wired.env["ANTHROPIC_BASE_URL"], "http://proxy.local:32768");
+    }
+
+    #[test]
+    fn list_event_returns_storage_error_when_config_path_is_unavailable() {
+        let _guard = override_home_dir(None);
+
+        assert_storage_error(list_event());
+    }
+
+    #[test]
+    fn add_from_preset_event_returns_storage_error_when_config_path_is_unavailable() {
+        let _guard = override_home_dir(None);
+
+        assert_storage_error(add_from_preset_event(sample_input()));
+    }
+
+    #[test]
+    fn update_event_returns_storage_error_when_config_path_is_unavailable() {
+        let _guard = override_home_dir(None);
+
+        assert_storage_error(update_event(sample_agent("claude-proxy")));
+    }
+
+    #[test]
+    fn delete_event_returns_storage_error_when_config_path_is_unavailable() {
+        let _guard = override_home_dir(None);
+
+        assert_storage_error(delete_event("claude-proxy".to_string()));
+    }
+
+    #[test]
+    fn list_event_uses_resolved_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = override_home_dir(Some(dir.path().to_path_buf()));
+
+        match list_event() {
+            BackendEvent::CustomAgentList { agents } => assert!(agents.is_empty()),
+            other => panic!("expected CustomAgentList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_from_preset_event_uses_resolved_config_path() {
+        use gwt_agent::REDACTED_PLACEHOLDER;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = home_config_path(dir.path().to_path_buf());
+        let _guard = override_home_dir(Some(dir.path().to_path_buf()));
+
+        match add_from_preset_event(sample_input()) {
+            BackendEvent::CustomAgentSaved { agent } => {
+                assert_eq!(agent.id, "claude-proxy");
+                assert_eq!(agent.env["ANTHROPIC_API_KEY"], REDACTED_PLACEHOLDER);
+            }
+            other => panic!("expected CustomAgentSaved, got {other:?}"),
+        }
+
+        let persisted =
+            crate::custom_agents_service::list_custom_agents(&config_path).expect("reload");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].env["ANTHROPIC_API_KEY"], "sk-real-secret");
+    }
+
+    #[test]
+    fn update_event_uses_resolved_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = home_config_path(dir.path().to_path_buf());
+        let _guard = override_home_dir(Some(dir.path().to_path_buf()));
+
+        add_from_preset_event(sample_input());
+        let mut agent = crate::custom_agents_service::list_custom_agents(&config_path)
+            .expect("reload")
+            .pop()
+            .expect("agent");
+        agent.display_name = "Renamed Proxy".to_string();
+
+        match update_event(agent) {
+            BackendEvent::CustomAgentSaved { agent } => {
+                assert_eq!(agent.display_name, "Renamed Proxy");
+            }
+            other => panic!("expected CustomAgentSaved, got {other:?}"),
+        }
+
+        let persisted =
+            crate::custom_agents_service::list_custom_agents(&config_path).expect("reload");
+        assert_eq!(persisted[0].display_name, "Renamed Proxy");
+    }
+
+    #[test]
+    fn delete_event_uses_resolved_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = home_config_path(dir.path().to_path_buf());
+        let _guard = override_home_dir(Some(dir.path().to_path_buf()));
+
+        add_from_preset_event(sample_input());
+
+        match delete_event("claude-proxy".to_string()) {
+            BackendEvent::CustomAgentDeleted { agent_id } => assert_eq!(agent_id, "claude-proxy"),
+            other => panic!("expected CustomAgentDeleted, got {other:?}"),
+        }
+
+        let persisted =
+            crate::custom_agents_service::list_custom_agents(&config_path).expect("reload");
+        assert!(persisted.is_empty());
     }
 }
