@@ -374,6 +374,22 @@ mod tests {
         assert_eq!(surface.webview_url, "http://127.0.0.1:44557/");
     }
 
+    #[test]
+    fn gui_front_door_launch_surface_shares_one_embedded_bundle_contract() {
+        let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
+        let html = crate::embedded_web::index_html();
+
+        assert_eq!(surface.browser_url, surface.webview_url);
+        assert!(
+            html.contains("window.__POC__ = { receive, frontendStateOwners, frontendUnits };"),
+            "expected browser and native front door modes to load the same embedded bundle contract",
+        );
+        assert!(
+            html.contains("frontendUnits.socketTransport.connect();"),
+            "expected the shared embedded bundle to bootstrap socket transport once for both front door modes",
+        );
+    }
+
     fn drain_client_payloads(
         receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     ) -> Vec<String> {

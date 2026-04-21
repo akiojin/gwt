@@ -233,6 +233,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
+        let html = index_html();
+        let websocket_url = regex::Regex::new(
+            r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            websocket_url.is_match(html),
+            "expected embedded bundle to derive the websocket endpoint from window.location without host-specific branches",
+        );
+        assert!(
+            !html.contains("__TAURI__")
+                && !html.contains("window.chrome.webview")
+                && !html.contains("webkit.messageHandlers"),
+            "expected websocket transport to avoid native-host-specific frontend branches",
+        );
+    }
+
+    #[test]
     fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
         let html = index_html();
         let workspace_state_flow = regex::Regex::new(
@@ -445,6 +465,26 @@ mod tests {
         assert!(
             wizard_state.is_match(html),
             "expected launch wizard state updates to hydrate the shared wizard renderer",
+        );
+    }
+
+    #[test]
+    fn embedded_web_shared_bundle_keeps_user_facing_copy_english_only() {
+        let html = index_html();
+        let japanese_scripts = regex::Regex::new(r"[ぁ-んァ-ン一-龯]").expect("valid regex");
+
+        assert!(
+            html.contains("Open a project")
+                && html.contains("Restore previous workspaces or choose a new folder.")
+                && html.contains("Open a standard shell terminal")
+                && html.contains("Launch Agent")
+                && html.contains("Connected")
+                && html.contains("Reconnecting"),
+            "expected shared frontend bundle to keep the browser and native user-facing copy on the English contract",
+        );
+        assert!(
+            !japanese_scripts.is_match(html),
+            "expected embedded bundle copy to stay English-only for both browser and native modes",
         );
     }
 
