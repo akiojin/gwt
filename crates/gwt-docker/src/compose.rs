@@ -15,6 +15,8 @@ pub struct ComposeService {
     pub name: String,
     /// Image name (if specified).
     pub image: Option<String>,
+    /// Explicit target platform (if specified), e.g. `linux/arm64`.
+    pub platform: Option<String>,
     /// Published ports (raw strings, e.g. "8080:80").
     pub ports: Vec<String>,
     /// Services this service depends on.
@@ -61,6 +63,10 @@ fn parse_compose_content(content: &str) -> Result<Vec<ComposeService>> {
             .get("image")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let platform = value
+            .get("platform")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let ports = value
             .get("ports")
@@ -82,6 +88,7 @@ fn parse_compose_content(content: &str) -> Result<Vec<ComposeService>> {
         result.push(ComposeService {
             name,
             image,
+            platform,
             ports,
             depends_on,
             working_dir,
@@ -285,12 +292,14 @@ services:
 services:
   app:
     image: node:18
+    platform: linux/arm64/v8
     working_dir: /workspace
     volumes:
       - .:/workspace
       - cache:/cache:ro
 "#;
         let services = parse_compose_content(yaml).unwrap();
+        assert_eq!(services[0].platform.as_deref(), Some("linux/arm64/v8"));
         assert_eq!(services[0].working_dir.as_deref(), Some("/workspace"));
         assert_eq!(services[0].volumes.len(), 2);
         assert_eq!(services[0].volumes[0].source, ".");

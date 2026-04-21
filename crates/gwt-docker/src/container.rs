@@ -6,6 +6,7 @@
 use std::{
     ffi::OsString,
     io::{BufRead, BufReader, Read},
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
@@ -289,36 +290,80 @@ where
     })
 }
 
-fn compose_parent_dir(compose_file: &std::path::Path) -> &std::path::Path {
-    compose_file
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
+fn compose_parent_dir(compose_file: &Path) -> &Path {
+    compose_file.parent().unwrap_or_else(|| Path::new("."))
+}
+
+fn compose_parent_dir_for_files(compose_files: &[PathBuf]) -> &Path {
+    compose_files
+        .first()
+        .map(|file| compose_parent_dir(file))
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn compose_file_args(compose_files: &[PathBuf]) -> Vec<String> {
+    compose_files
+        .iter()
+        .flat_map(|file| ["-f".to_string(), file.display().to_string()])
+        .collect()
+}
+
+fn compose_files_label(compose_files: &[PathBuf]) -> String {
+    compose_files
+        .iter()
+        .map(|file| file.display().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Start a compose service in detached mode.
-pub fn compose_up(compose_file: &std::path::Path, service: &str) -> Result<()> {
+pub fn compose_up(compose_file: &Path, service: &str) -> Result<()> {
     compose_up_with_output(compose_file, service, |_, _| {})
 }
 
+/// Start a compose service in detached mode using all provided Compose files.
+pub fn compose_up_with_files(compose_files: &[PathBuf], service: &str) -> Result<()> {
+    compose_up_with_files_output(compose_files, service, |_, _| {})
+}
+
 /// Start a compose service in detached mode and force container recreation.
-pub fn compose_up_force_recreate(compose_file: &std::path::Path, service: &str) -> Result<()> {
+pub fn compose_up_force_recreate(compose_file: &Path, service: &str) -> Result<()> {
     compose_up_force_recreate_with_output(compose_file, service, |_, _| {})
 }
 
+/// Start a compose service with all Compose files and force recreation.
+pub fn compose_up_force_recreate_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+) -> Result<()> {
+    compose_up_force_recreate_with_files_output(compose_files, service, |_, _| {})
+}
+
 /// Start a compose service in detached mode while streaming stdout/stderr lines.
-pub fn compose_up_with_output<F>(
-    compose_file: &std::path::Path,
+pub fn compose_up_with_output<F>(compose_file: &Path, service: &str, on_line: F) -> Result<()>
+where
+    F: FnMut(CommandOutputStream, &str),
+{
+    compose_up_with_files_output(&[compose_file.to_path_buf()], service, on_line)
+}
+
+/// Start a compose service using all Compose files while streaming output.
+pub fn compose_up_with_files_output<F>(
+    compose_files: &[PathBuf],
     service: &str,
     on_line: F,
 ) -> Result<()>
 where
     F: FnMut(CommandOutputStream, &str),
 {
-    let compose_file = compose_file.display().to_string();
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_file_args(compose_files));
+    args.extend(["up".to_string(), "-d".to_string(), service.to_string()]);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_docker_with_output_streaming_in_dir_and_timeout(
-        &["compose", "-f", &compose_file, "up", "-d", service],
+        &arg_refs,
         "docker compose up",
-        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        Some(compose_parent_dir_for_files(compose_files)),
         docker_compose_up_timeout(),
         on_line,
     )?;
@@ -330,6 +375,7 @@ where
             stderr
         }));
     }
+    let compose_file = compose_files_label(compose_files);
     debug!(
         category = "docker",
         service = service,
@@ -342,26 +388,39 @@ where
 /// Start a compose service in detached mode while forcing recreation and
 /// streaming stdout/stderr lines.
 pub fn compose_up_force_recreate_with_output<F>(
-    compose_file: &std::path::Path,
+    compose_file: &Path,
     service: &str,
     on_line: F,
 ) -> Result<()>
 where
     F: FnMut(CommandOutputStream, &str),
 {
-    let compose_file = compose_file.display().to_string();
+    compose_up_force_recreate_with_files_output(&[compose_file.to_path_buf()], service, on_line)
+}
+
+/// Start a compose service using all Compose files while forcing recreation and
+/// streaming stdout/stderr lines.
+pub fn compose_up_force_recreate_with_files_output<F>(
+    compose_files: &[PathBuf],
+    service: &str,
+    on_line: F,
+) -> Result<()>
+where
+    F: FnMut(CommandOutputStream, &str),
+{
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_file_args(compose_files));
+    args.extend([
+        "up".to_string(),
+        "-d".to_string(),
+        "--force-recreate".to_string(),
+        service.to_string(),
+    ]);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_docker_with_output_streaming_in_dir_and_timeout(
-        &[
-            "compose",
-            "-f",
-            &compose_file,
-            "up",
-            "-d",
-            "--force-recreate",
-            service,
-        ],
+        &arg_refs,
         "docker compose up --force-recreate",
-        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        Some(compose_parent_dir_for_files(compose_files)),
         docker_compose_up_timeout(),
         on_line,
     )?;
@@ -373,6 +432,7 @@ where
             stderr
         }));
     }
+    let compose_file = compose_files_label(compose_files);
     debug!(
         category = "docker",
         service = service,
@@ -382,22 +442,26 @@ where
     Ok(())
 }
 
-fn compose_service_statuses(
-    compose_file: &std::path::Path,
+fn compose_service_statuses(compose_file: &Path) -> Result<Vec<(String, ComposeServiceStatus)>> {
+    compose_service_statuses_with_files(&[compose_file.to_path_buf()])
+}
+
+fn compose_service_statuses_with_files(
+    compose_files: &[PathBuf],
 ) -> Result<Vec<(String, ComposeServiceStatus)>> {
-    let compose_file = compose_file.display().to_string();
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_file_args(compose_files));
+    args.extend([
+        "ps".to_string(),
+        "--all".to_string(),
+        "--format".to_string(),
+        "{{.Service}}\t{{.State}}".to_string(),
+    ]);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_docker_with_timeout_in_dir(
-        &[
-            "compose",
-            "-f",
-            &compose_file,
-            "ps",
-            "--all",
-            "--format",
-            "{{.Service}}\t{{.State}}",
-        ],
+        &arg_refs,
         "docker compose ps",
-        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        Some(compose_parent_dir_for_files(compose_files)),
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -431,23 +495,39 @@ fn compose_service_statuses(
 }
 
 /// Return whether a compose service is currently running.
-pub fn compose_service_is_running(compose_file: &std::path::Path, service: &str) -> Result<bool> {
+pub fn compose_service_is_running(compose_file: &Path, service: &str) -> Result<bool> {
     Ok(compose_service_status(compose_file, service)? == ComposeServiceStatus::Running)
 }
 
-/// Return the current status of a compose service.
-pub fn compose_service_status(
-    compose_file: &std::path::Path,
+/// Return whether a compose service from all Compose files is currently running.
+pub fn compose_service_is_running_with_files(
+    compose_files: &[PathBuf],
     service: &str,
-) -> Result<ComposeServiceStatus> {
+) -> Result<bool> {
+    Ok(compose_service_status_with_files(compose_files, service)? == ComposeServiceStatus::Running)
+}
+
+/// Return the current status of a compose service.
+pub fn compose_service_status(compose_file: &Path, service: &str) -> Result<ComposeServiceStatus> {
     Ok(compose_service_statuses(compose_file)?
         .into_iter()
         .find_map(|(candidate, status)| (candidate == service).then_some(status))
         .unwrap_or(ComposeServiceStatus::NotFound))
 }
 
+/// Return the current status of a compose service using all Compose files.
+pub fn compose_service_status_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+) -> Result<ComposeServiceStatus> {
+    Ok(compose_service_statuses_with_files(compose_files)?
+        .into_iter()
+        .find_map(|(candidate, status)| (candidate == service).then_some(status))
+        .unwrap_or(ComposeServiceStatus::NotFound))
+}
+
 /// Return recent logs for a compose service.
-pub fn compose_service_logs(compose_file: &std::path::Path, service: &str) -> Result<String> {
+pub fn compose_service_logs(compose_file: &Path, service: &str) -> Result<String> {
     let compose_file = compose_file.display().to_string();
     let output = run_docker_with_timeout_in_dir(
         &[
@@ -476,27 +556,36 @@ pub fn compose_service_logs(compose_file: &std::path::Path, service: &str) -> Re
 
 /// Return whether a compose service can resolve a command inside the container.
 pub fn compose_service_has_command(
-    compose_file: &std::path::Path,
+    compose_file: &Path,
     service: &str,
     command: &str,
 ) -> Result<bool> {
-    let compose_file = compose_file.display().to_string();
+    compose_service_has_command_with_files(&[compose_file.to_path_buf()], service, command)
+}
+
+/// Return whether a compose service can resolve a command using all Compose files.
+pub fn compose_service_has_command_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+    command: &str,
+) -> Result<bool> {
+    let mut docker_args = vec!["compose".to_string()];
+    docker_args.extend(compose_file_args(compose_files));
+    docker_args.extend([
+        "exec".to_string(),
+        "-T".to_string(),
+        service.to_string(),
+        "sh".to_string(),
+        "-lc".to_string(),
+        "command -v \"$1\" >/dev/null 2>&1".to_string(),
+        "sh".to_string(),
+        command.to_string(),
+    ]);
+    let arg_refs = docker_args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_docker_with_timeout_in_dir(
-        &[
-            "compose",
-            "-f",
-            &compose_file,
-            "exec",
-            "-T",
-            service,
-            "sh",
-            "-lc",
-            "command -v \"$1\" >/dev/null 2>&1",
-            "sh",
-            command,
-        ],
+        &arg_refs,
         "docker compose exec command check",
-        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        Some(compose_parent_dir_for_files(compose_files)),
     )?;
     if output.status.success() {
         return Ok(true);
@@ -515,31 +604,56 @@ pub fn compose_service_has_command(
 /// Transport failures such as spawn errors and timeouts return `Err`. A
 /// non-zero exit status from the command itself is returned via `Output`.
 pub fn compose_service_exec_capture(
-    compose_file: &std::path::Path,
+    compose_file: &Path,
     service: &str,
     working_dir: Option<&str>,
     args: &[String],
 ) -> Result<Output> {
-    let compose_file = compose_file.display().to_string();
-    let mut docker_args = vec!["compose", "-f", &compose_file, "exec", "-T"];
+    compose_service_exec_capture_with_files(
+        &[compose_file.to_path_buf()],
+        service,
+        working_dir,
+        args,
+    )
+}
+
+/// Execute a command inside a compose service using all Compose files.
+pub fn compose_service_exec_capture_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+    working_dir: Option<&str>,
+    args: &[String],
+) -> Result<Output> {
+    let mut docker_args = vec!["compose".to_string()];
+    docker_args.extend(compose_file_args(compose_files));
+    docker_args.extend(["exec".to_string(), "-T".to_string()]);
     if let Some(working_dir) = working_dir {
-        docker_args.push("-w");
-        docker_args.push(working_dir);
+        docker_args.push("-w".to_string());
+        docker_args.push(working_dir.to_string());
     }
-    docker_args.push(service);
-    docker_args.extend(args.iter().map(String::as_str));
+    docker_args.push(service.to_string());
+    docker_args.extend(args.iter().cloned());
+    let arg_refs = docker_args.iter().map(String::as_str).collect::<Vec<_>>();
 
     run_docker_with_timeout_in_dir(
-        &docker_args,
+        &arg_refs,
         "docker compose exec",
-        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        Some(compose_parent_dir_for_files(compose_files)),
     )
 }
 
 /// Return whether a compose service executes as root inside the container.
-pub fn compose_service_user_is_root(compose_file: &std::path::Path, service: &str) -> Result<bool> {
-    let output = compose_service_exec_capture(
-        compose_file,
+pub fn compose_service_user_is_root(compose_file: &Path, service: &str) -> Result<bool> {
+    compose_service_user_is_root_with_files(&[compose_file.to_path_buf()], service)
+}
+
+/// Return whether a compose service executes as root using all Compose files.
+pub fn compose_service_user_is_root_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+) -> Result<bool> {
+    let output = compose_service_exec_capture_with_files(
+        compose_files,
         service,
         None,
         &["sh".to_string(), "-lc".to_string(), "id -u".to_string()],
@@ -562,7 +676,7 @@ pub fn compose_service_user_is_root(compose_file: &std::path::Path, service: &st
 }
 
 /// Stop a compose service.
-pub fn compose_stop(compose_file: &std::path::Path, service: &str) -> Result<()> {
+pub fn compose_stop(compose_file: &Path, service: &str) -> Result<()> {
     let compose_file = compose_file.display().to_string();
     let output = run_docker_with_timeout_in_dir(
         &["compose", "-f", &compose_file, "stop", service],
@@ -581,12 +695,20 @@ pub fn compose_stop(compose_file: &std::path::Path, service: &str) -> Result<()>
 }
 
 /// Restart a compose service.
-pub fn compose_restart(compose_file: &std::path::Path, service: &str) -> Result<()> {
-    let compose_file = compose_file.display().to_string();
+pub fn compose_restart(compose_file: &Path, service: &str) -> Result<()> {
+    compose_restart_with_files(&[compose_file.to_path_buf()], service)
+}
+
+/// Restart a compose service using all Compose files.
+pub fn compose_restart_with_files(compose_files: &[PathBuf], service: &str) -> Result<()> {
+    let mut args = vec!["compose".to_string()];
+    args.extend(compose_file_args(compose_files));
+    args.extend(["restart".to_string(), service.to_string()]);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     let output = run_docker_with_timeout_in_dir(
-        &["compose", "-f", &compose_file, "restart", service],
+        &arg_refs,
         "docker compose restart",
-        Some(compose_parent_dir(std::path::Path::new(&compose_file))),
+        Some(compose_parent_dir_for_files(compose_files)),
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -678,7 +800,11 @@ pub fn restart(id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Write, path::PathBuf, sync::Mutex};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
 
     use tempfile::TempDir;
 
@@ -686,22 +812,80 @@ mod tests {
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let script_path = dir.path().join("docker");
-        let mut file = fs::File::create(&script_path).expect("create fake docker");
-        file.write_all(script_body.as_bytes())
-            .expect("write fake docker");
+    #[cfg(windows)]
+    fn git_bash_path() -> PathBuf {
+        [
+            std::env::var_os("GWT_TEST_BASH").map(PathBuf::from),
+            std::env::var_os("GIT_BASH").map(PathBuf::from),
+            Some(PathBuf::from(r"C:\Program Files\Git\bin\bash.exe")),
+            Some(PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe")),
+            Some(PathBuf::from(r"C:\Program Files (x86)\Git\bin\bash.exe")),
+            Some(PathBuf::from(
+                r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+            )),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("Git Bash not found for gwt-docker fake docker tests"))
+    }
 
-        #[cfg(unix)]
+    #[cfg(windows)]
+    fn git_bash_script_path(path: &Path) -> String {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        let normalized = normalized.strip_prefix("//?/").unwrap_or(&normalized);
+        if let Some((drive, rest)) = normalized.split_once(":/") {
+            format!("/{}/{}", drive.to_ascii_lowercase(), rest)
+        } else {
+            normalized.to_string()
+        }
+    }
+
+    fn shell_script_path(path: &Path) -> String {
+        #[cfg(windows)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = file.metadata().expect("stat fake docker").permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+            git_bash_script_path(path)
         }
 
-        (dir, script_path)
+        #[cfg(not(windows))]
+        {
+            path.display().to_string()
+        }
+    }
+
+    fn write_fake_docker(script_body: &str) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+
+        #[cfg(windows)]
+        {
+            let bash_script_path = dir.path().join("docker.sh");
+            fs::write(&bash_script_path, script_body).expect("write fake docker shell");
+
+            let script_path = dir.path().join("docker.cmd");
+            let wrapper = format!(
+                "@echo off\r\n\"{}\" \"{}\" %*\r\n",
+                git_bash_path().display(),
+                shell_script_path(&bash_script_path)
+            );
+            fs::write(&script_path, wrapper).expect("write fake docker wrapper");
+
+            (dir, script_path)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let script_path = dir.path().join("docker");
+            fs::write(&script_path, script_body).expect("write fake docker");
+
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path)
+                .expect("stat fake docker")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod fake docker");
+
+            (dir, script_path)
+        }
     }
 
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce(&PathBuf) -> R) -> R {
@@ -813,7 +997,7 @@ mod tests {
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -829,7 +1013,7 @@ mod tests {
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -845,7 +1029,7 @@ mod tests {
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -935,7 +1119,7 @@ mod tests {
         .expect("compose");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -945,6 +1129,24 @@ mod tests {
         assert_eq!(
             read_invocation(&log_path),
             format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display())
+        );
+    }
+
+    #[test]
+    fn compose_file_args_includes_all_compose_files_in_order() {
+        let compose_files = vec![
+            PathBuf::from("docker-compose.yml"),
+            PathBuf::from("docker-compose.override.yml"),
+        ];
+
+        assert_eq!(
+            compose_file_args(&compose_files),
+            vec![
+                "-f".to_string(),
+                "docker-compose.yml".to_string(),
+                "-f".to_string(),
+                "docker-compose.override.yml".to_string(),
+            ]
         );
     }
 
@@ -961,7 +1163,7 @@ mod tests {
         .expect("compose");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -1058,7 +1260,7 @@ mod tests {
         .expect("compose");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -1084,7 +1286,7 @@ mod tests {
         .expect("compose");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {
@@ -1184,7 +1386,7 @@ mod tests {
         .expect("compose");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"app\" ]; then\n  printf 'could not determine executable to run\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
-            log_path.display()
+            shell_script_path(&log_path)
         );
 
         with_fake_docker(&script, |_| {

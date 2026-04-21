@@ -72,6 +72,49 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
+        let html = index_html();
+        let streaming_write = regex::Regex::new(
+            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+        let snapshot_write = regex::Regex::new(
+            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function scheduleTerminalViewportRefresh(windowId)"),
+            "expected terminal viewport refresh scheduling helper",
+        );
+        assert!(
+            html.contains("viewportRefreshFrame"),
+            "expected terminal runtime to debounce viewport refreshes",
+        );
+        assert!(
+            streaming_write.is_match(html),
+            "expected streaming terminal output to refresh viewport after xterm parses it",
+        );
+        assert!(
+            snapshot_write.is_match(html),
+            "expected terminal snapshots to refresh viewport after xterm parses them",
+        );
+        assert!(
+            html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
+            "expected pending terminal viewport refresh frames to be cancelled during cleanup",
+        );
+        assert!(
+            html.contains("if (runtime && runtime.viewportRefreshFrame !== null)"),
+            "expected terminal cleanup to guard non-terminal windows before cancelling refresh frames",
+        );
+        assert!(
+            html.contains("function canRefreshTerminalViewport(windowId)")
+                && html.contains("!workspaceWindowById(windowId)?.minimized"),
+            "expected terminal viewport refresh to skip minimized windows",
+        );
+    }
+
+    #[test]
     fn embedded_web_repo_browser_scroll_surfaces_block_canvas_pan_at_edges() {
         let html = index_html();
         let scroll_gate = regex::Regex::new(
@@ -86,6 +129,10 @@ mod tests {
         assert!(
             html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
             "expected embedded html to reference repo browser scroll containers",
+        );
+        assert!(
+            html.contains(".knowledge-list-pane") && html.contains(".knowledge-detail-scroll"),
+            "expected knowledge bridge list and detail panes to keep plain wheel input inside the window",
         );
         assert!(
             html.contains(
@@ -274,6 +321,51 @@ mod tests {
         assert!(
             html.contains("open_issue_launch_wizard"),
             "expected issue launch wizard event in embedded html",
+        );
+        assert!(
+            html.contains(".workspace-window.surface-knowledge")
+                && html.contains(".surface-knowledge .titlebar"),
+            "expected knowledge bridge windows to define non-transparent window and titlebar chrome",
+        );
+        assert!(
+            html.contains("function renderMarkdownFragment("),
+            "expected knowledge bridge detail sections to render Markdown through a named renderer",
+        );
+        assert!(
+            html.contains("renderMarkdownFragment(section.body)")
+                && !html.contains("createNode(\"pre\", \"knowledge-section-body\", section.body)"),
+            "expected knowledge bridge detail bodies to avoid plain preformatted Markdown output",
+        );
+        assert!(
+            html.contains("flushList();\n          paragraph.push(line.trim());")
+                || html.contains("flushList();\r\n          paragraph.push(line.trim());"),
+            "expected pending Markdown lists to flush before a following paragraph preserves source order",
+        );
+    }
+
+    #[test]
+    fn embedded_web_profile_surface_uses_config_backed_contract() {
+        let html = index_html();
+
+        assert!(
+            html.contains("profile-root"),
+            "expected Profile window to render a dedicated non-mock root",
+        );
+        assert!(
+            html.contains("list_profiles"),
+            "expected Profile window to request a backend profile snapshot",
+        );
+        assert!(
+            html.contains("profile_snapshot"),
+            "expected Profile window to handle backend profile snapshots",
+        );
+        assert!(
+            html.contains("profile-add"),
+            "expected Profile window to expose inline profile add controls",
+        );
+        assert!(
+            html.contains("profile-merged-env"),
+            "expected Profile window to expose an effective environment preview",
         );
     }
 }

@@ -12,6 +12,8 @@ Download the installer or portable archive for your platform from
 
 ### macOS
 
+macOS releases include a signed and notarized `gwt-macos-universal.dmg`.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```
