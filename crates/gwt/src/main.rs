@@ -551,10 +551,12 @@ impl AppRuntime {
                 client_id,
                 gwt::custom_agents_dispatch::list_presets_event(),
             )],
-            FrontendEvent::AddCustomAgentFromPreset { input } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::add_from_preset_event(input),
-            )],
+            FrontendEvent::AddCustomAgentFromPreset { preset_id, payload } => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    gwt::custom_agents_dispatch::add_from_preset_event(preset_id, payload),
+                )]
+            }
             FrontendEvent::UpdateCustomAgent { agent } => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::update_event(*agent),
