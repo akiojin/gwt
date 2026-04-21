@@ -160,6 +160,7 @@ pub fn test_connection_event(base_url: &str, api_key: &str) -> BackendEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_agent::ClaudeCodeOpenaiCompatInput;
     use std::path::PathBuf;
 
     fn sample_input() -> ClaudeCodeOpenaiCompatInput {
@@ -170,6 +171,14 @@ mod tests {
             api_key: "sk-real-secret".to_string(),
             default_model: "openai/gpt-oss-20b".to_string(),
         }
+    }
+
+    fn sample_payload() -> Value {
+        serde_json::to_value(sample_input()).unwrap()
+    }
+
+    fn add_sample_from_preset_event() -> BackendEvent {
+        add_from_preset_event(PresetId::ClaudeCodeOpenaiCompat, sample_payload())
     }
 
     fn sample_agent(id: &str) -> CustomCodingAgent {
@@ -183,7 +192,7 @@ mod tests {
     }
 
     fn home_config_path(home: PathBuf) -> PathBuf {
-        home.join(".gwt").join("config.toml")
+        Settings::global_config_path_for_home(&home)
     }
 
     struct HomeDirOverrideGuard;
@@ -287,7 +296,7 @@ mod tests {
     fn add_from_preset_event_returns_storage_error_when_config_path_is_unavailable() {
         let _guard = override_home_dir(None);
 
-        assert_storage_error(add_from_preset_event(sample_input()));
+        assert_storage_error(add_sample_from_preset_event());
     }
 
     #[test]
@@ -323,7 +332,7 @@ mod tests {
         let config_path = home_config_path(dir.path().to_path_buf());
         let _guard = override_home_dir(Some(dir.path().to_path_buf()));
 
-        match add_from_preset_event(sample_input()) {
+        match add_sample_from_preset_event() {
             BackendEvent::CustomAgentSaved { agent } => {
                 assert_eq!(agent.id, "claude-proxy");
                 assert_eq!(agent.env["ANTHROPIC_API_KEY"], REDACTED_PLACEHOLDER);
@@ -343,7 +352,7 @@ mod tests {
         let config_path = home_config_path(dir.path().to_path_buf());
         let _guard = override_home_dir(Some(dir.path().to_path_buf()));
 
-        add_from_preset_event(sample_input());
+        add_sample_from_preset_event();
         let mut agent = crate::custom_agents_service::list_custom_agents(&config_path)
             .expect("reload")
             .pop()
@@ -368,7 +377,7 @@ mod tests {
         let config_path = home_config_path(dir.path().to_path_buf());
         let _guard = override_home_dir(Some(dir.path().to_path_buf()));
 
-        add_from_preset_event(sample_input());
+        add_sample_from_preset_event();
 
         match delete_event("claude-proxy".to_string()) {
             BackendEvent::CustomAgentDeleted { agent_id } => assert_eq!(agent_id, "claude-proxy"),
