@@ -1225,6 +1225,7 @@ name = "gwt-agent"
 version = "9.7.0"
 dependencies = [
  "chrono",
+ "gwt-config",
  "gwt-core",
  "reqwest",
  "semver",

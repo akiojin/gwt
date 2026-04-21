@@ -9,6 +9,7 @@ description = "Agent detection, launch, and session management for gwt"
 publish = false
 
 [dependencies]
+gwt-config.workspace = true
 gwt-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

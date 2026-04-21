@@ -4870,12 +4870,9 @@
         }
       }
 
-      // SPEC-1921 Phase 52 — Settings > Custom Agents backend bridge.
-      //
       // All DOM nodes are built via createElement + textContent to avoid
-      // innerHTML with mixed trust. The UI is intentionally minimal (prompt()
-      // driven) so the backend protocol can be exercised end-to-end before a
-      // richer form layout is designed.
+      // innerHTML with mixed trust. Secrets in env tables are redacted by
+      // the backend before reaching this layer (see redact_secrets_in_agent).
       const customAgentsState = {
         agents: [],
         loading: false,
@@ -4891,7 +4888,16 @@
         return el;
       }
 
+      function purgeDetachedSettingsBodies() {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) settingsWindowBodies.delete(body);
+        }
+      }
+
       function renderSettingsWindow(body, windowData) {
+        // Sweep detached bodies up-front so repeated open/close cycles do
+        // not accumulate references.
+        purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
         const root = createDiv("mock-root");
         const toolbar = createDiv("mock-toolbar");

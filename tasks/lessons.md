@@ -1,5 +1,39 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
+
+### 事象
+
+Release workflow `24696970550` の `Build MSI installer (Windows)` が
+`wix/main.wxs(26) : error WIX0367` で失敗し、`v9.7.0` の draft release が
+asset 0 件のまま止まった。直前に `feat: gwtとgwtdのbundle配布を追加`
+(299193c4) で同じ `<Component>` に `gwtd.exe` を追加し、File が 2 つに
+なっていた。
+
+### 原因
+
+- WiX v4 は `<Component>` の `Guid="*"` 省略時に GUID を自動生成するが、
+  複数 File を持つ Component は「keypath の File がバージョン情報を持つ」
+  ことを要求する。
+- Cargo の `cargo build --release` はデフォルトで Windows PE の
+  VERSIONINFO を埋め込まないため、`gwt.exe` は未バージョン化扱いとなり、
+  keypath が条件を満たさず WIX0367 が発生した。
+- PR マージ前に Windows MSI ビルドをローカル検証せず、生成 MSI を
+  確認しないまま main にマージしたため、release workflow で初めて
+  表面化した。
+
+### 再発防止策
+
+1. `wix/main.wxs` では 1 File = 1 Component を原則とし、複数 File を
+   1 Component に入れる場合のみ「keypath File が versioned か」を
+   明示的にレビュー項目に入れる。
+2. installer 構成に触る PR では、`wix build` をローカルで走らせるか、
+   少なくとも別の小さな PR で Windows MSI job を pre-flight 実行して
+   release workflow での失敗を前倒しで拾う。
+3. release workflow を一度壊したら、`gh release view v<N>` で
+   asset 数と draft 状態を確認し、tag だけ push されて asset 0 件の
+   draft が残っていないかを毎回セルフチェックする。
+
 ## 2026-04-20 — fix(ci): test import と期待値に OS 固定前提を埋め込まない
 
 ### 事象
