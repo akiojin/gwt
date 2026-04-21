@@ -2,7 +2,7 @@
 //!
 //! Translated from the retired branch-policy parity matrix. Each case is a
 //! (command, expected_decision) tuple. `Block` means the hook MUST return
-//! a `BlockDecision`; `Allow` means it MUST return `None`.
+//! a deny `HookOutput`; `Allow` means it MUST return `None`.
 
 use gwt::cli::hook::block_git_branch_ops;
 

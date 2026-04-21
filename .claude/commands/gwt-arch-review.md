@@ -11,13 +11,16 @@ Scan codebase structure, analyze domain boundaries (DDD), evaluate module depth 
 ## Usage
 
 ```text
-/gwt:gwt-arch-review [path]
+/gwt:gwt-arch-review --scope repo
+/gwt:gwt-arch-review --scope changed --base <ref>
 ```
+
+If omitted, prompt for the scope first. When `changed` is selected interactively, prompt for the base ref next.
 
 ## Steps
 
 1. Load `.claude/skills/gwt-arch-review/SKILL.md` and follow the workflow.
-2. Analyze the target path or full codebase for architectural concerns.
+2. Analyze either the full repository or the files changed since the selected base ref.
 3. Generate a prioritized report with actionable recommendations.
 
 ## Examples
@@ -27,9 +30,9 @@ Scan codebase structure, analyze domain boundaries (DDD), evaluate module depth 
 ```
 
 ```text
-/gwt:gwt-arch-review src/
+/gwt:gwt-arch-review --scope repo
 ```
 
 ```text
-/gwt:gwt-arch-review crates/gwt-core/
+/gwt:gwt-arch-review --scope changed --base origin/develop
 ```
