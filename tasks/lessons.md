@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(agent): gwt 起動 warning は current launch builder だけでなく persisted session args も必ず確認する
+
+### 事象
+
+Codex 起動時の `Under-development features enabled: codex_hooks` warning について、
+現行の `crates/gwt-agent/src/launch.rs` には `--enable codex_hooks` が見当たらないため、
+一度は「現行 builder では再現できない」と判断しかけた。実際には
+`~/.gwt/sessions/*.toml` に保存済みの Codex `launch_args` が
+`--enable codex_hooks` を保持しており、resume/continue 経路で warning が再注入されていた。
+
+### 原因
+
+- 調査の初手を current source と temp 再現に寄せ、persisted session store を先に見なかった。
+- `Session::load_and_migrate()` が legacy `launch_args` をほぼそのまま再利用する契約を
+  すぐには突き合わせていなかった。
+- 「今の builder が付けていない」ことと「実際の gwt launch で使われない」ことを
+  同一視していた。
+
+### 再発防止策
+
+1. gwt launch warning / argv 問題では、current builder・materialized config・persisted session TOML の
+   3 つを同じ調査サイクルで確認する。
+2. resume/continue でだけ再現する症状は、`~/.gwt/sessions/*.toml` の `launch_args` を
+   `rg` で最優先確認する。
+3. builder から削除した feature flag / arg は、fresh launch だけでなく
+   session migration で legacy 値が scrub されるかまでテストで固定する。
+
 ## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
 
 ### 事象
