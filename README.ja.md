@@ -10,6 +10,8 @@ gwt は Git worktree の管理と、`Claude Code` / `Codex` / `Gemini` /
 
 ### macOS
 
+macOS リリースには署名・notarization 済みの `gwt-macos-universal.dmg` が含まれます。
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
 ```

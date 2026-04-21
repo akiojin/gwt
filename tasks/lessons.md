@@ -1,5 +1,70 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
+
+### 事象
+
+SPEC-1938 FR-014 は「Issue を選択した launch が成功した場合、local linkage store を更新する」
+を実装済みとしていたが、現在の `crates/gwt/src/main.rs` には
+`~/.gwt/cache/issue-links/<repo_hash>.json` への書き込みが存在しなかった。あわせて
+GUI Issue Bridge は `surface-knowledge` が titlebar/background と wheel routing の対象から漏れ、
+Markdown 詳細も `pre` でプレーン表示されていた。
+
+### 原因
+
+- SPEC/tasks の完了レポートを信じ、現行コードに FR-014 の書き込み経路が残っているかを
+  grep で確認していなかった。
+- Branches / File Tree の scroll surface 追加時に、同じ canvas window 系の
+  Knowledge Bridge surface を wheel ownership の対象に含めていなかった。
+- cache-backed detail の body を Markdown として扱う仕様なのに、WebView 側では
+  text node として安全に表示するだけで renderer 契約を固定していなかった。
+
+### 再発防止策
+
+1. SPEC の「実装済み」状態を見た場合でも、対象 FR の read/write path を `rg` で確認し、
+   code path が消えていないかを実装前チェックに含める。
+2. canvas window に新しい surface class を追加したら、window chrome、status/action style、
+   wheel ownership、cleanup state の対象 selector を同時に点検する。
+3. Markdown を扱う GUI surface では、plain text fallback ではなく renderer の有無を
+   embedded HTML contract test で固定する。
+
+## 2026-04-21 — fix(gui): Issue link は PTY spawn 成功後に記録する
+
+### 事象
+
+Issue Bridge から Launch Agent を開始したとき、worktree 準備と session 保存が成功した時点で
+`issue-links` を更新していた。後続の PTY / command spawn が失敗してもリンク済み扱いになるため、
+Knowledge Bridge や hook fallback が実際には起動していない branch を Issue linked branch として扱えた。
+また、Issue detail の Markdown renderer 化で `branches.join("\n")` の改行が paragraph として潰れ、
+複数 linked branch が 1 行表示に退行した。
+
+### 原因
+
+- Launch の「準備完了」と「プロセス起動成功」を同じ成功境界として扱っていた。
+- `spawn_process_window` 失敗時の状態を、Issue linkage store の更新条件に含めていなかった。
+- Markdown renderer 導入時に、既存の preformatted branch list 表示契約を section body の形式側で
+  Markdown list に変換していなかった。
+
+### 再発防止策
+
+1. 外部プロセス起動を伴う link / active session / lifecycle 副作用は、準備完了ではなく
+   実際の spawn 成功後にだけ実行する。
+2. 起動失敗テストでは、UI status だけでなく downstream store が更新されないことも確認する。
+3. plain text から Markdown 表示へ移行する section は、改行・list・code block など既存の
+   可読性契約を backend payload か renderer contract test で固定する。
+
+### 追記 (2026-04-21 review follow-up)
+
+未リンク状態での launch 成功を「何もしない」と扱うと、過去に保存された
+`issue-links` の branch→Issue mapping が残り、session は未リンクなのに hook fallback だけが
+古い Issue を復元する。`linked_issue_number = None` の launch 成功は、該当 branch の mapping を
+明示的に clear する契約として扱う。また Markdown renderer では、list の直後に空行なしで
+paragraph が続く場合、paragraph を積む前に pending list を flush しないと表示順が逆転する。
+
+再発防止策: Optional なリンク値は `None = no-op` と短絡せず、既存 store の clear が必要かを
+必ず確認する。Markdown parser の flush 順序は、最終 flush だけでなく block type が切り替わる
+瞬間の順序も contract test に含める。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象
@@ -3343,3 +3408,53 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 1. Python と Rust の両方が同じ on-disk layout を読む場合、`HOME` / `USERPROFILE` / fallback の優先順を一致させる。
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
+
+## 2026-04-21 — fix: Launch Agent Resume と agent pane resume を混同しない
+
+### 事象
+
+Codex 起動後に Resume が有効にならないという報告を、最初に pane discussion
+側の resume 問題として扱いかけたが、実際の対象は Launch Agent の Quick Start
+Resume だった。
+
+### 原因
+
+- 「Codex」「Resume」という共通語だけで関連領域を推定し、Launch Wizard /
+  Quick Start の文脈確認が不足していた。
+- 既存の lesson に Quick Start resume の `agent_session_id` 確認が記録されていたが、
+  調査開始時の scope 固定に反映できていなかった。
+
+### 再発防止策
+
+1. Resume 不具合では最初に対象 UI を固定する。Launch Agent の Quick Start、
+   running pane の resume、session TOML の永続化を分けて扱う。
+2. Launch Agent の Resume は `launch_wizard` と session TOML の
+   `agent_session_id` を一次調査対象にする。
+3. ユーザーが UI 名を訂正した場合は、調査 plan とテスト観点を即座にその UI に
+   切り替える。
+
+## 2026-04-21 — fix: Quick Start resume fallback で resume id だけを借りない
+
+### 事象
+
+Launch Agent の Quick Start で、最新 session に `agent_session_id` がない場合でも
+Resume ボタンは出るようになったが、older resumable session の resume id だけを借りて、
+launch profile は newer session のまま使ってしまう review 指摘が入った。
+
+### 原因
+
+- fallback 実装が「Resume ボタンを出せるか」のみを見ており、resume 対象 session と
+  launch profile の整合性を 1 セットとして扱えていなかった。
+- `apply_quick_start_action()` が `QuickStartEntry` の model / version / runtime target /
+  docker service をそのまま resume launch に使う契約を、fallback helper 側で
+  回帰テストに落とし込めていなかった。
+
+### 再発防止策
+
+1. Quick Start の resume fallback では、resume id だけを借りず、resume 元に選んだ
+   session 全体を entry source として再利用する。
+2. session fallback を実装する helper では、`session_id`、model、reasoning、version、
+   runtime target、docker service、permission flags まで同一 session 由来であることを
+   pure test で固定する。
+3. 「表示用 session」と「実行に使う session」を分ける設計にする場合は、Resume launch が
+   参照する全フィールドの provenance をコード上で明示し、部分的な borrow を禁止する。

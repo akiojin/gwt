@@ -1214,6 +1214,7 @@ fn red_108_dispatch_pr_current_is_live_first() {
         url: "https://example.com/pr/77".to_string(),
         ci_status: "SUCCESS".to_string(),
         mergeable: "MERGEABLE".to_string(),
+        merge_state_status: "CLEAN".to_string(),
         review_status: "APPROVED".to_string(),
     }));
 
@@ -1224,6 +1225,7 @@ fn red_108_dispatch_pr_current_is_live_first() {
     let out = String::from_utf8(env.stdout.clone()).unwrap();
     assert!(out.contains("#77 [OPEN] Current PR"));
     assert!(out.contains("https://example.com/pr/77"));
+    assert!(out.contains("merge_state: CLEAN"));
 }
 
 #[test]
@@ -1241,6 +1243,7 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
         url: "https://example.com/pr/88".to_string(),
         ci_status: "PENDING".to_string(),
         mergeable: "UNKNOWN".to_string(),
+        merge_state_status: "UNKNOWN".to_string(),
         review_status: "REVIEW_REQUIRED".to_string(),
     });
 
@@ -1298,6 +1301,7 @@ fn red_108b_dispatch_pr_edit_uses_live_transport() {
             url: "https://example.com/pr/42".to_string(),
             ci_status: "SUCCESS".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         },
     );
@@ -1346,6 +1350,7 @@ fn red_109_dispatch_pr_view_reads_live_data() {
             url: "https://example.com/pr/42".to_string(),
             ci_status: "SUCCESS".to_string(),
             mergeable: "UNKNOWN".to_string(),
+            merge_state_status: "UNKNOWN".to_string(),
             review_status: "APPROVED".to_string(),
         },
     );
@@ -1357,6 +1362,30 @@ fn red_109_dispatch_pr_view_reads_live_data() {
     let out = String::from_utf8(env.stdout.clone()).unwrap();
     assert!(out.contains("#42 [MERGED] Viewed PR"));
     assert!(out.contains("mergeable: UNKNOWN"));
+    assert!(out.contains("merge_state: UNKNOWN"));
+}
+
+#[test]
+fn red_109_dispatch_pr_current_surfaces_branch_behind_as_effective_merge_state() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.seed_current_pr(Some(PrStatus {
+        number: 91,
+        title: "Update branch required".to_string(),
+        state: gwt_git::pr_status::PrState::Open,
+        url: "https://example.com/pr/91".to_string(),
+        ci_status: "SUCCESS".to_string(),
+        mergeable: "MERGEABLE".to_string(),
+        merge_state_status: "BEHIND".to_string(),
+        review_status: "REVIEW_REQUIRED".to_string(),
+    }));
+
+    let code = dispatch(&mut env, &argv(&["gwt", "pr", "current"]));
+    assert_eq!(code, 0);
+
+    let out = String::from_utf8(env.stdout.clone()).unwrap();
+    assert!(out.contains("mergeable: BEHIND"));
+    assert!(out.contains("merge_state: BEHIND"));
 }
 
 #[test]
@@ -1493,10 +1522,9 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
     env.seed_pr_checks(
         42,
         PrChecksSummary {
-            summary: "PR #42 | CI: FAILURE | Merge: CONFLICTING | Review: CHANGES_REQUESTED"
-                .to_string(),
+            summary: "PR #42 | CI: FAILURE | Merge: BEHIND | Review: CHANGES_REQUESTED".to_string(),
             ci_status: "FAILURE".to_string(),
-            merge_status: "CONFLICTING".to_string(),
+            merge_status: "BEHIND".to_string(),
             review_status: "CHANGES_REQUESTED".to_string(),
             checks: vec![PrCheckItem {
                 name: "test".to_string(),
@@ -1516,6 +1544,7 @@ fn red_110_dispatch_pr_checks_renders_summary_and_checks() {
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();
     assert!(out.contains("summary: PR #42 | CI: FAILURE"));
+    assert!(out.contains("merge: BEHIND"));
     assert!(out.contains("- test [COMPLETED / FAILURE]"));
     assert!(out.contains("workflow: CI"));
 }

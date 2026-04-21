@@ -23,7 +23,10 @@ pub use launch::{
     canonical_launch_args, normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig,
     ResolvedRunner,
 };
-pub use presets::claude_code_openai_compat_preset;
+pub use presets::{
+    claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,
+    PresetDefinition, PresetError, PresetId,
+};
 pub use session::{
     persist_agent_session_id, persist_session_status, reset_runtime_state_dir,
     reset_runtime_state_dir_for_pid, runtime_state_dir_for_pid, runtime_state_path,
