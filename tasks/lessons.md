@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-21 — spec: `gwt issue spec --edit` を短時間に連続実行したら readback を即確認する
+
+### 事象
+
+#1784 の `data-model` / `quickstart` を `gwt issue spec 1784 --edit ...` で追加した直後、
+comment 自体は作成されていたが Issue body の `<!-- sections: -->` index から抜け落ち、
+`gwt issue spec 1784 --section data-model` と `--section quickstart` が
+`section not found` になった。
+
+### 原因
+
+- 連続した section write の途中で stale cache を起点に後続 write が走り、
+  body index を再計算した際に直前に追加した section を落として上書きした。
+- `comment があるか` だけを見て完了扱いし、`--section <name>` の readback を
+  各 write 後に即確認しなかった。
+
+### 再発防止策
+
+1. `gwt issue spec --edit` で新しい section を追加したら、毎回すぐ
+   `gwt issue spec <n> --section <name>` で readback を確認する。
+2. 複数 section を短時間に連続更新するときは、途中で `gwt issue view <n> --refresh`
+   で cache を強制更新してから次の write に進む。
+3. `comment は存在するが section not found` になったら、Issue body の
+   `<!-- sections: -->` index 欠落を疑って GitHub 側の body と comment ids を直接確認する。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象

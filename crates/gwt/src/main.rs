@@ -3,24 +3,13 @@ use std::{
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex, RwLock},
+    sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
-use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
-};
 use base64::Engine;
-use futures_util::{SinkExt, StreamExt};
 use gwt::{
     build_builtin_agent_options, cleanup_selected_branches, default_wizard_version_cache_path,
     detect_shell_program, list_branch_entries_with_active_sessions, list_directory_entries,
@@ -29,8 +18,8 @@ use gwt::{
     save_session_state, save_workspace_state, workspace_state_path, BackendEvent,
     BranchEntriesPhase, BranchListEntry, DockerWizardContext, FrontendEvent, HookForwardTarget,
     KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
-    LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry, RuntimeHookEvent,
-    ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -38,16 +27,17 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::WindowBuilder,
 };
-use tokio::{
-    net::TcpListener,
-    runtime::Runtime,
-    sync::{mpsc, oneshot},
-};
+use tokio::runtime::Runtime;
 use uuid::Uuid;
 use wry::WebViewBuilder;
 
+mod embedded_server;
 mod embedded_web;
 mod repo_browser;
+
+#[cfg(test)]
+use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
+use embedded_server::{ClientHub, EmbeddedServer};
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -5803,333 +5793,6 @@ fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
         project_root,
         kind,
     })
-}
-
-#[derive(Clone, Default)]
-struct ClientHub {
-    clients: Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<String>>>>,
-}
-
-impl ClientHub {
-    fn register(&self, client_id: ClientId) -> mpsc::UnboundedReceiver<String> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.clients
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(client_id, tx);
-        rx
-    }
-
-    fn unregister(&self, client_id: &str) {
-        self.clients
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(client_id);
-    }
-
-    fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
-        for outbound in events {
-            let payload = serde_json::to_string(&outbound.event).expect("backend event json");
-            match outbound.target {
-                DispatchTarget::Broadcast => {
-                    for sender in clients.values() {
-                        let _ = sender.send(payload.clone());
-                    }
-                }
-                DispatchTarget::Client(client_id) => {
-                    if let Some(sender) = clients.get(&client_id) {
-                        let _ = sender.send(payload);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ServerState {
-    proxy: EventLoopProxy<UserEvent>,
-    clients: ClientHub,
-    hook_forward_token: String,
-    /// Shared PTY writer registry for the `terminal_input` fast-path.
-    pty_writers: PtyWriterRegistry,
-}
-
-struct EmbeddedServer {
-    url: String,
-    hook_forward_token: String,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-}
-
-impl EmbeddedServer {
-    fn start(
-        runtime: &Runtime,
-        proxy: EventLoopProxy<UserEvent>,
-        clients: ClientHub,
-        pty_writers: PtyWriterRegistry,
-    ) -> std::io::Result<Self> {
-        let listener = runtime.block_on(TcpListener::bind(("127.0.0.1", 0)))?;
-        let addr = listener.local_addr()?;
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let hook_forward_token = Uuid::new_v4().to_string();
-
-        let app = Router::new()
-            .route("/", get(embedded_web::index_handler))
-            .route("/healthz", get(health_handler))
-            .route("/internal/hook-live", post(hook_live_handler))
-            .route("/ws", get(websocket_handler))
-            .with_state(ServerState {
-                proxy,
-                clients,
-                hook_forward_token: hook_forward_token.clone(),
-                pty_writers,
-            });
-
-        runtime.spawn(async move {
-            let server = axum::serve(listener, app).with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            });
-            if let Err(error) = server.await {
-                eprintln!("embedded server error: {error}");
-            }
-        });
-
-        Ok(Self {
-            url: format!("http://127.0.0.1:{}/", addr.port()),
-            hook_forward_token,
-            shutdown_tx: Some(shutdown_tx),
-        })
-    }
-
-    fn url(&self) -> &str {
-        &self.url
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
-    }
-
-    fn hook_forward_target(&self) -> HookForwardTarget {
-        HookForwardTarget {
-            url: format!("{}internal/hook-live", self.url),
-            token: self.hook_forward_token.clone(),
-        }
-    }
-}
-
-async fn health_handler() -> &'static str {
-    "ok"
-}
-
-async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<ServerState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| client_session(socket, state))
-}
-
-async fn hook_live_handler(
-    headers: HeaderMap,
-    State(state): State<ServerState>,
-    Json(event): Json<RuntimeHookEvent>,
-) -> StatusCode {
-    if !hook_forward_authorized(&headers, &state.hook_forward_token) {
-        return StatusCode::UNAUTHORIZED;
-    }
-
-    broadcast_runtime_hook_event(&state.clients, event);
-    StatusCode::NO_CONTENT
-}
-
-async fn client_session(socket: WebSocket, state: ServerState) {
-    let client_id = Uuid::new_v4().to_string();
-    let mut outbound = state.clients.register(client_id.clone());
-    let (mut sender, mut receiver) = socket.split();
-
-    // Per-session counter that tags each inbound `terminal_input` in order so
-    // we can diff layer counts (frontend → WS → event loop → PTY writer) when
-    // diagnosing intermittent key-input drops (bugfix/input-key).
-    let input_seq = Arc::new(AtomicU64::new(0));
-
-    loop {
-        tokio::select! {
-            maybe_payload = outbound.recv() => {
-                let Some(payload) = maybe_payload else {
-                    break;
-                };
-                if sender.send(Message::Text(payload.into())).await.is_err() {
-                    break;
-                }
-            }
-            maybe_message = receiver.next() => {
-                match maybe_message {
-                    Some(Ok(Message::Text(text))) => {
-                        let text_len = text.len();
-                        match serde_json::from_str::<FrontendEvent>(text.as_ref()) {
-                            Ok(event) => {
-                                handle_frontend_message(
-                                    &state,
-                                    &client_id,
-                                    &input_seq,
-                                    text_len,
-                                    event,
-                                );
-                            }
-                            Err(error) => {
-                                eprintln!("invalid frontend message: {error}");
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(error)) => {
-                        eprintln!("websocket error: {error}");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    state.clients.unregister(&client_id);
-}
-
-/// Dispatch a parsed `FrontendEvent` from the WebSocket receiver task.
-///
-/// `TerminalInput` takes the fast-path: the pane's PTY handle is looked up in
-/// the shared registry and written to directly, bypassing the single-threaded
-/// tao event loop. Other events still flow through `UserEvent::Frontend` so
-/// they can mutate `AppRuntime` on the main thread.
-///
-/// If the fast-path fails (unknown window, PTY write error, or poisoned
-/// registry lock), the input is forwarded to the proxy so the existing
-/// error-reporting path in `terminal_input_events` still runs.
-fn handle_frontend_message(
-    state: &ServerState,
-    client_id: &str,
-    input_seq: &AtomicU64,
-    text_len: usize,
-    event: FrontendEvent,
-) {
-    // Fast-path only applies to TerminalInput. For every other variant, just
-    // forward to the main-thread event loop as before.
-    let (id, data) = match event {
-        FrontendEvent::TerminalInput { id, data } => (id, data),
-        other => {
-            let _ = state.proxy.send_event(UserEvent::Frontend {
-                client_id: client_id.to_string(),
-                event: other,
-            });
-            return;
-        }
-    };
-
-    let seq = input_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let data_len = data.len();
-    tracing::debug!(
-        target: "gwt_input_trace",
-        stage = "ws_recv",
-        client_id = %client_id,
-        seq,
-        window_id = %id,
-        data_len,
-        text_len,
-        "terminal_input received over WebSocket"
-    );
-
-    let pty_handle = match state.pty_writers.read() {
-        Ok(guard) => guard.get(&id).cloned(),
-        Err(error) => {
-            tracing::warn!(
-                target: "gwt_input_trace",
-                stage = "fast_path_lock_poisoned",
-                client_id = %client_id,
-                seq,
-                window_id = %id,
-                error = %error,
-                "pty_writers read lock poisoned; falling back to event loop"
-            );
-            None
-        }
-    };
-
-    if let Some(pty) = pty_handle {
-        let write_started = Instant::now();
-        match pty.write_input(data.as_bytes()) {
-            Ok(()) => {
-                tracing::debug!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write",
-                    client_id = %client_id,
-                    seq,
-                    window_id = %id,
-                    data_len,
-                    write_us = write_started.elapsed().as_micros() as u64,
-                    "terminal_input written to PTY via WS fast-path"
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "gwt_input_trace",
-                    stage = "fast_path_write_err",
-                    client_id = %client_id,
-                    seq,
-                    window_id = %id,
-                    data_len,
-                    error = %error,
-                    "fast-path PTY write failed; forwarding to event loop for error handling"
-                );
-                // fall through to proxy path so `terminal_input_events` can
-                // route the error through `handle_runtime_status`.
-            }
-        }
-    } else {
-        tracing::debug!(
-            target: "gwt_input_trace",
-            stage = "fast_path_miss",
-            client_id = %client_id,
-            seq,
-            window_id = %id,
-            data_len,
-            "pty_writers registry miss; falling back to event loop"
-        );
-    }
-
-    let send_result = state.proxy.send_event(UserEvent::Frontend {
-        client_id: client_id.to_string(),
-        event: FrontendEvent::TerminalInput {
-            id: id.clone(),
-            data,
-        },
-    });
-    tracing::debug!(
-        target: "gwt_input_trace",
-        stage = "ws_dispatch",
-        client_id = %client_id,
-        seq,
-        window_id = %id,
-        data_len,
-        ok = send_result.is_ok(),
-        "terminal_input forwarded to event loop proxy (fallback)"
-    );
-}
-
-fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected_token)
-}
-
-fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
-    clients.dispatch(vec![OutboundEvent::broadcast(
-        BackendEvent::RuntimeHookEvent { event },
-    )]);
 }
 
 fn normalize_branch_name(branch_name: &str) -> String {
