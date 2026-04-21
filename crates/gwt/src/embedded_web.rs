@@ -508,6 +508,10 @@ mod tests {
             !japanese_scripts.is_match(html),
             "expected embedded bundle copy to stay English-only for both browser and native modes",
         );
+        assert!(
+            !html.contains("PoC"),
+            "expected user-facing frontend copy to stop referring to the retired PoC surface",
+        );
     }
 
     #[test]
@@ -529,8 +533,8 @@ mod tests {
             "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, and knowledge/settings surfaces",
         );
         assert!(
-            html.contains("window.__POC__ = { receive, frontendStateOwners, frontendUnits };"),
-            "expected embedded runtime to expose the frontend unit registry for inspection",
+            !html.contains("window.__POC__"),
+            "expected embedded runtime to stop exporting the retired PoC inspection global",
         );
     }
 

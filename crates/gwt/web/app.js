@@ -531,7 +531,7 @@
         projectOnboardingCopy.textContent =
           tab.kind === "bare"
             ? `No develop worktree was found for ${tab.project_root}. Open a worktree folder or another project.`
-            : `${tab.project_root} is not a Git workspace yet. Open another project or initialize this folder outside the PoC.`;
+            : `${tab.project_root} is not a Git workspace yet. Open another project or initialize this folder in your shell first.`;
       }
 
       function renderAppState(nextState) {
@@ -4099,8 +4099,6 @@
           closeModal();
         });
       }
-
-      window.__POC__ = { receive, frontendStateOwners, frontendUnits };
 
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       frontendUnits.socketTransport.connect();

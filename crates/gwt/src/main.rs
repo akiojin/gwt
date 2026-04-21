@@ -386,8 +386,8 @@ mod tests {
             "expected browser and native front door modes to point at the same embedded frontend bundle entrypoint",
         );
         assert!(
-            app_js.contains("window.__POC__ = { receive, frontendStateOwners, frontendUnits };"),
-            "expected browser and native front door modes to load the same embedded bundle contract",
+            !app_js.contains("window.__POC__"),
+            "expected browser and native front door modes to avoid the retired PoC debug export",
         );
         assert!(
             app_js.contains("frontendUnits.socketTransport.connect();"),
