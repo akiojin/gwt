@@ -346,11 +346,15 @@ fn windows_spawn_wrapper(
     let comspec = windows_env_value("ComSpec", env, remove_env)
         .unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"));
 
+    // SPEC-1921 FR-082: Do NOT pass `/s`. `/s` forces CMD to strip the
+    // quotes that surround the executable path, which breaks invocations
+    // with whitespace in the path (e.g. `C:\Program Files\nodejs\npx.cmd`).
+    // Without `/s`, CMD's default rule preserves the quotes when the
+    // command line has the typical `"<exe>" <args>` shape we emit here.
     Some((
         PathBuf::from(comspec).display().to_string(),
         vec![
             "/d".to_string(),
-            "/s".to_string(),
             "/c".to_string(),
             resolved.display().to_string(),
         ],
@@ -434,6 +438,15 @@ fn build_windows_shim_target(base_dir: &Path, raw_paths: &[String]) -> Option<Wi
                 args_prefix: vec![script.display().to_string()],
             })
         }
+        // SPEC-1921 FR-081: Node.js distribution shims (e.g.
+        // `C:\Program Files\nodejs\npx`) reference `$basedir/node.exe` but
+        // dereference the CLI script via a separate variable such as
+        // `$CLI_BASEDIR`. Our marker scan never pairs node with a `.js`
+        // script in that case. Substituting `node.exe` alone would drop the
+        // script and pass the caller's agent args (`--yes @pkg@version ...`)
+        // straight to node, yielding `bad option: --yes`. Refuse the
+        // substitution so resolution falls back to the `.cmd` sibling.
+        (Some(executable), None) if windows_is_node_runtime(&executable) => None,
         (Some(executable), _) if executable.exists() => Some(WindowsSpawnTarget {
             command: executable.display().to_string(),
             args_prefix: Vec::new(),
@@ -807,7 +820,6 @@ mod tests {
             normalized.args,
             vec![
                 "/d".to_string(),
-                "/s".to_string(),
                 "/c".to_string(),
                 cmd.display().to_string(),
                 "--dangerously-skip-permissions".to_string(),
@@ -1017,5 +1029,116 @@ mod tests {
 
         let handle = PtyHandle::spawn(config).expect("spawn failed");
         assert!(handle.process_id().is_some(), "expected spawned process id");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nodejs_distribution_npx_shim_does_not_collapse_to_node_exe() {
+        // Regression for `node.exe: bad option: --yes` (SPEC-1921 FR-081).
+        // Mechanism is documented in `build_windows_shim_target`.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("Program Files").join("nodejs");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let npx_shim = bin_dir.join("npx");
+        let npx_cmd = bin_dir.join("npx.cmd");
+        let node_exe = bin_dir.join("node.exe");
+        std::fs::write(&node_exe, "not-a-real-pe").expect("node exe placeholder");
+        std::fs::write(
+            &npx_shim,
+            concat!(
+                "#!/usr/bin/env bash\n",
+                "basedir=`dirname \"$0\"`\n",
+                "NODE_EXE=\"$basedir/node.exe\"\n",
+                "if ! [ -x \"$NODE_EXE\" ]; then\n",
+                "  NODE_EXE=\"$basedir/node\"\n",
+                "fi\n",
+                "CLI_BASEDIR=\"$(\"$NODE_EXE\" -p 'require(\"path\").dirname(process.execPath)' 2> /dev/null)\"\n",
+                "NPX_CLI_JS=\"$CLI_BASEDIR/node_modules/npm/bin/npx-cli.js\"\n",
+                "\"$NODE_EXE\" \"$NPX_CLI_JS\" \"$@\"\n",
+            ),
+        )
+        .expect("npx shim");
+        std::fs::write(
+            &npx_cmd,
+            concat!(
+                "@ECHO OFF\n",
+                "SET \"NODE_EXE=%~dp0\\node.exe\"\n",
+                "\"%NODE_EXE%\" \"%~dp0\\node_modules\\npm\\bin\\npx-cli.js\" %*\n",
+            ),
+        )
+        .expect("npx.cmd");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalize_windows_spawn_config(SpawnConfig {
+            command: "npx".to_string(),
+            args: vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env,
+            remove_env: Vec::new(),
+            cwd: None,
+        });
+
+        assert_ne!(
+            normalized.command,
+            node_exe.display().to_string(),
+            "parser must not collapse a Node.js distribution shim to node.exe alone (FR-081): {:?} {:?}",
+            normalized.command,
+            normalized.args,
+        );
+        // The original agent args must survive unchanged somewhere in argv so
+        // they still reach npx, not node.exe.
+        assert!(
+            normalized
+                .args
+                .iter()
+                .any(|a| a == "@anthropic-ai/claude-code@latest"),
+            "expected original package spec preserved in argv, got {:?}",
+            normalized.args,
+        );
+        assert!(
+            normalized.args.iter().any(|a| a == "--yes"),
+            "expected --yes preserved in argv, got {:?}",
+            normalized.args,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cmd_wrapper_omits_slash_s_flag() {
+        // SPEC-1921 FR-082. `/s` makes CMD strip the quoting around the
+        // executable path, which breaks `.cmd` invocations where the path
+        // contains spaces (for example `C:\Program Files\nodejs\npx.cmd`).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("Program Files").join("nodejs");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let cmd_path = bin_dir.join("npx.cmd");
+        std::fs::write(&cmd_path, "@echo off\n").expect("cmd");
+
+        let env: HashMap<String, String> = HashMap::new();
+        let wrapped = windows_spawn_wrapper(&cmd_path, &env, &[]).expect("wrapper");
+
+        assert!(
+            !wrapped.1.iter().any(|a| a.eq_ignore_ascii_case("/s")),
+            "cmd.exe wrapper must not include /s (FR-082), got argv {:?}",
+            wrapped.1,
+        );
+        assert!(
+            wrapped.1.iter().any(|a| a.eq_ignore_ascii_case("/d")),
+            "wrapper should still include /d, got {:?}",
+            wrapped.1,
+        );
+        assert!(
+            wrapped.1.iter().any(|a| a.eq_ignore_ascii_case("/c")),
+            "wrapper should still include /c, got {:?}",
+            wrapped.1,
+        );
     }
 }
