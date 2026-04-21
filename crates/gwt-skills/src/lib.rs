@@ -674,6 +674,23 @@ mod tests {
                 "expected visible discussion handoff guidance in {relative}"
             );
             assert!(
+                issue_skill.contains("Spec Status")
+                    && issue_skill.contains("ALIGNED")
+                    && issue_skill.contains("IMPLEMENTATION-GAP")
+                    && issue_skill.contains("SPEC-GAP")
+                    && issue_skill.contains("SPEC-AMBIGUOUS"),
+                "expected registration decision status guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("## Related SPECs"),
+                "expected related-spec section guidance in {relative}"
+            );
+            assert!(
+                issue_skill.contains("duplicate search")
+                    && issue_skill.contains("before creating anything"),
+                "expected duplicate-search-first guidance in {relative}"
+            );
+            assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"
             );
@@ -682,6 +699,16 @@ mod tests {
                 "unexpected retired gwt-issue dependency in {relative}"
             );
         }
+
+        let issue_command =
+            std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-register-issue.md"))
+                .unwrap_or_else(|err| panic!("failed to read gwt-register-issue command: {err}"));
+        assert!(
+            issue_command.contains("Search for duplicates before creating anything.")
+                && issue_command.contains("plain Issue")
+                && issue_command.contains("SPEC"),
+            "expected gwt-register-issue command to describe duplicate-search-first routing"
+        );
 
         for relative in [
             ".claude/skills/gwt-fix-issue/SKILL.md",
