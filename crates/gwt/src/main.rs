@@ -48,7 +48,10 @@ use wry::WebViewBuilder;
 
 mod custom_agents_controller;
 mod embedded_web;
+mod launch_wizard_runtime;
 mod repo_browser;
+
+use launch_wizard_runtime::{IssueLaunchWizardPrepared, LaunchWizardSession};
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -378,24 +381,6 @@ struct ProjectTabRuntime {
 struct WindowAddress {
     tab_id: String,
     raw_id: String,
-}
-
-#[derive(Debug, Clone)]
-struct LaunchWizardSession {
-    tab_id: String,
-    wizard_id: String,
-    wizard: LaunchWizardState,
-}
-
-#[derive(Debug, Clone)]
-struct IssueLaunchWizardPrepared {
-    client_id: ClientId,
-    id: String,
-    knowledge_kind: KnowledgeKind,
-    tab_id: String,
-    project_root: PathBuf,
-    issue_number: u64,
-    result: Result<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1442,320 +1427,6 @@ fn spawn_branch_cleanup_async(
 }
 
 impl AppRuntime {
-    fn open_launch_wizard(
-        &mut self,
-        id: &str,
-        branch_name: &str,
-        linked_issue_number: Option<u64>,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            })];
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Project tab not found".to_string(),
-            })];
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            })];
-        };
-
-        if window.preset != WindowPreset::Branches {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window is not a branches list".to_string(),
-            })];
-        }
-
-        let project_root = tab.project_root.clone();
-        let tab_id = address.tab_id.clone();
-        match self.open_launch_wizard_for_branch(
-            &tab_id,
-            &project_root,
-            branch_name,
-            linked_issue_number,
-        ) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: error,
-            })],
-        }
-    }
-
-    fn open_launch_wizard_for_branch(
-        &mut self,
-        tab_id: &str,
-        project_root: &Path,
-        branch_name: &str,
-        linked_issue_number: Option<u64>,
-    ) -> Result<(), String> {
-        let normalized_branch_name = normalize_branch_name(branch_name);
-        let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
-        let wizard_id = Uuid::new_v4().to_string();
-        self.launch_wizard = Some(LaunchWizardSession {
-            tab_id: tab_id.to_string(),
-            wizard_id: wizard_id.clone(),
-            wizard: LaunchWizardState::open_loading(
-                LaunchWizardContext {
-                    selected_branch: synthetic_branch_entry(branch_name),
-                    normalized_branch_name,
-                    worktree_path: None,
-                    quick_start_root: project_root.to_path_buf(),
-                    live_sessions,
-                    docker_context: None,
-                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
-                    linked_issue_number,
-                },
-                Vec::new(),
-            ),
-        });
-
-        let proxy = self.proxy.clone();
-        let sessions_dir = self.sessions_dir.clone();
-        let project_root = project_root.to_path_buf();
-        let branch_name = branch_name.to_string();
-        let active_session_branches = self.active_session_branches_for_tab(tab_id);
-        thread::spawn(move || {
-            let result = resolve_launch_wizard_hydration(
-                &project_root,
-                &branch_name,
-                &active_session_branches,
-                &sessions_dir,
-            );
-            proxy.send(UserEvent::LaunchWizardHydrated { wizard_id, result });
-        });
-
-        Ok(())
-    }
-
-    fn open_issue_launch_wizard_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        issue_number: u64,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Window not found".to_string(),
-                },
-            )];
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Project tab not found".to_string(),
-                },
-            )];
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Window not found".to_string(),
-                },
-            )];
-        };
-        let Some(kind) = knowledge_kind_for_preset(window.preset) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Window is not a knowledge bridge".to_string(),
-                },
-            )];
-        };
-
-        let project_root = tab.project_root.clone();
-        let tab_id = address.tab_id.clone();
-        let proxy = self.proxy.clone();
-        let client_id = client_id.to_string();
-        let id = id.to_string();
-        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
-        thread::spawn(move || {
-            let result =
-                list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
-                    .map_err(|error| error.to_string())
-                    .and_then(|entries| {
-                        preferred_issue_launch_branch(&entries)
-                            .ok_or_else(|| "No local branch is available for launch".to_string())
-                    });
-            proxy.send(UserEvent::IssueLaunchWizardPrepared(
-                IssueLaunchWizardPrepared {
-                    client_id,
-                    id,
-                    knowledge_kind: kind,
-                    tab_id,
-                    project_root,
-                    issue_number,
-                    result,
-                },
-            ));
-        });
-        Vec::new()
-    }
-
-    fn handle_launch_wizard_hydrated(
-        &mut self,
-        wizard_id: String,
-        result: Result<LaunchWizardHydration, String>,
-    ) -> Vec<OutboundEvent> {
-        let Some(session) = self.launch_wizard.as_mut() else {
-            return Vec::new();
-        };
-        if session.wizard_id != wizard_id {
-            return Vec::new();
-        }
-
-        match result {
-            Ok(hydration) => session.wizard.apply_hydration(hydration),
-            Err(error) => session.wizard.set_hydration_error(error),
-        }
-
-        vec![self.launch_wizard_state_outbound()]
-    }
-
-    fn handle_issue_launch_wizard_prepared(
-        &mut self,
-        prepared: IssueLaunchWizardPrepared,
-    ) -> Vec<OutboundEvent> {
-        let IssueLaunchWizardPrepared {
-            client_id,
-            id,
-            knowledge_kind,
-            tab_id,
-            project_root,
-            issue_number,
-            result,
-        } = prepared;
-        if self.tab(&tab_id).is_none() {
-            return vec![OutboundEvent::reply(
-                &client_id,
-                BackendEvent::KnowledgeError {
-                    id,
-                    knowledge_kind,
-                    message: "Project tab not found".to_string(),
-                },
-            )];
-        }
-
-        match result {
-            Ok(branch_name) => match self.open_launch_wizard_for_branch(
-                &tab_id,
-                &project_root,
-                &branch_name,
-                Some(issue_number),
-            ) {
-                Ok(()) => vec![self.launch_wizard_state_outbound()],
-                Err(error) => vec![OutboundEvent::reply(
-                    &client_id,
-                    BackendEvent::KnowledgeError {
-                        id,
-                        knowledge_kind,
-                        message: error,
-                    },
-                )],
-            },
-            Err(error) => vec![OutboundEvent::reply(
-                &client_id,
-                BackendEvent::KnowledgeError {
-                    id,
-                    knowledge_kind,
-                    message: error,
-                },
-            )],
-        }
-    }
-
-    fn handle_launch_wizard_action(
-        &mut self,
-        action: gwt::LaunchWizardAction,
-        bounds: Option<WindowGeometry>,
-    ) -> Vec<OutboundEvent> {
-        let Some(mut session) = self.launch_wizard.take() else {
-            return Vec::new();
-        };
-        session.wizard.apply(action);
-
-        match session.wizard.completion.take() {
-            Some(LaunchWizardCompletion::Cancelled) => {
-                vec![self.launch_wizard_state_broadcast(None)]
-            }
-            Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
-                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    session.wizard.error =
-                        Some("The selected session window is no longer available".to_string());
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
-                };
-                let Some(tab) = self.tab_mut(&address.tab_id) else {
-                    return Vec::new();
-                };
-                if !tab.workspace.focus_window(&address.raw_id, None) {
-                    session.wizard.error =
-                        Some("The selected session window is no longer available".to_string());
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
-                }
-                self.active_tab_id = Some(address.tab_id);
-                let _ = self.persist();
-                vec![
-                    self.workspace_state_broadcast(),
-                    self.launch_wizard_state_broadcast(None),
-                ]
-            }
-            Some(LaunchWizardCompletion::Launch(config)) => match *config {
-                LaunchWizardLaunchRequest::Agent(config) => {
-                    match self.spawn_agent_window(&session.tab_id, *config, bounds) {
-                        Ok(mut events) => {
-                            events.push(self.launch_wizard_state_broadcast(None));
-                            events
-                        }
-                        Err(error) => {
-                            session.wizard.error = Some(error);
-                            self.launch_wizard = Some(session);
-                            vec![self.launch_wizard_state_outbound()]
-                        }
-                    }
-                }
-                LaunchWizardLaunchRequest::Shell(config) => {
-                    match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
-                        Ok(mut events) => {
-                            events.push(self.launch_wizard_state_broadcast(None));
-                            events
-                        }
-                        Err(error) => {
-                            session.wizard.error = Some(error);
-                            self.launch_wizard = Some(session);
-                            vec![self.launch_wizard_state_outbound()]
-                        }
-                    }
-                }
-            },
-            None => {
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
-            }
-        }
-    }
-
     fn live_sessions_for_branch(&self, tab_id: &str, branch_name: &str) -> Vec<LiveSessionEntry> {
         let mut entries = self
             .active_agent_sessions
@@ -2590,24 +2261,6 @@ impl AppRuntime {
         })
     }
 
-    fn launch_wizard_state_outbound(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: self
-                .launch_wizard
-                .as_ref()
-                .map(|wizard| Box::new(wizard.wizard.view())),
-        })
-    }
-
-    fn launch_wizard_state_broadcast(
-        &self,
-        wizard: Option<gwt::LaunchWizardView>,
-    ) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: wizard.map(Box::new),
-        })
-    }
-
     fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
         let address = self.window_lookup.get(window_id)?;
         let tab = self.tab(&address.tab_id)?;
@@ -2675,10 +2328,6 @@ impl AppRuntime {
             self.launch_wizard = None;
         }
         wizard_closed
-    }
-
-    fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
-        self.launch_wizard.take()
     }
 
     fn rebuild_window_lookup(&mut self) {
@@ -4621,6 +4270,7 @@ mod tests {
             )],
             Some("tab-1"),
         );
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
         let claude_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
 
         assert!(runtime
@@ -4683,7 +4333,7 @@ mod tests {
         let prepared_error =
             runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
                 client_id: "client-1".to_string(),
-                id: "issue-1".to_string(),
+                id: issue_id.clone(),
                 knowledge_kind: KnowledgeKind::Issue,
                 tab_id: "tab-1".to_string(),
                 project_root: repo.clone(),
@@ -4699,7 +4349,7 @@ mod tests {
         let prepared_ok =
             runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
                 client_id: "client-1".to_string(),
-                id: "issue-1".to_string(),
+                id: issue_id.clone(),
                 knowledge_kind: KnowledgeKind::Issue,
                 tab_id: "tab-1".to_string(),
                 project_root: repo.clone(),
@@ -4716,6 +4366,22 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
         });
+        assert_eq!(runtime.close_window_events(&issue_id).len(), 1);
+        let prepared_closed =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: issue_id.clone(),
+                knowledge_kind: KnowledgeKind::Issue,
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+                issue_number: 7,
+                result: Ok("feature/demo".to_string()),
+            });
+        assert!(matches!(
+            prepared_closed[0].event,
+            BackendEvent::KnowledgeError { ref message, .. }
+                if message == "Issue/Knowledge window closed"
+        ));
 
         runtime.launch_wizard = None;
         assert!(runtime
@@ -4735,6 +4401,51 @@ mod tests {
             None,
         );
         assert!(!missing_focus.is_empty());
+        runtime.window_lookup.insert(
+            "stale-focus".to_string(),
+            WindowAddress {
+                tab_id: "missing".to_string(),
+                raw_id: "claude-1".to_string(),
+            },
+        );
+        runtime.launch_wizard = Some(LaunchWizardSession {
+            tab_id: "tab-1".to_string(),
+            wizard_id: "wizard-stale-focus".to_string(),
+            wizard: LaunchWizardState::open_with(
+                LaunchWizardContext {
+                    selected_branch: sample_branch_entry("feature/demo"),
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: Some(repo.clone()),
+                    quick_start_root: repo.clone(),
+                    live_sessions: vec![gwt::LiveSessionEntry {
+                        session_id: "session-1".to_string(),
+                        window_id: "stale-focus".to_string(),
+                        agent_id: "codex".to_string(),
+                        kind: "agent".to_string(),
+                        name: "Codex".to_string(),
+                        detail: Some(repo.display().to_string()),
+                        active: true,
+                    }],
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                sample_wizard_agent_options(),
+                Vec::new(),
+            ),
+        });
+        let stale_tab_focus = runtime.handle_launch_wizard_action(
+            LaunchWizardAction::FocusExistingSession { index: 0 },
+            None,
+        );
+        assert_eq!(stale_tab_focus.len(), 1);
+        assert_eq!(
+            runtime
+                .launch_wizard
+                .as_ref()
+                .and_then(|session| session.wizard.error.as_deref()),
+            Some("The selected session tab is no longer available")
+        );
 
         runtime.launch_wizard = Some(sample_focus_launch_wizard_session(
             "tab-1",
@@ -6495,47 +6206,6 @@ fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
         cleanup_ready: true,
         cleanup: gwt::BranchCleanupInfo::default(),
     }
-}
-
-fn resolve_launch_wizard_hydration(
-    project_root: &Path,
-    branch_name: &str,
-    active_session_branches: &std::collections::HashSet<String>,
-    sessions_dir: &Path,
-) -> Result<LaunchWizardHydration, String> {
-    let agent_options = build_builtin_agent_options(
-        gwt_agent::AgentDetector::detect_all(),
-        &gwt_agent::VersionCache::load(&default_wizard_version_cache_path()),
-    );
-    let entries = list_branch_entries_with_active_sessions(project_root, active_session_branches)
-        .map_err(|error| error.to_string())?;
-    let selected_branch = entries
-        .into_iter()
-        .find(|entry| entry.name == branch_name)
-        .ok_or_else(|| format!("Branch not found: {branch_name}"))?;
-    let normalized_branch_name = normalize_branch_name(&selected_branch.name);
-    let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
-    let quick_start_root = worktree_path
-        .clone()
-        .unwrap_or_else(|| project_root.to_path_buf());
-    let quick_start_entries = gwt::launch_wizard::load_quick_start_entries(
-        &quick_start_root,
-        sessions_dir,
-        &normalized_branch_name,
-    );
-    let (docker_context, docker_service_status) =
-        detect_wizard_docker_context_and_status(&quick_start_root);
-
-    Ok(LaunchWizardHydration {
-        selected_branch: Some(selected_branch),
-        normalized_branch_name,
-        worktree_path,
-        quick_start_root,
-        docker_context,
-        docker_service_status,
-        agent_options,
-        quick_start_entries,
-    })
 }
 
 fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
