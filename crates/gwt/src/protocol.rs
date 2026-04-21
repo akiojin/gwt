@@ -406,4 +406,38 @@ mod tests {
             Some(&Value::String("aGVsbG8=".to_string()))
         );
     }
+
+    #[test]
+    fn protocol_source_layout_keeps_wire_schema_separate_from_transport_and_frontend_logic() {
+        let source = include_str!("protocol.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("protocol.rs should contain production source before tests");
+
+        assert!(
+            production_source.contains("pub enum FrontendEvent"),
+            "expected protocol owner to define frontend wire events in protocol.rs",
+        );
+        assert!(
+            production_source.contains("pub enum BackendEvent"),
+            "expected protocol owner to define backend wire events in protocol.rs",
+        );
+        assert!(
+            production_source.contains("#[serde(tag = \"kind\", rename_all = \"snake_case\")]"),
+            "expected protocol owner to keep the stable tagged-union contract local to protocol.rs",
+        );
+        assert!(
+            !production_source.contains("handle_frontend_message")
+                && !production_source.contains("websocket_handler")
+                && !production_source.contains("ClientHub"),
+            "expected transport/runtime dispatch to stay out of protocol.rs",
+        );
+        assert!(
+            !production_source.contains("document.addEventListener")
+                && !production_source.contains("handleCanvasWheelEvent")
+                && !production_source.contains("navigator.clipboard"),
+            "expected frontend behavior details to stay out of protocol.rs",
+        );
+    }
 }
