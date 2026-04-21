@@ -47,20 +47,15 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
-    if should_prefer_path_gwt(current_exe) {
-        if let Some(candidate) = lookup("gwt").filter(|candidate| {
-            !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
-        }) {
-            return candidate;
-        }
-    }
-    current_exe.to_path_buf()
+    gwt_agent::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
 }
 
+#[cfg(test)]
 fn should_prefer_path_gwt(current_exe: &Path) -> bool {
     is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
 }
 
+#[cfg(test)]
 fn is_named_gwt_binary(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
@@ -69,12 +64,14 @@ fn is_named_gwt_binary(path: &Path) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
 }
 
+#[cfg(test)]
 fn is_bunx_temp_executable(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
         .any(|segment| segment.starts_with("bunx-"))
 }
 
+#[cfg(test)]
 fn normalized_path_segments(path: &Path) -> Vec<String> {
     let normalized = path.to_string_lossy().replace('\\', "/");
     normalized
@@ -84,6 +81,7 @@ fn normalized_path_segments(path: &Path) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn same_path(left: &Path, right: &Path) -> bool {
     let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());

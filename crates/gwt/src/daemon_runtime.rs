@@ -202,11 +202,7 @@ fn current_session_from_env() -> io::Result<Option<Session>> {
 
 fn session_dir_from_runtime_path_env() -> Option<PathBuf> {
     let runtime_path = PathBuf::from(std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV)?);
-    runtime_path
-        .parent()?
-        .parent()?
-        .parent()
-        .map(|path| path.to_path_buf())
+    gwt_agent::sessions_dir_from_runtime_path(&runtime_path)
 }
 
 fn is_loopback_host(host: &str) -> bool {

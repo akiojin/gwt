@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::{self, Read},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::{atomic::AtomicU64, mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -51,7 +51,6 @@ mod embedded_web;
 mod repo_browser;
 
 type ClientId = String;
-const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
@@ -2219,7 +2218,7 @@ impl AppRuntime {
         sessions_dir: PathBuf,
         project_root: String,
         window_id: String,
-        mut config: gwt_agent::LaunchConfig,
+        config: gwt_agent::LaunchConfig,
         hook_forward_target: Option<HookForwardTarget>,
     ) {
         let result = (|| {
@@ -2227,112 +2226,60 @@ impl AppRuntime {
                 window_id: window_id.clone(),
                 message: "Preparing worktree...".to_string(),
             });
-            resolve_launch_worktree(Path::new(&project_root), &mut config)?;
 
             proxy.send(UserEvent::LaunchProgress {
                 window_id: window_id.clone(),
                 message: "Starting Docker service...".to_string(),
             });
-            apply_docker_runtime_to_launch_config(Path::new(&project_root), &mut config)?;
+            let proxy_for_refresh = proxy.clone();
+            let prepared = gwt_agent::prepare_agent_launch(
+                Path::new(&project_root),
+                &sessions_dir,
+                config,
+                hook_forward_target.map(|target| gwt_agent::HookForwardEnv {
+                    url: target.url,
+                    token: target.token,
+                }),
+                |worktree_path| {
+                    proxy_for_refresh.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: "Configuring workspace...".to_string(),
+                    });
+                    refresh_managed_gwt_assets_for_worktree(worktree_path)
+                        .map_err(|error| error.to_string())
+                },
+            )?;
 
-            proxy.send(UserEvent::LaunchProgress {
-                window_id: window_id.clone(),
-                message: "Configuring workspace...".to_string(),
-            });
-            let worktree_path = config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(&project_root));
-            refresh_managed_gwt_assets_for_worktree(&worktree_path)
-                .map_err(|error| error.to_string())?;
-            if let Err(error) = gwt::index_worker::bootstrap_project_index_for_path(&worktree_path)
+            if let Err(error) =
+                gwt::index_worker::bootstrap_project_index_for_path(&prepared.worktree_path)
             {
                 tracing::warn!(
-                    worktree = %worktree_path.display(),
+                    worktree = %prepared.worktree_path.display(),
                     error = %error,
                     "project index bootstrap skipped during worktree prepare"
                 );
             }
 
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
-                && apply_host_package_runner_fallback(&mut config)
-            {
+            if prepared.used_host_package_runner_fallback {
                 proxy.send(UserEvent::LaunchProgress {
                     window_id: window_id.clone(),
                     message: "bunx unavailable, switching to npx...".to_string(),
                 });
             }
-            install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
-
-            let branch_name = config
-                .branch
-                .clone()
-                .unwrap_or_else(|| "workspace".to_string());
-
-            let agent_id = config.agent_id.clone();
-            let mut session =
-                gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
-            session.display_name = config.display_name.clone();
-            session.tool_version = config.tool_version.clone();
-            session.model = config.model.clone();
-            session.reasoning_level = config.reasoning_level.clone();
-            session.skip_permissions = config.skip_permissions;
-            session.codex_fast_mode = config.codex_fast_mode;
-            session.runtime_target = config.runtime_target;
-            session.docker_service = config.docker_service.clone();
-            session.docker_lifecycle_intent = config.docker_lifecycle_intent;
-            session.linked_issue_number = config.linked_issue_number;
-            session.launch_command = config.command.clone();
-            session.launch_args = config.args.clone();
-            session.update_status(gwt_agent::AgentStatus::Running);
-
-            let session_id = session.id.clone();
-            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
-            config.env_vars.insert(
-                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
-                session_id.clone(),
-            );
-            config.env_vars.insert(
-                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
-                runtime_path.display().to_string(),
-            );
-            if let Some(target) = hook_forward_target {
-                config
-                    .env_vars
-                    .insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
-                config.env_vars.insert(
-                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
-                    target.token,
-                );
-            }
-            config
-                .env_vars
-                .entry("COLORTERM".to_string())
-                .or_insert_with(|| "truecolor".to_string());
-            finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
-
-            session
-                .save(&sessions_dir)
-                .map_err(|error| error.to_string())?;
-            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-                .save(&runtime_path)
-                .map_err(|error| error.to_string())?;
-
-            let process_launch = ProcessLaunch {
-                command: config.command.clone(),
-                args: config.args.clone(),
-                env: config.env_vars.clone(),
-                cwd: config.working_dir.clone(),
-            };
 
             Ok(AgentLaunchReady {
-                process_launch,
-                session_id,
-                branch_name,
-                display_name: config.display_name,
-                worktree_path,
-                agent_id,
-                linked_issue_number: config.linked_issue_number,
+                process_launch: ProcessLaunch {
+                    command: prepared.process_launch.command,
+                    args: prepared.process_launch.args,
+                    env: prepared.process_launch.env,
+                    cwd: prepared.process_launch.cwd,
+                },
+                session_id: prepared.session.id.clone(),
+                branch_name: prepared.session.branch.clone(),
+                display_name: prepared.session.display_name.clone(),
+                worktree_path: prepared.worktree_path,
+                agent_id: prepared.session.agent_id.clone(),
+                linked_issue_number: prepared.session.linked_issue_number,
             })
         })();
 
@@ -6613,116 +6560,21 @@ fn resolve_launch_worktree_request(
     working_dir: &mut Option<PathBuf>,
     env_vars: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    let Some(branch_name) = branch_name.map(str::to_string) else {
-        return Ok(());
-    };
-    if working_dir.is_some() {
-        return Ok(());
-    }
-
-    let current_branch = current_git_branch(repo_path);
-    if current_branch.is_err() && base_branch.is_none() {
-        return Ok(());
-    }
-    if current_branch
-        .as_ref()
-        .is_ok_and(|current| current == &branch_name)
-    {
-        *working_dir = Some(repo_path.to_path_buf());
-        env_vars.insert(
-            "GWT_PROJECT_ROOT".to_string(),
-            repo_path.display().to_string(),
-        );
-        return Ok(());
-    }
-
-    let main_repo_path =
-        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let worktrees = manager.list().map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = worktrees
-        .iter()
-        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
-        .map(|worktree| worktree.path.clone())
-    {
-        *working_dir = Some(existing_worktree.clone());
-        env_vars.insert(
-            "GWT_PROJECT_ROOT".to_string(),
-            existing_worktree.display().to_string(),
-        );
-        return Ok(());
-    }
-
-    let base_branch = base_branch
-        .map(str::to_string)
-        .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
-    let remote_base_ref = origin_remote_ref(&base_branch);
-    let remote_branch_ref = origin_remote_ref(&branch_name);
-
-    manager
-        .fetch_origin()
-        .map_err(|err| format!("failed to fetch origin: {err}"))?;
-
-    if !manager
-        .remote_branch_exists(&remote_base_ref)
-        .map_err(|err| format!("failed to verify remote base branch {remote_base_ref}: {err}"))?
-    {
-        return Err(format!(
-            "remote base branch does not exist: {remote_base_ref}"
-        ));
-    }
-
-    if !manager
-        .remote_branch_exists(&remote_branch_ref)
-        .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
-    {
-        manager
-            .create_remote_branch_from_base(&remote_base_ref, &branch_name)
-            .map_err(|err| {
-                format!(
-                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                )
-            })?;
-        manager
-            .fetch_origin()
-            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
-    }
-
-    let preferred_worktree_path =
-        gwt_git::worktree::sibling_worktree_path(&main_repo_path, &branch_name);
-    let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
-        .ok_or_else(|| {
-            format!("failed to resolve available worktree path for branch {branch_name}")
-        })?;
-    if local_branch_exists(&main_repo_path, &branch_name)? {
-        manager
-            .create(&branch_name, &worktree_path)
-            .map_err(|err| err.to_string())?;
-    } else {
-        manager
-            .create_from_remote(&remote_branch_ref, &branch_name, &worktree_path)
-            .map_err(|err| err.to_string())?;
-    }
-
-    *working_dir = Some(worktree_path.clone());
-    env_vars.insert(
-        "GWT_PROJECT_ROOT".to_string(),
-        worktree_path.display().to_string(),
-    );
-    Ok(())
+    gwt_agent::resolve_launch_worktree_request(
+        repo_path,
+        branch_name,
+        base_branch,
+        working_dir,
+        env_vars,
+    )
 }
 
+#[cfg(test)]
 fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
-    resolve_launch_worktree_request(
-        repo_path,
-        config.branch.as_deref(),
-        config.base_branch.as_deref(),
-        &mut config.working_dir,
-        &mut config.env_vars,
-    )
+    gwt_agent::resolve_launch_worktree(repo_path, config)
 }
 
 fn resolve_shell_launch_worktree(
@@ -6745,93 +6597,11 @@ struct DockerLaunchPlan {
     container_cwd: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DockerExecProgram {
-    executable: String,
-    args: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DockerPackageRunnerCandidate {
-    executable: &'static str,
-    base_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PackageRunnerProgram {
-    executable: String,
-    args: Vec<String>,
-}
-
 #[derive(Debug, Clone, Default)]
 struct DevContainerLaunchDefaults {
     service: Option<String>,
     workspace_folder: Option<String>,
     compose_file: Option<PathBuf>,
-}
-
-fn apply_docker_runtime_to_launch_config(
-    repo_path: &Path,
-    config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
-    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        return Ok(());
-    }
-
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
-    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    ensure_docker_launch_runtime_ready()?;
-    ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
-    maybe_inject_docker_sandbox_env(&launch, config)?;
-    install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
-    let runtime_program = resolve_docker_exec_program(&launch, config)?;
-    config.command = runtime_program.executable;
-    config.args = runtime_program.args;
-    config
-        .env_vars
-        .insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
-    config.docker_service = Some(launch.service);
-    Ok(())
-}
-
-fn finalize_docker_agent_launch_config(
-    repo_path: &Path,
-    config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
-    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        return Ok(());
-    }
-
-    let worktree = config
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| repo_path.to_path_buf());
-    let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
-    let runtime_program = PackageRunnerProgram {
-        executable: config.command.clone(),
-        args: config.args.clone(),
-    };
-
-    let mut args = vec![
-        "compose".to_string(),
-        "-f".to_string(),
-        launch.compose_file.display().to_string(),
-        "exec".to_string(),
-        "-w".to_string(),
-        launch.container_cwd,
-    ];
-    args.extend(docker_compose_exec_env_args(&config.env_vars));
-    args.push(launch.service);
-    args.push(runtime_program.executable);
-    args.extend(runtime_program.args);
-
-    config.command = docker_binary_for_launch();
-    config.args = args;
-    Ok(())
 }
 
 fn build_shell_process_launch(
@@ -6889,79 +6659,18 @@ fn build_shell_process_launch(
     })
 }
 
-fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
-    apply_host_package_runner_fallback_with_probe(
-        config,
-        "npx".to_string(),
-        probe_host_package_runner,
-    )
-}
-
+#[cfg(test)]
 fn apply_host_package_runner_fallback_with_probe<F>(
     config: &mut gwt_agent::LaunchConfig,
     fallback_executable: String,
-    mut probe: F,
+    probe: F,
 ) -> bool
 where
     F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
 {
-    let Some(program) =
-        resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
-    else {
-        return false;
-    };
-    config.command = program.executable;
-    config.args = program.args;
-    true
+    gwt_agent::apply_host_package_runner_fallback_with_probe(config, fallback_executable, probe)
 }
-
-fn resolve_host_package_runner_with_probe<F>(
-    config: &gwt_agent::LaunchConfig,
-    fallback_executable: String,
-    probe: &mut F,
-) -> Option<PackageRunnerProgram>
-where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
-{
-    let version_spec = package_runner_version_spec(config)?;
-    if !command_matches_runner(&config.command, "bunx") {
-        return None;
-    }
-
-    let probe_args = vec![version_spec.clone(), "--version".to_string()];
-    let cwd = config.working_dir.clone();
-    if probe(&config.command, probe_args, &config.env_vars, cwd) {
-        return None;
-    }
-
-    let agent_args = strip_package_runner_args(&config.args, &version_spec);
-    let mut args = vec!["--yes".to_string(), version_spec];
-    args.extend(agent_args);
-    Some(PackageRunnerProgram {
-        executable: fallback_executable,
-        args,
-    })
-}
-
-fn probe_host_package_runner(
-    command: &str,
-    args: Vec<String>,
-    env_vars: &HashMap<String, String>,
-    cwd: Option<PathBuf>,
-) -> bool {
-    let mut process = Command::new(command);
-    process
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .envs(env_vars);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
-    process.status().is_ok_and(|status| status.success())
-}
-
+#[cfg(test)]
 fn command_matches_runner(command: &str, runner: &str) -> bool {
     let path = Path::new(command);
     path.file_stem()
@@ -6987,37 +6696,17 @@ fn install_launch_gwt_bin_env(
     env_vars: &mut HashMap<String, String>,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
 ) -> Result<(), String> {
-    let current_exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
-    install_launch_gwt_bin_env_with_lookup(env_vars, runtime_target, &current_exe, |command| {
-        which::which(command).ok()
-    })
+    gwt_agent::install_launch_gwt_bin_env(env_vars, runtime_target)
 }
 
+#[cfg(test)]
 fn install_launch_gwt_bin_env_with_lookup(
     env_vars: &mut HashMap<String, String>,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> Result<(), String> {
-    let gwt_bin = match runtime_target {
-        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWT_BIN_PATH.to_string(),
-        gwt_agent::LaunchRuntimeTarget::Host => {
-            gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
-                .to_string_lossy()
-                .into_owned()
-        }
-    };
-    match runtime_target {
-        gwt_agent::LaunchRuntimeTarget::Docker => {
-            env_vars.insert(gwt_agent::session::GWT_BIN_PATH_ENV.to_string(), gwt_bin);
-        }
-        gwt_agent::LaunchRuntimeTarget::Host => {
-            env_vars
-                .entry(gwt_agent::session::GWT_BIN_PATH_ENV.to_string())
-                .or_insert(gwt_bin);
-        }
-    }
-    Ok(())
+    gwt_agent::install_launch_gwt_bin_env_with_lookup(env_vars, runtime_target, current_exe, lookup)
 }
 
 fn resolve_user_home_dir() -> Result<PathBuf, String> {
@@ -7094,32 +6783,6 @@ fn ensure_docker_gwt_binary_setup(repo_path: &Path, service: &str) -> Result<(),
     Ok(())
 }
 
-fn maybe_inject_docker_sandbox_env(
-    launch: &DockerLaunchPlan,
-    config: &mut gwt_agent::LaunchConfig,
-) -> Result<(), String> {
-    if cfg!(windows)
-        || !matches!(config.agent_id, gwt_agent::AgentId::ClaudeCode)
-        || !config.skip_permissions
-    {
-        return Ok(());
-    }
-
-    let is_root = gwt_docker::compose_service_user_is_root(&launch.compose_file, &launch.service)
-        .map_err(|err| {
-        format!(
-            "Failed to determine Docker user for service '{}': {err}",
-            launch.service
-        )
-    })?;
-    if is_root {
-        config
-            .env_vars
-            .insert("IS_SANDBOX".to_string(), "1".to_string());
-    }
-    Ok(())
-}
-
 fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<String> {
     let mut keys = env_vars.keys().collect::<Vec<_>>();
     keys.sort();
@@ -7145,21 +6808,7 @@ fn is_valid_docker_env_key(key: &str) -> bool {
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
-
-fn resolve_docker_exec_program(
-    launch: &DockerLaunchPlan,
-    config: &gwt_agent::LaunchConfig,
-) -> Result<DockerExecProgram, String> {
-    let Some(version_spec) = package_runner_version_spec(config) else {
-        ensure_docker_launch_command_ready(launch, &config.command)?;
-        return Ok(DockerExecProgram {
-            executable: config.command.clone(),
-            args: config.args.clone(),
-        });
-    };
-    resolve_docker_package_runner(launch, config, &version_spec)
-}
-
+#[cfg(test)]
 fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
     let package = config.agent_id.package_name()?;
     let version = config.tool_version.as_deref()?;
@@ -7172,43 +6821,7 @@ fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<Strin
         format!("{package}@{version}")
     })
 }
-
-fn resolve_docker_package_runner(
-    launch: &DockerLaunchPlan,
-    config: &gwt_agent::LaunchConfig,
-    version_spec: &str,
-) -> Result<DockerExecProgram, String> {
-    let agent_args = strip_package_runner_args(&config.args, version_spec);
-    let candidates = vec![
-        DockerPackageRunnerCandidate {
-            executable: "bunx",
-            base_args: vec![version_spec.to_string()],
-        },
-        DockerPackageRunnerCandidate {
-            executable: "npx",
-            base_args: vec!["--yes".to_string(), version_spec.to_string()],
-        },
-    ];
-
-    for candidate in candidates {
-        let output = gwt_docker::compose_service_exec_capture(
-            &launch.compose_file,
-            &launch.service,
-            Some(&launch.container_cwd),
-            &candidate.probe_args(),
-        )
-        .map_err(|err| err.to_string())?;
-        if output.status.success() {
-            return Ok(candidate.into_exec_program(agent_args.clone()));
-        }
-    }
-
-    Err(format!(
-        "Selected Docker runtime cannot launch {version_spec} in service '{}'",
-        launch.service
-    ))
-}
-
+#[cfg(test)]
 fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
     if args.first().is_some_and(|first| first == "--yes")
         && args.get(1).is_some_and(|arg| arg == version_spec)
@@ -7238,41 +6851,6 @@ fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String, Str
         "Selected Docker runtime has no interactive shell in service '{}'",
         launch.service
     ))
-}
-
-fn ensure_docker_launch_command_ready(
-    launch: &DockerLaunchPlan,
-    command: &str,
-) -> Result<(), String> {
-    let available =
-        gwt_docker::compose_service_has_command(&launch.compose_file, &launch.service, command)
-            .map_err(|err| err.to_string())?;
-    if available {
-        Ok(())
-    } else {
-        Err(format!(
-            "Command '{command}' is not available in Docker service '{}'",
-            launch.service
-        ))
-    }
-}
-
-impl DockerPackageRunnerCandidate {
-    fn probe_args(&self) -> Vec<String> {
-        let mut args = vec![self.executable.to_string()];
-        args.extend(self.base_args.clone());
-        args.push("--version".to_string());
-        args
-    }
-
-    fn into_exec_program(self, mut agent_args: Vec<String>) -> DockerExecProgram {
-        let mut args = self.base_args;
-        args.append(&mut agent_args);
-        DockerExecProgram {
-            executable: self.executable.to_string(),
-            args,
-        }
-    }
 }
 
 fn ensure_docker_launch_service_ready(
@@ -7462,6 +7040,7 @@ fn mount_source_matches_project_root(source: &str, project_root: &Path) -> bool 
     source_path.is_absolute() && same_worktree_path(source_path, project_root)
 }
 
+#[cfg(test)]
 fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],
@@ -7480,6 +7059,7 @@ fn first_available_worktree_path(
     None
 }
 
+#[cfg(test)]
 fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_str()?;
     let mut candidate = path.to_path_buf();
@@ -7487,6 +7067,7 @@ fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
     Some(candidate)
 }
 
+#[cfg(test)]
 fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
     worktrees
         .iter()
@@ -7504,6 +7085,7 @@ fn same_worktree_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+#[cfg(test)]
 fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
@@ -7535,6 +7117,7 @@ fn current_git_branch(repo_path: &Path) -> Result<String, String> {
     }
 }
 
+#[cfg(test)]
 fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
     let output = Command::new("git")
         .args([
