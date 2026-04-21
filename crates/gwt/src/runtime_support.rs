@@ -363,30 +363,50 @@ pub(crate) fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
     (cols.max(20), rows.max(6))
 }
 
-pub(crate) fn run_cli(argv: &[String]) -> io::Result<()> {
-    let needs_repo = matches!(
-        argv.get(1).map(String::as_str),
-        Some("issue" | "pr" | "actions")
-    );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrontDoorRoute {
+    Gui,
+    RepoBackedCli,
+    DetachedCli,
+}
 
-    if needs_repo {
-        let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (owner, repo) = match resolve_repo_coordinates() {
-            Some(coords) => coords,
-            None => {
-                eprintln!(
-                    "gwt {}: could not resolve GitHub owner/repo from the current git remote",
-                    argv.get(1).map(String::as_str).unwrap_or("issue")
-                );
-                std::process::exit(2);
-            }
-        };
-        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
-        std::process::exit(gwt::cli::dispatch(&mut env, argv));
+pub(crate) fn front_door_route(argv: &[String]) -> FrontDoorRoute {
+    match argv.get(1).map(String::as_str) {
+        Some("issue" | "pr" | "actions") => FrontDoorRoute::RepoBackedCli,
+        Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
+            debug_assert!(matches!(
+                top_verb,
+                "board" | "hook" | "update" | "__internal"
+            ));
+            FrontDoorRoute::DetachedCli
+        }
+        _ => FrontDoorRoute::Gui,
     }
+}
 
-    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
-    std::process::exit(gwt::cli::dispatch(&mut env, argv));
+pub(crate) fn run_cli(argv: &[String]) -> io::Result<()> {
+    match front_door_route(argv) {
+        FrontDoorRoute::RepoBackedCli => {
+            let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let (owner, repo) = match resolve_repo_coordinates() {
+                Some(coords) => coords,
+                None => {
+                    eprintln!(
+                        "gwt {}: could not resolve GitHub owner/repo from the current git remote",
+                        argv.get(1).map(String::as_str).unwrap_or("issue")
+                    );
+                    std::process::exit(2);
+                }
+            };
+            let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
+            std::process::exit(gwt::cli::dispatch(&mut env, argv));
+        }
+        FrontDoorRoute::DetachedCli => {
+            let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
+            std::process::exit(gwt::cli::dispatch(&mut env, argv));
+        }
+        FrontDoorRoute::Gui => Ok(()),
+    }
 }
 
 pub(crate) fn resolve_repo_coordinates() -> Option<(String, String)> {
@@ -425,4 +445,60 @@ pub(crate) fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{front_door_route, FrontDoorRoute};
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn front_door_route_keeps_gui_launch_for_empty_and_repo_path_argv() {
+        for args in [
+            argv(&["gwt"]),
+            argv(&["gwt", "E:/gwt/repo"]),
+            argv(&["gwt", "."]),
+        ] {
+            assert_eq!(front_door_route(&args), FrontDoorRoute::Gui);
+            assert!(
+                !gwt::cli::should_dispatch_cli(&args),
+                "GUI launch argv must not fall through to CLI dispatch: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn front_door_route_keeps_repo_backed_issue_pr_and_actions_commands_on_cli_path() {
+        for args in [
+            argv(&["gwt", "issue", "spec", "1784", "--section", "tasks"]),
+            argv(&["gwt", "issue", "view", "1784", "--refresh"]),
+            argv(&["gwt", "pr", "current"]),
+            argv(&["gwt", "actions", "logs", "--run", "101"]),
+        ] {
+            assert_eq!(front_door_route(&args), FrontDoorRoute::RepoBackedCli);
+            assert!(
+                gwt::cli::should_dispatch_cli(&args),
+                "repo-backed tooling must stay on the CLI path: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn front_door_route_keeps_board_hook_update_and_internal_commands_on_cli_path() {
+        for args in [
+            argv(&["gwt", "board", "show", "--json"]),
+            argv(&["gwt", "hook", "runtime-state", "PreToolUse"]),
+            argv(&["gwt", "update", "--check"]),
+            argv(&["gwt", "__internal", "daemon-hook", "forward"]),
+        ] {
+            assert_eq!(front_door_route(&args), FrontDoorRoute::DetachedCli);
+            assert!(
+                gwt::cli::should_dispatch_cli(&args),
+                "non-GUI helper tooling must stay on the CLI path: {args:?}"
+            );
+        }
+    }
 }
