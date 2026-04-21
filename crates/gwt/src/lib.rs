@@ -48,8 +48,9 @@ pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]
 pub use native_app::MacosNativeMenu;
 pub use native_app::{
-    macos_bundle_identifier, macos_native_menu_titles, native_menu_command_for_id,
-    NativeMenuCommand, APP_NAME, MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
+    macos_bundle_identifier, macos_native_menu_titles, native_launch_surface,
+    native_menu_command_for_id, NativeLaunchSurface, NativeMenuCommand, APP_NAME,
+    MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 pub use persistence::{
     default_session_state, default_workspace_state, empty_workspace_state,

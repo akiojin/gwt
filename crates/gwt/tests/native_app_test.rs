@@ -1,6 +1,6 @@
 use gwt::{
-    macos_bundle_identifier, macos_native_menu_titles, native_menu_command_for_id,
-    NativeMenuCommand, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
+    macos_bundle_identifier, macos_native_menu_titles, native_launch_surface,
+    native_menu_command_for_id, NativeMenuCommand, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 
 #[test]
@@ -23,4 +23,18 @@ fn native_menu_command_maps_supported_ids_and_ignores_unknown_ids() {
         Some(NativeMenuCommand::ReloadWebView)
     );
     assert_eq!(native_menu_command_for_id("view.unknown"), None);
+}
+
+#[test]
+fn native_launch_surface_keeps_gui_primary_bundle_and_menu_contract() {
+    let surface = native_launch_surface();
+
+    assert_eq!(surface.app_name, "GWT");
+    assert_eq!(surface.bundle_identifier, "io.github.akiojin.gwt");
+    assert_eq!(surface.menu_titles, &["GWT", "File", "View", "Window"]);
+    assert_eq!(
+        surface.command_ids,
+        &[OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID],
+        "native launch path should keep the Open Project / Reload surface stable"
+    );
 }

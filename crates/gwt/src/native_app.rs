@@ -4,6 +4,14 @@ pub const OPEN_PROJECT_MENU_ID: &str = "file.open_project";
 pub const RELOAD_MENU_ID: &str = "view.reload";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeLaunchSurface {
+    pub app_name: &'static str,
+    pub bundle_identifier: &'static str,
+    pub menu_titles: &'static [&'static str],
+    pub command_ids: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeMenuCommand {
     OpenProject,
     ReloadWebView,
@@ -15,6 +23,15 @@ pub fn macos_bundle_identifier() -> &'static str {
 
 pub fn macos_native_menu_titles() -> &'static [&'static str] {
     &[APP_NAME, "File", "View", "Window"]
+}
+
+pub fn native_launch_surface() -> NativeLaunchSurface {
+    NativeLaunchSurface {
+        app_name: APP_NAME,
+        bundle_identifier: macos_bundle_identifier(),
+        menu_titles: macos_native_menu_titles(),
+        command_ids: &[OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID],
+    }
 }
 
 pub fn native_menu_command_for_id(menu_id: &str) -> Option<NativeMenuCommand> {

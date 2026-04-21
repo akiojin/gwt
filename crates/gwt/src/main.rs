@@ -83,6 +83,19 @@ const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GuiFrontDoorLaunchSurface<'a> {
+    browser_url: &'a str,
+    webview_url: &'a str,
+}
+
+fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<'_> {
+    GuiFrontDoorLaunchSurface {
+        browser_url: server_url,
+        webview_url: server_url,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -271,7 +284,8 @@ mod tests {
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
         close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content, hook_forward_authorized,
+        docker_bundle_mounts_for_home, docker_bundle_override_content,
+        gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
         AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub, DispatchTarget,
@@ -425,6 +439,14 @@ mod tests {
         assert_eq!(native_payload, browser_payload);
         assert!(native_payload.contains("\"kind\":\"runtime_hook_event\""));
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
+    }
+
+    #[test]
+    fn gui_front_door_launch_surface_reuses_same_server_url_for_browser_and_native_webview() {
+        let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
+
+        assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
+        assert_eq!(surface.webview_url, "http://127.0.0.1:44557/");
     }
 
     fn drain_client_payloads(
@@ -3746,7 +3768,8 @@ fn main() -> wry::Result<()> {
     )
     .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());
-    eprintln!("gwt browser URL: {}", server.url());
+    let front_door = gui_front_door_launch_surface(server.url());
+    eprintln!("gwt browser URL: {}", front_door.browser_url);
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
@@ -3763,7 +3786,7 @@ fn main() -> wry::Result<()> {
         native_menu
     };
 
-    let builder = WebViewBuilder::new().with_url(server.url());
+    let builder = WebViewBuilder::new().with_url(front_door.webview_url);
 
     #[cfg(any(
         target_os = "windows",
