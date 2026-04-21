@@ -67,6 +67,24 @@ run("release workflow packages gwtd alongside gwt", () => {
   assert.match(workflow, /Contents\/MacOS\/gwtd/);
 });
 
+run("release workflow signs and notarizes macOS distribution assets", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  assert.match(workflow, /APPLE_CERT_APP_BASE64/);
+  assert.match(workflow, /APPLE_CERTIFICATE_PASSWORD/);
+  assert.match(workflow, /APPLE_ID_PASSWORD/);
+  assert.match(workflow, /APPLE_TEAM_ID/);
+  assert.match(workflow, /security create-keychain/);
+  assert.match(workflow, /codesign --force --options runtime --timestamp --sign/);
+  assert.match(workflow, /xcrun notarytool submit/);
+  assert.match(workflow, /xcrun stapler staple/);
+  assert.match(workflow, /xcrun stapler validate/);
+  assert.match(workflow, /spctl --assess/);
+  assert.match(workflow, /hdiutil attach/);
+});
+
 run("portable tarball extraction installs the unix bundle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-release-test-"));
   const sourceDir = path.join(root, "source");

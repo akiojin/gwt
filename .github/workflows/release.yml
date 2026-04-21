@@ -127,6 +127,64 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - name: Build gwt bundle binaries
         run: cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
+      - name: Prepare macOS signing keychain
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERT_APP_BASE64: ${{ secrets.APPLE_CERT_APP_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APPLE_CERT_APP_BASE64:-}" || -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+            echo "macOS signing requires APPLE_CERT_APP_BASE64 and APPLE_CERTIFICATE_PASSWORD" >&2
+            exit 1
+          fi
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/gwt-app-signing.keychain-db"
+          CERT_PATH="${RUNNER_TEMP}/gwt-app-signing.p12"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          echo "$APPLE_CERT_APP_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          rm -f "$CERT_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CODESIGN_IDENTITY="$(security find-identity -p codesigning -v "$KEYCHAIN_PATH" \
+            | awk '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$CODESIGN_IDENTITY" ]]; then
+            CODESIGN_IDENTITY="$(security find-identity -p codesigning -v "$KEYCHAIN_PATH" \
+              | awk 'NR == 1 { print $2; exit }')"
+          fi
+          if [[ -z "$CODESIGN_IDENTITY" ]]; then
+            echo "No codesigning identity found in temporary keychain" >&2
+            exit 1
+          fi
+
+          {
+            echo "GWT_MACOS_KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "GWT_CODESIGN_IDENTITY=$CODESIGN_IDENTITY"
+          } >> "$GITHUB_ENV"
+      - name: Sign macOS portable binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            "target/${{ matrix.target }}/release/gwt"
+          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            "target/${{ matrix.target }}/release/gwtd"
+          codesign --verify --strict --verbose=4 "target/${{ matrix.target }}/release/gwt"
+          codesign --verify --strict --verbose=4 "target/${{ matrix.target }}/release/gwtd"
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -151,6 +209,14 @@ jobs:
         with:
           name: ${{ matrix.archive_name }}
           path: dist/${{ matrix.archive_name }}
+      - name: Cleanup macOS signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${GWT_MACOS_KEYCHAIN_PATH:-}" && -f "$GWT_MACOS_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$GWT_MACOS_KEYCHAIN_PATH" || true
+          fi
 
   build-msi:
     name: Build MSI installer (Windows)
@@ -195,6 +261,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gwt-dmg
+      - name: Prepare macOS signing keychain
+        shell: bash
+        env:
+          APPLE_CERT_APP_BASE64: ${{ secrets.APPLE_CERT_APP_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APPLE_CERT_APP_BASE64:-}" || -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+            echo "macOS signing requires APPLE_CERT_APP_BASE64 and APPLE_CERTIFICATE_PASSWORD" >&2
+            exit 1
+          fi
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/gwt-dmg-signing.keychain-db"
+          CERT_PATH="${RUNNER_TEMP}/gwt-dmg-signing.p12"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+
+          echo "$APPLE_CERT_APP_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          rm -f "$CERT_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CODESIGN_IDENTITY="$(security find-identity -p codesigning -v "$KEYCHAIN_PATH" \
+            | awk '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$CODESIGN_IDENTITY" ]]; then
+            CODESIGN_IDENTITY="$(security find-identity -p codesigning -v "$KEYCHAIN_PATH" \
+              | awk 'NR == 1 { print $2; exit }')"
+          fi
+          if [[ -z "$CODESIGN_IDENTITY" ]]; then
+            echo "No codesigning identity found in temporary keychain" >&2
+            exit 1
+          fi
+
+          {
+            echo "GWT_MACOS_KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "GWT_CODESIGN_IDENTITY=$CODESIGN_IDENTITY"
+          } >> "$GITHUB_ENV"
       - name: Build gwt bundle binaries for aarch64
         run: cargo build --release -p gwt --target aarch64-apple-darwin --bin gwt --bin gwtd
       - name: Build gwt bundle binaries for x86_64
@@ -239,17 +351,76 @@ jobs:
           cp dist/gwtd dist/GWT.app/Contents/MacOS/gwtd
           chmod +x dist/GWT.app/Contents/MacOS/gwt
           chmod +x dist/GWT.app/Contents/MacOS/gwtd
+      - name: Sign app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            dist/GWT.app/Contents/MacOS/gwt
+          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            dist/GWT.app/Contents/MacOS/gwtd
+          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            dist/GWT.app
+          codesign --verify --deep --strict --verbose=4 dist/GWT.app
       - name: Create DMG
         run: |
           mkdir -p dmg_temp
           cp -R dist/GWT.app dmg_temp/GWT.app
           ln -s /Applications dmg_temp/Applications
           hdiutil create -volname GWT -srcfolder dmg_temp -ov -format UDZO dist/gwt-macos-universal.dmg
+      - name: Sign and notarize DMG
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          for var in APPLE_ID APPLE_ID_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!var:-}" ]]; then
+              echo "macOS notarization requires ${var}" >&2
+              exit 1
+            fi
+          done
+
+          codesign --force --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            dist/gwt-macos-universal.dmg
+          codesign --verify --strict --verbose=4 dist/gwt-macos-universal.dmg
+
+          xcrun notarytool submit dist/gwt-macos-universal.dmg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple dist/gwt-macos-universal.dmg
+          xcrun stapler validate dist/gwt-macos-universal.dmg
+          spctl --assess --type execute --verbose=4 dist/GWT.app
+          spctl --assess --type open --context context:primary-signature --verbose=4 \
+            dist/gwt-macos-universal.dmg
+      - name: Validate DMG contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          MOUNT_DIR="${RUNNER_TEMP}/gwt-dmg-verify"
+          mkdir -p "$MOUNT_DIR"
+          hdiutil attach dist/gwt-macos-universal.dmg -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+          trap 'hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true' EXIT
+          test -d "$MOUNT_DIR/GWT.app"
+          codesign --verify --deep --strict --verbose=4 "$MOUNT_DIR/GWT.app"
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: gwt-macos-universal.dmg
           path: dist/gwt-macos-universal.dmg
+      - name: Cleanup macOS signing keychain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${GWT_MACOS_KEYCHAIN_PATH:-}" && -f "$GWT_MACOS_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$GWT_MACOS_KEYCHAIN_PATH" || true
+          fi
 
   upload-release:
     name: Upload to GitHub Release
