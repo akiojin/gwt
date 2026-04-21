@@ -26,12 +26,12 @@ pub use branch_list::{
 };
 pub use branch_list::{list_branch_entries, list_branch_inventory, BranchListEntry, BranchScope};
 pub use custom_agents_service::{
-    add_from_claude_code_openai_compat_preset, delete_custom_agent, list_custom_agents,
-    list_presets, probe_backend, update_custom_agent, ClaudeCodeOpenaiCompatInput,
-    CustomAgentsServiceError, PresetDefinition, PresetId,
+    add_from_preset, delete_custom_agent, list_custom_agents, list_presets, probe_backend,
+    update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
+pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use knowledge_bridge::{
     load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
     KnowledgeKind, KnowledgeListItem,

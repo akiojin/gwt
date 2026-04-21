@@ -5071,7 +5071,8 @@
         setSettingsStatus("Saving preset…", "info");
         send({
           kind: "add_custom_agent_from_preset",
-          input: {
+          preset_id: "claude_code_openai_compat",
+          payload: {
             id,
             display_name: displayName,
             base_url: pendingAddFromPreset.baseUrl,
