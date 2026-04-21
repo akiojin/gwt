@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import chromadb
 
 import chroma_index_runner as runner
 
@@ -23,6 +27,15 @@ class IndexHealthTests(unittest.TestCase):
             "# Project index health\n"
             "Docs repair details live here.\n"
         )
+
+    def _write_cached_issue(self, cache_root: Path) -> None:
+        issue = cache_root / "77"
+        issue.mkdir(parents=True, exist_ok=True)
+        (issue / "meta.json").write_text(
+            '{"number":77,"title":"Broken issue index",'
+            '"labels":["bug"],"state":"open","updated_at":"2026-04-21T00:00:00Z"}'
+        )
+        (issue / "body.md").write_text("Search should repair missing issue collection.")
 
     def _files_db_path(self, db_root: Path) -> Path:
         return runner.resolve_db_path(
@@ -165,6 +178,61 @@ class IndexHealthTests(unittest.TestCase):
                 worktree_hash=self.WORKTREE_HASH,
                 project_root=str(root),
                 query="watcher",
+                n_results=5,
+                no_auto_build=True,
+                db_root=db_root,
+            )
+
+            self.assertFalse(search["ok"])
+            self.assertEqual(search.get("error_code"), "INDEX_UNHEALTHY")
+
+    def test_search_issues_rebuilds_when_sqlite_exists_without_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            db_root = Path(tmp) / "index_root"
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / self.REPO_HASH
+            self._write_cached_issue(cache_root)
+
+            db_path = runner.resolve_db_path(self.REPO_HASH, None, "issues", db_root=db_root)
+            db_path.mkdir(parents=True, exist_ok=True)
+            client = chromadb.PersistentClient(path=str(db_path))
+            client.close()
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                search = runner.action_search_v2(
+                    action="search-issues",
+                    repo_hash=self.REPO_HASH,
+                    worktree_hash=None,
+                    project_root=str(root),
+                    query="missing issue collection",
+                    n_results=5,
+                    no_auto_build=False,
+                    db_root=db_root,
+                )
+
+            self.assertTrue(search["ok"], search)
+            self.assertTrue(
+                any(item["number"] == 77 for item in search["issueResults"]),
+                search["issueResults"],
+            )
+
+    def test_search_issues_no_auto_build_reports_unhealthy_collection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            db_root = Path(tmp) / "index_root"
+            db_path = runner.resolve_db_path(self.REPO_HASH, None, "issues", db_root=db_root)
+            db_path.mkdir(parents=True, exist_ok=True)
+            client = chromadb.PersistentClient(path=str(db_path))
+            client.close()
+
+            search = runner.action_search_v2(
+                action="search-issues",
+                repo_hash=self.REPO_HASH,
+                worktree_hash=None,
+                project_root=str(root),
+                query="issue",
                 n_results=5,
                 no_auto_build=True,
                 db_root=db_root,
