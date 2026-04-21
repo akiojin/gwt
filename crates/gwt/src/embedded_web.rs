@@ -476,6 +476,28 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_surface_uses_cache_backed_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("board-root"),
+            "expected Board root scaffold in embedded html",
+        );
+        assert!(
+            html.contains("load_board"),
+            "expected Board load event in embedded html",
+        );
+        assert!(
+            html.contains("post_board_entry"),
+            "expected Board post event in embedded html",
+        );
+        assert!(
+            html.contains("runtime_hook_event") && html.contains("coordination_event"),
+            "expected Board surface to react to live coordination hook events",
+        );
+    }
+
+    #[test]
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
@@ -569,8 +591,9 @@ mod tests {
                 && html.contains("terminalHost,")
                 && html.contains("launchWizardSurface,")
                 && html.contains("branchesFileTreeSurface,")
+                && html.contains("boardSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Board, and knowledge/settings surfaces",
         );
         assert!(
             !html.contains("window.__POC__"),

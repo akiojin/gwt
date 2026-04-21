@@ -51,6 +51,7 @@
       const windowMap = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
+      const boardStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
       const pendingMessages = [];
       // Phase 1B extraction map: each entry names the surface that owns the
@@ -87,6 +88,15 @@
           mutatedBy: Object.freeze([
             "ensureBranchListState",
             "renderBranches",
+          ]),
+        }),
+        boardStateMap: Object.freeze({
+          owner: "board-surface",
+          mutatedBy: Object.freeze([
+            "ensureBoardState",
+            "renderBoard",
+            "requestBoard",
+            "submitBoardEntry",
           ]),
         }),
         knowledgeBridgeStateMap: Object.freeze({
@@ -212,6 +222,9 @@
         }
         if (preset === "branches") {
           return "branches";
+        }
+        if (preset === "board") {
+          return "board";
         }
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
@@ -1260,6 +1273,23 @@
         return state;
       }
 
+      function ensureBoardState(windowId) {
+        if (!boardStateMap.has(windowId)) {
+          boardStateMap.set(windowId, {
+            entries: [],
+            loading: false,
+            submitting: false,
+            error: "",
+            replyParentId: null,
+            composerKind: "status",
+            composerBody: "",
+            topicsDraft: "",
+            ownersDraft: "",
+          });
+        }
+        return boardStateMap.get(windowId);
+      }
+
       function requestFileTree(windowId, path = "") {
         const state = ensureFileTreeState(windowId);
         if (state.loading.has(path)) {
@@ -1282,6 +1312,19 @@
         state.receivedFreshEntries = false;
         send({
           kind: "load_branches",
+          id: windowId,
+        });
+      }
+
+      function requestBoard(windowId) {
+        const state = ensureBoardState(windowId);
+        if (state.loading) {
+          return;
+        }
+        state.loading = true;
+        state.error = "";
+        send({
+          kind: "load_board",
           id: windowId,
         });
       }
@@ -1342,6 +1385,365 @@
           node.textContent = textContent;
         }
         return node;
+      }
+
+      function sanitizeBoardDraftList(value) {
+        const items = [];
+        for (const raw of String(value || "").split(",")) {
+          const trimmed = raw.trim();
+          if (!trimmed || items.includes(trimmed)) {
+            continue;
+          }
+          items.push(trimmed);
+        }
+        return items;
+      }
+
+      function boardKindLabel(kind) {
+        switch (kind) {
+          case "request":
+            return "Request";
+          case "status":
+            return "Status";
+          case "next":
+            return "Next";
+          case "claim":
+            return "Claim";
+          case "impact":
+            return "Impact";
+          case "question":
+            return "Question";
+          case "blocked":
+            return "Blocked";
+          case "handoff":
+            return "Handoff";
+          case "decision":
+            return "Decision";
+          default:
+            return "Entry";
+        }
+      }
+
+      function boardTimestampLabel(value) {
+        if (!value) {
+          return "";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return value;
+        }
+        return date.toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      }
+
+      function boardAgentKey(entry) {
+        return (
+          entry.origin_agent_id ||
+          entry.origin_session_id ||
+          (entry.author_kind === "agent" ? entry.author : "")
+        );
+      }
+
+      function boardAgentSummaries(entries) {
+        const latestByAgent = new Map();
+        for (const entry of entries) {
+          const key = boardAgentKey(entry);
+          if (!key) {
+            continue;
+          }
+          latestByAgent.set(key, entry);
+        }
+        return Array.from(latestByAgent.values());
+      }
+
+      function submitBoardEntry(windowId) {
+        const state = ensureBoardState(windowId);
+        const body = state.composerBody.trim();
+        if (!body) {
+          state.error = "Entry body is required.";
+          renderBoard(windowId);
+          return;
+        }
+        state.loading = true;
+        state.submitting = true;
+        state.error = "";
+        send({
+          kind: "post_board_entry",
+          id: windowId,
+          entry_kind: state.composerKind,
+          body,
+          parent_id: state.replyParentId,
+          topics: sanitizeBoardDraftList(state.topicsDraft),
+          owners: sanitizeBoardDraftList(state.ownersDraft),
+        });
+        renderBoard(windowId);
+      }
+
+      function handleBoardHookEvent(event) {
+        const hookEvent = event.event;
+        if (!hookEvent || hookEvent.kind !== "coordination_event") {
+          return;
+        }
+        const activeTab = activeProjectTab();
+        if (!activeTab) {
+          return;
+        }
+        if (hookEvent.project_root && hookEvent.project_root !== activeTab.project_root) {
+          return;
+        }
+        for (const windowData of activeWorkspace().windows || []) {
+          if (windowData.preset !== "board") {
+            continue;
+          }
+          const state = ensureBoardState(windowData.id);
+          if (!state.loading) {
+            requestBoard(windowData.id);
+          }
+          renderBoard(windowData.id);
+        }
+      }
+
+      function renderBoard(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const body = element.querySelector(".window-body");
+        if (!body) {
+          return;
+        }
+        const state = ensureBoardState(windowId);
+        const status = body.querySelector(".board-status");
+        const timeline = body.querySelector(".board-timeline");
+        const agents = body.querySelector(".board-agent-pane");
+        const composer = body.querySelector(".board-composer-pane");
+        if (!status || !timeline || !agents || !composer) {
+          return;
+        }
+
+        status.textContent = state.error
+          ? state.error
+          : state.loading
+            ? state.submitting
+              ? "Saving entry..."
+              : "Loading coordination..."
+            : `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
+        status.className = "board-status";
+        if (state.error) {
+          status.classList.add("error");
+        } else if (state.loading) {
+          status.classList.add("info");
+        }
+
+        timeline.innerHTML = "";
+        if (!state.loading && state.entries.length === 0) {
+          timeline.appendChild(
+            createNode("div", "board-empty", "No coordination entries yet."),
+          );
+        }
+        for (const entry of state.entries) {
+          const card = createNode("article", "board-entry");
+          if (state.replyParentId === entry.id) {
+            card.classList.add("reply-target");
+          }
+
+          const header = createNode("div", "board-entry-header");
+          const meta = createNode(
+            "div",
+            "board-entry-meta",
+            `${entry.author || "Unknown"} · ${boardTimestampLabel(
+              entry.updated_at || entry.created_at,
+            )}`,
+          );
+          const chips = createNode("div", "board-entry-chips");
+          chips.appendChild(
+            createNode("span", "board-chip", boardKindLabel(entry.kind)),
+          );
+          if (entry.state) {
+            chips.appendChild(createNode("span", "board-chip state", entry.state));
+          }
+          header.appendChild(meta);
+          header.appendChild(chips);
+          card.appendChild(header);
+          card.appendChild(createNode("div", "board-entry-body", entry.body));
+
+          if (
+            (entry.related_topics && entry.related_topics.length > 0) ||
+            (entry.related_owners && entry.related_owners.length > 0)
+          ) {
+            const links = createNode("div", "board-entry-links");
+            if (entry.related_topics && entry.related_topics.length > 0) {
+              links.appendChild(
+                createNode(
+                  "span",
+                  "board-entry-link",
+                  `Topics · ${entry.related_topics.join(", ")}`,
+                ),
+              );
+            }
+            if (entry.related_owners && entry.related_owners.length > 0) {
+              links.appendChild(
+                createNode(
+                  "span",
+                  "board-entry-link",
+                  `Owners · ${entry.related_owners.join(", ")}`,
+                ),
+              );
+            }
+            card.appendChild(links);
+          }
+
+          const footer = createNode("div", "board-entry-footer");
+          const replyButton = createNode("button", "text-button", "Reply");
+          replyButton.type = "button";
+          replyButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            state.replyParentId = entry.id;
+            renderBoard(windowId);
+          });
+          footer.appendChild(replyButton);
+          card.appendChild(footer);
+          timeline.appendChild(card);
+        }
+
+        agents.innerHTML = "";
+        agents.appendChild(createNode("div", "mock-label", "Agent activity"));
+        const summaries = boardAgentSummaries(state.entries);
+        if (summaries.length === 0) {
+          agents.appendChild(
+            createNode("div", "board-empty", "No active agent status yet."),
+          );
+        } else {
+          for (const entry of summaries) {
+            const section = createNode("div", "mock-section");
+            section.appendChild(
+              createNode("div", "mock-label", entry.author || "Agent"),
+            );
+            section.appendChild(
+              createNode(
+                "div",
+                "board-agent-status",
+                entry.state || boardKindLabel(entry.kind),
+              ),
+            );
+            section.appendChild(createNode("div", "board-agent-copy", entry.body));
+            if (entry.origin_branch) {
+              section.appendChild(
+                createNode(
+                  "div",
+                  "board-agent-copy",
+                  `Branch · ${entry.origin_branch}`,
+                ),
+              );
+            }
+            agents.appendChild(section);
+          }
+        }
+
+        composer.innerHTML = "";
+        composer.appendChild(createNode("div", "mock-label", "Post update"));
+        if (state.replyParentId) {
+          const replyEntry = state.entries.find((entry) => entry.id === state.replyParentId);
+          const replyBox = createNode("div", "board-reply-box");
+          replyBox.appendChild(
+            createNode(
+              "div",
+              "board-reply-copy",
+              replyEntry
+                ? `Replying to ${replyEntry.author || "entry"}`
+                : "Reply target selected",
+            ),
+          );
+          const clearReply = createNode("button", "text-button", "Clear reply");
+          clearReply.type = "button";
+          clearReply.addEventListener("click", () => {
+            state.replyParentId = null;
+            renderBoard(windowId);
+          });
+          replyBox.appendChild(clearReply);
+          composer.appendChild(replyBox);
+        }
+
+        const kindField = createNode("label", "board-field");
+        kindField.appendChild(createNode("span", "mock-label", "Kind"));
+        const kindSelect = document.createElement("select");
+        kindSelect.className = "launch-select";
+        for (const kind of [
+          "status",
+          "next",
+          "request",
+          "question",
+          "blocked",
+          "handoff",
+          "decision",
+          "claim",
+          "impact",
+        ]) {
+          const option = document.createElement("option");
+          option.value = kind;
+          option.textContent = boardKindLabel(kind);
+          kindSelect.appendChild(option);
+        }
+        kindSelect.value = state.composerKind;
+        kindSelect.addEventListener("change", () => {
+          state.composerKind = kindSelect.value;
+        });
+        kindField.appendChild(kindSelect);
+        composer.appendChild(kindField);
+
+        const bodyField = createNode("label", "board-field");
+        bodyField.appendChild(createNode("span", "mock-label", "Message"));
+        const bodyInput = document.createElement("textarea");
+        bodyInput.className = "board-textarea";
+        bodyInput.value = state.composerBody;
+        bodyInput.placeholder = "Share the current state, next action, or blocker";
+        bodyInput.addEventListener("input", () => {
+          state.composerBody = bodyInput.value;
+        });
+        bodyField.appendChild(bodyInput);
+        composer.appendChild(bodyField);
+
+        const topicsField = createNode("label", "board-field");
+        topicsField.appendChild(createNode("span", "mock-label", "Topics"));
+        const topicsInput = document.createElement("input");
+        topicsInput.className = "launch-input";
+        topicsInput.type = "text";
+        topicsInput.value = state.topicsDraft;
+        topicsInput.placeholder = "coordination, release";
+        topicsInput.addEventListener("input", () => {
+          state.topicsDraft = topicsInput.value;
+        });
+        topicsField.appendChild(topicsInput);
+        composer.appendChild(topicsField);
+
+        const ownersField = createNode("label", "board-field");
+        ownersField.appendChild(createNode("span", "mock-label", "Owners"));
+        const ownersInput = document.createElement("input");
+        ownersInput.className = "launch-input";
+        ownersInput.type = "text";
+        ownersInput.value = state.ownersDraft;
+        ownersInput.placeholder = "2018, 1784";
+        ownersInput.addEventListener("input", () => {
+          state.ownersDraft = ownersInput.value;
+        });
+        ownersField.appendChild(ownersInput);
+        composer.appendChild(ownersField);
+
+        const actions = createNode("div", "board-composer-actions");
+        const submit = createNode(
+          "button",
+          "wizard-button primary",
+          state.submitting ? "Saving..." : "Post",
+        );
+        submit.type = "button";
+        submit.disabled = state.submitting;
+        submit.addEventListener("click", () => submitBoardEntry(windowId));
+        actions.appendChild(submit);
+        composer.appendChild(actions);
       }
 
       function createLaunchSection(title, copy) {
@@ -2884,6 +3286,7 @@
           "surface-terminal",
           "surface-file-tree",
           "surface-branches",
+          "surface-board",
           "surface-knowledge",
           "surface-mock",
         );
@@ -3024,6 +3427,50 @@
             frontendUnits.branchesFileTreeSurface.requestBranches(windowData.id);
           }
           frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
+          return;
+        }
+
+        if (surface === "board") {
+          body.innerHTML = `
+            <div class="board-root">
+              <div class="knowledge-toolbar">
+                <div class="knowledge-toolbar-main">
+                  <div class="knowledge-heading">Coordination timeline</div>
+                  <div class="board-status"></div>
+                </div>
+                <div class="knowledge-toolbar-actions">
+                  <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
+                </div>
+              </div>
+              <div class="board-layout">
+                <div class="board-timeline-pane">
+                  <div class="board-timeline"></div>
+                </div>
+                <div class="board-side-pane">
+                  <div class="board-agent-pane"></div>
+                  <div class="board-composer-pane"></div>
+                </div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='refresh-board']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.error = "";
+              frontendUnits.boardSurface.requestBoard(windowData.id);
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+          if (state.entries.length === 0 && !state.loading && !state.error) {
+            frontendUnits.boardSurface.requestBoard(windowData.id);
+          }
+          frontendUnits.boardSurface.renderBoard(windowData.id);
           return;
         }
 
@@ -3472,6 +3919,7 @@
           pendingSnapshotMap.delete(windowId);
           fileTreeStateMap.delete(windowId);
           branchListStateMap.delete(windowId);
+          boardStateMap.delete(windowId);
           knowledgeBridgeStateMap.delete(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
@@ -3562,6 +4010,14 @@
         renderBranchCleanupModal,
       });
 
+      const boardSurface = Object.freeze({
+        ensureBoardState,
+        requestBoard,
+        renderBoard,
+        submitBoardEntry,
+        handleRuntimeHookEvent: handleBoardHookEvent,
+      });
+
       const knowledgeSettingsSurface = Object.freeze({
         ensureKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -3580,6 +4036,7 @@
         terminalHost,
         launchWizardSurface,
         branchesFileTreeSurface,
+        boardSurface,
         knowledgeSettingsSurface,
       });
 
@@ -3650,6 +4107,21 @@
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
+          case "board_entries": {
+            const state = frontendUnits.boardSurface.ensureBoardState(event.id);
+            state.entries = event.entries || [];
+            if (
+              state.replyParentId &&
+              !state.entries.some((entry) => entry.id === state.replyParentId)
+            ) {
+              state.replyParentId = null;
+            }
+            state.loading = false;
+            state.submitting = false;
+            state.error = "";
+            frontendUnits.boardSurface.renderBoard(event.id);
+            break;
+          }
           case "knowledge_entries": {
             const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
               event.id,
@@ -3708,6 +4180,14 @@
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
+          case "board_error": {
+            const state = frontendUnits.boardSurface.ensureBoardState(event.id);
+            state.loading = false;
+            state.submitting = false;
+            state.error = event.message;
+            frontendUnits.boardSurface.renderBoard(event.id);
+            break;
+          }
           case "knowledge_error": {
             const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
               event.id,
@@ -3729,6 +4209,9 @@
           case "launch_wizard_state":
             launchWizard = event.wizard;
             frontendUnits.launchWizardSurface.render();
+            break;
+          case "runtime_hook_event":
+            frontendUnits.boardSurface.handleRuntimeHookEvent(event);
             break;
           case "update_state":
             if (event.state === "available") {

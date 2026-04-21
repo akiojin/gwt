@@ -1,4 +1,5 @@
 use gwt_agent::CustomCodingAgent;
+use gwt_core::coordination::{BoardEntry, BoardEntryKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -100,6 +101,9 @@ pub enum FrontendEvent {
     LoadBranches {
         id: String,
     },
+    LoadBoard {
+        id: String,
+    },
     LoadKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -115,6 +119,14 @@ pub enum FrontendEvent {
         id: String,
         branches: Vec<String>,
         delete_remote: bool,
+    },
+    PostBoardEntry {
+        id: String,
+        entry_kind: BoardEntryKind,
+        body: String,
+        parent_id: Option<String>,
+        topics: Vec<String>,
+        owners: Vec<String>,
     },
     OpenIssueLaunchWizard {
         id: String,
@@ -231,6 +243,10 @@ pub enum BackendEvent {
         phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
     },
+    BoardEntries {
+        id: String,
+        entries: Vec<BoardEntry>,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -249,6 +265,10 @@ pub enum BackendEvent {
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchError {
+        id: String,
+        message: String,
+    },
+    BoardError {
         id: String,
         message: String,
     },
@@ -315,6 +335,7 @@ pub enum CustomAgentErrorCode {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
     use serde_json::Value;
 
     use crate::branch_list::{
@@ -404,6 +425,39 @@ mod tests {
         assert_eq!(
             value.get("data_base64"),
             Some(&Value::String("aGVsbG8=".to_string()))
+        );
+    }
+
+    #[test]
+    fn board_entries_serializes_snapshot_contract() {
+        let event = BackendEvent::BoardEntries {
+            id: "board-1".to_string(),
+            entries: vec![BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Waiting for next task",
+                Some("ready".to_string()),
+                None,
+                vec!["coordination".to_string()],
+                vec!["2018".to_string()],
+            )],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize board entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("board_entries".to_string()))
+        );
+        assert_eq!(
+            value["entries"][0]["kind"],
+            Value::String("status".to_string()),
+            "expected board entry kind to remain machine-readable on the wire",
+        );
+        assert_eq!(
+            value["entries"][0]["related_topics"][0],
+            Value::String("coordination".to_string()),
+            "expected board snapshot payload to keep related topics on the wire",
         );
     }
 

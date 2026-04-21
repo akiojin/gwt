@@ -86,6 +86,16 @@ pub(crate) struct ProcessLaunch {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BoardPostRequest {
+    pub(crate) id: String,
+    pub(crate) entry_kind: gwt_core::coordination::BoardEntryKind,
+    pub(crate) body: String,
+    pub(crate) parent_id: Option<String>,
+    pub(crate) topics: Vec<String>,
+    pub(crate) owners: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ActiveAgentSession {
     pub(crate) window_id: String,
     pub(crate) session_id: String,
@@ -378,6 +388,7 @@ impl AppRuntime {
                 )]
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
+            FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
                 knowledge_kind,
@@ -406,6 +417,24 @@ impl AppRuntime {
                 branches,
                 delete_remote,
             } => self.run_branch_cleanup_events(&client_id, &id, &branches, delete_remote),
+            FrontendEvent::PostBoardEntry {
+                id,
+                entry_kind,
+                body,
+                parent_id,
+                topics,
+                owners,
+            } => self.post_board_entry_events(
+                &client_id,
+                BoardPostRequest {
+                    id,
+                    entry_kind,
+                    body,
+                    parent_id,
+                    topics,
+                    owners,
+                },
+            ),
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
@@ -995,6 +1024,189 @@ impl AppRuntime {
         Vec::new()
     }
 
+    pub(crate) fn load_board_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Board {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window is not a Board surface".to_string(),
+                },
+            )];
+        }
+
+        match gwt_core::coordination::load_snapshot(&tab.project_root) {
+            Ok(snapshot) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardEntries {
+                    id: id.to_string(),
+                    entries: snapshot.board.entries,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn post_board_entry_events(
+        &self,
+        client_id: &str,
+        request: BoardPostRequest,
+    ) -> Vec<OutboundEvent> {
+        let BoardPostRequest {
+            id,
+            entry_kind,
+            body,
+            parent_id,
+            topics,
+            owners,
+        } = request;
+
+        let Some(address) = self.window_lookup.get(&id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id,
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id,
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Board {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id,
+                    message: "Window is not a Board surface".to_string(),
+                },
+            )];
+        }
+
+        let trimmed_body = body.trim();
+        if trimmed_body.is_empty() {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id,
+                    message: "Board entry body is required".to_string(),
+                },
+            )];
+        }
+
+        let parent_id = parent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let topics = sanitize_board_list(&topics);
+        let owners = sanitize_board_list(&owners);
+
+        let snapshot = match gwt_core::coordination::load_snapshot(&tab.project_root) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardError {
+                        id,
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+        if let Some(parent_id) = parent_id.as_deref() {
+            if !snapshot
+                .board
+                .entries
+                .iter()
+                .any(|entry| entry.id == parent_id)
+            {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardError {
+                        id,
+                        message: "Reply target was not found".to_string(),
+                    },
+                )];
+            }
+        }
+
+        let entry = gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::User,
+            "You",
+            entry_kind,
+            trimmed_body,
+            None,
+            parent_id,
+            topics,
+            owners,
+        );
+        match gwt_core::coordination::post_entry(&tab.project_root, entry) {
+            Ok(snapshot) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardEntries {
+                    id,
+                    entries: snapshot.board.entries,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id,
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -1133,6 +1345,18 @@ impl AppRuntime {
         );
         Vec::new()
     }
+}
+
+fn sanitize_board_list(values: &[String]) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || sanitized.iter().any(|item| item == trimmed) {
+            continue;
+        }
+        sanitized.push(trimmed.to_string());
+    }
+    sanitized
 }
 
 fn spawn_branch_cleanup_async(
@@ -2534,11 +2758,14 @@ mod tests {
         LaunchWizardState, ProjectKind, WindowGeometry, WindowPreset, WindowProcessStatus,
         WorkspaceState,
     };
+    use gwt_core::coordination::{
+        load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind,
+    };
     use gwt_terminal::Pane;
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        LaunchWizardSession, ProjectTabRuntime, WindowRuntime,
+        LaunchWizardSession, OutboundEvent, ProjectTabRuntime, WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
 
@@ -2978,5 +3205,122 @@ mod tests {
         assert_eq!(window.geometry.y, 78.0);
         assert_eq!(window.geometry.width, 720.0);
         assert_eq!(window.geometry.height, 480.0);
+    }
+
+    #[test]
+    fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Need review",
+                Some("running".to_string()),
+                None,
+                vec!["coordination".to_string()],
+                vec!["2018".to_string()],
+            ),
+        )
+        .expect("seed board snapshot");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo,
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadBoard {
+                id: window_id.clone(),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardEntries { id, entries },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && entries.len() == 1
+                && entries[0].body == "Need review"
+        ));
+    }
+
+    #[test]
+    fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let parent = post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Question,
+                "Can someone verify this?",
+                None,
+                None,
+                vec!["coordination".to_string()],
+                vec!["2018".to_string()],
+            ),
+        )
+        .expect("seed board parent")
+        .board
+        .entries
+        .into_iter()
+        .next()
+        .expect("parent entry");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo.clone(),
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::PostBoardEntry {
+                id: window_id.clone(),
+                entry_kind: BoardEntryKind::Next,
+                body: "I will take the next slice".to_string(),
+                parent_id: Some(parent.id.clone()),
+                topics: vec!["coordination".to_string(), "phase-1b".to_string()],
+                owners: vec!["2018".to_string()],
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardEntries { id, entries },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && entries.iter().any(|entry|
+                    entry.body == "I will take the next slice"
+                    && entry.parent_id.as_deref() == Some(parent.id.as_str())
+                    && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
+                    && entry.related_owners == vec!["2018".to_string()]
+                )
+        ));
+
+        let snapshot = load_snapshot(&repo).expect("load board snapshot");
+        assert!(snapshot.board.entries.iter().any(|entry| entry.body
+            == "I will take the next slice"
+            && entry.parent_id.as_deref() == Some(parent.id.as_str())
+            && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
+            && entry.related_owners == vec!["2018".to_string()]));
     }
 }

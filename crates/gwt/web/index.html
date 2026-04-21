@@ -325,6 +325,7 @@
 
       .workspace-window.surface-file-tree,
       .workspace-window.surface-branches,
+      .workspace-window.surface-board,
       .workspace-window.surface-mock {
         background: rgba(255, 255, 255, 0.98);
       }
@@ -347,6 +348,7 @@
 
       .surface-file-tree .titlebar,
       .surface-branches .titlebar,
+      .surface-board .titlebar,
       .surface-mock .titlebar {
         background: rgba(248, 250, 252, 0.98);
         color: #0f172a;
@@ -389,6 +391,7 @@
 
       .surface-file-tree .status-chip,
       .surface-branches .status-chip,
+      .surface-board .status-chip,
       .surface-knowledge .status-chip,
       .surface-mock .status-chip {
         color: #334155;
@@ -438,6 +441,7 @@
 
       .surface-file-tree .icon-button,
       .surface-branches .icon-button,
+      .surface-board .icon-button,
       .surface-knowledge .icon-button,
       .surface-mock .icon-button {
         color: #334155;
@@ -467,6 +471,7 @@
 
       .surface-file-tree .window-body,
       .surface-branches .window-body,
+      .surface-board .window-body,
       .surface-knowledge .window-body,
       .surface-mock .window-body {
         background: #ffffff;
@@ -527,6 +532,7 @@
 
       .file-tree-root,
       .branch-list-root,
+      .board-root,
       .knowledge-root,
       .mock-root {
         position: absolute;
@@ -851,6 +857,141 @@
         overflow-wrap: anywhere;
       }
 
+      .board-layout {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1.7fr) minmax(240px, 0.9fr);
+      }
+
+      .board-timeline-pane,
+      .board-side-pane {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .board-timeline-pane {
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+        overflow: auto;
+      }
+
+      .board-side-pane {
+        display: grid;
+        grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
+      }
+
+      .board-timeline,
+      .board-agent-pane,
+      .board-composer-pane {
+        min-height: 0;
+        overflow: auto;
+        padding: 12px;
+      }
+
+      .board-agent-pane {
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .board-status {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .board-status.info {
+        color: #1d4ed8;
+      }
+
+      .board-status.error {
+        color: #b91c1c;
+      }
+
+      .board-entry {
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .board-entry.reply-target {
+        background: rgba(59, 130, 246, 0.08);
+      }
+
+      .board-entry-header,
+      .board-entry-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .board-entry-meta,
+      .board-entry-link,
+      .board-agent-copy,
+      .board-reply-copy {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .board-entry-chips,
+      .board-entry-links {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .board-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+        font-size: 11px;
+      }
+
+      .board-chip.state {
+        background: rgba(16, 185, 129, 0.12);
+        color: #047857;
+      }
+
+      .board-entry-body {
+        font-size: 13px;
+        line-height: 1.5;
+        color: #0f172a;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .board-agent-status {
+        font-size: 12px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+
+      .board-field {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+
+      .board-textarea {
+        min-height: 110px;
+        resize: vertical;
+        padding: 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        font: inherit;
+        color: #0f172a;
+      }
+
+      .board-reply-box,
+      .board-composer-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+
       .file-tree-list,
       .branch-list {
         padding: 8px 0;
@@ -1130,6 +1271,7 @@
 
       .file-tree-empty,
       .branch-empty,
+      .board-empty,
       .mock-empty {
         padding: 16px 12px;
         font-size: 12px;
