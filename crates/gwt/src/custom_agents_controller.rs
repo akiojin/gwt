@@ -27,9 +27,9 @@ impl CustomAgentsController {
             FrontendEvent::ListCustomAgentPresets => {
                 vec![self.reply(client_id, gwt::custom_agents_dispatch::list_presets_event())]
             }
-            FrontendEvent::AddCustomAgentFromPreset { input } => vec![self.reply(
+            FrontendEvent::AddCustomAgentFromPreset { preset_id, payload } => vec![self.reply(
                 client_id,
-                gwt::custom_agents_dispatch::add_from_preset_event(input),
+                gwt::custom_agents_dispatch::add_from_preset_event(preset_id, payload),
             )],
             FrontendEvent::UpdateCustomAgent { agent } => {
                 vec![self.reply(client_id, gwt::custom_agents_dispatch::update_event(*agent))]
