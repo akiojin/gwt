@@ -224,6 +224,115 @@ fn list_branch_entries_marks_local_and_remote_rows_safe_when_upstream_remote_bas
 }
 
 #[test]
+fn list_branch_entries_keeps_remote_row_risky_when_local_branch_is_behind_upstream() {
+    let temp = tempdir().expect("tempdir");
+    let origin = temp.path().join("origin.git");
+    let repo = temp.path().join("repo");
+    let peer = temp.path().join("peer");
+
+    run_git(
+        temp.path(),
+        &["init", "--bare", origin.to_str().expect("origin path")],
+    );
+    run_git(
+        temp.path(),
+        &["init", "-q", repo.to_str().expect("repo path")],
+    );
+    init_repo(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path"),
+        ],
+    );
+    run_git(&repo, &["push", "-u", "origin", "main"]);
+    run_git(&repo, &["checkout", "-qb", "develop"]);
+    std::fs::write(repo.join("develop.txt"), "develop\n").expect("write develop");
+    run_git(&repo, &["add", "develop.txt"]);
+    run_git(&repo, &["commit", "-qm", "develop base"]);
+    run_git(&repo, &["push", "-u", "origin", "develop"]);
+    run_git(&repo, &["checkout", "-qb", "feature/alpha"]);
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").expect("write alpha");
+    run_git(&repo, &["add", "alpha.txt"]);
+    run_git(&repo, &["commit", "-qm", "alpha"]);
+    run_git(&repo, &["push", "-u", "origin", "feature/alpha"]);
+    run_git(&repo, &["push", "origin", "HEAD:refs/heads/develop"]);
+    run_git(&repo, &["checkout", "main"]);
+
+    run_git(
+        temp.path(),
+        &[
+            "clone",
+            "-q",
+            origin.to_str().expect("origin path"),
+            peer.to_str().expect("peer path"),
+        ],
+    );
+    run_git(&peer, &["config", "user.name", "PoC Tester"]);
+    run_git(&peer, &["config", "user.email", "poc@example.com"]);
+    run_git(
+        &peer,
+        &["checkout", "-qb", "feature/alpha", "origin/feature/alpha"],
+    );
+    std::fs::write(peer.join("remote-only.txt"), "remote\n").expect("write remote-only");
+    run_git(&peer, &["add", "remote-only.txt"]);
+    run_git(&peer, &["commit", "-qm", "remote only"]);
+    run_git(&peer, &["push", "origin", "HEAD:refs/heads/feature/alpha"]);
+
+    run_git(&repo, &["fetch", "origin", "--prune"]);
+
+    let branches =
+        list_branch_entries_with_active_sessions(&repo, &HashSet::new()).expect("entries");
+    let local_entry = branches
+        .iter()
+        .find(|branch| branch.name == "feature/alpha")
+        .expect("local branch");
+    let remote_entry = branches
+        .iter()
+        .find(|branch| branch.name == "origin/feature/alpha")
+        .expect("remote branch");
+
+    assert_eq!(local_entry.behind, 1);
+    assert_eq!(
+        local_entry.cleanup.availability,
+        BranchCleanupAvailability::Safe
+    );
+    assert_eq!(
+        local_entry
+            .cleanup
+            .merge_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some("origin/develop")
+    );
+
+    assert_eq!(remote_entry.scope, BranchScope::Remote);
+    assert_eq!(
+        remote_entry.cleanup.execution_branch.as_deref(),
+        Some("feature/alpha")
+    );
+    assert_eq!(
+        remote_entry.cleanup.availability,
+        BranchCleanupAvailability::Risky
+    );
+    assert_eq!(
+        remote_entry
+            .cleanup
+            .merge_target
+            .as_ref()
+            .map(|target| target.as_str()),
+        Some("origin/develop")
+    );
+    assert!(remote_entry
+        .cleanup
+        .risks
+        .contains(&BranchCleanupRisk::RemoteTracking));
+}
+
+#[test]
 fn list_branch_entries_blocks_remote_tracking_row_without_local_counterpart() {
     let temp = tempdir().expect("tempdir");
     let remote = temp.path().join("origin.git");
