@@ -2494,6 +2494,17 @@
         sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
       }
 
+      function scheduleTerminalViewportRefresh(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.viewportRefreshFrame !== null) {
+          return;
+        }
+        runtime.viewportRefreshFrame = requestAnimationFrame(() => {
+          runtime.viewportRefreshFrame = null;
+          fitTerminal(windowId, false);
+        });
+      }
+
       function sendGeometry(windowId, cols, rows) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -2847,7 +2858,7 @@
           });
           send({ kind: "terminal_input", id: windowId, data });
         });
-        const runtime = { terminal, fitAddon, cleanup };
+        const runtime = { terminal, fitAddon, cleanup, viewportRefreshFrame: null };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
@@ -2877,7 +2888,9 @@
           return;
         }
         const decoder = decoderMap.get(windowId);
-        runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }));
+        runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {
+          scheduleTerminalViewportRefresh(windowId);
+        });
       }
 
       function replaceTerminalSnapshot(windowId, base64) {
@@ -2888,7 +2901,9 @@
         }
         const decoder = decoderMap.get(windowId);
         runtime.terminal.reset();
-        runtime.terminal.write(decoder.decode(decodeBase64(base64)));
+        runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {
+          scheduleTerminalViewportRefresh(windowId);
+        });
       }
 
       function mockContentForPreset(preset) {
@@ -5198,6 +5213,9 @@
             continue;
           }
           const runtime = terminalMap.get(windowId);
+          if (runtime && runtime.viewportRefreshFrame !== null) {
+            cancelAnimationFrame(runtime.viewportRefreshFrame);
+          }
           runtime?.cleanup?.();
           runtime?.terminal.dispose();
           terminalMap.delete(windowId);
