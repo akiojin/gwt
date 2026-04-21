@@ -529,9 +529,6 @@ impl AppRuntime {
         client_id: ClientId,
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
-        if custom_agents_controller::CustomAgentsController::supports(&event) {
-            return self.custom_agents.handle_event(client_id, event);
-        }
         match event {
             FrontendEvent::FrontendReady => self.frontend_sync_events(&client_id),
             FrontendEvent::OpenProjectDialog => self.open_project_dialog_events(),
@@ -707,7 +704,14 @@ impl AppRuntime {
             } => vec![OutboundEvent::broadcast(
                 gwt::profiles_dispatch::delete_disabled_env_event(id, profile_name, key),
             )],
-            other => unreachable!("feature-scoped event handled before main match: {other:?}"),
+            custom_agents_event @ (FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListCustomAgentPresets
+            | FrontendEvent::AddCustomAgentFromPreset { .. }
+            | FrontendEvent::UpdateCustomAgent { .. }
+            | FrontendEvent::DeleteCustomAgent { .. }
+            | FrontendEvent::TestBackendConnection { .. }) => self
+                .custom_agents
+                .handle_event(client_id, custom_agents_event),
         }
     }
 
