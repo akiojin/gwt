@@ -83,7 +83,9 @@ pub fn set_proposal_status_by_label(
 
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
     if let Some(line) = lines.get_mut(target.header_line_index) {
-        *line = line.replacen("[active]", &format!("[{new_status}]"), 1);
+        if let Some(rewritten) = replace_trailing_status_tag(line, new_status) {
+            *line = rewritten;
+        }
     }
     let rewritten = lines.join("\n");
     let final_content = if content.ends_with('\n') {
@@ -93,6 +95,25 @@ pub fn set_proposal_status_by_label(
     };
     std::fs::write(discussion_path, final_content)?;
     Ok(true)
+}
+
+/// Rewrite only the terminal `[status]` tag on a `### Proposal ...` header
+/// line. Mirrors the `rsplit_once('[')` parse contract used by
+/// [`parse_proposals`] so titles that happen to contain a literal
+/// `"[active]"` substring do not fool the replacement.
+fn replace_trailing_status_tag(line: &str, new_status: &str) -> Option<String> {
+    // Find the rightmost `[` and its matching `]` on the same line,
+    // ignoring anything that appears before them (including a proposal
+    // title that spuriously contains `[active]`).
+    let trimmed_end = line.trim_end();
+    if !trimmed_end.ends_with(']') {
+        return None;
+    }
+    let last_open = trimmed_end.rfind('[')?;
+    let trailing_whitespace_len = line.len() - trimmed_end.len();
+    let prefix = &line[..last_open];
+    let trailing = &line[line.len() - trailing_whitespace_len..];
+    Some(format!("{prefix}[{new_status}]{trailing}"))
 }
 
 /// Clear the `Next Question:` line of the named `[active]` proposal.
@@ -375,6 +396,36 @@ mod tests {
         assert!(!updated.contains("### Proposal A - Hook-driven resume [active]"));
         // Other proposals remain untouched
         assert!(updated.contains("### Proposal B - Manual follow-up only [parked]"));
+    }
+
+    #[test]
+    fn set_proposal_status_rewrites_only_trailing_status_tag_even_with_active_in_title() {
+        // Regression: a proposal title that literally contains "[active]"
+        // must NOT trick the setter into replacing the substring inside
+        // the title. Only the terminal `[status]` tag should change.
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "### Proposal A - Toggle [active] state review [active]\n\
+             - Next Question: is this safe?\n",
+        )
+        .unwrap();
+
+        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        assert!(changed);
+        let updated = std::fs::read_to_string(&discussion_path).unwrap();
+        // Trailing tag flipped to [chosen]; the title substring untouched.
+        assert!(
+            updated.contains("### Proposal A - Toggle [active] state review [chosen]"),
+            "trailing tag must be rewritten, title substring preserved; got: {updated}"
+        );
+        // And no stray "[active] state review [active]" remains.
+        assert!(
+            !updated.contains("[active] state review [active]"),
+            "trailing [active] must be replaced: {updated}"
+        );
     }
 
     #[test]

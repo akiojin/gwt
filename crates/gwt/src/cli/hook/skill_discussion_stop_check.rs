@@ -48,7 +48,7 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
         "Discussion is still [active] on proposal \"{title}\".\n\
          Next question: {question}\n\
          Continue the gwt-discussion workflow (investigate → ask the user → update Discussion TODO), \
-         or call `gwt discuss resolve|park|reject --proposal {label}` to exit the discussion explicitly.",
+         or call `gwt discuss resolve|park|reject --proposal \"{label}\"` to exit the discussion explicitly.",
         title = pending.proposal_title,
         question = question,
         label = pending.proposal_label,
@@ -112,6 +112,28 @@ mod tests {
                 "Proposal A",
             ],
         );
+    }
+
+    #[test]
+    fn block_reason_quotes_proposal_label_for_shell_safety() {
+        // Regression: default labels like `Proposal A` contain spaces.
+        // The remediation command must quote the label so the LLM's
+        // tool call does not split on whitespace.
+        let dir = tempfile::tempdir().unwrap();
+        write_discussion(dir.path(), ACTIVE_WITH_QUESTION);
+        match handle_with_input(dir.path(), "{}") {
+            HookOutput::StopBlock { reason } => {
+                assert!(
+                    reason.contains("--proposal \"Proposal A\""),
+                    "proposal label must be double-quoted in reason; got: {reason}"
+                );
+                assert!(
+                    !reason.contains("--proposal Proposal A"),
+                    "unquoted form would shell-split; got: {reason}"
+                );
+            }
+            other => panic!("expected StopBlock, got {other:?}"),
+        }
     }
 
     #[test]
