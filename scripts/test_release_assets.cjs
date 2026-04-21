@@ -67,6 +67,37 @@ run("release workflow packages gwtd alongside gwt", () => {
   assert.match(workflow, /Contents\/MacOS\/gwtd/);
 });
 
+run("release workflow signs and notarizes macOS distribution assets", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  const buildDmgSection = workflow.split("  build-dmg:\n")[1];
+  assert.match(workflow, /APPLE_CERT_APP_BASE64/);
+  assert.match(workflow, /APPLE_CERTIFICATE_PASSWORD/);
+  assert.match(workflow, /--apple-id\s+"\$APPLE_ID"/);
+  assert.match(workflow, /APPLE_ID_PASSWORD/);
+  assert.match(workflow, /APPLE_TEAM_ID/);
+  assert.match(workflow, /security create-keychain/);
+  assert.doesNotMatch(workflow, /base64 --decode/);
+  assert.doesNotMatch(workflow, /awk 'NR == 1/);
+  assert.equal((workflow.match(/base64 -D/g) || []).length, 2);
+  assert.match(workflow, /codesign --force --options runtime --timestamp --sign/);
+  assert.match(workflow, /xcrun notarytool submit/);
+  assert.match(workflow, /xcrun stapler staple/);
+  assert.match(workflow, /xcrun stapler validate/);
+  assert.match(workflow, /spctl --assess/);
+  assert.match(workflow, /hdiutil attach/);
+  assert.ok(
+    buildDmgSection.indexOf("Build gwt bundle binaries for x86_64") <
+      buildDmgSection.indexOf("Prepare macOS signing keychain")
+  );
+  assert.ok(
+    buildDmgSection.indexOf("Prepare macOS signing keychain") <
+      buildDmgSection.indexOf("Sign app bundle")
+  );
+});
+
 run("portable tarball extraction installs the unix bundle", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-release-test-"));
   const sourceDir = path.join(root, "source");
