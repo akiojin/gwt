@@ -1,16 +1,10 @@
 //! Service layer for Custom Agent CRUD operations exposed to the Settings UI.
 //!
-//! This module is the single library surface the desktop app's WebSocket
-//! handler (and any future TUI/CLI consumer) calls into to manage custom
-//! agents. It composes:
+//! Single library surface that composes:
 //!
 //! - `gwt-agent::store` for TOML persistence
 //! - `gwt-agent::presets::claude_code_openai_compat_preset` for preset seeding
 //! - `gwt-ai::models_probe::list_model_ids_blocking` for `/v1/models` probe
-//!
-//! SPEC-1921 Phase 52, tasks T226-T232: this is the backend side of the
-//! Settings UI. The HTML/JS surface that drives these functions is still to
-//! be implemented.
 
 use std::path::Path;
 
@@ -156,11 +150,12 @@ pub fn add_from_claude_code_openai_compat_preset(
 
 /// Update an existing custom agent in place. The agent id must match an
 /// existing entry; returns `NotFound` otherwise. Preserves any sibling
-/// TOML tables (e.g. `models`) via the stored `raw` table.
+/// TOML tables (e.g. `models`) via the stored `raw` table. Returns the
+/// persisted agent so callers do not need a pre-save clone to echo back.
 pub fn update_custom_agent(
     config_path: &Path,
     updated: CustomCodingAgent,
-) -> Result<(), CustomAgentsServiceError> {
+) -> Result<CustomCodingAgent, CustomAgentsServiceError> {
     if !updated.validate() {
         return Err(CustomAgentsServiceError::InvalidInput(format!(
             "invalid agent id or fields: {}",
@@ -175,8 +170,9 @@ pub fn update_custom_agent(
         return Err(CustomAgentsServiceError::NotFound(updated.id));
     };
     entry.agent = updated;
+    let saved = entry.agent.clone();
     save_stored_custom_agents_to_path(config_path, &entries)?;
-    Ok(())
+    Ok(saved)
 }
 
 /// Remove the custom agent with the given id. Returns `NotFound` if no
@@ -195,41 +191,35 @@ pub fn delete_custom_agent(
     Ok(())
 }
 
+fn require_non_empty(field: &str, value: &str) -> Result<(), CustomAgentsServiceError> {
+    if value.trim().is_empty() {
+        Err(CustomAgentsServiceError::InvalidInput(format!(
+            "{field} must not be empty"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_preset_input(
     input: &ClaudeCodeOpenaiCompatInput,
 ) -> Result<(), CustomAgentsServiceError> {
-    if input.id.trim().is_empty() {
-        return Err(CustomAgentsServiceError::InvalidInput(
-            "id must not be empty".to_string(),
-        ));
-    }
+    require_non_empty("id", &input.id)?;
     if !input.id.chars().all(|c| c.is_alphanumeric() || c == '-') {
         return Err(CustomAgentsServiceError::InvalidInput(format!(
             "id `{}` contains invalid characters (allowed: alphanumeric, `-`)",
             input.id
         )));
     }
-    if input.display_name.trim().is_empty() {
-        return Err(CustomAgentsServiceError::InvalidInput(
-            "display_name must not be empty".to_string(),
-        ));
-    }
+    require_non_empty("display_name", &input.display_name)?;
     if !is_valid_base_url(&input.base_url) {
         return Err(CustomAgentsServiceError::InvalidInput(format!(
             "base_url must start with http:// or https://, got: {}",
             input.base_url
         )));
     }
-    if input.api_key.trim().is_empty() {
-        return Err(CustomAgentsServiceError::InvalidInput(
-            "api_key must not be empty".to_string(),
-        ));
-    }
-    if input.default_model.trim().is_empty() {
-        return Err(CustomAgentsServiceError::InvalidInput(
-            "default_model must not be empty".to_string(),
-        ));
-    }
+    require_non_empty("api_key", &input.api_key)?;
+    require_non_empty("default_model", &input.default_model)?;
     Ok(())
 }
 
