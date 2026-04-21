@@ -8,6 +8,7 @@ const {
   binaryNameForPlatform,
   bundleBinaryNamesForPlatform,
   installBundleFromArchive,
+  primaryReleaseAssetName,
   releaseAssetName,
 } = require("./release-assets.cjs");
 const postinstall = require("./postinstall.cjs");
@@ -32,6 +33,14 @@ run("release asset names match the public portable contract", () => {
   assert.equal(releaseAssetName("linux", "arm64"), "gwt-linux-aarch64.tar.gz");
   assert.equal(releaseAssetName("linux", "x64"), "gwt-linux-x86_64.tar.gz");
   assert.equal(releaseAssetName("win32", "x64"), "gwt-windows-x86_64.zip");
+});
+
+run("primary release asset names match the GUI-first install contract", () => {
+  assert.equal(primaryReleaseAssetName("darwin", "arm64"), "gwt-macos-universal.dmg");
+  assert.equal(primaryReleaseAssetName("darwin", "x64"), "gwt-macos-universal.dmg");
+  assert.equal(primaryReleaseAssetName("linux", "arm64"), "gwt-linux-aarch64.tar.gz");
+  assert.equal(primaryReleaseAssetName("linux", "x64"), "gwt-linux-x86_64.tar.gz");
+  assert.equal(primaryReleaseAssetName("win32", "x64"), "gwt-windows-x86_64.msi");
 });
 
 run("release helper keeps platform binary names stable", () => {
@@ -65,6 +74,24 @@ run("release workflow packages gwtd alongside gwt", () => {
   assert.match(workflow, /Compress-Archive -Path @\("dist\/gwt\.exe", "dist\/gwtd\.exe"\)/);
   assert.match(workflow, /tar -czf \$\{\{ matrix\.archive_name \}\} gwt gwtd/);
   assert.match(workflow, /Contents\/MacOS\/gwtd/);
+});
+
+run("package scripts keep the GUI front door and release contract explicit", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
+  assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");
+  assert.equal(pkg.scripts.build, "cargo build --release -p gwt --bin gwt --bin gwtd");
+});
+
+run("README install guidance points to GUI-first release assets", () => {
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const readmeJa = fs.readFileSync(path.join(__dirname, "..", "README.ja.md"), "utf8");
+
+  for (const doc of [readme, readmeJa]) {
+    assert.match(doc, /gwt-macos-universal\.dmg/);
+    assert.match(doc, /gwt-windows-x86_64\.msi/);
+    assert.match(doc, /gwt-linux-x86_64\.tar\.gz/);
+  }
 });
 
 run("portable tarball extraction installs the unix bundle", () => {

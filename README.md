@@ -7,11 +7,14 @@ such as `Claude Code`, `Codex`, `Gemini`, and `OpenCode`.
 
 ## Install
 
-Download the binary for your platform from
-[GitHub Releases](https://github.com/akiojin/gwt/releases) and place it in
-your `PATH`.
+Download the release asset for your platform from
+[GitHub Releases](https://github.com/akiojin/gwt/releases).
 
 ### macOS
+
+- GUI-first installer: `gwt-macos-universal.dmg`
+- Open `GWT.app` from the mounted DMG for the native desktop launch surface
+- Use the install script when you want the `gwt` CLI front door in your `PATH`
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -20,12 +23,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version <version>
 ```
 
-### Windows / Linux
+### Windows
 
-Download the binary from GitHub Releases and add it to your `PATH`.
+- GUI-first installer: `gwt-windows-x86_64.msi`
+- Portable bundle: `gwt-windows-x86_64.zip`
+- The public front door is `gwt.exe`; `gwtd.exe` is bundled for internal runtime use
+
+### Linux
+
+- Portable bundles:
+  - `gwt-linux-x86_64.tar.gz`
+  - `gwt-linux-aarch64.tar.gz`
+- Extract `gwt` and `gwtd` into a directory on your `PATH`
 
 ### Uninstall (macOS)
 
@@ -144,13 +156,13 @@ gwt issue spec <number> --section spec|plan|tasks
 ### Build
 
 ```bash
-cargo build -p gwt
+cargo build -p gwt --bin gwt --bin gwtd
 ```
 
 ### Run
 
 ```bash
-cargo run -p gwt
+cargo run -p gwt --bin gwt
 ```
 
 ### Build a macOS app bundle
@@ -164,6 +176,12 @@ cargo bundle -p gwt --format osx
 
 ```bash
 cargo test -p gwt-core -p gwt --all-features
+```
+
+### Release Asset Contract
+
+```bash
+node scripts/test_release_assets.cjs
 ```
 
 ### Lint
