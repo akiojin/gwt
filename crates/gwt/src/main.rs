@@ -37,6 +37,7 @@ mod embedded_server;
 mod embedded_web;
 mod launch_runtime;
 mod repo_browser;
+mod update_front_door;
 
 #[cfg(test)]
 pub(crate) use app_runtime::{build_frontend_sync_events, LaunchWizardSession};
@@ -71,6 +72,9 @@ pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, resolve_launch_worktree_request,
 };
+pub(crate) use update_front_door::{apply_update_and_exit, spawn_startup_update_check};
+#[cfg(test)]
+pub(crate) use update_front_door::{classify_startup_update_state, StartupUpdateAction};
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
@@ -249,6 +253,7 @@ mod tests {
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use base64::Engine;
+    use chrono::Utc;
     use tempfile::tempdir;
 
     use gwt::{
@@ -829,6 +834,43 @@ mod tests {
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
+    }
+
+    #[test]
+    fn startup_update_state_classification_covers_publish_stop_and_retry() {
+        let checked_at = Utc::now();
+
+        assert!(matches!(
+            super::classify_startup_update_state(&UpdateState::Available {
+                current: "9.7.0".to_string(),
+                latest: "9.7.1".to_string(),
+                release_url: "https://example.invalid/releases/9.7.1".to_string(),
+                asset_url: Some("https://example.invalid/gwt.zip".to_string()),
+                checked_at,
+            }),
+            super::StartupUpdateAction::Publish
+        ));
+        assert!(matches!(
+            super::classify_startup_update_state(&UpdateState::Available {
+                current: "9.7.0".to_string(),
+                latest: "9.7.1".to_string(),
+                release_url: "https://example.invalid/releases/9.7.1".to_string(),
+                asset_url: None,
+                checked_at,
+            }),
+            super::StartupUpdateAction::Stop
+        ));
+        assert!(matches!(
+            super::classify_startup_update_state(&UpdateState::UpToDate { checked_at: None }),
+            super::StartupUpdateAction::Stop
+        ));
+        assert!(matches!(
+            super::classify_startup_update_state(&UpdateState::Failed {
+                message: "network".to_string(),
+                failed_at: checked_at,
+            }),
+            super::StartupUpdateAction::Retry
+        ));
     }
 
     #[test]
@@ -3706,53 +3748,8 @@ fn main() -> wry::Result<()> {
     app.set_hook_forward_target(server.hook_forward_target());
     eprintln!("gwt browser URL: {}", server.url());
 
-    // Startup update check (T-031): runs in background; broadcasts UpdateState::Available if a
-    // newer release is found. Silent on failure and in CI environments.
-    {
-        let clients = clients.clone();
-        let update_proxy = proxy.clone();
-        runtime.spawn(async move {
-            if gwt_core::update::is_ci() {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-            let current_exe = std::env::current_exe().ok();
-            for attempt in 0..3u32 {
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-                }
-                let exe = current_exe.clone();
-                let state = match tokio::task::spawn_blocking(move || {
-                    gwt_core::update::UpdateManager::new()
-                        .check_for_executable(false, exe.as_deref())
-                })
-                .await
-                {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                match &state {
-                    gwt_core::update::UpdateState::Available {
-                        asset_url: Some(_), ..
-                    } => {
-                        // Notify main thread to cache the state for reconnecting clients.
-                        let _ = update_proxy.send_event(UserEvent::UpdateAvailable(state.clone()));
-                        clients.dispatch(vec![OutboundEvent::broadcast(
-                            BackendEvent::UpdateState(state),
-                        )]);
-                        return;
-                    }
-                    gwt_core::update::UpdateState::Available {
-                        asset_url: None, ..
-                    }
-                    | gwt_core::update::UpdateState::UpToDate { .. } => return,
-                    gwt_core::update::UpdateState::Failed { .. } => {
-                        // retry on next iteration
-                    }
-                }
-            }
-        });
-    }
+    // Startup update check (T-031): keep only the wiring here.
+    spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -3874,75 +3871,4 @@ fn main() -> wry::Result<()> {
             _ => {}
         }
     });
-}
-
-/// Download and apply a pending update, then exit.
-///
-/// Called from a background thread so the GUI remains responsive during download.
-/// On success, this function calls `std::process::exit(0)` and never returns.
-/// On any failure, it returns silently.
-fn apply_update_and_exit() {
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let mgr = gwt_core::update::UpdateManager::new();
-    // Use force=false to read from the TTL cache rather than forcing a new network round-trip.
-    // The startup check already confirmed the update; a second network call here could flip the
-    // result to Failed if connectivity was lost between discovery and user confirmation.
-    let state = mgr.check_for_executable(false, Some(&current_exe));
-    let (latest, asset_url) = match state {
-        gwt_core::update::UpdateState::Available {
-            latest,
-            asset_url: Some(asset_url),
-            ..
-        } => (latest, asset_url),
-        _ => return,
-    };
-    let payload = match mgr.prepare_update(&latest, &asset_url) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let args_file = match &payload {
-        gwt_core::update::PreparedPayload::PortableBinary { path }
-        | gwt_core::update::PreparedPayload::Installer { path, .. } => {
-            path.parent().map(|d| d.join("restart-args.json"))
-        }
-    };
-    let Some(args_file) = args_file else {
-        return;
-    };
-    let restart_args: Vec<String> = std::env::args().skip(1).collect();
-    if mgr
-        .write_restart_args_file(&args_file, restart_args)
-        .is_err()
-    {
-        return;
-    }
-    let helper_exe = if cfg!(windows) {
-        match mgr.make_helper_copy(&current_exe, &latest) {
-            Ok(p) => p,
-            Err(_) => return,
-        }
-    } else {
-        current_exe.clone()
-    };
-    let old_pid = std::process::id();
-    let result = match payload {
-        gwt_core::update::PreparedPayload::PortableBinary { path } => {
-            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)
-        }
-        gwt_core::update::PreparedPayload::Installer { path, kind } => mgr
-            .spawn_internal_run_installer(
-                &helper_exe,
-                old_pid,
-                &current_exe,
-                &path,
-                kind,
-                &args_file,
-            ),
-    };
-    if result.is_ok() {
-        std::process::exit(0);
-    }
 }
