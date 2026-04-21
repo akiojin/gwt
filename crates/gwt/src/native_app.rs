@@ -1,5 +1,8 @@
 pub const APP_NAME: &str = "GWT";
 pub const MACOS_BUNDLE_IDENTIFIER: &str = "io.github.akiojin.gwt";
+pub const MACOS_APP_BUNDLE_NAME: &str = "GWT.app";
+pub const GUI_FRONT_DOOR_BINARY_NAME: &str = "gwt";
+pub const INTERNAL_DAEMON_BINARY_NAME: &str = "gwtd";
 pub const OPEN_PROJECT_MENU_ID: &str = "file.open_project";
 pub const RELOAD_MENU_ID: &str = "view.reload";
 
@@ -7,6 +10,9 @@ pub const RELOAD_MENU_ID: &str = "view.reload";
 pub struct NativeLaunchSurface {
     pub app_name: &'static str,
     pub bundle_identifier: &'static str,
+    pub bundle_name: &'static str,
+    pub front_door_binary: &'static str,
+    pub daemon_binary: &'static str,
     pub menu_titles: &'static [&'static str],
     pub command_ids: &'static [&'static str],
 }
@@ -29,6 +35,9 @@ pub fn native_launch_surface() -> NativeLaunchSurface {
     NativeLaunchSurface {
         app_name: APP_NAME,
         bundle_identifier: macos_bundle_identifier(),
+        bundle_name: MACOS_APP_BUNDLE_NAME,
+        front_door_binary: GUI_FRONT_DOOR_BINARY_NAME,
+        daemon_binary: INTERNAL_DAEMON_BINARY_NAME,
         menu_titles: macos_native_menu_titles(),
         command_ids: &[OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID],
     }

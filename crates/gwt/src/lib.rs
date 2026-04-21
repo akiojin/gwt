@@ -50,6 +50,7 @@ pub use native_app::MacosNativeMenu;
 pub use native_app::{
     macos_bundle_identifier, macos_native_menu_titles, native_launch_surface,
     native_menu_command_for_id, NativeLaunchSurface, NativeMenuCommand, APP_NAME,
+    GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME, MACOS_APP_BUNDLE_NAME,
     MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 pub use persistence::{

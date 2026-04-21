@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
 };
@@ -53,6 +54,9 @@ pub fn resolve_public_gwt_bin_with_lookup(
         }) {
             return candidate;
         }
+        if let Some(candidate) = sibling_front_door_binary(current_exe) {
+            return candidate;
+        }
     }
     current_exe.to_path_buf()
 }
@@ -66,13 +70,32 @@ fn is_named_gwt_binary(path: &Path) -> bool {
         .into_iter()
         .next_back()
         .map(|value| value.trim_end_matches(".exe").to_string())
-        .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
+        .is_some_and(|value| value.eq_ignore_ascii_case(GUI_FRONT_DOOR_BINARY_NAME))
+}
+
+fn is_named_gwtd_binary(path: &Path) -> bool {
+    normalized_path_segments(path)
+        .into_iter()
+        .next_back()
+        .map(|value| value.trim_end_matches(".exe").to_string())
+        .is_some_and(|value| value.eq_ignore_ascii_case(INTERNAL_DAEMON_BINARY_NAME))
 }
 
 fn is_bunx_temp_executable(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
         .any(|segment| segment.starts_with("bunx-"))
+}
+
+fn sibling_front_door_binary(path: &Path) -> Option<PathBuf> {
+    if !is_named_gwtd_binary(path) {
+        return None;
+    }
+    let sibling_name = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("exe") => format!("{GUI_FRONT_DOOR_BINARY_NAME}.exe"),
+        _ => GUI_FRONT_DOOR_BINARY_NAME.to_string(),
+    };
+    Some(path.with_file_name(sibling_name))
 }
 
 fn normalized_path_segments(path: &Path) -> Vec<String> {
@@ -183,6 +206,15 @@ mod tests {
         });
 
         assert_eq!(resolved, current_exe);
+    }
+
+    #[test]
+    fn gwtd_current_exe_prefers_gui_front_door_sibling_when_path_lookup_is_missing() {
+        let current_exe = Path::new(r"C:\Program Files\GWT\gwtd.exe");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| None);
+
+        assert_eq!(resolved, PathBuf::from(r"C:\Program Files\GWT\gwt.exe"));
     }
 
     #[test]
