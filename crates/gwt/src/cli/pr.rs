@@ -274,6 +274,7 @@ mod tests {
             url: "https://example.com/pr/7".to_string(),
             ci_status: "SUCCESS".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         }
     }

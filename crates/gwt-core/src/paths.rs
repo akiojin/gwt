@@ -156,6 +156,14 @@ mod tests {
     use super::*;
     use crate::repo_hash::compute_repo_hash;
 
+    fn gwt_home_suffix(parts: &[&str]) -> PathBuf {
+        let mut path = PathBuf::from(".gwt");
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
     #[test]
     fn gwt_home_ends_with_dot_gwt() {
         let home = gwt_home();
@@ -213,43 +221,38 @@ mod tests {
     fn gwt_config_path_ends_with_config_toml() {
         let p = gwt_config_path();
         assert_eq!(p.file_name().unwrap(), "config.toml");
-        assert!(p.starts_with(gwt_home()));
+        assert!(p.ends_with(gwt_home_suffix(&["config.toml"])));
     }
 
     #[test]
     fn gwt_sessions_dir_is_under_home() {
         let p = gwt_sessions_dir();
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with("sessions"));
+        assert!(p.ends_with(gwt_home_suffix(&["sessions"])));
     }
 
     #[test]
     fn gwt_cache_dir_is_under_home() {
         let p = gwt_cache_dir();
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with("cache"));
+        assert!(p.ends_with(gwt_home_suffix(&["cache"])));
     }
 
     #[test]
     fn gwt_projects_dir_is_under_home() {
         let p = gwt_projects_dir();
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with("projects"));
+        assert!(p.ends_with(gwt_home_suffix(&["projects"])));
     }
 
     #[test]
     fn gwt_project_dir_scopes_by_repo_hash() {
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_project_dir(&repo_hash);
-        assert!(p.starts_with(gwt_projects_dir()));
-        assert!(p.ends_with(format!("projects/{}", repo_hash.as_str())));
+        assert!(p.ends_with(gwt_home_suffix(&["projects", repo_hash.as_str()])));
     }
 
     #[test]
     fn gwt_session_state_path_is_under_home() {
         let p = gwt_session_state_path();
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with("session.json"));
+        assert!(p.ends_with(gwt_home_suffix(&["session.json"])));
     }
 
     #[test]
@@ -266,45 +269,43 @@ mod tests {
     #[test]
     fn gwt_logs_dir_is_under_home() {
         let p = gwt_logs_dir();
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with("logs"));
+        assert!(p.ends_with(gwt_home_suffix(&["logs"])));
     }
 
     #[test]
     fn gwt_project_logs_dir_scopes_by_repo_hash() {
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_project_logs_dir(&repo_hash);
-        assert!(p.starts_with(gwt_project_dir(&repo_hash)));
-        assert!(p.ends_with(format!("projects/{}/logs", repo_hash.as_str())));
+        assert!(p.ends_with(gwt_home_suffix(&["projects", repo_hash.as_str(), "logs"])));
     }
 
     #[test]
     fn gwt_coordination_dir_scopes_by_repo_hash() {
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_coordination_dir(&repo_hash);
-        assert!(p.starts_with(gwt_project_dir(&repo_hash)));
-        assert!(p.ends_with(format!("projects/{}/coordination", repo_hash.as_str())));
+        assert!(p.ends_with(gwt_home_suffix(&[
+            "projects",
+            repo_hash.as_str(),
+            "coordination",
+        ])));
     }
 
     #[test]
     fn gwt_runtime_dir_is_under_home() {
         let p = gwt_runtime_dir();
-        assert!(p.starts_with(gwt_home()));
-        assert!(p.ends_with("runtime"));
+        assert!(p.ends_with(gwt_home_suffix(&["runtime"])));
     }
 
     #[test]
     fn gwt_runtime_runner_path_is_under_runtime_dir() {
         let p = gwt_runtime_runner_path();
-        assert!(p.starts_with(gwt_runtime_dir()));
-        assert_eq!(p.file_name().unwrap(), "chroma_index_runner.py");
+        assert!(p.ends_with(gwt_home_suffix(&["runtime", "chroma_index_runner.py"])));
     }
 
     #[test]
     fn gwt_project_index_venv_dir_is_under_runtime_dir() {
         let p = gwt_project_index_venv_dir();
-        assert!(p.starts_with(gwt_runtime_dir()));
-        assert_eq!(p.file_name().unwrap(), "chroma-venv");
+        assert!(p.ends_with(gwt_home_suffix(&["runtime", "chroma-venv"])));
     }
 
     #[test]

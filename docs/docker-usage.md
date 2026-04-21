@@ -17,12 +17,22 @@ docker compose build --no-cache
 
 ## Docker agent bundle
 
-Docker-backed agent sessions expect the Linux `gwt` bundle to be available on the host and mounted into the container as the public front door plus its internal daemon companion.
+Docker-backed agent sessions automatically download the latest Linux `gwt`
+bundle for the selected container architecture from GitHub Releases when the
+host cache is missing. The bundle is cached on the host and mounted into the
+container as the public front door plus its internal daemon companion.
 
 - `~/.gwt/bin/gwt-linux` -> `/usr/local/bin/gwt`
 - `~/.gwt/bin/gwtd-linux` -> `/usr/local/bin/gwtd`
 
-`gwt` remains the only operator-facing entrypoint inside the container. Skills and scripts should prefer `GWT_BIN_PATH` when it is present instead of calling `gwtd` directly.
+`gwt` remains the only operator-facing entrypoint inside the container. Skills
+and scripts should prefer `GWT_BIN_PATH` when it is present instead of calling
+`gwtd` directly.
+
+gwt writes its generated mounts into `docker-compose.gwt.override.yml` next to
+the project compose file. If the repo already has a user-managed
+`docker-compose.override.yml`, gwt layers that file first and keeps it
+unchanged.
 
 ## エラー対応
 
