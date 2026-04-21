@@ -25,8 +25,10 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 GitHub Releases から `gwt-windows-x86_64.msi` をダウンロードして実行します。
 インストーラーはユーザー `PATH` への `gwt` 追加と Start Menu エントリ作成を行います。
 
-古い per-machine 版 GWT が `Program Files` 配下に入っている場合は、先に Windows
-Settings からアンインストールしてから MSI を再実行してください。
+古い per-machine 版 GWT が `Program Files` 配下にある場合、手動で MSI を起動した
+ときは side-by-side install を避けるため block されます。既存の `Program Files`
+install を新しい per-user MSI 系列へ移行する場合は、`gwt update` またはアプリ内
+updater を使ってください。
 
 ### Linux
 

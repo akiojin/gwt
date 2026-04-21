@@ -634,7 +634,7 @@ pub fn internal_run_installer(
                 #[cfg(target_os = "windows")]
                 {
                     run_windows_msi_with_uac(installer)?;
-                    target_exe.to_path_buf()
+                    resolve_windows_restart_executable(target_exe)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -806,12 +806,62 @@ fn installer_kind_for_url(platform: &Platform, installer_url: &str) -> Option<In
     }
 }
 
+fn normalize_windows_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn windows_paths_equal(lhs: &Path, rhs: &Path) -> bool {
+    normalize_windows_path(lhs) == normalize_windows_path(rhs)
+}
+
+fn windows_per_user_install_executable(target_exe: &Path) -> Option<PathBuf> {
+    let file_name = target_exe.file_name()?;
+    std::env::var_os("LOCALAPPDATA").map(|root| {
+        PathBuf::from(root)
+            .join("Programs")
+            .join("GWT")
+            .join(file_name)
+    })
+}
+
+fn is_windows_per_user_install_executable(current_exe: &Path) -> bool {
+    windows_per_user_install_executable(current_exe)
+        .is_some_and(|expected| windows_paths_equal(&expected, current_exe))
+}
+
+fn is_windows_legacy_program_files_executable(current_exe: &Path) -> bool {
+    let normalized = normalize_windows_path(current_exe);
+    normalized.ends_with("\\gwt\\gwt.exe")
+        && (normalized.contains("\\program files\\")
+            || normalized.contains("\\program files (x86)\\"))
+}
+
+fn windows_should_prefer_installer(current_exe: &Path) -> bool {
+    is_windows_per_user_install_executable(current_exe)
+        || is_windows_legacy_program_files_executable(current_exe)
+}
+
 fn choose_apply_plan(
     platform: &Platform,
     current_exe: Option<&Path>,
     portable_url: Option<&str>,
     installer_url: Option<&str>,
 ) -> Option<ApplyPlan> {
+    if platform.os == "windows" {
+        if let (Some(current_exe), Some(url)) = (current_exe, installer_url) {
+            if windows_should_prefer_installer(current_exe) {
+                let kind = installer_kind_for_url(platform, url)?;
+                return Some(ApplyPlan::Installer {
+                    url: url.to_string(),
+                    kind,
+                });
+            }
+        }
+    }
+
     let running_from_app_bundle =
         current_exe.and_then(app_bundle_from_executable).is_some() || current_exe.is_none();
     let writable = current_exe
@@ -1158,6 +1208,15 @@ fn resolve_macos_restart_executable(
     target_exe.to_path_buf()
 }
 
+fn resolve_windows_restart_executable(target_exe: &Path) -> PathBuf {
+    if let Some(preferred) = windows_per_user_install_executable(target_exe) {
+        if preferred.exists() {
+            return preferred;
+        }
+    }
+    target_exe.to_path_buf()
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn build_macos_dmg_install_shell_cmd(
     source_app: &Path,
@@ -1284,14 +1343,24 @@ fn run_macos_dmg_installer_with_privileges(
     Ok(target_app)
 }
 
+fn windows_msi_argument_list(installer: &Path) -> Vec<String> {
+    vec![
+        "/i".to_string(),
+        installer.to_string_lossy().to_string(),
+        "/passive".to_string(),
+        "GWT_ALLOW_LEGACY_MIGRATION=1".to_string(),
+    ]
+}
+
 #[cfg(target_os = "windows")]
 fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
     // Trigger UAC for msiexec via PowerShell.
-    let msi = installer.to_string_lossy().to_string();
-    let args = format!(
-        "Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', '{}', '/passive')",
-        msi.replace('\'', "''")
-    );
+    let arg_list = windows_msi_argument_list(installer)
+        .into_iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = format!("Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @({arg_list})");
     let status = std::process::Command::new("powershell")
         .arg("-NoProfile")
         .arg("-Command")
@@ -1481,15 +1550,16 @@ mod tests {
         io::{Cursor, Read, Write},
         net::TcpListener,
         path::Path,
+        sync::Mutex,
         thread,
     };
 
     use super::*;
 
     #[cfg(target_os = "windows")]
-    use std::{sync::Mutex, time::Duration as StdDuration};
+    use std::time::Duration as StdDuration;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(test)]
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn serve_once(path: &str, status: &str, content_type: &str, body: Vec<u8>) -> String {
@@ -1898,6 +1968,72 @@ mod tests {
     }
 
     #[test]
+    fn choose_apply_plan_prefers_installer_for_windows_per_user_msi_install() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("AppData").join("Local");
+        let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let plan = choose_apply_plan(
+            &Platform {
+                os: "windows".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            Some(&current_exe),
+            Some("https://example.com/gwt-windows-x86_64.zip"),
+            Some("https://example.com/gwt-windows-x86_64.msi"),
+        );
+
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt-windows-x86_64.msi".to_string(),
+                kind: InstallerKind::WindowsMsi,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_apply_plan_prefers_installer_for_legacy_program_files_windows_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let current_exe = temp
+            .path()
+            .join("Program Files")
+            .join("GWT")
+            .join("gwt.exe");
+        fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+
+        let plan = choose_apply_plan(
+            &Platform {
+                os: "windows".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            Some(&current_exe),
+            Some("https://example.com/gwt-windows-x86_64.zip"),
+            Some("https://example.com/gwt-windows-x86_64.msi"),
+        );
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt-windows-x86_64.msi".to_string(),
+                kind: InstallerKind::WindowsMsi,
+            })
+        );
+    }
+
+    #[test]
     fn resolve_macos_restart_executable_scans_applications_for_matching_binary() {
         let temp = tempfile::tempdir().unwrap();
         let other_bundle = temp.path().join("Other.app").join("Contents").join("MacOS");
@@ -1912,6 +2048,49 @@ mod tests {
             resolve_macos_restart_executable(temp.path(), Path::new("/usr/local/bin/gwt"), None);
 
         assert_eq!(restart_exe, gwt_bundle.join("gwt"));
+    }
+
+    #[test]
+    fn resolve_windows_restart_executable_prefers_per_user_install_after_migration() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("AppData").join("Local");
+        let migrated_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(migrated_exe.parent().unwrap()).unwrap();
+        fs::write(&migrated_exe, b"new-binary").unwrap();
+
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let restart_exe = resolve_windows_restart_executable(
+            &temp
+                .path()
+                .join("Program Files")
+                .join("GWT")
+                .join("gwt.exe"),
+        );
+
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+
+        assert_eq!(restart_exe, migrated_exe);
+    }
+
+    #[test]
+    fn windows_msi_argument_list_allows_legacy_migration() {
+        assert_eq!(
+            windows_msi_argument_list(Path::new("C:/temp/gwt-windows-x86_64.msi")),
+            vec![
+                "/i".to_string(),
+                "C:/temp/gwt-windows-x86_64.msi".to_string(),
+                "/passive".to_string(),
+                "GWT_ALLOW_LEGACY_MIGRATION=1".to_string(),
+            ]
+        );
     }
 
     #[test]

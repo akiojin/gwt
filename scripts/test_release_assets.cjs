@@ -73,7 +73,7 @@ run("windows icon assets are available for exe and installer branding", () => {
   }
 });
 
-run("windows installer is per-user and adds command and start menu entrypoints", () => {
+run("windows installer is per-user and keeps updater migration on the MSI path", () => {
   const wix = fs.readFileSync(path.join(__dirname, "..", "wix", "main.wxs"), "utf8");
   assert.match(wix, /Scope="perUser"/);
   assert.match(wix, /LocalAppDataFolder/);
@@ -82,6 +82,11 @@ run("windows installer is per-user and adds command and start menu entrypoints",
   assert.match(wix, /Shortcut[^>]+Id="GwtStartMenuShortcut"[^>]+Name="GWT"/);
   assert.match(wix, /Icon[^>]+Id="GwtIcon\.exe"/);
   assert.match(wix, /GWT_LEGACY_PER_MACHINE_EXE/);
+  assert.match(wix, /GWT_ALLOW_LEGACY_MIGRATION/);
+  assert.match(
+    wix,
+    /Condition="NOT GWT_LEGACY_PER_MACHINE_EXE OR GWT_ALLOW_LEGACY_MIGRATION = &quot;1&quot;"/
+  );
 });
 
 run("release workflow packages gwtd alongside gwt", () => {

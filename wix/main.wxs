@@ -10,13 +10,14 @@
     Scope="perUser">
     <SummaryInformation Description="Canvas-based floating terminal GUI for Git Worktree Manager" />
     <Property Id="ARPPRODUCTICON" Value="GwtIcon.exe" />
+    <Property Id="GWT_ALLOW_LEGACY_MIGRATION" Secure="yes" />
     <Property Id="GWT_LEGACY_PER_MACHINE_EXE">
       <DirectorySearch Id="GwtLegacyProgramFilesSearch" Path="[ProgramFiles6432Folder]GWT" Depth="0">
         <FileSearch Id="GwtLegacyProgramFilesExeSearch" Name="gwt.exe" />
       </DirectorySearch>
     </Property>
     <Launch
-      Condition="NOT GWT_LEGACY_PER_MACHINE_EXE"
+      Condition="NOT GWT_LEGACY_PER_MACHINE_EXE OR GWT_ALLOW_LEGACY_MIGRATION = &quot;1&quot;"
       Message="A per-machine GWT installation was found in Program Files. Uninstall the existing GWT from Windows Settings, then run this installer again." />
     <MajorUpgrade DowngradeErrorMessage="A newer version of GWT is already installed." />
     <MediaTemplate EmbedCab="yes" />

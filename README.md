@@ -27,8 +27,10 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 Download `gwt-windows-x86_64.msi` from GitHub Releases and run it. The
 installer adds `gwt` to your user `PATH` and creates a Start Menu entry.
 
-If an older per-machine GWT install exists under `Program Files`, uninstall it
-from Windows Settings before running the MSI.
+If an older per-machine GWT install exists under `Program Files`, a manual MSI
+launch is blocked to avoid side-by-side installs. Existing `Program Files`
+installs can migrate onto the per-user MSI line through `gwt update` or the
+in-app updater.
 
 ### Linux
 
