@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Mirrors the protected list from the current Branch Cleanup contract.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop"];
+const CANONICAL_BASE_BRANCHES: &[&str] = &["develop", "main", "master"];
 
 /// Returns true when `name` matches one of the hard-coded protected branches
 /// (FR-018b). Comparisons strip a leading `origin/` so a remote tracking ref
@@ -19,23 +20,33 @@ pub fn is_protected_branch(name: &str) -> bool {
 }
 
 /// Where a cleanable branch was determined to be merged into (FR-018a).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MergeTarget {
-    /// Branch is merged into `main` / `master`.
-    Main,
-    /// Branch is merged into `develop`.
-    Develop,
-    /// Branch's upstream tracking ref is `[gone]`.
-    Gone,
-}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MergeTarget(String);
 
 impl MergeTarget {
+    pub fn from_ref(ref_name: impl Into<String>) -> Self {
+        Self(ref_name.into())
+    }
+
+    pub fn gone() -> Self {
+        Self("gone".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_gone(&self) -> bool {
+        self.0 == "gone"
+    }
+
     /// Human-readable label used by the Cleanup confirm modal.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Main => "merged → main",
-            Self::Develop => "merged → develop",
-            Self::Gone => "gone",
+    pub fn label(&self) -> String {
+        if self.is_gone() {
+            "gone".to_string()
+        } else {
+            format!("merged → {}", self.0)
         }
     }
 }
@@ -70,26 +81,71 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
     Ok(parse_cherry_output(&stdout))
 }
 
-/// Walks `bases` in order and returns the first base that already contains
-/// every commit on `branch` (FR-018a). When `gone_branches` reports `branch`
-/// as having a `[gone]` upstream and no positive merge match was found, the
-/// function returns `Some(MergeTarget::Gone)` so callers can still treat the
-/// branch as cleanable.
+/// Resolves the canonical cleanup target for `branch`.
+///
+/// Canonical base selection follows the current cleanup contract:
+/// 1. prefer the execution branch's upstream remote (`<remote>/develop|main|master`)
+/// 2. if that remote has no canonical base refs at all and is not `origin`,
+///    fall back to `origin/develop|main|master`
+/// 3. if the branch's upstream is `[gone]`, treat it as cleanable via `gone`
+///
+/// Branches without an upstream do not get a canonical remote fallback and
+/// remain unresolved here.
 pub fn detect_cleanable_target(
     repo_path: &Path,
     branch: &str,
-    bases: &[(&str, MergeTarget)],
+    upstream: Option<&str>,
     gone_branches: &HashSet<String>,
 ) -> Result<Option<MergeTarget>> {
-    for (base, target) in bases {
-        if is_branch_merged_into(repo_path, branch, base)? {
-            return Ok(Some(*target));
+    let Some(primary_remote) = upstream.and_then(remote_name_from_tracking_ref) else {
+        if gone_branches.contains(branch) {
+            return Ok(Some(MergeTarget::gone()));
+        }
+        return Ok(None);
+    };
+
+    let (primary_has_bases, primary_target) =
+        detect_cleanable_target_for_remote(repo_path, branch, primary_remote)?;
+    if let Some(target) = primary_target {
+        return Ok(Some(target));
+    }
+
+    if !primary_has_bases && primary_remote != "origin" {
+        let (_, fallback_target) = detect_cleanable_target_for_remote(repo_path, branch, "origin")?;
+        if let Some(target) = fallback_target {
+            return Ok(Some(target));
         }
     }
     if gone_branches.contains(branch) {
-        return Ok(Some(MergeTarget::Gone));
+        return Ok(Some(MergeTarget::gone()));
     }
     Ok(None)
+}
+
+fn detect_cleanable_target_for_remote(
+    repo_path: &Path,
+    branch: &str,
+    remote: &str,
+) -> Result<(bool, Option<MergeTarget>)> {
+    let mut has_canonical_base = false;
+    for base in CANONICAL_BASE_BRANCHES {
+        let refname = format!("{remote}/{base}");
+        if !ref_exists(repo_path, &refname)? {
+            continue;
+        }
+        has_canonical_base = true;
+        if is_branch_merged_into(repo_path, branch, &refname)? {
+            return Ok((true, Some(MergeTarget::from_ref(refname))));
+        }
+    }
+    Ok((has_canonical_base, None))
+}
+
+fn remote_name_from_tracking_ref(upstream: &str) -> Option<&str> {
+    upstream
+        .split_once('/')
+        .map(|(remote, _)| remote)
+        .filter(|remote| !remote.is_empty())
 }
 
 /// Returns the set of local branch names whose upstream tracking ref is
@@ -565,22 +621,34 @@ mod tests {
     #[test]
     fn detect_cleanable_target_walks_bases_in_order() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path();
-        init_named_repo(repo);
-        run(&["checkout", "-b", "develop"], repo);
-        run(&["checkout", "-b", "feature/d"], repo);
-        make_commit(repo, "d.txt", "d", "feat: d");
-        run(&["checkout", "develop"], repo);
-        run(&["merge", "--no-ff", "-m", "merge d", "feature/d"], repo);
+        let origin = tmp.path().join("origin.git");
+        let repo = tmp.path().join("repo");
+        run(&["init", "--bare", origin.to_str().unwrap()], tmp.path());
+        run(
+            &["init", "--initial-branch=main", repo.to_str().unwrap()],
+            tmp.path(),
+        );
+        run(&["config", "user.email", "test@example.com"], &repo);
+        run(&["config", "user.name", "Test"], &repo);
+        run(&["commit", "--allow-empty", "-m", "init"], &repo);
+        run(
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+            &repo,
+        );
+        run(&["push", "-u", "origin", "main"], &repo);
+        run(&["checkout", "-b", "develop"], &repo);
+        run(&["push", "-u", "origin", "develop"], &repo);
+        run(&["checkout", "-b", "feature/d"], &repo);
+        make_commit(&repo, "d.txt", "d", "feat: d");
+        run(&["checkout", "develop"], &repo);
+        run(&["merge", "--no-ff", "-m", "merge d", "feature/d"], &repo);
+        run(&["push", "origin", "develop"], &repo);
+        run(&["fetch", "origin", "--prune"], &repo);
 
-        let bases = [
-            ("main", MergeTarget::Main),
-            ("develop", MergeTarget::Develop),
-        ];
         let gone = HashSet::new();
         assert_eq!(
-            detect_cleanable_target(repo, "feature/d", &bases, &gone).unwrap(),
-            Some(MergeTarget::Develop)
+            detect_cleanable_target(&repo, "feature/d", Some("origin/feature/d"), &gone).unwrap(),
+            Some(MergeTarget::from_ref("origin/develop"))
         );
     }
 
@@ -592,10 +660,9 @@ mod tests {
         run(&["checkout", "-b", "feature/free"], repo);
         make_commit(repo, "f.txt", "f", "feat: f");
 
-        let bases = [("main", MergeTarget::Main)];
         let gone = HashSet::new();
         assert_eq!(
-            detect_cleanable_target(repo, "feature/free", &bases, &gone).unwrap(),
+            detect_cleanable_target(repo, "feature/free", None, &gone).unwrap(),
             None
         );
     }
@@ -608,12 +675,68 @@ mod tests {
         run(&["checkout", "-b", "feature/abandoned"], repo);
         make_commit(repo, "a.txt", "a", "feat: a");
 
-        let bases = [("main", MergeTarget::Main)];
         let mut gone = HashSet::new();
         gone.insert("feature/abandoned".to_string());
         assert_eq!(
-            detect_cleanable_target(repo, "feature/abandoned", &bases, &gone).unwrap(),
-            Some(MergeTarget::Gone)
+            detect_cleanable_target(
+                repo,
+                "feature/abandoned",
+                Some("origin/feature/abandoned"),
+                &gone
+            )
+            .unwrap(),
+            Some(MergeTarget::gone())
+        );
+    }
+
+    #[test]
+    fn detect_cleanable_target_uses_upstream_remote_before_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin.git");
+        let upstream = tmp.path().join("upstream.git");
+        let repo = tmp.path().join("repo");
+        run(&["init", "--bare", origin.to_str().unwrap()], tmp.path());
+        run(&["init", "--bare", upstream.to_str().unwrap()], tmp.path());
+        run(
+            &["init", "--initial-branch=main", repo.to_str().unwrap()],
+            tmp.path(),
+        );
+        run(&["config", "user.email", "test@example.com"], &repo);
+        run(&["config", "user.name", "Test"], &repo);
+        run(&["commit", "--allow-empty", "-m", "init"], &repo);
+        run(
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+            &repo,
+        );
+        run(
+            &["remote", "add", "upstream", upstream.to_str().unwrap()],
+            &repo,
+        );
+        run(&["push", "-u", "origin", "main"], &repo);
+        run(&["push", "-u", "upstream", "main"], &repo);
+        run(&["checkout", "-b", "develop"], &repo);
+        make_commit(&repo, "develop.txt", "develop", "develop");
+        run(&["push", "-u", "origin", "develop"], &repo);
+        run(&["push", "-u", "upstream", "develop"], &repo);
+        run(&["checkout", "-b", "feature/alpha"], &repo);
+        make_commit(&repo, "alpha.txt", "alpha", "alpha");
+        run(
+            &["push", "-u", "upstream", "HEAD:refs/heads/feature/alpha"],
+            &repo,
+        );
+        run(&["push", "upstream", "HEAD:refs/heads/develop"], &repo);
+        run(&["fetch", "upstream", "--prune"], &repo);
+
+        let gone = HashSet::new();
+        assert_eq!(
+            detect_cleanable_target(
+                repo.as_path(),
+                "feature/alpha",
+                Some("upstream/feature/alpha"),
+                &gone
+            )
+            .unwrap(),
+            Some(MergeTarget::from_ref("upstream/develop"))
         );
     }
 

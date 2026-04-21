@@ -30,6 +30,7 @@ pub enum BranchCleanupBlockedReason {
 pub enum BranchCleanupRisk {
     Unmerged,
     RemoteTracking,
+    NoUpstream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,11 +115,6 @@ fn build_cleanup_targets(
     entries: &[BranchListEntry],
     gone_branches: &HashSet<String>,
 ) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTarget>>> {
-    let cleanup_bases = [
-        ("main", gwt_git::MergeTarget::Main),
-        ("master", gwt_git::MergeTarget::Main),
-        ("develop", gwt_git::MergeTarget::Develop),
-    ];
     let mut cleanup_targets = HashMap::new();
     for branch in entries
         .iter()
@@ -127,7 +123,7 @@ fn build_cleanup_targets(
         let target = gwt_git::detect_cleanable_target(
             repo_path,
             &branch.name,
-            &cleanup_bases,
+            branch.upstream.as_deref(),
             gone_branches,
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -243,10 +239,13 @@ fn build_cleanup_info(
         .cloned()
         .flatten();
     let mut risks = Vec::new();
-    if branch.scope == BranchScope::Remote {
+    if upstream.is_none() {
+        risks.push(BranchCleanupRisk::NoUpstream);
+    }
+    if branch.scope == BranchScope::Remote && merge_target.is_none() {
         risks.push(BranchCleanupRisk::RemoteTracking);
     }
-    if merge_target.is_none() {
+    if merge_target.is_none() && upstream.is_some() {
         risks.push(BranchCleanupRisk::Unmerged);
     }
 
@@ -399,7 +398,7 @@ mod tests {
             name: "feature/demo".to_string(),
             scope: BranchScope::Local,
             is_head: false,
-            upstream: None,
+            upstream: Some("origin/feature/demo".to_string()),
             ahead: 0,
             behind: 0,
             last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
@@ -408,7 +407,7 @@ mod tests {
         }];
         let cleanup_targets = HashMap::from([(
             String::from("feature/demo"),
-            Some(gwt_git::MergeTarget::Develop),
+            Some(gwt_git::MergeTarget::from_ref("origin/develop")),
         )]);
 
         let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets);
