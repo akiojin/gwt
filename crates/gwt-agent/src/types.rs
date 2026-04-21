@@ -85,22 +85,14 @@ pub fn resolve_agent_id(raw: &str) -> Option<AgentId> {
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("claude") {
-        return Some(AgentId::ClaudeCode);
+    match lower.as_str() {
+        "claude" | "claudecode" | "claude-code" | "claude code" => Some(AgentId::ClaudeCode),
+        "codex" => Some(AgentId::Codex),
+        "gemini" | "gemini cli" | "gemini-cli" => Some(AgentId::Gemini),
+        "opencode" | "open-code" => Some(AgentId::OpenCode),
+        "gh" | "copilot" | "github copilot" | "github-copilot" => Some(AgentId::Copilot),
+        _ => Some(AgentId::Custom(trimmed.to_string())),
     }
-    if lower.contains("codex") {
-        return Some(AgentId::Codex);
-    }
-    if lower.contains("gemini") {
-        return Some(AgentId::Gemini);
-    }
-    if lower.contains("opencode") || lower.contains("open-code") {
-        return Some(AgentId::OpenCode);
-    }
-    if lower == "gh" || lower.contains("copilot") {
-        return Some(AgentId::Copilot);
-    }
-    Some(AgentId::Custom(trimmed.to_string()))
 }
 
 /// Static information about an agent, combining identity with presentation.
@@ -295,6 +287,18 @@ mod tests {
             resolve_agent_id("unknown-cli"),
             Some(AgentId::Custom("unknown-cli".into()))
         );
+    }
+
+    #[test]
+    fn resolve_agent_id_does_not_infer_known_agents_from_custom_names() {
+        let custom_inputs = ["my-claude-wrapper", "codex-wrapper", "opencode-mentor"];
+        for raw in custom_inputs {
+            assert_eq!(
+                resolve_agent_id(raw),
+                Some(AgentId::Custom(raw.into())),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
