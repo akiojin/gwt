@@ -150,7 +150,6 @@
         position: absolute;
         inset: 0;
         transform-origin: 0 0;
-        will-change: transform;
         background-image:
           linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
           linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
@@ -1953,6 +1952,7 @@
       let panState = null;
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
+      let viewportRasterTimer = null;
       let launchWizard = null;
       let wizardWasOpen = false;
       let wizardAdvancedOpen = false;
@@ -2379,6 +2379,14 @@
 
       function applyViewport() {
         stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+        stage.style.willChange = "transform";
+        if (viewportRasterTimer !== null) {
+          clearTimeout(viewportRasterTimer);
+        }
+        viewportRasterTimer = setTimeout(() => {
+          stage.style.willChange = "auto";
+          viewportRasterTimer = null;
+        }, 300);
       }
 
       function persistViewport() {
