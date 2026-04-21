@@ -4815,6 +4815,8 @@
           switch (risk) {
             case "remote_tracking":
               return "remote-tracking";
+            case "no_upstream":
+              return "no upstream";
             case "unmerged":
               return "unmerged";
             default:
@@ -4824,16 +4826,13 @@
       }
 
       function cleanupMergeTargetText(target) {
-        switch (target) {
-          case "main":
-            return "merged to main";
-          case "develop":
-            return "merged to develop";
-          case "gone":
-            return "upstream is gone";
-          default:
-            return "";
+        if (!target) {
+          return "";
         }
+        if (target === "gone") {
+          return "upstream is gone";
+        }
+        return `merged to ${target}`;
       }
 
       function branchLoadingNoticeText(state) {

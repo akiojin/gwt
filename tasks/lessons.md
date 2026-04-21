@@ -1,5 +1,36 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(branch-cleanup): `Safe` は stale local base ではなく canonical remote base merge で判定する
+
+### 事象
+
+Branches window の cleanup availability で、feature branch が `origin/develop` に
+取り込まれているのに local `develop` が古いだけで `Risky` と表示された。
+その結果、「安全に削除できない」理由が実際の Git 状態ではなく local base の
+鮮度に引きずられていた。
+
+### 原因
+
+- cleanup target 解決が local `develop/main/master` だけを見ており、gwt の通常
+  branch workflow（remote branch 作成後に local tracking branch を materialize）
+  を反映していなかった。
+- `Safe` の意味を「local base が最新であること」と暗黙に扱い、canonical remote
+  base に merge 済みかどうかという本来の削除安全性と切り分けていなかった。
+- remote-tracking row も row 種別だけで `remote_tracking` risk を付与しており、
+  execution local branch が `Safe` でも row 側が `Risky` から下がらなかった。
+
+### 再発防止策
+
+1. Branch Cleanup の `Safe` / `Risky` / `Blocked` を変更するときは、まず
+   「execution branch がどの canonical base に merge 済みなら safe か」を
+   SPEC で明文化する。
+2. gwt 管理 branch の cleanup 判定では upstream remote の
+   `develop -> main -> master` を優先し、その remote に canonical base がない
+   場合だけ `origin/*` を fallback に使う。
+3. remote-tracking row の availability は row 種別ではなく execution local
+   branch 基準で決め、manual local branch のような例外経路だけを別 risk
+   (`no upstream`) で表現する。
+
 ## 2026-04-21 — fix(review): vt100 shrink crash は parser 再構築で回避しない
 
 ### 事象
