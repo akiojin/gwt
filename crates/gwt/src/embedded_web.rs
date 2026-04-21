@@ -82,6 +82,10 @@ mod tests {
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
         .expect("valid regex");
+        let hidden_geometry_sync = regex::Regex::new(
+            r"if\s*\(\s*!canRefreshTerminalViewport\(windowId\)\s*\)\s*\{\s*if\s*\(\s*persist\s*\)\s*\{\s*sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\);\s*\}\s*return;\s*\}",
+        )
+        .expect("valid regex");
 
         assert!(
             html.contains("function scheduleTerminalViewportRefresh(windowId)"),
@@ -111,6 +115,18 @@ mod tests {
             html.contains("function canRefreshTerminalViewport(windowId)")
                 && html.contains("!workspaceWindowById(windowId)?.minimized"),
             "expected terminal viewport refresh to skip minimized windows",
+        );
+        assert!(
+            hidden_geometry_sync.is_match(html),
+            "expected persisted terminal fit to sync geometry even while hidden",
+        );
+        assert!(
+            html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
+                && html.contains(
+                    "const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized",
+                )
+                && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
+            "expected restored terminals to persist fitted geometry after becoming visible",
         );
     }
 

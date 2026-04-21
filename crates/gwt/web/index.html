@@ -2488,7 +2488,13 @@
       function fitTerminal(windowId, persist = false) {
         const runtime = terminalMap.get(windowId);
         const element = windowMap.get(windowId);
-        if (!runtime || !element || !canRefreshTerminalViewport(windowId)) {
+        if (!runtime || !element) {
+          return;
+        }
+        if (!canRefreshTerminalViewport(windowId)) {
+          if (persist) {
+            sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
+          }
           return;
         }
         runtime.fitAddon.fit();
@@ -5195,6 +5201,8 @@
         }
 
         element.querySelector(".title-text").textContent = windowData.title;
+        const wasMinimized = element.classList.contains("minimized");
+        const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.style.left = `${windowData.geometry.x}px`;
@@ -5206,7 +5214,9 @@
           Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
         if (presetSurface(windowData.preset) === "terminal" && !windowData.minimized) {
-          requestAnimationFrame(() => fitTerminal(windowData.id, false));
+          requestAnimationFrame(() =>
+            fitTerminal(windowData.id, shouldPersistTerminalGeometry),
+          );
         }
       }
 
