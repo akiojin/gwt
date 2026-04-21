@@ -3343,3 +3343,27 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 1. Python と Rust の両方が同じ on-disk layout を読む場合、`HOME` / `USERPROFILE` / fallback の優先順を一致させる。
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
+
+## 2026-04-21 — fix: Launch Agent Resume と agent pane resume を混同しない
+
+### 事象
+
+Codex 起動後に Resume が有効にならないという報告を、最初に pane discussion
+側の resume 問題として扱いかけたが、実際の対象は Launch Agent の Quick Start
+Resume だった。
+
+### 原因
+
+- 「Codex」「Resume」という共通語だけで関連領域を推定し、Launch Wizard /
+  Quick Start の文脈確認が不足していた。
+- 既存の lesson に Quick Start resume の `agent_session_id` 確認が記録されていたが、
+  調査開始時の scope 固定に反映できていなかった。
+
+### 再発防止策
+
+1. Resume 不具合では最初に対象 UI を固定する。Launch Agent の Quick Start、
+   running pane の resume、session TOML の永続化を分けて扱う。
+2. Launch Agent の Resume は `launch_wizard` と session TOML の
+   `agent_session_id` を一次調査対象にする。
+3. ユーザーが UI 名を訂正した場合は、調査 plan とテスト観点を即座にその UI に
+   切り替える。
