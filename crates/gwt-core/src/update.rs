@@ -1460,7 +1460,60 @@ fn replace_paths(target_exe: &Path, backup_path: &Path, tmp_path: &Path) -> io::
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+    use std::{
+        io::{Cursor, Read, Write},
+        net::TcpListener,
+        path::Path,
+        thread,
+    };
+
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    use std::{sync::Mutex, time::Duration as StdDuration};
+
+    #[cfg(target_os = "windows")]
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn serve_once(path: &str, status: &str, content_type: &str, body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let path = path.trim_start_matches('/').to_string();
+        let status = status.to_string();
+        let content_type = content_type.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            stream.write_all(&body).expect("write body");
+        });
+        format!("http://{addr}/{path}")
+    }
+
+    fn zip_body(file_name: &str, contents: &[u8]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file(file_name, zip::write::FileOptions::<()>::default())
+            .expect("start zip file");
+        writer.write_all(contents).expect("write zip body");
+        let daemon_name = companion_binary_name(file_name);
+        writer
+            .start_file(daemon_name, zip::write::FileOptions::<()>::default())
+            .expect("start daemon zip file");
+        writer
+            .write_all(b"zip-daemon")
+            .expect("write daemon zip body");
+        writer.finish().expect("finish zip").into_inner()
+    }
 
     #[test]
     fn parse_tag_version_accepts_v_prefix() {
@@ -1521,6 +1574,197 @@ mod tests {
 
         let state = mgr.check(true);
         assert!(matches!(state, UpdateState::Failed { .. }));
+    }
+
+    #[test]
+    fn check_fetches_release_and_caches_available_or_invalid_tags() {
+        let temp = tempfile::tempdir().unwrap();
+        let platform = Platform::detect();
+        let portable_name = platform
+            .portable_asset_name()
+            .unwrap_or_else(|| "gwt-linux-x86_64.tar.gz".to_string());
+        let portable_url = "https://example.com/downloads/portable";
+        let release_body = format!(
+            r#"{{
+  "tag_name": "v99.0.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v99.0.0",
+  "assets": [
+    {{
+      "name": "{portable_name}",
+      "browser_download_url": "{portable_url}"
+    }}
+  ]
+}}"#
+        );
+        let base_url = serve_once(
+            "/repos/akiojin/gwt/releases/latest",
+            "200 OK",
+            "application/json",
+            release_body.into_bytes(),
+        );
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let state = mgr.check(true);
+        match state {
+            UpdateState::Available {
+                latest,
+                release_url,
+                asset_url,
+                ..
+            } => {
+                assert_eq!(latest, "99.0.0");
+                assert_eq!(
+                    release_url,
+                    "https://github.com/akiojin/gwt/releases/tag/v99.0.0"
+                );
+                assert_eq!(asset_url.as_deref(), Some(portable_url));
+            }
+            other => panic!("expected available update, got {other:?}"),
+        }
+
+        let cached = read_cache(mgr.cache_path()).expect("cache");
+        assert_eq!(cached.latest_version.as_deref(), Some("99.0.0"));
+        assert_eq!(cached.asset_url.as_deref(), Some(portable_url));
+
+        let bad_base_url = serve_once(
+            "/repos/akiojin/gwt/releases/latest",
+            "200 OK",
+            "application/json",
+            br#"{"tag_name":"not-a-semver","html_url":"https://example.com/release","assets":[]}"#
+                .to_vec(),
+        );
+        let bad_mgr = UpdateManager::new()
+            .with_api_base_url(bad_base_url)
+            .with_cache_path(temp.path().join("bad-update-check.json"))
+            .with_updates_dir(temp.path().join("bad-updates"));
+        let failed = bad_mgr.check(true);
+        assert!(matches!(
+            failed,
+            UpdateState::Failed { ref message, .. }
+                if message.contains("Failed to parse release tag as version")
+        ));
+    }
+
+    #[test]
+    fn prepare_update_handles_direct_binary_archives_installers_and_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let direct_url = serve_once(
+            "/gwt.bin",
+            "200 OK",
+            "application/octet-stream",
+            b"bin".to_vec(),
+        );
+        let direct = mgr
+            .prepare_update("99.0.0", &direct_url)
+            .expect("direct binary");
+        match direct {
+            PreparedPayload::PortableBinary { path } => {
+                assert_eq!(fs::read(path).unwrap(), b"bin");
+            }
+            other => panic!("expected direct binary payload, got {other:?}"),
+        }
+
+        let binary_name = Platform::detect().binary_name();
+        let archive_url = serve_once(
+            "/gwt.zip",
+            "200 OK",
+            "application/zip",
+            zip_body(&binary_name, b"zip-bin"),
+        );
+        let archive = mgr.prepare_update("99.0.1", &archive_url).expect("archive");
+        match archive {
+            PreparedPayload::PortableBinary { path } => {
+                assert_eq!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some(binary_name.as_str())
+                );
+                assert_eq!(fs::read(path).unwrap(), b"zip-bin");
+            }
+            other => panic!("expected extracted archive payload, got {other:?}"),
+        }
+
+        let installer_url = serve_once(
+            "/gwt.pkg",
+            "200 OK",
+            "application/octet-stream",
+            b"pkg".to_vec(),
+        );
+        let installer = mgr
+            .prepare_update("99.0.2", &installer_url)
+            .expect("installer");
+        assert_eq!(
+            installer,
+            PreparedPayload::Installer {
+                path: temp.path().join("updates").join("v99.0.2").join("gwt.pkg"),
+                kind: InstallerKind::MacPkg,
+            }
+        );
+
+        let empty_url = serve_once(
+            "/empty.bin",
+            "200 OK",
+            "application/octet-stream",
+            Vec::new(),
+        );
+        let empty_err = mgr.prepare_update("99.0.3", &empty_url).unwrap_err();
+        assert!(empty_err.contains("Downloaded payload is empty"));
+
+        let status_err_url = serve_once(
+            "/missing.bin",
+            "404 Not Found",
+            "text/plain",
+            b"missing".to_vec(),
+        );
+        let status_err = mgr.prepare_update("99.0.4", &status_err_url).unwrap_err();
+        assert!(status_err.contains("Download failed with status 404"));
+    }
+
+    #[test]
+    fn restart_args_and_helper_process_helpers_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let args_path = temp.path().join("restart").join("args.json");
+        mgr.write_restart_args_file(&args_path, vec!["--version".to_string()])
+            .expect("write restart args");
+        assert_eq!(
+            UpdateManager::read_restart_args_file(&args_path).expect("read restart args"),
+            vec!["--version".to_string()]
+        );
+
+        let current_exe = temp.path().join("gwt-current.exe");
+        fs::write(&current_exe, b"binary").unwrap();
+        let helper_copy = mgr
+            .make_helper_copy(&current_exe, "99.1.0")
+            .expect("helper copy");
+        assert_eq!(fs::read(&helper_copy).unwrap(), b"binary");
+
+        mgr.spawn_internal_apply_update(
+            Path::new("git"),
+            999_999,
+            Path::new("target.exe"),
+            Path::new("source.exe"),
+            &args_path,
+        )
+        .expect("spawn apply helper");
+        mgr.spawn_internal_run_installer(
+            Path::new("git"),
+            999_999,
+            Path::new("target.exe"),
+            Path::new("installer.pkg"),
+            InstallerKind::MacPkg,
+            &args_path,
+        )
+        .expect("spawn installer helper");
     }
 
     #[test]
@@ -1778,5 +2022,454 @@ mod tests {
         let _ = fs::set_permissions(&unreadable, restore_perms);
 
         assert_eq!(found.unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn cache_round_trip_and_invalid_json_are_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_path = temp.path().join("cache").join("update.json");
+        let cache = UpdateCacheFile {
+            checked_at: Utc.with_ymd_and_hms(2026, 4, 20, 10, 0, 0).unwrap(),
+            latest_version: Some("9.9.0".to_string()),
+            release_url: Some("https://github.com/akiojin/gwt/releases/tag/v9.9.0".to_string()),
+            portable_asset_url: Some("https://example.com/gwt-linux-x86_64.tar.gz".to_string()),
+            installer_asset_url: Some("https://example.com/gwt-windows-x86_64.msi".to_string()),
+            asset_url: Some("https://example.com/legacy.zip".to_string()),
+        };
+
+        write_cache(&cache_path, &cache).unwrap();
+        let loaded = read_cache(&cache_path).unwrap();
+        assert_eq!(loaded.latest_version.as_deref(), Some("9.9.0"));
+        assert_eq!(
+            loaded.portable_asset_url.as_deref(),
+            Some("https://example.com/gwt-linux-x86_64.tar.gz")
+        );
+        assert_eq!(
+            loaded.installer_asset_url.as_deref(),
+            Some("https://example.com/gwt-windows-x86_64.msi")
+        );
+
+        let invalid_path = temp.path().join("broken.json");
+        fs::write(&invalid_path, b"{not-json").unwrap();
+        let err = read_cache(&invalid_path).unwrap_err();
+        assert!(err.contains("Failed to parse update cache"));
+    }
+
+    #[test]
+    fn state_from_cache_covers_missing_invalid_and_fallback_release_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::default()
+            .with_cache_path(temp.path().join("cache").join("update.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let checked_at = Utc.with_ymd_and_hms(2026, 4, 20, 11, 0, 0).unwrap();
+
+        let missing = UpdateCacheFile {
+            checked_at,
+            latest_version: None,
+            release_url: None,
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: None,
+        };
+        assert_eq!(
+            mgr.state_from_cache(&missing, None),
+            UpdateState::UpToDate {
+                checked_at: Some(checked_at),
+            }
+        );
+
+        let invalid = UpdateCacheFile {
+            latest_version: Some("not-a-version".to_string()),
+            ..missing.clone()
+        };
+        assert_eq!(
+            mgr.state_from_cache(&invalid, None),
+            UpdateState::UpToDate {
+                checked_at: Some(checked_at),
+            }
+        );
+
+        let older = UpdateCacheFile {
+            latest_version: Some("0.1.0".to_string()),
+            ..missing.clone()
+        };
+        assert_eq!(
+            mgr.state_from_cache(&older, None),
+            UpdateState::UpToDate {
+                checked_at: Some(checked_at),
+            }
+        );
+
+        let newer = UpdateCacheFile {
+            latest_version: Some("99.0.0".to_string()),
+            release_url: None,
+            portable_asset_url: Some("https://example.com/gwt-portable.tar.gz".to_string()),
+            installer_asset_url: Some("https://example.com/gwt-installer.msi".to_string()),
+            asset_url: Some("https://example.com/gwt-legacy.zip".to_string()),
+            ..missing
+        };
+        match mgr.state_from_cache(&newer, None) {
+            UpdateState::Available {
+                current,
+                latest,
+                release_url,
+                asset_url,
+                checked_at: seen_at,
+            } => {
+                assert_eq!(current, env!("CARGO_PKG_VERSION"));
+                assert_eq!(latest, "99.0.0");
+                assert_eq!(seen_at, checked_at);
+                assert_eq!(
+                    release_url,
+                    "https://github.com/akiojin/gwt/releases/tag/v99.0.0"
+                );
+                assert_eq!(
+                    asset_url.as_deref(),
+                    Some("https://example.com/gwt-portable.tar.gz")
+                );
+            }
+            other => panic!("expected cached available update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn installer_url_selection_covers_legacy_and_unsupported_platforms() {
+        let macos = Platform {
+            os: "macos".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let mac_assets = vec![GitHubAsset {
+            name: "gwt-macos-x86_64.pkg".to_string(),
+            browser_download_url: "https://example.com/macos.pkg".to_string(),
+        }];
+        assert_eq!(
+            find_installer_asset_url(&macos, &mac_assets).as_deref(),
+            Some("https://example.com/macos.pkg")
+        );
+
+        let windows = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let windows_assets = vec![GitHubAsset {
+            name: "gwt-windows-x86_64.msi".to_string(),
+            browser_download_url: "https://example.com/windows.msi".to_string(),
+        }];
+        assert_eq!(
+            find_installer_asset_url(&windows, &windows_assets).as_deref(),
+            Some("https://example.com/windows.msi")
+        );
+
+        let linux = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert!(find_installer_asset_url(&linux, &windows_assets).is_none());
+    }
+
+    #[test]
+    fn asset_and_installer_matching_cover_arch_and_suffix_variants() {
+        assert!(asset_matches_arch("gwt-aarch64.dmg", "aarch64"));
+        assert!(asset_matches_arch("gwt-amd64.msi", "x86_64"));
+        assert!(!asset_matches_arch("gwt-aarch64.dmg", "x86_64"));
+        assert!(asset_matches_arch("gwt-anything.pkg", "riscv64"));
+
+        let macos = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let windows = Platform {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        let linux = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+
+        assert_eq!(
+            installer_kind_for_url(&macos, "https://example.com/gwt.dmg"),
+            Some(InstallerKind::MacDmg)
+        );
+        assert_eq!(
+            installer_kind_for_url(&macos, "https://example.com/gwt.pkg"),
+            Some(InstallerKind::MacPkg)
+        );
+        assert_eq!(
+            installer_kind_for_url(&windows, "https://example.com/gwt.msi"),
+            Some(InstallerKind::WindowsMsi)
+        );
+        assert_eq!(
+            installer_kind_for_url(&linux, "https://example.com/gwt.tar.gz"),
+            None
+        );
+    }
+
+    #[test]
+    fn choose_apply_plan_respects_platform_and_writability() {
+        let linux = Platform {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+        };
+        assert_eq!(
+            choose_apply_plan_with_writable(
+                &linux,
+                false,
+                true,
+                Some("https://example.com/gwt-linux.tar.gz"),
+                Some("https://example.com/gwt-windows.msi"),
+            ),
+            Some(ApplyPlan::Portable {
+                url: "https://example.com/gwt-linux.tar.gz".to_string(),
+            })
+        );
+        assert_eq!(
+            choose_apply_plan_with_writable(
+                &Platform {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                },
+                false,
+                false,
+                Some("https://example.com/gwt-linux.tar.gz"),
+                Some("https://example.com/gwt-windows.msi"),
+            ),
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt-windows.msi".to_string(),
+                kind: InstallerKind::WindowsMsi,
+            })
+        );
+        assert_eq!(
+            choose_apply_plan_with_writable(&linux, false, false, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_and_binary_helpers_cover_error_flat_and_missing_layouts() {
+        let temp = tempfile::tempdir().unwrap();
+        let unsupported = temp.path().join("gwt.bin");
+        fs::write(&unsupported, b"bin").unwrap();
+        let err = extract_archive(&unsupported, temp.path()).unwrap_err();
+        assert!(err.contains("Unsupported archive format"));
+
+        let flat_binary = temp.path().join("gwt");
+        fs::write(&flat_binary, b"bin").unwrap();
+        assert_eq!(
+            find_extracted_binary(temp.path(), "gwt").unwrap(),
+            Some(flat_binary)
+        );
+        assert_eq!(find_extracted_binary(temp.path(), "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn prepare_update_handles_tarballs_and_empty_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let archive_path = temp.path().join("payload.tar.gz");
+        {
+            let archive_file = fs::File::create(&archive_path).unwrap();
+            let encoder =
+                flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let binary_name = Platform::detect().binary_name();
+            let daemon_name = companion_binary_name(&binary_name);
+            let bytes = b"tar-gz-bin";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("nested/{binary_name}"), &bytes[..])
+                .unwrap();
+            let daemon_bytes = b"tar-gz-daemon";
+            let mut daemon_header = tar::Header::new_gnu();
+            daemon_header.set_size(daemon_bytes.len() as u64);
+            daemon_header.set_mode(0o755);
+            daemon_header.set_cksum();
+            archive
+                .append_data(
+                    &mut daemon_header,
+                    format!("nested/{daemon_name}"),
+                    &daemon_bytes[..],
+                )
+                .unwrap();
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+
+        let tarball_url = serve_once(
+            "/gwt.tar.gz",
+            "200 OK",
+            "application/gzip",
+            fs::read(&archive_path).unwrap(),
+        );
+        let payload = mgr
+            .prepare_update("99.0.5", &tarball_url)
+            .expect("tarball payload");
+        match payload {
+            PreparedPayload::PortableBinary { path } => {
+                assert_eq!(fs::read(path).unwrap(), b"tar-gz-bin");
+            }
+            other => panic!("expected tarball portable payload, got {other:?}"),
+        }
+
+        let empty_url = serve_once("/empty.bin", "200 OK", "application/octet-stream", vec![]);
+        let err = mgr.prepare_update("99.0.6", &empty_url).unwrap_err();
+        assert!(err.contains("Downloaded payload is empty"));
+    }
+
+    #[test]
+    fn app_bundle_helpers_find_matching_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("GWT.app");
+        let macos_dir = bundle.join("Contents").join("MacOS");
+        fs::create_dir_all(&macos_dir).unwrap();
+        let bundle_exe = macos_dir.join("gwt");
+        fs::write(&bundle_exe, b"bin").unwrap();
+
+        let target = Path::new("/usr/local/bin/gwt");
+        assert_eq!(
+            app_bundle_from_executable(&bundle_exe),
+            Some(bundle.clone())
+        );
+        assert_eq!(
+            app_bundle_executable_path(&bundle, target),
+            Some(bundle_exe.clone())
+        );
+        assert_eq!(
+            find_matching_app_bundle(temp.path(), target),
+            Some(bundle.clone())
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(find_first_app_bundle(temp.path()).unwrap(), Some(bundle));
+        assert_eq!(sh_single_quote("it's ready"), "'it'\\''s ready'");
+    }
+
+    #[test]
+    fn app_bundle_helpers_cover_preferred_and_fallback_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let apps = temp.path().join("Applications");
+        let preferred_dir = apps.join("Preferred.app").join("Contents").join("MacOS");
+        fs::create_dir_all(&preferred_dir).unwrap();
+        fs::write(preferred_dir.join("gwt"), b"preferred").unwrap();
+
+        let fallback_dir = apps.join("Fallback.app").join("Contents").join("MacOS");
+        fs::create_dir_all(&fallback_dir).unwrap();
+        fs::write(fallback_dir.join("alt-gwt"), b"fallback").unwrap();
+
+        assert_eq!(
+            app_bundle_executable_path(&apps.join("Fallback.app"), Path::new("/usr/local/bin/gwt")),
+            Some(fallback_dir.join("alt-gwt"))
+        );
+        assert_eq!(
+            resolve_macos_restart_executable(
+                &apps,
+                Path::new("/usr/local/bin/gwt"),
+                Some(std::ffi::OsStr::new("Preferred.app")),
+            ),
+            preferred_dir.join("gwt")
+        );
+        assert_eq!(
+            find_matching_app_bundle(&apps, Path::new("/usr/local/bin/missing")),
+            None
+        );
+    }
+
+    #[test]
+    fn replace_executables_with_retry_validates_source_and_swaps_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp
+            .path()
+            .join("bin")
+            .join(if cfg!(windows) { "gwt.exe" } else { "gwt" });
+        let source = temp
+            .path()
+            .join(if cfg!(windows) { "new.exe" } else { "new" });
+
+        let missing_err = replace_executables_with_retry(&[(&target, &source)]).unwrap_err();
+        assert!(missing_err.contains("Source missing"));
+
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new-binary").unwrap();
+        replace_executables_with_retry(&[(&target, &source)]).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new-binary");
+
+        let empty = temp
+            .path()
+            .join(if cfg!(windows) { "empty.exe" } else { "empty" });
+        fs::write(&empty, b"").unwrap();
+        let empty_err = replace_executables_with_retry(&[(&target, &empty)]).unwrap_err();
+        assert!(empty_err.contains("Source executable is empty"));
+    }
+
+    #[test]
+    fn replace_paths_rolls_back_when_new_executable_cannot_be_moved() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp
+            .path()
+            .join(if cfg!(windows) { "gwt.exe" } else { "gwt" });
+        let backup = temp.path().join(if cfg!(windows) {
+            "gwt.exe.old"
+        } else {
+            "gwt.old"
+        });
+        let missing_tmp = temp.path().join(if cfg!(windows) {
+            "missing.exe"
+        } else {
+            "missing"
+        });
+
+        fs::write(&target, b"original").unwrap();
+        let err = replace_paths(&target, &backup, &missing_tmp).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert!(!backup.exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_installer_helpers_cover_timeout_and_platform_errors() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let args_path = temp.path().join("restart").join("args.json");
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        mgr.write_restart_args_file(&args_path, vec!["--version".to_string()])
+            .expect("write restart args");
+
+        assert!(is_process_running(std::process::id()));
+        assert!(!is_process_running(999_999));
+
+        let timeout_err =
+            wait_for_pid_exit(std::process::id(), StdDuration::from_millis(1)).unwrap_err();
+        assert!(timeout_err.contains("Timed out waiting for process"));
+        assert!(wait_for_pid_exit(999_999, StdDuration::from_millis(1)).is_ok());
+
+        let mac_pkg_err = internal_run_installer(
+            999_999,
+            Path::new("gwt.exe"),
+            Path::new("installer.pkg"),
+            InstallerKind::MacPkg,
+            &args_path,
+        )
+        .unwrap_err();
+        assert!(mac_pkg_err.contains("mac_pkg installer can only run on macOS"));
+
+        let mac_dmg_err = internal_run_installer(
+            999_999,
+            Path::new("gwt.exe"),
+            Path::new("installer.dmg"),
+            InstallerKind::MacDmg,
+            &args_path,
+        )
+        .unwrap_err();
+        assert!(mac_dmg_err.contains("mac_dmg installer can only run on macOS"));
     }
 }

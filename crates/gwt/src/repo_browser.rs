@@ -4,70 +4,14 @@ use std::{
     thread,
 };
 
+use crate::{AppEventProxy, ClientId, OutboundEvent, UserEvent};
 use gwt::{
-    cleanup_selected_branches, hydrate_branch_entries_with_active_sessions,
-    list_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent,
+    hydrate_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent,
     BranchEntriesPhase, BranchListEntry, BranchScope,
 };
-use tao::event_loop::EventLoopProxy;
-
-use crate::{ClientId, OutboundEvent, UserEvent};
-
-pub(crate) fn spawn_branch_cleanup_async(
-    proxy: EventLoopProxy<UserEvent>,
-    client_id: ClientId,
-    window_id: String,
-    project_root: PathBuf,
-    active_session_branches: HashSet<String>,
-    branches: Vec<String>,
-    delete_remote: bool,
-) {
-    thread::spawn(move || {
-        let events =
-            match list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
-            {
-                Ok(entries) => {
-                    let results = cleanup_selected_branches(
-                        &project_root,
-                        &entries,
-                        &branches,
-                        delete_remote,
-                    );
-                    dispatch_async_events(
-                        &proxy,
-                        vec![OutboundEvent::reply(
-                            client_id.clone(),
-                            BackendEvent::BranchCleanupResult {
-                                id: window_id.clone(),
-                                results,
-                            },
-                        )],
-                    );
-                    dispatch_branch_load_progressive(
-                        &proxy,
-                        &client_id,
-                        &window_id,
-                        &project_root,
-                        &active_session_branches,
-                    );
-                    Vec::new()
-                }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BranchError {
-                        id: window_id,
-                        message: error.to_string(),
-                    },
-                )],
-            };
-        if !events.is_empty() {
-            let _ = proxy.send_event(UserEvent::Dispatch(events));
-        }
-    });
-}
 
 pub(crate) fn spawn_branch_load_async(
-    proxy: EventLoopProxy<UserEvent>,
+    proxy: AppEventProxy,
     client_id: ClientId,
     window_id: String,
     project_root: PathBuf,
@@ -103,7 +47,7 @@ pub(crate) fn preferred_issue_launch_branch(entries: &[BranchListEntry]) -> Opti
 }
 
 fn dispatch_branch_load_progressive(
-    proxy: &EventLoopProxy<UserEvent>,
+    proxy: &AppEventProxy,
     client_id: &ClientId,
     window_id: &str,
     project_root: &Path,
@@ -163,8 +107,8 @@ fn dispatch_branch_load_progressive(
     }
 }
 
-fn dispatch_async_events(proxy: &EventLoopProxy<UserEvent>, events: Vec<OutboundEvent>) {
-    let _ = proxy.send_event(UserEvent::Dispatch(events));
+fn dispatch_async_events(proxy: &AppEventProxy, events: Vec<OutboundEvent>) {
+    proxy.send(UserEvent::Dispatch(events));
 }
 
 #[cfg(test)]

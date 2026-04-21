@@ -20,6 +20,7 @@ const LEGACY_GWT_HOOK_SCRIPT_SEGMENT: &str = "hooks/scripts/gwt-";
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook runtime-state ",
     " hook coordination-event ",
+    " hook board-reminder ",
     " hook workflow-policy",
     " hook block-bash-policy",
     " hook block-git-branch-ops",
@@ -256,6 +257,7 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
             runtime_hook("SessionStart", shell),
             forward_hook(shell),
             coordination_hook("SessionStart", shell),
+            board_reminder_hook("SessionStart", shell),
         ]),
     );
     hooks.insert(
@@ -263,6 +265,7 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
         Value::Array(vec![
             runtime_hook("UserPromptSubmit", shell),
             forward_hook(shell),
+            board_reminder_hook("UserPromptSubmit", shell),
         ]),
     );
     hooks.insert(
@@ -286,6 +289,7 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
             runtime_hook("Stop", shell),
             forward_hook(shell),
             coordination_hook("Stop", shell),
+            board_reminder_hook("Stop", shell),
         ]),
     );
     hooks
@@ -309,6 +313,18 @@ fn coordination_hook(event: &str, shell: HookShell) -> Value {
         "hooks": [
             {
                 "command": coordination_hook_command(event, shell),
+                "type": CLAUDE_HOOK_COMMAND_TYPE,
+            }
+        ]
+    })
+}
+
+fn board_reminder_hook(event: &str, shell: HookShell) -> Value {
+    json!({
+        "matcher": "*",
+        "hooks": [
+            {
+                "command": board_reminder_hook_command(event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
@@ -420,6 +436,13 @@ fn coordination_hook_command(event: &str, shell: HookShell) -> String {
     }
 }
 
+fn board_reminder_hook_command(event: &str, shell: HookShell) -> String {
+    match shell {
+        HookShell::Posix => posix_board_reminder_hook_command(event),
+        HookShell::PowerShell => powershell_board_reminder_hook_command(event),
+    }
+}
+
 fn forward_hook_command(shell: HookShell) -> String {
     forward_hook_command_with_bin(&gwt_hook_bin_path(), shell)
 }
@@ -467,6 +490,11 @@ fn posix_coordination_hook_command(event: &str) -> String {
     format!("{bin} hook coordination-event {event}")
 }
 
+fn posix_board_reminder_hook_command(event: &str) -> String {
+    let bin = posix_shell_quote(&gwt_hook_bin_path());
+    format!("{bin} hook board-reminder {event}")
+}
+
 /// Emit the PowerShell form of the runtime-state hook. Windows Claude
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
 /// keep that wrapper, then invoke the gwt binary via `& '...'` call
@@ -491,6 +519,11 @@ fn powershell_coordination_hook_command(event: &str) -> String {
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook coordination-event {event} }}\"")
 }
 
+fn powershell_board_reminder_hook_command(event: &str) -> String {
+    let bin = powershell_quote(&gwt_hook_bin_path());
+    format!("powershell -NoProfile -Command \"& {{ & {bin} hook board-reminder {event} }}\"")
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -505,6 +538,114 @@ mod tests {
             .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
             .filter_map(|hook| hook["command"].as_str())
             .collect()
+    }
+
+    #[test]
+    fn board_reminder_registered_only_on_intent_boundary_events() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+            let commands = commands_for_event(&value, event);
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| c.contains(&format!(" hook board-reminder {event}"))),
+                "board-reminder must dispatch on {event}; commands: {commands:?}"
+            );
+        }
+        for event in ["PreToolUse", "PostToolUse"] {
+            let commands = commands_for_event(&value, event);
+            assert!(
+                commands
+                    .iter()
+                    .all(|c| !c.contains(" hook board-reminder ")),
+                "board-reminder must NOT be registered on {event}; commands: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn board_reminder_regeneration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let first = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let second = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        assert_eq!(
+            first, second,
+            "settings.local.json must be byte-identical after regeneration"
+        );
+        assert!(first.contains(" hook board-reminder SessionStart"));
+        assert!(first.contains(" hook board-reminder UserPromptSubmit"));
+        assert!(first.contains(" hook board-reminder Stop"));
+    }
+
+    #[test]
+    fn board_reminder_migration_dedupes_legacy_settings_without_board_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join(".claude/settings.local.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        // Legacy settings carry every older gwt-managed hook but none of
+        // them know about board-reminder yet. The regeneration must add
+        // board-reminder on the intent-boundary events without duplicating
+        // any pre-existing managed entries.
+        let legacy = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            {
+                                "command": "'/old/gwt' hook runtime-state SessionStart",
+                                "type": "command"
+                            }
+                        ]
+                    }
+                ],
+                "UserPromptSubmit": [],
+                "PreToolUse": [],
+                "PostToolUse": [],
+                "Stop": []
+            }
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        generate_settings_local(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&settings_path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        // Every intent-boundary event now includes board-reminder exactly
+        // once, and the legacy runtime-state entry has been replaced (not
+        // duplicated) with the freshly generated one.
+        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+            let commands = commands_for_event(&value, event);
+            let board_reminder_count = commands
+                .iter()
+                .filter(|c| c.contains(&format!(" hook board-reminder {event}")))
+                .count();
+            assert_eq!(
+                board_reminder_count, 1,
+                "expected exactly one board-reminder entry on {event}, got {board_reminder_count}: {commands:?}"
+            );
+        }
+
+        let session_start = commands_for_event(&value, "SessionStart");
+        let runtime_count = session_start
+            .iter()
+            .filter(|c| c.contains(" hook runtime-state SessionStart"))
+            .count();
+        assert_eq!(
+            runtime_count, 1,
+            "legacy runtime-state entry must be replaced, not duplicated; got: {session_start:?}"
+        );
     }
 
     #[test]

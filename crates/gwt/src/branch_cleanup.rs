@@ -139,3 +139,81 @@ fn blocked_reason_message(reason: BranchCleanupBlockedReason) -> String {
         BranchCleanupBlockedReason::Unknown => "Cannot clean up this branch".to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{BranchCleanupAvailability, BranchCleanupInfo, BranchScope};
+
+    fn sample_entry(name: &str) -> BranchListEntry {
+        BranchListEntry {
+            name: name.to_string(),
+            scope: BranchScope::Local,
+            is_head: false,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: None,
+            cleanup_ready: true,
+            cleanup: BranchCleanupInfo::default(),
+        }
+    }
+
+    #[test]
+    fn cleanup_selected_branches_reports_missing_branch() {
+        let repo = tempdir().expect("tempdir");
+
+        let results =
+            cleanup_selected_branches(repo.path(), &[], &[String::from("feature/missing")], false);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].branch, "feature/missing");
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
+        assert_eq!(results[0].message, "Branch not found");
+    }
+
+    #[test]
+    fn cleanup_selected_branches_uses_blocked_reason_when_execution_branch_is_missing() {
+        let repo = tempdir().expect("tempdir");
+        let mut entry = sample_entry("feature/demo");
+        entry.cleanup.blocked_reason = Some(BranchCleanupBlockedReason::ActiveSession);
+
+        let results = cleanup_selected_branches(
+            repo.path(),
+            &[entry],
+            &[String::from("feature/demo")],
+            false,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].execution_branch, None);
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
+        assert_eq!(
+            results[0].message,
+            "Cannot clean up a branch with an active session"
+        );
+    }
+
+    #[test]
+    fn cleanup_selected_branches_preserves_blocked_execution_branch_message() {
+        let repo = tempdir().expect("tempdir");
+        let mut entry = sample_entry("feature/demo");
+        entry.cleanup.availability = BranchCleanupAvailability::Blocked;
+        entry.cleanup.execution_branch = Some("feature/demo".to_string());
+        entry.cleanup.blocked_reason = Some(BranchCleanupBlockedReason::ProtectedBranch);
+
+        let results = cleanup_selected_branches(
+            repo.path(),
+            &[entry],
+            &[String::from("feature/demo")],
+            false,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].execution_branch.as_deref(), Some("feature/demo"));
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
+        assert_eq!(results[0].message, "Cannot clean up a protected branch");
+    }
+}

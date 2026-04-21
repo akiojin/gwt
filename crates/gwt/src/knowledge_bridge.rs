@@ -439,3 +439,247 @@ fn load_linked_branches(repo_path: &Path) -> HashMap<u64, Vec<String>> {
     }
     linked
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, ffi::OsString, fs};
+
+    use gwt_github::{
+        client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+        Cache,
+    };
+
+    use super::*;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn init_repo(repo: &Path) {
+        fs::create_dir_all(repo).expect("create repo");
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed");
+
+        let remote = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(repo)
+            .output()
+            .expect("git remote add");
+        assert!(remote.status.success(), "git remote add failed");
+    }
+
+    fn issue_snapshot(
+        number: u64,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+        state: IssueState,
+    ) -> IssueSnapshot {
+        IssueSnapshot {
+            number: IssueNumber(number),
+            title: title.to_string(),
+            body: body.to_string(),
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            state,
+            updated_at: UpdatedAt::new("2026-04-20T12:34:56Z"),
+            comments: vec![CommentSnapshot {
+                id: CommentId(41),
+                body: "Follow-up detail".to_string(),
+                updated_at: UpdatedAt::new("2026-04-20T12:35:00Z"),
+            }],
+        }
+    }
+
+    fn spec_snapshot(number: u64) -> IssueSnapshot {
+        issue_snapshot(
+            number,
+            "Coverage SPEC",
+            r#"<!-- gwt-spec id=2001 version=1 -->
+<!-- sections:
+spec=body
+plan=body
+tasks=body
+notes=body
+-->
+<!-- artifact:spec BEGIN -->
+Raise project coverage to 90%.
+<!-- artifact:spec END -->
+
+<!-- artifact:plan BEGIN -->
+1. Add tests.
+<!-- artifact:plan END -->
+
+<!-- artifact:tasks BEGIN -->
+- [ ] Add push-time gate.
+<!-- artifact:tasks END -->
+
+<!-- artifact:notes BEGIN -->
+Extra context.
+<!-- artifact:notes END -->
+"#,
+            &["gwt-spec", "phase/in-progress"],
+            IssueState::Open,
+        )
+    }
+
+    fn write_issue_links(repo_path: &Path, links: &[(&str, u64)]) {
+        let repo_hash = crate::index_worker::detect_repo_hash(repo_path).expect("repo hash");
+        let path = gwt_cache_dir()
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str()));
+        fs::create_dir_all(path.parent().expect("issue links dir"))
+            .expect("create issue-links dir");
+        let branches = links
+            .iter()
+            .map(|(branch, issue)| ((*branch).to_string(), *issue))
+            .collect::<HashMap<_, _>>();
+        let bytes = serde_json::to_vec(&serde_json::json!({ "branches": branches }))
+            .expect("serialize links");
+        fs::write(path, bytes).expect("write links");
+    }
+
+    #[test]
+    fn load_knowledge_bridge_returns_non_repo_and_disabled_pr_views() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let issue_view = load_knowledge_bridge(dir.path(), KnowledgeKind::Issue, None, false)
+            .expect("issue view");
+        assert_eq!(issue_view.kind, KnowledgeKind::Issue);
+        assert!(!issue_view.refresh_enabled);
+        assert_eq!(
+            issue_view.empty_message.as_deref(),
+            Some("Knowledge Bridge is available only for Git projects.")
+        );
+
+        let pr_view =
+            load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
+        assert_eq!(pr_view.kind, KnowledgeKind::Pr);
+        assert!(!pr_view.refresh_enabled);
+        assert_eq!(pr_view.detail.title, "PR Bridge");
+        assert_eq!(pr_view.detail.state, "unavailable");
+    }
+
+    #[test]
+    fn load_knowledge_bridge_builds_issue_and_spec_views_from_cache() {
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                11,
+                "Coverage bug",
+                "Need more tests.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write issue snapshot");
+        cache
+            .write_snapshot(&spec_snapshot(22))
+            .expect("write spec snapshot");
+        write_issue_links(
+            &repo,
+            &[
+                ("feature/coverage", 11),
+                ("feature/coverage-followup", 11),
+                ("spec/coverage", 22),
+            ],
+        );
+
+        let issue_view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(11), false)
+            .expect("issue bridge");
+        let issue_entry = issue_view
+            .entries
+            .iter()
+            .find(|entry| entry.number == 11)
+            .expect("issue entry");
+        assert_eq!(issue_entry.linked_branch_count, 2);
+        assert_eq!(issue_view.selected_number, Some(11));
+        assert_eq!(issue_view.detail.launch_issue_number, Some(11));
+        assert!(issue_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "Description" && section.body == "Need more tests."));
+        assert!(issue_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "Comment 1" && section.body == "Follow-up detail"));
+        assert!(issue_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "Linked branches"
+                && section.body.contains("feature/coverage")));
+
+        let spec_view = load_knowledge_bridge(&repo, KnowledgeKind::Spec, Some(22), false)
+            .expect("spec bridge");
+        let spec_entry = spec_view
+            .entries
+            .iter()
+            .find(|entry| entry.number == 22)
+            .expect("spec entry");
+        assert_eq!(spec_entry.linked_branch_count, 1);
+        assert!(spec_entry.meta.contains("phase/in-progress"));
+        assert_eq!(spec_view.detail.launch_issue_number, Some(22));
+        assert!(spec_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "spec"
+                && section.body.contains("Raise project coverage")));
+        assert!(spec_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "plan"));
+        assert!(spec_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "tasks"));
+        assert!(spec_view
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "notes"));
+    }
+}
