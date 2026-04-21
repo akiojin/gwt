@@ -14,7 +14,9 @@ pub mod store;
 pub mod types;
 pub mod version_cache;
 
-pub use audit::{is_secret_env_key, redact_env_value_for_audit, REDACTED_PLACEHOLDER};
+pub use audit::{
+    is_secret_env_key, redact_env_value_for_audit, redact_secrets_in_agent, REDACTED_PLACEHOLDER,
+};
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
 pub use launch::{

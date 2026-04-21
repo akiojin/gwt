@@ -52,6 +52,19 @@ pub fn redact_env_value_for_audit<'a>(key: &str, value: &'a str) -> std::borrow:
     }
 }
 
+/// In-place mask every secret-shaped env entry on the given custom agent so
+/// that a copy of it is safe to transmit over the WebSocket protocol without
+/// leaking plaintext `ANTHROPIC_API_KEY` (or similar) to the frontend.
+/// Callers should clone the `CustomCodingAgent` first when the original must
+/// retain secrets for launch.
+pub fn redact_secrets_in_agent(agent: &mut crate::custom::CustomCodingAgent) {
+    for (key, value) in agent.env.iter_mut() {
+        if is_secret_env_key(key) {
+            *value = REDACTED_PLACEHOLDER.to_string();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
