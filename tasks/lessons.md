@@ -3367,3 +3367,29 @@ Resume だった。
    `agent_session_id` を一次調査対象にする。
 3. ユーザーが UI 名を訂正した場合は、調査 plan とテスト観点を即座にその UI に
    切り替える。
+
+## 2026-04-21 — fix: Quick Start resume fallback で resume id だけを借りない
+
+### 事象
+
+Launch Agent の Quick Start で、最新 session に `agent_session_id` がない場合でも
+Resume ボタンは出るようになったが、older resumable session の resume id だけを借りて、
+launch profile は newer session のまま使ってしまう review 指摘が入った。
+
+### 原因
+
+- fallback 実装が「Resume ボタンを出せるか」のみを見ており、resume 対象 session と
+  launch profile の整合性を 1 セットとして扱えていなかった。
+- `apply_quick_start_action()` が `QuickStartEntry` の model / version / runtime target /
+  docker service をそのまま resume launch に使う契約を、fallback helper 側で
+  回帰テストに落とし込めていなかった。
+
+### 再発防止策
+
+1. Quick Start の resume fallback では、resume id だけを借りず、resume 元に選んだ
+   session 全体を entry source として再利用する。
+2. session fallback を実装する helper では、`session_id`、model、reasoning、version、
+   runtime target、docker service、permission flags まで同一 session 由来であることを
+   pure test で固定する。
+3. 「表示用 session」と「実行に使う session」を分ける設計にする場合は、Resume launch が
+   参照する全フィールドの provenance をコード上で明示し、部分的な borrow を禁止する。

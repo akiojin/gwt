@@ -56,7 +56,19 @@ pub(super) fn collect_quick_start_entries_from_sessions(
         }
     }
 
-    let mut sessions = latest_by_agent.into_values().collect::<Vec<_>>();
+    let mut sessions = latest_by_agent
+        .into_iter()
+        .map(|(agent_key, latest_session)| {
+            if agent_session_resume_id(&latest_session).is_some() {
+                latest_session
+            } else {
+                latest_resumable_by_agent
+                    .get(&agent_key)
+                    .cloned()
+                    .unwrap_or(latest_session)
+            }
+        })
+        .collect::<Vec<_>>();
     sessions.sort_by(|left, right| {
         right
             .updated_at
@@ -64,40 +76,27 @@ pub(super) fn collect_quick_start_entries_from_sessions(
             .then_with(|| right.created_at.cmp(&left.created_at))
     });
 
-    let fallback_resume_by_agent = latest_resumable_by_agent
-        .into_iter()
-        .filter_map(|(agent_key, session)| {
-            agent_session_resume_id(&session).map(|resume_id| (agent_key, resume_id))
-        })
-        .collect::<HashMap<_, _>>();
-
     sessions
         .into_iter()
-        .map(|session| {
-            let agent_key = session.agent_id.command().to_string();
-            let resume_session_id = agent_session_resume_id(&session)
-                .or_else(|| fallback_resume_by_agent.get(&agent_key).cloned());
-
-            QuickStartEntry {
-                session_id: session.id.clone(),
-                agent_id: agent_key,
-                tool_label: session.display_name.clone(),
-                model: session.model.clone(),
-                reasoning: session.reasoning_level.clone(),
-                version: session.tool_version.clone().or_else(|| {
-                    session
-                        .agent_id
-                        .package_name()
-                        .map(|_| "installed".to_string())
-                }),
-                resume_session_id,
-                live_window_id: None,
-                skip_permissions: session.skip_permissions,
-                codex_fast_mode: session.codex_fast_mode,
-                runtime_target: session.runtime_target,
-                docker_service: session.docker_service.clone(),
-                docker_lifecycle_intent: session.docker_lifecycle_intent,
-            }
+        .map(|session| QuickStartEntry {
+            session_id: session.id.clone(),
+            agent_id: session.agent_id.command().to_string(),
+            tool_label: session.display_name.clone(),
+            model: session.model.clone(),
+            reasoning: session.reasoning_level.clone(),
+            version: session.tool_version.clone().or_else(|| {
+                session
+                    .agent_id
+                    .package_name()
+                    .map(|_| "installed".to_string())
+            }),
+            resume_session_id: agent_session_resume_id(&session),
+            live_window_id: None,
+            skip_permissions: session.skip_permissions,
+            codex_fast_mode: session.codex_fast_mode,
+            runtime_target: session.runtime_target,
+            docker_service: session.docker_service.clone(),
+            docker_lifecycle_intent: session.docker_lifecycle_intent,
         })
         .collect()
 }
