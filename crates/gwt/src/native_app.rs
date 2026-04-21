@@ -25,6 +25,14 @@ pub fn native_menu_command_for_id(menu_id: &str) -> Option<NativeMenuCommand> {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn windows_app_icon() -> Option<tao::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../../../assets/icons/icon.png")).ok()?;
+    let image = image.into_rgba8();
+    let (width, height) = image.dimensions();
+    tao::window::Icon::from_rgba(image.into_raw(), width, height).ok()
+}
+
 #[cfg(target_os = "macos")]
 pub struct MacosNativeMenu {
     menu_bar: muda::Menu,

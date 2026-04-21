@@ -11,6 +11,7 @@ pub mod index;
 pub mod logging;
 pub mod paths;
 pub mod process;
+mod release_contract;
 pub mod repo_hash;
 pub mod runtime;
 pub mod update;
