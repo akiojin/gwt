@@ -1939,6 +1939,86 @@
       const branchListStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
       const pendingMessages = [];
+      // Phase 1B extraction map: each entry names the surface that owns the
+      // backing state today. New helpers should mutate state through the owning
+      // surface instead of adding cross-surface writes here.
+      const frontendStateOwners = Object.freeze({
+        terminalMap: Object.freeze({
+          owner: "terminal-host",
+          mutatedBy: Object.freeze([
+            "createTerminalRuntime",
+            "fitTerminal",
+            "writeOutput",
+            "replaceTerminalSnapshot",
+            "applyStatus",
+          ]),
+        }),
+        windowMap: Object.freeze({
+          owner: "workspace-window-manager",
+          mutatedBy: Object.freeze([
+            "ensureWindow",
+            "mountWindowBody",
+            "renderWorkspace",
+          ]),
+        }),
+        fileTreeStateMap: Object.freeze({
+          owner: "file-tree-surface",
+          mutatedBy: Object.freeze([
+            "ensureFileTreeState",
+            "renderFileTree",
+          ]),
+        }),
+        branchListStateMap: Object.freeze({
+          owner: "branches-surface",
+          mutatedBy: Object.freeze([
+            "ensureBranchListState",
+            "renderBranches",
+          ]),
+        }),
+        knowledgeBridgeStateMap: Object.freeze({
+          owner: "knowledge-bridge-surface",
+          mutatedBy: Object.freeze([
+            "ensureKnowledgeBridgeState",
+            "renderKnowledgeBridge",
+          ]),
+        }),
+        wizardState: Object.freeze({
+          owner: "launch-wizard-surface",
+          state: Object.freeze([
+            "launchWizard",
+            "wizardWasOpen",
+            "wizardAdvancedOpen",
+            "wizardBranchDraft",
+            "wizardBranchBackendValue",
+          ]),
+          mutatedBy: Object.freeze([
+            "openIssueLaunchWizard",
+            "sendWizardAction",
+            "renderLaunchWizard",
+            "flushWizardBranchDraft",
+            "syncWizardDraftState",
+          ]),
+        }),
+        projectState: Object.freeze({
+          owner: "project-workspace-shell",
+          state: Object.freeze([
+            "appState",
+            "versionState",
+            "projectError",
+            "viewport",
+            "windowListOpen",
+            "windowListEntries",
+          ]),
+          mutatedBy: Object.freeze([
+            "renderAppState",
+            "renderWorkspace",
+            "renderProjectTabs",
+            "renderProjectPicker",
+            "renderProjectOnboarding",
+            "renderWindowList",
+          ]),
+        }),
+      });
 
       // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
       // Incremented on every `terminal.onData` firing so layer-by-layer counts
@@ -5741,7 +5821,7 @@
         });
       }
 
-      window.__POC__ = { receive };
+      window.__POC__ = { receive, frontendStateOwners };
 
       renderAppState(appState);
       connectSocket();
