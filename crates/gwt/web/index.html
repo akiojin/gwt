@@ -325,6 +325,7 @@
 
       .workspace-window.surface-file-tree,
       .workspace-window.surface-branches,
+      .workspace-window.surface-profile,
       .workspace-window.surface-knowledge,
       .workspace-window.surface-mock {
         background: rgba(255, 255, 255, 0.98);
@@ -348,6 +349,7 @@
 
       .surface-file-tree .titlebar,
       .surface-branches .titlebar,
+      .surface-profile .titlebar,
       .surface-knowledge .titlebar,
       .surface-mock .titlebar {
         background: rgba(248, 250, 252, 0.98);
@@ -392,6 +394,7 @@
       .surface-file-tree .status-chip,
       .surface-branches .status-chip,
       .surface-knowledge .status-chip,
+      .surface-profile .status-chip,
       .surface-mock .status-chip {
         color: #334155;
       }
@@ -441,6 +444,7 @@
       .surface-file-tree .icon-button,
       .surface-branches .icon-button,
       .surface-knowledge .icon-button,
+      .surface-profile .icon-button,
       .surface-mock .icon-button {
         color: #334155;
       }
@@ -470,6 +474,7 @@
       .surface-file-tree .window-body,
       .surface-branches .window-body,
       .surface-knowledge .window-body,
+      .surface-profile .window-body,
       .surface-mock .window-body {
         background: #ffffff;
       }
@@ -530,6 +535,7 @@
       .file-tree-root,
       .branch-list-root,
       .knowledge-root,
+      .profile-root,
       .mock-root {
         position: absolute;
         inset: 0;
@@ -540,6 +546,7 @@
       .file-tree-toolbar,
       .branch-toolbar,
       .knowledge-toolbar,
+      .profile-toolbar,
       .mock-toolbar {
         display: flex;
         align-items: center;
@@ -572,6 +579,10 @@
         align-items: flex-start;
       }
 
+      .profile-toolbar {
+        align-items: flex-start;
+      }
+
       .knowledge-toolbar-main {
         min-width: 0;
         flex: 1;
@@ -579,7 +590,19 @@
         gap: 8px;
       }
 
+      .profile-toolbar-main {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+
       .knowledge-toolbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .profile-toolbar-actions {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -618,6 +641,7 @@
       .file-tree-path,
       .branch-heading,
       .knowledge-heading,
+      .profile-heading,
       .mock-heading {
         min-width: 0;
         font-size: 12px;
@@ -630,9 +654,201 @@
 
       .file-tree-scroll,
       .branch-scroll,
+      .profile-scroll,
       .mock-scroll {
         flex: 1;
         overflow: auto;
+      }
+
+      .profile-status {
+        display: none;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        font-size: 12px;
+      }
+
+      .profile-status.visible {
+        display: block;
+      }
+
+      .profile-status.info {
+        background: rgba(59, 130, 246, 0.08);
+        color: #1d4ed8;
+      }
+
+      .profile-status.error {
+        background: rgba(239, 68, 68, 0.08);
+        color: #b91c1c;
+      }
+
+      .profile-layout {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(180px, 32%) minmax(0, 1fr);
+      }
+
+      .profile-list-pane,
+      .profile-detail-pane {
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+      }
+
+      .profile-list-pane {
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .profile-list {
+        display: grid;
+      }
+
+      .profile-row {
+        display: grid;
+        gap: 4px;
+        width: 100%;
+        padding: 10px 12px;
+        border: none;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .profile-row.selected {
+        background: rgba(59, 130, 246, 0.1);
+      }
+
+      .profile-row-main,
+      .profile-section-head,
+      .profile-form-row,
+      .profile-table-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .profile-name {
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+        overflow-wrap: anywhere;
+      }
+
+      .profile-description,
+      .profile-subtle {
+        font-size: 11px;
+        color: #64748b;
+        overflow-wrap: anywhere;
+      }
+
+      .profile-detail {
+        display: grid;
+        gap: 12px;
+        padding: 12px;
+      }
+
+      .profile-section {
+        display: grid;
+        gap: 8px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .profile-section:last-child {
+        border-bottom: none;
+        padding-bottom: 0;
+      }
+
+      .profile-section-title {
+        font-size: 12px;
+        font-weight: 700;
+        color: #334155;
+      }
+
+      .profile-form-grid {
+        display: grid;
+        grid-template-columns: minmax(92px, 1fr) minmax(120px, 1.4fr) auto;
+        gap: 8px;
+      }
+
+      .profile-form-grid.two {
+        grid-template-columns: minmax(120px, 1fr) auto;
+      }
+
+      .profile-input {
+        min-width: 0;
+        height: 30px;
+        padding: 0 8px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.42);
+        background: #ffffff;
+        color: #0f172a;
+        font-size: 12px;
+      }
+
+      .profile-input[disabled] {
+        background: #f8fafc;
+        color: #64748b;
+      }
+
+      .profile-button {
+        height: 30px;
+        padding: 0 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.4);
+        background: #f8fafc;
+        color: #334155;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .profile-button.primary {
+        background: #0f172a;
+        border-color: #0f172a;
+        color: #ffffff;
+      }
+
+      .profile-button.danger {
+        color: #b91c1c;
+      }
+
+      .profile-button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      .profile-table {
+        display: grid;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .profile-table-row {
+        padding: 8px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .profile-table-row:last-child {
+        border-bottom: none;
+      }
+
+      .profile-table-row.preview {
+        justify-content: flex-start;
+        align-items: flex-start;
+        display: grid;
+        grid-template-columns: minmax(92px, 0.9fr) minmax(120px, 1.4fr) auto;
+      }
+
+      .profile-value {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        font-size: 12px;
+        color: #0f172a;
       }
 
       .knowledge-search {
@@ -1999,6 +2215,8 @@
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      const profileWindowStateMap = new Map();
+      const profileWindowBodies = new Map();
       const pendingMessages = [];
 
       // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
@@ -2023,6 +2241,7 @@
       let windowListOpen = false;
       let windowListEntries = [];
       let titlebarClickState = null;
+      let profileSnapshot = null;
       let appState = {
         app_version: "",
         tabs: [],
@@ -2082,6 +2301,9 @@
         }
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
+        }
+        if (preset === "profile") {
+          return "profile";
         }
         return "mock";
       }
@@ -4889,6 +5111,7 @@
           "surface-file-tree",
           "surface-branches",
           "surface-knowledge",
+          "surface-profile",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
@@ -5063,6 +5286,11 @@
           return;
         }
 
+        if (surface === "profile") {
+          renderProfileWindow(body, windowData);
+          return;
+        }
+
         if (windowData.preset === "settings") {
           renderSettingsWindow(body, windowData);
           return;
@@ -5095,6 +5323,446 @@
           `;
           scroll.appendChild(section);
         }
+      }
+
+      function ensureProfileWindowState(windowId) {
+        if (!profileWindowStateMap.has(windowId)) {
+          profileWindowStateMap.set(windowId, {
+            selected: "",
+            loading: false,
+            statusMessage: "",
+            statusKind: "",
+          });
+        }
+        return profileWindowStateMap.get(windowId);
+      }
+
+      function selectedProfileForWindow(windowId) {
+        const state = ensureProfileWindowState(windowId);
+        if (state.selected && profileSnapshot) {
+          const exists = profileSnapshot.profiles.some(
+            (profile) => profile.name === state.selected,
+          );
+          if (exists) {
+            return state.selected;
+          }
+        }
+        return profileSnapshot?.selected || profileSnapshot?.active || "default";
+      }
+
+      function profileByName(name) {
+        return (
+          profileSnapshot?.profiles.find((profile) => profile.name === name) ||
+          profileSnapshot?.profiles[0] ||
+          null
+        );
+      }
+
+      function requestProfiles(windowId, selectedProfile = null) {
+        const state = ensureProfileWindowState(windowId);
+        state.loading = true;
+        state.statusMessage = "Loading profiles...";
+        state.statusKind = "info";
+        send({
+          kind: "list_profiles",
+          id: windowId,
+          selected_profile: selectedProfile,
+        });
+      }
+
+      function setProfileStatus(windowId, message, kind = "info") {
+        const state = ensureProfileWindowState(windowId);
+        state.statusMessage = message;
+        state.statusKind = kind;
+        renderProfileWindows();
+      }
+
+      function createProfileButton(label, action, extraClass = "") {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `profile-button ${extraClass}`.trim();
+        button.dataset.action = action;
+        button.textContent = label;
+        return button;
+      }
+
+      function createProfileInput(value, placeholder = "") {
+        const input = document.createElement("input");
+        input.className = "profile-input";
+        input.value = value || "";
+        input.placeholder = placeholder;
+        return input;
+      }
+
+      function appendProfileStatus(root, windowId) {
+        const state = ensureProfileWindowState(windowId);
+        const status = createDiv("profile-status");
+        status.classList.toggle("visible", Boolean(state.statusMessage));
+        status.classList.toggle("error", state.statusKind === "error");
+        status.classList.toggle("info", state.statusKind !== "error");
+        status.textContent = state.statusMessage;
+        root.appendChild(status);
+      }
+
+      function renderProfileWindow(body, windowData) {
+        while (body.firstChild) body.removeChild(body.firstChild);
+        profileWindowBodies.set(windowData.id, body);
+        const state = ensureProfileWindowState(windowData.id);
+        const root = createDiv("profile-root");
+        const toolbar = createDiv("profile-toolbar");
+        const toolbarMain = createDiv("profile-toolbar-main");
+        const heading = createDiv("profile-heading");
+        heading.textContent = "Profiles";
+        const summary = createDiv("profile-subtle");
+        summary.textContent = profileSnapshot
+          ? `Active: ${profileSnapshot.active}`
+          : "Waiting for profile data";
+        toolbarMain.appendChild(heading);
+        toolbarMain.appendChild(summary);
+        toolbar.appendChild(toolbarMain);
+        const actions = createDiv("profile-toolbar-actions");
+        const refresh = document.createElement("button");
+        refresh.className = "icon-button";
+        refresh.type = "button";
+        refresh.setAttribute("aria-label", "Refresh profiles");
+        refresh.textContent = "↻";
+        refresh.addEventListener("click", (event) => {
+          event.stopPropagation();
+          requestProfiles(windowData.id, selectedProfileForWindow(windowData.id));
+          renderProfileWindows();
+        });
+        actions.appendChild(refresh);
+        toolbar.appendChild(actions);
+        root.appendChild(toolbar);
+        appendProfileStatus(root, windowData.id);
+
+        const layout = createDiv("profile-layout");
+        const listPane = createDiv("profile-list-pane");
+        const detailPane = createDiv("profile-detail-pane");
+        layout.appendChild(listPane);
+        layout.appendChild(detailPane);
+        root.appendChild(layout);
+        body.appendChild(root);
+        if (!body.dataset.profileFocusBound) {
+          body.dataset.profileFocusBound = "true";
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            send({ kind: "focus_window", id: windowData.id });
+          });
+        }
+
+        if (!profileSnapshot) {
+          const empty = createDiv("mock-empty");
+          empty.textContent = state.loading ? "Loading profiles..." : "No profile data loaded.";
+          detailPane.appendChild(empty);
+          if (!state.loading) {
+            requestProfiles(windowData.id, state.selected || null);
+          }
+          renderProfileList(windowData.id, listPane);
+          return;
+        }
+
+        renderProfileList(windowData.id, listPane);
+        renderProfileDetail(windowData.id, detailPane);
+      }
+
+      function renderProfileWindows() {
+        for (const [windowId, body] of Array.from(profileWindowBodies.entries())) {
+          if (!body.isConnected) {
+            profileWindowBodies.delete(windowId);
+            profileWindowStateMap.delete(windowId);
+            continue;
+          }
+          const windowData = windowMap.get(windowId)?.__windowData;
+          if (windowData) {
+            renderProfileWindow(body, windowData);
+          }
+        }
+      }
+
+      function renderProfileList(windowId, pane) {
+        const list = createDiv("profile-list");
+        const state = ensureProfileWindowState(windowId);
+        const selected = selectedProfileForWindow(windowId);
+        const profiles = profileSnapshot?.profiles || [];
+        for (const profile of profiles) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "profile-row";
+          row.classList.toggle("selected", profile.name === selected);
+          row.addEventListener("click", (event) => {
+            event.stopPropagation();
+            state.selected = profile.name;
+            state.statusMessage = "";
+            renderProfileWindows();
+          });
+          const main = createDiv("profile-row-main");
+          const name = createDiv("profile-name");
+          name.textContent = profile.name;
+          main.appendChild(name);
+          if (profile.active) {
+            const chip = document.createElement("span");
+            chip.className = "mock-chip";
+            chip.textContent = "active";
+            main.appendChild(chip);
+          }
+          row.appendChild(main);
+          const description = createDiv("profile-description");
+          description.textContent = profile.description || "No description";
+          row.appendChild(description);
+          list.appendChild(row);
+        }
+        const add = createDiv("profile-section");
+        const title = createDiv("profile-section-title");
+        title.textContent = "Add profile";
+        add.appendChild(title);
+        const form = createDiv("profile-form-grid");
+        const nameInput = createProfileInput("", "name");
+        const descriptionInput = createProfileInput("", "description");
+        const button = createProfileButton("Add", "profile-add", "primary");
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          send({
+            kind: "add_profile",
+            id: windowId,
+            name: nameInput.value,
+            description: descriptionInput.value,
+          });
+        });
+        form.appendChild(nameInput);
+        form.appendChild(descriptionInput);
+        form.appendChild(button);
+        add.appendChild(form);
+        list.appendChild(add);
+        pane.appendChild(list);
+      }
+
+      function renderProfileDetail(windowId, pane) {
+        const selected = selectedProfileForWindow(windowId);
+        const profile = profileByName(selected);
+        const detail = createDiv("profile-detail");
+        pane.appendChild(detail);
+        if (!profile) {
+          const empty = createDiv("mock-empty");
+          empty.textContent = "No profiles configured.";
+          detail.appendChild(empty);
+          return;
+        }
+        renderProfileMetadata(windowId, detail, profile);
+        renderProfileEnvVars(windowId, detail, profile);
+        renderProfileDisabledEnv(windowId, detail, profile);
+        renderProfileMergedEnv(detail, profile);
+      }
+
+      function renderProfileMetadata(windowId, detail, profile) {
+        const section = createDiv("profile-section");
+        const head = createDiv("profile-section-head");
+        const title = createDiv("profile-section-title");
+        title.textContent = "Metadata";
+        head.appendChild(title);
+        if (!profile.active) {
+          const activate = createProfileButton("Set active", "profile-switch", "primary");
+          activate.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({
+              kind: "switch_profile",
+              id: windowId,
+              profile_name: profile.name,
+            });
+          });
+          head.appendChild(activate);
+        }
+        section.appendChild(head);
+        const form = createDiv("profile-form-grid");
+        const nameInput = createProfileInput(profile.name, "name");
+        const descriptionInput = createProfileInput(profile.description, "description");
+        const save = createProfileButton("Save", "profile-save", "primary");
+        save.addEventListener("click", (event) => {
+          event.stopPropagation();
+          send({
+            kind: "update_profile",
+            id: windowId,
+            current_name: profile.name,
+            name: nameInput.value,
+            description: descriptionInput.value,
+          });
+        });
+        if (profile.name === "default") {
+          nameInput.disabled = true;
+        }
+        form.appendChild(nameInput);
+        form.appendChild(descriptionInput);
+        form.appendChild(save);
+        section.appendChild(form);
+        const deleteButton = createProfileButton("Delete profile", "profile-delete", "danger");
+        deleteButton.disabled = profile.name === "default";
+        deleteButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (profile.name !== "default") {
+            send({
+              kind: "delete_profile",
+              id: windowId,
+              profile_name: profile.name,
+            });
+          }
+        });
+        section.appendChild(deleteButton);
+        detail.appendChild(section);
+      }
+
+      function renderProfileEnvVars(windowId, detail, profile) {
+        const section = createDiv("profile-section");
+        const title = createDiv("profile-section-title");
+        title.textContent = "Profile variables";
+        section.appendChild(title);
+        const add = createDiv("profile-form-grid");
+        const keyInput = createProfileInput("", "KEY");
+        const valueInput = createProfileInput("", "value");
+        const addButton = createProfileButton("Add", "profile-env-add", "primary");
+        addButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          send({
+            kind: "set_profile_env_var",
+            id: windowId,
+            profile_name: profile.name,
+            key: keyInput.value,
+            value: valueInput.value,
+          });
+        });
+        add.appendChild(keyInput);
+        add.appendChild(valueInput);
+        add.appendChild(addButton);
+        section.appendChild(add);
+        const table = createDiv("profile-table");
+        if (profile.env_vars.length === 0) {
+          const row = createDiv("profile-table-row");
+          const empty = createDiv("profile-subtle");
+          empty.textContent = "No profile variables.";
+          row.appendChild(empty);
+          table.appendChild(row);
+        }
+        for (const entry of profile.env_vars) {
+          const row = createDiv("profile-table-row");
+          const key = createProfileInput(entry.key, "KEY");
+          const value = createProfileInput(entry.value, "value");
+          const save = createProfileButton("Save", "profile-env-save");
+          save.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({
+              kind: "update_profile_env_var",
+              id: windowId,
+              profile_name: profile.name,
+              current_key: entry.key,
+              key: key.value,
+              value: value.value,
+            });
+          });
+          const remove = createProfileButton("×", "profile-env-delete", "danger");
+          remove.setAttribute("aria-label", `Delete ${entry.key}`);
+          remove.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({
+              kind: "delete_profile_env_var",
+              id: windowId,
+              profile_name: profile.name,
+              key: entry.key,
+            });
+          });
+          row.appendChild(key);
+          row.appendChild(value);
+          row.appendChild(save);
+          row.appendChild(remove);
+          table.appendChild(row);
+        }
+        section.appendChild(table);
+        detail.appendChild(section);
+      }
+
+      function renderProfileDisabledEnv(windowId, detail, profile) {
+        const section = createDiv("profile-section");
+        const title = createDiv("profile-section-title");
+        title.textContent = "Disabled OS variables";
+        section.appendChild(title);
+        const add = createDiv("profile-form-grid two");
+        const keyInput = createProfileInput("", "KEY");
+        const addButton = createProfileButton("Add", "profile-disabled-add", "primary");
+        addButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          send({
+            kind: "add_disabled_env",
+            id: windowId,
+            profile_name: profile.name,
+            key: keyInput.value,
+          });
+        });
+        add.appendChild(keyInput);
+        add.appendChild(addButton);
+        section.appendChild(add);
+        const table = createDiv("profile-table");
+        if (profile.disabled_env.length === 0) {
+          const row = createDiv("profile-table-row");
+          const empty = createDiv("profile-subtle");
+          empty.textContent = "No disabled OS variables.";
+          row.appendChild(empty);
+          table.appendChild(row);
+        }
+        for (const disabledKey of profile.disabled_env) {
+          const row = createDiv("profile-table-row");
+          const key = createProfileInput(disabledKey, "KEY");
+          const save = createProfileButton("Save", "profile-disabled-save");
+          save.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({
+              kind: "update_disabled_env",
+              id: windowId,
+              profile_name: profile.name,
+              current_key: disabledKey,
+              key: key.value,
+            });
+          });
+          const remove = createProfileButton("×", "profile-disabled-delete", "danger");
+          remove.setAttribute("aria-label", `Delete ${disabledKey}`);
+          remove.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({
+              kind: "delete_disabled_env",
+              id: windowId,
+              profile_name: profile.name,
+              key: disabledKey,
+            });
+          });
+          row.appendChild(key);
+          row.appendChild(save);
+          row.appendChild(remove);
+          table.appendChild(row);
+        }
+        section.appendChild(table);
+        detail.appendChild(section);
+      }
+
+      function renderProfileMergedEnv(detail, profile) {
+        const section = createDiv("profile-section");
+        const title = createDiv("profile-section-title");
+        title.textContent = "Effective environment preview";
+        section.appendChild(title);
+        const table = createDiv("profile-table");
+        table.dataset.role = "profile-merged-env";
+        for (const entry of profile.merged_env) {
+          const row = createDiv("profile-table-row preview");
+          const key = createDiv("profile-value");
+          key.textContent = entry.key;
+          const value = createDiv("profile-value");
+          value.textContent = entry.value;
+          const chip = document.createElement("span");
+          chip.className = "mock-chip";
+          chip.textContent = entry.source === "profile" ? "profile" : "os";
+          row.appendChild(key);
+          row.appendChild(value);
+          row.appendChild(chip);
+          table.appendChild(row);
+        }
+        section.appendChild(table);
+        detail.appendChild(section);
       }
 
       // All DOM nodes are built via createElement + textContent to avoid
@@ -5402,6 +6070,7 @@
           });
         }
 
+        element.__windowData = windowData;
         if (!element.dataset.preset || element.dataset.preset !== windowData.preset) {
           element.dataset.preset = windowData.preset;
           mountWindowBody(windowData, element);
@@ -5450,6 +6119,8 @@
           fileTreeStateMap.delete(windowId);
           branchListStateMap.delete(windowId);
           knowledgeBridgeStateMap.delete(windowId);
+          profileWindowStateMap.delete(windowId);
+          profileWindowBodies.delete(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
@@ -5649,6 +6320,36 @@
             pendingAddFromPreset = null;
             setSettingsStatus(`Error [${event.code}]: ${event.message}`, "error");
             break;
+          case "profile_snapshot": {
+            const hadProfileSnapshot = Boolean(profileSnapshot);
+            profileSnapshot = event.snapshot;
+            const state = ensureProfileWindowState(event.id);
+            state.loading = false;
+            state.selected = event.snapshot.selected || event.snapshot.active;
+            state.statusMessage = hadProfileSnapshot ? "Profiles saved." : "Profiles loaded.";
+            state.statusKind = "info";
+            for (const [windowId, otherState] of profileWindowStateMap.entries()) {
+              if (windowId === event.id) continue;
+              otherState.loading = false;
+              if (
+                otherState.selected &&
+                !event.snapshot.profiles.some(
+                  (profile) => profile.name === otherState.selected,
+                )
+              ) {
+                otherState.selected = event.snapshot.active;
+              }
+            }
+            renderProfileWindows();
+            break;
+          }
+          case "profile_error":
+            setProfileStatus(
+              event.id,
+              `Error [${event.code}]: ${event.message}`,
+              "error",
+            );
+            break;
         }
       }
 
@@ -5820,7 +6521,7 @@
           return null;
         }
         return element.closest(
-          ".branch-scroll, .file-tree-scroll, .knowledge-list-pane, .knowledge-detail-scroll",
+          ".branch-scroll, .file-tree-scroll, .knowledge-list-pane, .knowledge-detail-scroll, .profile-list-pane, .profile-detail-pane",
         );
       }
 

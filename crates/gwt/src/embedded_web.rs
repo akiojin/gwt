@@ -342,4 +342,30 @@ mod tests {
             "expected pending Markdown lists to flush before a following paragraph preserves source order",
         );
     }
+
+    #[test]
+    fn embedded_web_profile_surface_uses_config_backed_contract() {
+        let html = index_html();
+
+        assert!(
+            html.contains("profile-root"),
+            "expected Profile window to render a dedicated non-mock root",
+        );
+        assert!(
+            html.contains("list_profiles"),
+            "expected Profile window to request a backend profile snapshot",
+        );
+        assert!(
+            html.contains("profile_snapshot"),
+            "expected Profile window to handle backend profile snapshots",
+        );
+        assert!(
+            html.contains("profile-add"),
+            "expected Profile window to expose inline profile add controls",
+        );
+        assert!(
+            html.contains("profile-merged-env"),
+            "expected Profile window to expose an effective environment preview",
+        );
+    }
 }

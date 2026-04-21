@@ -623,6 +623,95 @@ impl AppRuntime {
             | FrontendEvent::TestBackendConnection { .. }) => self
                 .custom_agents
                 .handle_event(client_id, custom_agents_event),
+            FrontendEvent::ListProfiles {
+                id,
+                selected_profile,
+            } => vec![OutboundEvent::reply(
+                client_id,
+                gwt::profiles_dispatch::list_event(id, selected_profile),
+            )],
+            FrontendEvent::SwitchProfile { id, profile_name } => {
+                vec![OutboundEvent::broadcast(
+                    gwt::profiles_dispatch::switch_event(id, profile_name),
+                )]
+            }
+            FrontendEvent::AddProfile {
+                id,
+                name,
+                description,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::add_profile_event(id, name, description),
+            )],
+            FrontendEvent::UpdateProfile {
+                id,
+                current_name,
+                name,
+                description,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::update_profile_event(id, current_name, name, description),
+            )],
+            FrontendEvent::DeleteProfile { id, profile_name } => {
+                vec![OutboundEvent::broadcast(
+                    gwt::profiles_dispatch::delete_profile_event(id, profile_name),
+                )]
+            }
+            FrontendEvent::SetProfileEnvVar {
+                id,
+                profile_name,
+                key,
+                value,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::set_env_var_event(id, profile_name, key, value),
+            )],
+            FrontendEvent::UpdateProfileEnvVar {
+                id,
+                profile_name,
+                current_key,
+                key,
+                value,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::update_env_var_event(
+                    id,
+                    profile_name,
+                    current_key,
+                    key,
+                    value,
+                ),
+            )],
+            FrontendEvent::DeleteProfileEnvVar {
+                id,
+                profile_name,
+                key,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::delete_env_var_event(id, profile_name, key),
+            )],
+            FrontendEvent::AddDisabledEnv {
+                id,
+                profile_name,
+                key,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::add_disabled_env_event(id, profile_name, key),
+            )],
+            FrontendEvent::UpdateDisabledEnv {
+                id,
+                profile_name,
+                current_key,
+                key,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::update_disabled_env_event(
+                    id,
+                    profile_name,
+                    current_key,
+                    key,
+                ),
+            )],
+            FrontendEvent::DeleteDisabledEnv {
+                id,
+                profile_name,
+                key,
+            } => vec![OutboundEvent::broadcast(
+                gwt::profiles_dispatch::delete_disabled_env_event(id, profile_name, key),
+            )],
         }
     }
 
