@@ -147,20 +147,19 @@ impl Platform {
     }
 
     fn binary_name(&self) -> String {
-        if self.os == "windows" {
-            "gwt.exe".to_string()
-        } else {
-            "gwt".to_string()
-        }
+        crate::release_contract::bundle_binary_names(&self.os)
+            .and_then(|names| names.into_iter().next())
+            .unwrap_or_else(|| {
+                if self.os == "windows" {
+                    "gwt.exe".to_string()
+                } else {
+                    "gwt".to_string()
+                }
+            })
     }
 
     fn portable_asset_name(&self) -> Option<String> {
-        let artifact = self.artifact()?;
-        if self.os == "windows" {
-            Some(format!("gwt-{artifact}.zip"))
-        } else {
-            Some(format!("gwt-{artifact}.tar.gz"))
-        }
+        crate::release_contract::portable_asset_name(&self.os, &self.arch)
     }
 }
 
@@ -707,7 +706,16 @@ fn asset_name_from_url(url: &str) -> Option<String> {
 fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
     match platform.os.as_str() {
         "macos" => {
-            // New release flow: prefer DMG for macOS.
+            if let Some(asset_name) = crate::release_contract::installer_asset_name(&platform.os) {
+                if let Some(asset) = assets
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(&asset_name))
+                {
+                    return Some(asset.browser_download_url.clone());
+                }
+            }
+
+            // Legacy release flow: prefer any DMG for macOS.
             if let Some(asset) = assets.iter().find(|a| {
                 let lower = a.name.to_ascii_lowercase();
                 lower.ends_with(".dmg") && asset_matches_arch(&lower, &platform.arch)
@@ -736,7 +744,16 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 .map(|a| a.browser_download_url.clone())
         }
         "windows" => {
-            // New release flow: WiX MSI.
+            if let Some(asset_name) = crate::release_contract::installer_asset_name(&platform.os) {
+                if let Some(asset) = assets
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(&asset_name))
+                {
+                    return Some(asset.browser_download_url.clone());
+                }
+            }
+
+            // Legacy naming fallback.
             if let Some(asset) = assets
                 .iter()
                 .find(|a| a.name.eq_ignore_ascii_case("gwt-wix-windows-x86_64.msi"))
@@ -744,7 +761,6 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 return Some(asset.browser_download_url.clone());
             }
 
-            // Legacy naming fallback.
             if let Some(asset) = assets
                 .iter()
                 .find(|a| a.name.eq_ignore_ascii_case("gwt-windows-x86_64.msi"))
@@ -1820,6 +1836,22 @@ mod tests {
     }
 
     #[test]
+    fn shared_release_contract_exposes_current_stable_bundle_assets() {
+        assert_eq!(
+            crate::release_contract::portable_asset_name("windows", "x86_64").as_deref(),
+            Some("gwt-windows-x86_64.zip")
+        );
+        assert_eq!(
+            crate::release_contract::installer_asset_name("windows").as_deref(),
+            Some("gwt-windows-x86_64.msi")
+        );
+        assert_eq!(
+            crate::release_contract::bundle_binary_names("windows").expect("bundle binaries"),
+            vec!["gwt.exe".to_string(), "gwtd.exe".to_string()]
+        );
+    }
+
+    #[test]
     fn choose_apply_plan_prefers_portable_for_macos_cli_install() {
         let platform = Platform {
             os: "macos".to_string(),
@@ -1898,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn find_installer_asset_url_prefers_windows_wix_msi() {
+    fn find_installer_asset_url_prefers_contract_windows_msi() {
         let platform = Platform {
             os: "windows".to_string(),
             arch: "x86_64".to_string(),
@@ -1912,10 +1944,14 @@ mod tests {
                 name: "gwt-wix-windows-x86_64.msi".to_string(),
                 browser_download_url: "https://example.com/wix.msi".to_string(),
             },
+            GitHubAsset {
+                name: "gwt-windows-x86_64.msi".to_string(),
+                browser_download_url: "https://example.com/current.msi".to_string(),
+            },
         ];
 
         let url = find_installer_asset_url(&platform, &assets);
-        assert_eq!(url.as_deref(), Some("https://example.com/wix.msi"));
+        assert_eq!(url.as_deref(), Some("https://example.com/current.msi"));
     }
 
     #[test]
