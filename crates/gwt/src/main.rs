@@ -2683,7 +2683,8 @@ mod tests {
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
         close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content, hook_forward_authorized,
+        docker_bundle_mounts_for_home, docker_bundle_override_content,
+        ensure_docker_gwt_binary_setup_for_home, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
         AppEventProxy, AppRuntime, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
@@ -4754,6 +4755,61 @@ mod tests {
     }
 
     #[test]
+    fn docker_binary_setup_installs_missing_bundle_before_writing_override() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let mut installer_calls = 0;
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
+            installer_calls += 1;
+            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                .expect("create bin dir");
+            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+            Ok(())
+        })
+        .expect("docker setup");
+
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        assert_eq!(installer_calls, 1);
+        assert_eq!(fs::read(&bundle.host_gwt).expect("read gwt"), b"linux-gwt");
+        assert_eq!(
+            fs::read(&bundle.host_gwtd).expect("read gwtd"),
+            b"linux-gwtd"
+        );
+
+        let override_content = fs::read_to_string(repo.path().join("docker-compose.override.yml"))
+            .expect("override content");
+        assert!(override_content.contains("gwt-linux:/usr/local/bin/gwt:ro"));
+        assert!(override_content.contains("gwtd-linux:/usr/local/bin/gwtd:ro"));
+    }
+
+    #[test]
+    fn docker_binary_setup_skips_installer_when_bundle_exists() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
+            panic!("installer should not run when both bundle binaries exist");
+        })
+        .expect("docker setup");
+
+        assert_eq!(
+            fs::read(&bundle.host_gwt).expect("read gwt"),
+            b"existing-gwt"
+        );
+        assert_eq!(
+            fs::read(&bundle.host_gwtd).expect("read gwtd"),
+            b"existing-gwtd"
+        );
+        assert!(repo.path().join("docker-compose.override.yml").exists());
+    }
+
+    #[test]
     fn issue_and_spec_presets_route_to_knowledge_bridge_kind() {
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Issue),
@@ -6586,23 +6642,17 @@ fn install_launch_gwt_bin_env_with_lookup(
     Ok(())
 }
 
-fn resolve_user_home_dir() -> Result<PathBuf, String> {
-    let home = if cfg!(windows) {
-        std::env::var("USERPROFILE")
-    } else {
-        std::env::var("HOME")
-    }
-    .map(PathBuf::from)
-    .map_err(|_| "Could not determine home directory".to_string())?;
-    Ok(home)
-}
-
-fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
-    let gwt_bin_dir = home.join(".gwt").join("bin");
+fn docker_bundle_mounts_for_gwt_home(gwt_home: &Path) -> DockerBundleMounts {
+    let gwt_bin_dir = gwt_home.join("bin");
     DockerBundleMounts {
         host_gwt: gwt_bin_dir.join(DOCKER_HOST_GWT_BIN_NAME),
         host_gwtd: gwt_bin_dir.join(DOCKER_HOST_GWTD_BIN_NAME),
     }
+}
+
+#[cfg(test)]
+fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
+    docker_bundle_mounts_for_gwt_home(&home.join(".gwt"))
 }
 
 fn docker_compose_mount_path(path: &Path) -> String {
@@ -6624,25 +6674,67 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
 }
 
 fn ensure_docker_gwt_binary_setup(repo_path: &Path, service: &str) -> Result<(), String> {
+    let gwt_home = gwt_core::paths::gwt_home();
+    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, |bundle| {
+        eprintln!(
+            "Installing Linux gwt bundle for Docker at {} and {}",
+            bundle.host_gwt.display(),
+            bundle.host_gwtd.display()
+        );
+        let installed = gwt_core::update::UpdateManager::new()
+            .install_latest_docker_linux_bundle(&bundle.host_gwt, &bundle.host_gwtd)?;
+        eprintln!(
+            "Installed Linux gwt bundle v{} for Docker",
+            installed.version
+        );
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+fn ensure_docker_gwt_binary_setup_for_home<F>(
+    repo_path: &Path,
+    service: &str,
+    home: &Path,
+    install_bundle: F,
+) -> Result<(), String>
+where
+    F: FnMut(&DockerBundleMounts) -> Result<(), String>,
+{
+    let gwt_home = home.join(".gwt");
+    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, install_bundle)
+}
+
+fn ensure_docker_gwt_binary_setup_for_gwt_home<F>(
+    repo_path: &Path,
+    service: &str,
+    gwt_home: &Path,
+    mut install_bundle: F,
+) -> Result<(), String>
+where
+    F: FnMut(&DockerBundleMounts) -> Result<(), String>,
+{
     use std::fs;
 
-    let home = resolve_user_home_dir()?;
-    let bundle = docker_bundle_mounts_for_home(&home);
+    let bundle = docker_bundle_mounts_for_gwt_home(gwt_home);
 
     if !bundle.host_gwt.exists() || !bundle.host_gwtd.exists() {
-        let override_path = repo_path.join("docker-compose.override.yml");
-        if !override_path.exists() {
-            eprintln!(
-                "Note: Linux gwt bundle not found at {} and {}\n\
-                 This is required for Docker agent support.\n\
-                 You can either:\n\
-                 1. Download the Linux release bundle and place the extracted binaries at these paths\n\
-                 2. Run 'gwt setup docker' to set up Docker integration automatically"
-                ,
+        install_bundle(&bundle).map_err(|err| {
+            format!(
+                "Failed to install Linux gwt bundle for Docker: {err}\n\
+                 Expected cached binaries at {} and {}",
                 bundle.host_gwt.display(),
                 bundle.host_gwtd.display()
-            );
-        }
+            )
+        })?;
+    }
+
+    if !bundle.host_gwt.exists() || !bundle.host_gwtd.exists() {
+        return Err(format!(
+            "Linux gwt bundle setup did not create expected Docker binaries at {} and {}",
+            bundle.host_gwt.display(),
+            bundle.host_gwtd.display()
+        ));
     }
 
     let override_path = repo_path.join("docker-compose.override.yml");

@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-21 — test: process-global HOME/USERPROFILE を読む assertion は並列テスト中に再読しない
+
+### 事象
+
+Issue #2035 の全体検証で `cargo test -p gwt-core -p gwt` を実行したところ、
+`paths::tests::gwt_config_path_ends_with_config_toml` などが失敗した。失敗した
+assertion は `let p = gwt_config_path(); assert!(p.starts_with(gwt_home()))` のように、
+同一 assertion 内で process-global な home 解決を 2 回読んでいた。
+
+### 原因
+
+別の並列テストが `HOME` / `USERPROFILE` を一時変更しており、`p` を作った時点の
+home と assertion 側で再読した `gwt_home()` が一致しなかった。`gwt_home()` 自体の
+契約ではなく、テスト assertion が process-global env の再読に依存していた。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` など process-global env に依存する path test では、
+   1 つの assertion 内で public resolver を再読して比較しない。
+2. path helper の layout test は、必要なら `.gwt/...` の suffix や file name など
+   env 変更に影響されない構造を検証する。
+3. env を実際に mutate するテストを追加する場合は、同じ process 内の path test と
+   競合しないよう、共有 lock か再読しない assertion 形式を先に確認する。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象
