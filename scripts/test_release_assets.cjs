@@ -79,8 +79,42 @@ run("release workflow packages gwtd alongside gwt", () => {
 run("package scripts keep the GUI front door and release contract explicit", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
   assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
+  assert.equal(
+    pkg.scripts["test:frontend-bundle"],
+    "node --check crates/gwt/web/app.js"
+  );
+  assert.equal(pkg.scripts["test:release-flow"], "bash scripts/check-release-flow.sh");
   assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");
   assert.equal(pkg.scripts.build, "cargo build --release -p gwt --bin gwt --bin gwtd");
+});
+
+run("test all script keeps rust tests plus frontend release checks", () => {
+  const testAll = fs.readFileSync(path.join(__dirname, "test-all.sh"), "utf8");
+  assert.match(testAll, /test -p gwt-core -p gwt --all-features/);
+  assert.match(testAll, /cargo\.exe/);
+  assert.match(testAll, /bash scripts\/check-release-flow\.sh/);
+});
+
+run("release flow helper checks the shared frontend bundle and release assets", () => {
+  const releaseFlow = fs.readFileSync(path.join(__dirname, "check-release-flow.sh"), "utf8");
+  assert.match(releaseFlow, /scripts\/test_release_assets\.cjs/);
+  assert.match(releaseFlow, /node --check \"\$APP_JS\"/);
+  assert.match(releaseFlow, /script type=\"module\" src=\"\/app\.js\"/);
+});
+
+run("CI workflows call the named frontend and release verification scripts", () => {
+  const lintWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "lint.yml"),
+    "utf8"
+  );
+  const testWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "test.yml"),
+    "utf8"
+  );
+
+  assert.match(lintWorkflow, /test:frontend-bundle/);
+  assert.match(lintWorkflow, /test:release-flow/);
+  assert.match(testWorkflow, /test:release-assets/);
 });
 
 run("README install guidance points to GUI-first release assets", () => {
@@ -91,6 +125,8 @@ run("README install guidance points to GUI-first release assets", () => {
     assert.match(doc, /gwt-macos-universal\.dmg/);
     assert.match(doc, /gwt-windows-x86_64\.msi/);
     assert.match(doc, /gwt-linux-x86_64\.tar\.gz/);
+    assert.match(doc, /test:frontend-bundle|node --check crates\/gwt\/web\/app\.js/);
+    assert.match(doc, /test:release-flow|bash scripts\/check-release-flow\.sh/);
   }
 });
 
@@ -117,6 +153,10 @@ run("portable tarball extraction installs the unix bundle", () => {
 });
 
 run("portable zip extraction installs the windows bundle", () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-release-test-"));
   const sourceDir = path.join(root, "source");
   const binDir = path.join(root, "bin");

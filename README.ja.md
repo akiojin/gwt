@@ -178,7 +178,19 @@ cargo test -p gwt-core -p gwt --all-features
 ### Release Asset Contract
 
 ```bash
-node scripts/test_release_assets.cjs
+npm run test:release-assets
+```
+
+### Frontend Bundle Contract
+
+```bash
+npm run test:frontend-bundle
+```
+
+### Release Flow Checks
+
+```bash
+npm run test:release-flow
 ```
 
 ### Lint
