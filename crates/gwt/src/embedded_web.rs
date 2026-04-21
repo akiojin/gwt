@@ -24,7 +24,7 @@ pub(crate) async fn app_js_handler() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::index_html;
+    use super::{app_js, index_html};
 
     fn frontend_bundle_source() -> &'static str {
         concat!(
@@ -199,6 +199,38 @@ mod tests {
         assert!(
             html.contains("document.addEventListener(\"wheel\", handleCanvasWheelEvent, { capture: true, passive: false })"),
             "expected capture-phase wheel routing to be installed through the named handler",
+        );
+    }
+
+    #[test]
+    fn embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in() {
+        let html = index_html();
+
+        assert!(
+            html.contains(".canvas-stage"),
+            "expected embedded html to define the canvas stage surface",
+        );
+        assert!(
+            !html.contains("will-change: transform"),
+            "expected canvas stage css to avoid pinning the transform layer hint",
+        );
+    }
+
+    #[test]
+    fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
+        let js = app_js();
+        let apply_viewport = regex::Regex::new(
+            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            js.contains("let viewportRasterTimer = null;"),
+            "expected viewport apply flow to keep a dedicated raster debounce timer",
+        );
+        assert!(
+            apply_viewport.is_match(js),
+            "expected viewport application to opt into the transform layer only during motion and reset it after 300ms",
         );
     }
 
