@@ -1239,8 +1239,11 @@ name = "gwt-agent"
 version = "9.7.0"
 dependencies = [
  "chrono",
+ "dunce",
  "gwt-config",
  "gwt-core",
+ "gwt-docker",
+ "gwt-git",
  "reqwest",
  "semver",
  "serde",

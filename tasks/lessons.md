@@ -1,5 +1,58 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(review): text contract は success status だけでなく semantic validity を確認する
+
+### 事象
+
+PR #2129 の review で、`docker_bundle_override_content()` が成功していても
+2 行目の volume list item の字下げが 1 文字ずれており、生成される
+`docker-compose.gwt.override.yml` が invalid YAML になっていた。加えて
+`git branch --show-current` は detached HEAD でも exit code 0 を返すため、
+空文字列を branch 名として扱うと launch no-op 判定をすり抜けた。
+
+### 原因
+
+- text template / CLI stdout を「コマンド成功なら有効」とみなし、構文・意味の妥当性を
+  別途検証していなかった。
+- review 前の test が substring ベースで、list item の相対 indentation や
+  empty branch output を contract として固定できていなかった。
+
+### 再発防止策
+
+1. YAML / JSON / shell snippet を文字列で生成する helper では、重要な改行・字下げを
+   exact string か parser-level assertion で固定する。
+2. external command wrapper は exit status だけでなく、empty stdout が有効値かどうかを
+   helper ごとに明示的に判定する。
+3. review 指摘が text contract 起因だった場合は、修正と同時に「壊れた文字列そのもの」を
+  回帰テストへ追加する。
+
+## 2026-04-21 — fix(agent): gwt 起動 warning は current launch builder だけでなく persisted session args も必ず確認する
+
+### 事象
+
+Codex 起動時の `Under-development features enabled: codex_hooks` warning について、
+現行の `crates/gwt-agent/src/launch.rs` には `--enable codex_hooks` が見当たらないため、
+一度は「現行 builder では再現できない」と判断しかけた。実際には
+`~/.gwt/sessions/*.toml` に保存済みの Codex `launch_args` が
+`--enable codex_hooks` を保持しており、resume/continue 経路で warning が再注入されていた。
+
+### 原因
+
+- 調査の初手を current source と temp 再現に寄せ、persisted session store を先に見なかった。
+- `Session::load_and_migrate()` が legacy `launch_args` をほぼそのまま再利用する契約を
+  すぐには突き合わせていなかった。
+- 「今の builder が付けていない」ことと「実際の gwt launch で使われない」ことを
+  同一視していた。
+
+### 再発防止策
+
+1. gwt launch warning / argv 問題では、current builder・materialized config・persisted session TOML の
+   3 つを同じ調査サイクルで確認する。
+2. resume/continue でだけ再現する症状は、`~/.gwt/sessions/*.toml` の `launch_args` を
+   `rg` で最優先確認する。
+3. builder から削除した feature flag / arg は、fresh launch だけでなく
+   session migration で legacy 値が scrub されるかまでテストで固定する。
+
 ## 2026-04-21 — fix(branch-cleanup): remote row の `Safe` 継承は upstream 同値性まで確認する
 
 ### 事象
