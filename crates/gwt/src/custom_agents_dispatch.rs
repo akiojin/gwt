@@ -7,14 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
-use gwt_agent::{redact_secrets_in_agent, CustomCodingAgent};
+use gwt_agent::{redact_secrets_in_agent, CustomCodingAgent, PresetId};
 use gwt_config::Settings;
+use serde_json::Value;
 
 use crate::{
     custom_agents_service::{
-        add_from_claude_code_openai_compat_preset, delete_custom_agent, list_custom_agents,
-        list_presets, probe_backend, update_custom_agent, ClaudeCodeOpenaiCompatInput,
-        CustomAgentsServiceError,
+        add_from_preset, delete_custom_agent, list_custom_agents, list_presets, probe_backend,
+        update_custom_agent, CustomAgentsServiceError,
     },
     protocol::{BackendEvent, CustomAgentErrorCode},
 };
@@ -121,15 +121,13 @@ pub fn list_presets_event() -> BackendEvent {
 }
 
 /// Respond to `FrontendEvent::AddCustomAgentFromPreset`.
-pub fn add_from_preset_event(input: ClaudeCodeOpenaiCompatInput) -> BackendEvent {
-    with_config_path(
-        |path| match add_from_claude_code_openai_compat_preset(path, &input) {
-            Ok(agent) => BackendEvent::CustomAgentSaved {
-                agent: Box::new(redacted_for_wire(agent)),
-            },
-            Err(err) => error_to_event(err),
+pub fn add_from_preset_event(preset_id: PresetId, payload: Value) -> BackendEvent {
+    with_config_path(|path| match add_from_preset(path, preset_id, &payload) {
+        Ok(agent) => BackendEvent::CustomAgentSaved {
+            agent: Box::new(redacted_for_wire(agent)),
         },
-    )
+        Err(err) => error_to_event(err),
+    })
 }
 
 /// Respond to `FrontendEvent::UpdateCustomAgent`.
