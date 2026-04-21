@@ -46,6 +46,7 @@ use tokio::{
 use uuid::Uuid;
 use wry::WebViewBuilder;
 
+mod custom_agents_controller;
 mod embedded_web;
 mod repo_browser;
 
@@ -348,7 +349,7 @@ struct AppRuntime {
     window_lookup: HashMap<String, WindowAddress>,
     session_state_path: PathBuf,
     proxy: AppEventProxy,
-    blocking_tasks: BlockingTaskSpawner,
+    custom_agents: custom_agents_controller::CustomAgentsController,
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -403,6 +404,10 @@ impl AppRuntime {
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
 
+        let proxy = AppEventProxy::new(proxy);
+        let custom_agents =
+            custom_agents_controller::CustomAgentsController::new(proxy.clone(), blocking_tasks);
+
         let mut app = Self {
             tabs,
             active_tab_id,
@@ -411,8 +416,8 @@ impl AppRuntime {
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
             session_state_path,
-            proxy: AppEventProxy::new(proxy),
-            blocking_tasks,
+            proxy,
+            custom_agents,
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
@@ -543,46 +548,15 @@ impl AppRuntime {
                 std::thread::spawn(apply_update_and_exit);
                 vec![]
             }
-            FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::list_event(),
-            )],
-            FrontendEvent::ListCustomAgentPresets => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::list_presets_event(),
-            )],
-            FrontendEvent::AddCustomAgentFromPreset { input } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::add_from_preset_event(input),
-            )],
-            FrontendEvent::UpdateCustomAgent { agent } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::update_event(*agent),
-            )],
-            FrontendEvent::DeleteCustomAgent { agent_id } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::delete_event(agent_id),
-            )],
-            FrontendEvent::TestBackendConnection { base_url, api_key } => {
-                self.spawn_backend_connection_probe(client_id, base_url, api_key);
-                Vec::new()
-            }
+            custom_agents_event @ (FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListCustomAgentPresets
+            | FrontendEvent::AddCustomAgentFromPreset { .. }
+            | FrontendEvent::UpdateCustomAgent { .. }
+            | FrontendEvent::DeleteCustomAgent { .. }
+            | FrontendEvent::TestBackendConnection { .. }) => self
+                .custom_agents
+                .handle_event(client_id, custom_agents_event),
         }
-    }
-
-    fn spawn_backend_connection_probe(
-        &self,
-        client_id: ClientId,
-        base_url: String,
-        api_key: String,
-    ) {
-        let proxy = self.proxy.clone();
-        self.blocking_tasks.spawn(move || {
-            let event = gwt::custom_agents_dispatch::test_connection_event(&base_url, &api_key);
-            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                client_id, event,
-            )]));
-        });
     }
 
     fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
@@ -3106,8 +3080,11 @@ mod tests {
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
             session_state_path: temp_root.join("session-state.json"),
+            custom_agents: super::custom_agents_controller::CustomAgentsController::new(
+                proxy.clone(),
+                BlockingTaskSpawner::thread(),
+            ),
             proxy,
-            blocking_tasks: BlockingTaskSpawner::thread(),
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
@@ -4260,6 +4237,30 @@ mod tests {
                 )
             })
         });
+    }
+
+    #[test]
+    fn custom_agents_controller_dispatches_preset_list_reply() {
+        let (proxy, _events) = AppEventProxy::stub();
+        let controller = super::custom_agents_controller::CustomAgentsController::new(
+            proxy,
+            BlockingTaskSpawner::thread(),
+        );
+
+        let outbound = controller.handle_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::ListCustomAgentPresets,
+        );
+
+        assert_eq!(outbound.len(), 1);
+        match &outbound[0].target {
+            DispatchTarget::Client(client_id) => assert_eq!(client_id, "client-1"),
+            other => panic!("expected client reply, got {other:?}"),
+        }
+        match &outbound[0].event {
+            BackendEvent::CustomAgentPresetList { presets } => assert!(!presets.is_empty()),
+            other => panic!("expected CustomAgentPresetList, got {other:?}"),
+        }
     }
 
     #[test]
