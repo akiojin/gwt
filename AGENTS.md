@@ -267,12 +267,6 @@ Commands can be invoked as `/gwt:<command-name>`.
 | gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
 
-### TUI Design
-
-| Skill | Command | Description |
-|-------|---------|-------------|
-| tui-design | `/gwt:tui-design` | Create distinctive, production-grade terminal UI surfaces for the xterm.js-based GUI terminal. |
-
 ### Recommended Workflow
 
 ```text
