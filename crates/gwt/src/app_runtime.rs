@@ -2522,20 +2522,23 @@ mod tests {
         collections::HashMap,
         fs,
         path::{Path, PathBuf},
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
     };
 
     use tempfile::tempdir;
 
+    use base64::Engine;
     use gwt::{
-        empty_workspace_state, BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope,
-        FrontendEvent, LaunchWizardContext, LaunchWizardState, ProjectKind, WindowGeometry,
-        WindowPreset, WindowProcessStatus, WorkspaceState,
+        empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
+        BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardContext,
+        LaunchWizardState, ProjectKind, WindowGeometry, WindowPreset, WindowProcessStatus,
+        WorkspaceState,
     };
+    use gwt_terminal::Pane;
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        LaunchWizardSession, ProjectTabRuntime,
+        LaunchWizardSession, ProjectTabRuntime, WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
 
@@ -2578,6 +2581,22 @@ mod tests {
         preset: WindowPreset,
         status: WindowProcessStatus,
     ) -> ProjectTabRuntime {
+        sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            PathBuf::from("E:/gwt/test-repo"),
+            preset,
+            status,
+        )
+    }
+
+    fn sample_project_tab_with_window_at(
+        tab_id: &str,
+        raw_window_id: &str,
+        project_root: PathBuf,
+        preset: WindowPreset,
+        status: WindowProcessStatus,
+    ) -> ProjectTabRuntime {
         let mut persisted = empty_workspace_state();
         persisted
             .windows
@@ -2586,7 +2605,7 @@ mod tests {
         ProjectTabRuntime {
             id: tab_id.to_string(),
             title: "Repo".to_string(),
-            project_root: PathBuf::from("E:/gwt/test-repo"),
+            project_root,
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
         }
@@ -2722,6 +2741,66 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_client() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "exit 0".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+        let mut pane = Pane::new(
+            window_id.clone(),
+            command,
+            args,
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("pane");
+        pane.process_bytes(b"hello from frontend ready\n");
+        runtime.runtimes.insert(
+            window_id.clone(),
+            WindowRuntime {
+                pane: Arc::new(Mutex::new(pane)),
+                output_thread: None,
+            },
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        assert!(events.iter().all(|event| matches!(
+            &event.target,
+            DispatchTarget::Client(client_id) if client_id == "client-1"
+        )));
+        let snapshot = events.iter().find_map(|event| match &event.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => {
+                Some(data_base64)
+            }
+            _ => None,
+        });
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(snapshot.expect("terminal snapshot event"))
+            .expect("decode terminal snapshot");
+        assert!(String::from_utf8_lossy(&decoded).contains("hello from frontend ready"));
+    }
+
+    #[test]
     fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -2794,5 +2873,110 @@ mod tests {
                     && *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
         ));
+    }
+
+    #[test]
+    fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[WindowPreset::Shell],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
+        let window_id = combined_window_id("tab-1", &window.id);
+
+        let event = runtime
+            .start_window("tab-1", &window.id, window.preset, window.geometry.clone())
+            .expect("process launch event");
+
+        assert!(matches!(
+            event,
+            BackendEvent::TerminalStatus {
+                ref id,
+                status: WindowProcessStatus::Running,
+                detail: None,
+            } if id == &window_id
+        ));
+        assert_eq!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Running)
+        );
+        assert!(runtime.runtimes.contains_key(&window_id));
+        assert!(runtime
+            .pty_writers
+            .read()
+            .expect("pty writer registry")
+            .contains_key(&window_id));
+
+        runtime.stop_window_runtime(&window_id);
+    }
+
+    #[test]
+    fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "shell-1",
+            repo.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+
+        assert_eq!(
+            runtime
+                .update_viewport_events(gwt::CanvasViewport {
+                    x: 12.0,
+                    y: 34.0,
+                    zoom: 1.25,
+                })
+                .len(),
+            1
+        );
+        assert_eq!(
+            runtime
+                .update_window_geometry_events(
+                    &window_id,
+                    WindowGeometry {
+                        x: 56.0,
+                        y: 78.0,
+                        width: 720.0,
+                        height: 480.0,
+                    },
+                    100,
+                    30,
+                )
+                .len(),
+            1
+        );
+
+        let session = load_session_state(&temp.path().join("session-state.json"))
+            .expect("load persisted session state");
+        assert_eq!(session.active_tab_id.as_deref(), Some("tab-1"));
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.tabs[0].project_root, repo);
+
+        let workspace = load_restored_workspace_state(&repo).expect("load persisted workspace");
+        assert_eq!(workspace.viewport.x, 12.0);
+        assert_eq!(workspace.viewport.y, 34.0);
+        assert_eq!(workspace.viewport.zoom, 1.25);
+        let window = workspace
+            .windows
+            .iter()
+            .find(|window| window.id == "shell-1")
+            .expect("persisted window");
+        assert_eq!(window.geometry.x, 56.0);
+        assert_eq!(window.geometry.y, 78.0);
+        assert_eq!(window.geometry.width, 720.0);
+        assert_eq!(window.geometry.height, 480.0);
     }
 }

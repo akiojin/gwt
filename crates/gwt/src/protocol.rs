@@ -337,4 +337,26 @@ mod tests {
             Some(&Value::String("inventory".to_string()))
         );
     }
+
+    #[test]
+    fn terminal_snapshot_serializes_explicit_kind_contract() {
+        let event = BackendEvent::TerminalSnapshot {
+            id: "tab-1::shell-1".to_string(),
+            data_base64: "aGVsbG8=".to_string(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize terminal snapshot");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("terminal_snapshot".to_string()))
+        );
+        assert_eq!(
+            value.get("id"),
+            Some(&Value::String("tab-1::shell-1".to_string()))
+        );
+        assert_eq!(
+            value.get("data_base64"),
+            Some(&Value::String("aGVsbG8=".to_string()))
+        );
+    }
 }
