@@ -9,7 +9,8 @@ use std::{
 };
 
 use crate::docker_setup::{
-    docker_compose_override_path, ensure_docker_gwt_binary_setup, install_launch_gwt_bin_env,
+    docker_compose_override_path, docker_compose_user_override_path,
+    ensure_docker_gwt_binary_setup, install_launch_gwt_bin_env, is_legacy_gwt_generated_override,
 };
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
 use axum::{
@@ -5784,6 +5785,18 @@ mod tests {
             super::resolve_docker_launch_plan(&arm64, Some("app")).expect("arm64 plan");
         assert_eq!(arm64_plan.target_arch, "aarch64");
 
+        let unsupported = temp.path().join("unsupported-platform");
+        fs::create_dir_all(&unsupported).expect("create unsupported project");
+        fs::write(
+            unsupported.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    platform: linux/ppc64le\n    working_dir: /workspace/app\n",
+        )
+        .expect("write unsupported compose");
+        let unsupported_err = super::resolve_docker_launch_plan(&unsupported, Some("app"))
+            .expect_err("unsupported platform");
+        assert!(unsupported_err.contains("unsupported platform"));
+        assert!(unsupported_err.contains("linux/ppc64le"));
+
         let missing_compose =
             super::resolve_docker_launch_plan(temp.path(), None).expect_err("missing compose");
         assert!(missing_compose.contains("docker-compose.yml"));
@@ -5859,17 +5872,23 @@ mod tests {
         let project = temp.path().join("project");
         fs::create_dir_all(&project).expect("create project");
         let compose_file = project.join("docker-compose.yml");
-        let override_file = project.join("docker-compose.override.yml");
+        let user_override_file = super::docker_compose_user_override_path(&project);
+        let generated_override_file = super::docker_compose_override_path(&project);
         fs::write(
             &compose_file,
             "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
         )
         .expect("write compose");
         fs::write(
-            &override_file,
+            &user_override_file,
+            "services:\n  app:\n    environment:\n      KEEP_ME: \"true\"\n",
+        )
+        .expect("write user override");
+        fs::write(
+            &generated_override_file,
             "services:\n  app:\n    volumes:\n      - /host/gwt:/usr/local/bin/gwt:ro\n",
         )
-        .expect("write override");
+        .expect("write generated override");
 
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .runtime_target(LaunchRuntimeTarget::Docker)
@@ -5884,13 +5903,15 @@ mod tests {
 
         assert_eq!(config.command, super::docker_binary_for_launch());
         assert_eq!(
-            &config.args[..5],
+            &config.args[..7],
             vec![
                 "compose".to_string(),
                 "-f".to_string(),
                 compose_file.display().to_string(),
                 "-f".to_string(),
-                override_file.display().to_string(),
+                user_override_file.display().to_string(),
+                "-f".to_string(),
+                generated_override_file.display().to_string(),
             ]
         );
         assert_eq!(
@@ -5910,6 +5931,33 @@ mod tests {
         assert!(config.args.windows(3).any(|window| {
             window[0] == "exec" && window[1] == "-w" && window[2] == "/workspace/app"
         }));
+    }
+
+    #[test]
+    fn docker_launch_compose_files_skips_legacy_generated_default_override() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        let compose_file = project.join("docker-compose.yml");
+        let legacy_override_file = super::docker_compose_user_override_path(&project);
+        let generated_override_file = super::docker_compose_override_path(&project);
+        fs::write(&compose_file, "services:\n  app:\n    image: alpine:3.19\n")
+            .expect("write compose");
+        fs::write(
+            &legacy_override_file,
+            "# Auto-generated docker-compose override for gwt bundle mounting\nservices:\n  app:\n",
+        )
+        .expect("write legacy override");
+        fs::write(
+            &generated_override_file,
+            "services:\n  app:\n    volumes:\n      - /host/gwt:/usr/local/bin/gwt:ro\n",
+        )
+        .expect("write generated override");
+
+        assert_eq!(
+            super::docker_launch_compose_files(&project, &compose_file),
+            vec![compose_file, generated_override_file]
+        );
     }
 
     #[test]
@@ -7317,7 +7365,7 @@ fn resolve_docker_launch_plan(
         compose_files: docker_launch_compose_files(worktree, &compose_file),
         service: service.name.clone(),
         container_cwd,
-        target_arch: docker_bundle_target_arch(service),
+        target_arch: docker_bundle_target_arch(service)?,
     })
 }
 
@@ -7325,12 +7373,16 @@ fn docker_binary_for_launch() -> String {
     std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
 }
 
-fn docker_bundle_target_arch(service: &gwt_docker::ComposeService) -> String {
-    service
-        .platform
-        .as_deref()
-        .and_then(docker_platform_target_arch)
-        .unwrap_or_else(host_docker_target_arch)
+fn docker_bundle_target_arch(service: &gwt_docker::ComposeService) -> Result<String, String> {
+    if let Some(platform) = service.platform.as_deref() {
+        return docker_platform_target_arch(platform).ok_or_else(|| {
+            format!(
+                "Docker service {} specifies unsupported platform {}; expected x86_64/amd64 or aarch64/arm64",
+                service.name, platform
+            )
+        });
+    }
+    Ok(host_docker_target_arch())
 }
 
 fn docker_platform_target_arch(platform: &str) -> Option<String> {
@@ -7364,9 +7416,13 @@ fn normalize_docker_target_arch(raw: &str) -> Option<String> {
 
 fn docker_launch_compose_files(worktree: &Path, compose_file: &Path) -> Vec<PathBuf> {
     let mut files = vec![compose_file.to_path_buf()];
-    let override_file = docker_compose_override_path(worktree);
-    if override_file.is_file() {
-        files.push(override_file);
+    let user_override_file = docker_compose_user_override_path(worktree);
+    if user_override_file.is_file() && !is_legacy_gwt_generated_override(&user_override_file) {
+        files.push(user_override_file);
+    }
+    let generated_override_file = docker_compose_override_path(worktree);
+    if generated_override_file.is_file() {
+        files.push(generated_override_file);
     }
     files
 }

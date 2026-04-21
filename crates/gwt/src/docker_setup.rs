@@ -7,6 +7,10 @@ const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
+const DOCKER_GWT_OVERRIDE_HEADER: &str =
+    "# Auto-generated docker-compose override for gwt bundle mounting";
+const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
+const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DockerBundleMounts {
@@ -72,7 +76,7 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
     let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
-        "# Auto-generated docker-compose override for gwt bundle mounting\n\
+        "{DOCKER_GWT_OVERRIDE_HEADER}\n\
          version: '3.8'\n\
          services:\n\
            {service}:\n\
@@ -108,7 +112,16 @@ pub(super) fn ensure_docker_gwt_binary_setup(
 }
 
 pub(super) fn docker_compose_override_path(repo_path: &Path) -> PathBuf {
-    repo_path.join("docker-compose.override.yml")
+    repo_path.join(DOCKER_GWT_OVERRIDE_FILE_NAME)
+}
+
+pub(super) fn docker_compose_user_override_path(repo_path: &Path) -> PathBuf {
+    repo_path.join(DOCKER_USER_OVERRIDE_FILE_NAME)
+}
+
+pub(super) fn is_legacy_gwt_generated_override(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|content| content.starts_with(DOCKER_GWT_OVERRIDE_HEADER))
 }
 
 #[cfg(test)]
@@ -169,7 +182,7 @@ where
     if rewrite_override {
         fs::write(&override_path, override_content).map_err(|err| {
             format!(
-                "Failed to write docker-compose.override.yml: {err}\n\
+                "Failed to write generated Docker compose override: {err}\n\
                  Manually create {} with gwt/gwtd bundle mounts",
                 override_path.display()
             )
@@ -192,6 +205,7 @@ mod tests {
 
     use super::{
         docker_bundle_mounts_for_home, docker_bundle_override_content,
+        docker_compose_override_path, docker_compose_user_override_path,
         ensure_docker_gwt_binary_setup_for_home, install_launch_gwt_bin_env_with_lookup,
     };
 
@@ -255,7 +269,7 @@ mod tests {
             b"linux-gwtd"
         );
 
-        let override_content = fs::read_to_string(repo.path().join("docker-compose.override.yml"))
+        let override_content = fs::read_to_string(docker_compose_override_path(repo.path()))
             .expect("override content");
         assert!(override_content.contains("gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(override_content.contains("gwtd-linux:/usr/local/bin/gwtd:ro"));
@@ -289,7 +303,7 @@ mod tests {
         assert_eq!(installer_calls, 1);
         assert!(bundle.host_gwt.is_file());
         assert!(bundle.host_gwtd.is_file());
-        assert!(repo.path().join("docker-compose.override.yml").is_file());
+        assert!(docker_compose_override_path(repo.path()).is_file());
     }
 
     #[test]
@@ -314,7 +328,32 @@ mod tests {
             fs::read(&bundle.host_gwtd).expect("read gwtd"),
             b"existing-gwtd"
         );
-        assert!(repo.path().join("docker-compose.override.yml").exists());
+        assert!(docker_compose_override_path(repo.path()).exists());
+    }
+
+    #[test]
+    fn docker_binary_setup_preserves_existing_user_override_file() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        let user_override = docker_compose_user_override_path(repo.path());
+        let user_override_content =
+            "services:\n  app:\n    environment:\n      KEEP_ME: \"true\"\n";
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+        fs::write(&user_override, user_override_content).expect("write user override");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
+            panic!("installer should not run when both bundle binaries exist");
+        })
+        .expect("docker setup");
+
+        assert_eq!(
+            fs::read_to_string(&user_override).expect("read user override"),
+            user_override_content
+        );
+        assert!(docker_compose_override_path(repo.path()).is_file());
     }
 
     #[test]
@@ -336,7 +375,7 @@ mod tests {
         })
         .expect("docker setup for worker");
 
-        let override_content = fs::read_to_string(repo.path().join("docker-compose.override.yml"))
+        let override_content = fs::read_to_string(docker_compose_override_path(repo.path()))
             .expect("override content");
         assert!(override_content.contains("worker:"));
         assert!(!override_content.contains("app:"));

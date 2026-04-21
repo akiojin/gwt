@@ -1,5 +1,54 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(docker): gwt generated compose mount は user override と分離して所有する
+
+### 事象
+
+Issue #2035 の PR review で、gwt が `docker-compose.override.yml` を直接再生成しており、
+repo 利用者が自分で管理している override を launch 時に上書きし得ることが分かった。
+
+### 原因
+
+- generated mount layer と user-managed override layer の ownership を分離せず、
+  両方を同じ `docker-compose.override.yml` に載せていた。
+- generated file の更新要件だけを見て、既存の user file を gwt が触ってよいという
+  誤った前提で実装していた。
+
+### 再発防止策
+
+1. runtime が自動生成する compose layer は専用 file
+   (`docker-compose.gwt.override.yml`) に分離し、`docker-compose.override.yml` は
+   user-managed file として扱う。
+2. compose file の layering 順を `base -> user override -> generated override` で固定し、
+   既存 repo の local customization を壊さない contract test を追加する。
+3. 既に field に出た legacy generated override は header で判定して読み飛ばし、
+   stale mount を二重適用しない。
+
+## 2026-04-21 — fix(docker): explicit compose platform は unsupported 値で host fallback しない
+
+### 事象
+
+Issue #2035 の PR review で、compose service に `platform:` が明示されていても、
+unsupported value を parse できない場合に host arch fallback していることが分かった。
+そのまま進むと Docker bundle installer が誤った asset を選び、mount 後に
+`exec format error` を起こし得る。
+
+### 原因
+
+- `platform:` の有無と parse 成否を同じ `Option` に畳み込み、`None` を
+  「platform 未指定」と「unsupported platform」の両方に使っていた。
+- fallback を便利側に寄せたまま、explicit user input の validation failure を
+  runtime error として表に出していなかった。
+
+### 再発防止策
+
+1. compose service が `platform:` を明示した場合は、normalize 失敗を
+   即座にエラーとして返し、host fallback は未指定時だけに限定する。
+2. supported arch alias (`x86_64/amd64/x64`, `aarch64/arm64`) と unsupported
+   platform failure の両方を regression test で固定する。
+3. user-supplied runtime selector を parse する helper では、「未指定」と
+   「不正値」を別の戻り値で表現する。
+
 ## 2026-04-21 — fix(docker): Linux bundle asset は host 固定ではなく target/container arch で選ぶ
 
 ### 事象
