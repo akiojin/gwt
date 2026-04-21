@@ -28,6 +28,31 @@ Markdown 詳細も `pre` でプレーン表示されていた。
 3. Markdown を扱う GUI surface では、plain text fallback ではなく renderer の有無を
    embedded HTML contract test で固定する。
 
+## 2026-04-21 — fix(gui): Issue link は PTY spawn 成功後に記録する
+
+### 事象
+
+Issue Bridge から Launch Agent を開始したとき、worktree 準備と session 保存が成功した時点で
+`issue-links` を更新していた。後続の PTY / command spawn が失敗してもリンク済み扱いになるため、
+Knowledge Bridge や hook fallback が実際には起動していない branch を Issue linked branch として扱えた。
+また、Issue detail の Markdown renderer 化で `branches.join("\n")` の改行が paragraph として潰れ、
+複数 linked branch が 1 行表示に退行した。
+
+### 原因
+
+- Launch の「準備完了」と「プロセス起動成功」を同じ成功境界として扱っていた。
+- `spawn_process_window` 失敗時の状態を、Issue linkage store の更新条件に含めていなかった。
+- Markdown renderer 導入時に、既存の preformatted branch list 表示契約を section body の形式側で
+  Markdown list に変換していなかった。
+
+### 再発防止策
+
+1. 外部プロセス起動を伴う link / active session / lifecycle 副作用は、準備完了ではなく
+   実際の spawn 成功後にだけ実行する。
+2. 起動失敗テストでは、UI status だけでなく downstream store が更新されないことも確認する。
+3. plain text から Markdown 表示へ移行する section は、改行・list・code block など既存の
+   可読性契約を backend payload か renderer contract test で固定する。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象
