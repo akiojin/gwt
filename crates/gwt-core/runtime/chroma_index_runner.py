@@ -1208,10 +1208,15 @@ def _open_chroma_collection(db_path: Path, collection_name: str):
 
     client = chromadb.PersistentClient(path=str(db_path))
     ef = E5EmbeddingFunction()
-    return client, client.get_collection(
-        name=collection_name,
-        embedding_function=ef,
-    )
+    try:
+        collection = client.get_collection(
+            name=collection_name,
+            embedding_function=ef,
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
 
 
 # ---------------------------------------------------------------------
@@ -2050,6 +2055,52 @@ def _scope_status_v2(
     }
 
 
+def _issue_status_v2(
+    repo_hash: str,
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
+    meta = _read_issue_meta(db_path) or {}
+    exists = (db_path / "chroma.sqlite3").exists() or (db_path / META_FILENAME).is_file()
+    count_ok, document_count = _scope_document_count(db_path, "issues")
+
+    reason = "ready"
+    healthy = True
+    repair_required = False
+
+    if not exists or not count_ok:
+        reason = "collection_missing"
+        healthy = False
+        repair_required = True
+    elif not meta:
+        reason = "metadata_missing"
+        healthy = False
+        repair_required = True
+
+    status: Dict[str, Any] = {
+        "exists": exists,
+        "healthy": healthy,
+        "repair_required": repair_required,
+        "document_count": document_count,
+        "reason": reason,
+        "legacy_residue_detected": False,
+        "last_repair_at": meta.get("last_full_refresh"),
+    }
+    if meta:
+        status.update(
+            {
+                "last_full_refresh": meta.get("last_full_refresh"),
+                "ttl_minutes": meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT),
+            }
+        )
+        last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
+        if last is not None:
+            age = (_now_utc() - last).total_seconds()
+            ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
+            status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
+    return status
+
+
 def action_index_issues_v2(
     repo_hash: str,
     project_root: str,
@@ -2138,6 +2189,7 @@ def action_index_issues_v2(
                     "schema_version": INDEX_SCHEMA_VERSION,
                     "last_full_refresh": _now_utc().isoformat(),
                     "ttl_minutes": ttl_minutes,
+                    "document_count": len(issues),
                 },
             )
         finally:
@@ -2266,7 +2318,7 @@ def action_search_v2(
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
     if scope == "issues":
-        health = {"exists": (db_path / "chroma.sqlite3").exists(), "repair_required": False, "healthy": True}
+        health = _issue_status_v2(repo_hash, db_root=db_root)
     else:
         health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
@@ -2348,27 +2400,8 @@ def action_status_v2(
     worktree_hash: Optional[str],
     db_root: Optional[Path] = None,
 ) -> dict:
-    issues_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
-    issues_status: Dict[str, Any] = {
-        "exists": (issues_path / "chroma.sqlite3").exists()
-        or (issues_path / META_FILENAME).is_file(),
-    }
-    meta = _read_issue_meta(issues_path)
-    if meta:
-        issues_status.update(
-            {
-                "last_full_refresh": meta.get("last_full_refresh"),
-                "ttl_minutes": meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT),
-            }
-        )
-        last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
-        if last is not None:
-            age = (_now_utc() - last).total_seconds()
-            ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
-            issues_status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
-
     out: Dict[str, Any] = {
-        "issues": issues_status,
+        "issues": _issue_status_v2(repo_hash, db_root=db_root),
         "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
     }
     if worktree_hash:

@@ -25,10 +25,15 @@ fn resolve_home_dir(
     userprofile: Option<OsString>,
     fallback: Option<PathBuf>,
 ) -> PathBuf {
-    home.or(userprofile)
+    non_empty_os(home)
+        .or_else(|| non_empty_os(userprofile))
         .map(PathBuf::from)
         .or(fallback)
         .expect("home directory must be resolvable")
+}
+
+fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
+    value.filter(|value| !value.is_empty())
 }
 
 /// Return the path to the global config file (`~/.gwt/config.toml`).
@@ -181,6 +186,27 @@ mod tests {
             .join(".gwt");
 
         assert_eq!(home, override_profile.join(".gwt"));
+    }
+
+    #[test]
+    fn gwt_home_treats_empty_env_values_as_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_profile = tmp.path().join("custom-userprofile");
+        let fallback = tmp.path().join("fallback-home");
+
+        let userprofile_home = resolve_home_dir(
+            Some(OsString::from("")),
+            Some(override_profile.clone().into_os_string()),
+            Some(fallback.clone()),
+        );
+        let fallback_home = resolve_home_dir(
+            Some(OsString::from("")),
+            Some(OsString::from("")),
+            Some(fallback.clone()),
+        );
+
+        assert_eq!(userprofile_home, override_profile);
+        assert_eq!(fallback_home, fallback);
     }
 
     #[test]
