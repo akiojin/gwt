@@ -474,7 +474,8 @@ fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
     out.push_str(&format!("ci: {}\n", pr.ci_status));
-    out.push_str(&format!("mergeable: {}\n", pr.mergeable));
+    out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
+    out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
     out.push_str(&format!("review: {}\n", pr.review_status));
 }
 
@@ -754,7 +755,7 @@ fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrS
             "pr",
             "view",
             "--json",
-            "number,title,state,url,mergeable,statusCheckRollup,reviewDecision",
+            "number,title,state,url,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
         ])
         .current_dir(repo_path)
         .output()?;
@@ -1218,14 +1219,15 @@ fn fetch_pr_checks_via_gh(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let checks = parse_pr_checks_items_response(&stdout, &stderr, output.status.success())?;
+    let merge_status = pr.effective_merge_status().to_string();
 
     Ok(PrChecksSummary {
         summary: format!(
             "PR #{} | CI: {} | Merge: {} | Review: {}",
-            pr.number, pr.ci_status, pr.mergeable, pr.review_status
+            pr.number, pr.ci_status, merge_status, pr.review_status
         ),
         ci_status: pr.ci_status,
-        merge_status: pr.mergeable,
+        merge_status,
         review_status: pr.review_status,
         checks,
     })
@@ -1465,7 +1467,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{block_bash_policy, workflow_policy, BlockDecision, HookKind};
+    use crate::cli::hook::{block_bash_policy, workflow_policy, HookKind, HookOutput};
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1473,18 +1475,11 @@ pub fn run_daemon_hook<E: CliEnv>(
     };
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
-    fn emit_block_decision<E: CliEnv>(env: &mut E, decision: &BlockDecision) -> i32 {
-        match serde_json::to_vec(decision) {
-            Ok(bytes) => {
-                let _ = env.stdout().write_all(&bytes);
-                let _ = env.stdout().flush();
-                2
-            }
+    fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match output.serialize_to(env.stdout()) {
+            Ok(()) => output.exit_code(),
             Err(err) => {
-                let _ = writeln!(
-                    env.stderr(),
-                    "gwt hook: failed to serialize decision: {err}"
-                );
+                let _ = writeln!(env.stderr(), "gwt hook: failed to serialize output: {err}");
                 1
             }
         }
@@ -1529,19 +1524,17 @@ pub fn run_daemon_hook<E: CliEnv>(
                 );
                 return Ok(2);
             };
-            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin, env.stdout()) {
-                Ok(()) => Ok(0),
+            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
         HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Ok(output) => Ok(emit_hook_output(env, &output)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
         HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Ok(output) => Ok(emit_hook_output(env, &output)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
         HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
@@ -1582,7 +1575,13 @@ use std::{env, fs, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
     format!(
-        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+    )
+}
+
+fn behind_pr_json(number: &str, title: &str) -> String {
+    format!(
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"BEHIND\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"REVIEW_REQUIRED\"}}"
     )
 }
 
@@ -1606,13 +1605,21 @@ fn main() -> ExitCode {
                 eprintln!("no pull requests found for branch");
                 return ExitCode::from(1);
             }
-            println!("{}", pr_json("12", "Current PR"));
+            if mode == "behind" {
+                println!("{}", behind_pr_json("12", "Current PR"));
+            } else {
+                println!("{}", pr_json("12", "Current PR"));
+            }
             return ExitCode::SUCCESS;
         }
         [pr, view, number, repo_flag, _, json_flag, ..]
             if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
         {
-            println!("{}", pr_json(number, "Fetched PR"));
+            if mode == "behind" {
+                println!("{}", behind_pr_json(number, "Fetched PR"));
+            } else {
+                println!("{}", pr_json(number, "Fetched PR"));
+            }
             return ExitCode::SUCCESS;
         }
         [pr, create, ..] if pr == "pr" && create == "create" => {
@@ -1852,6 +1859,7 @@ fn main() -> ExitCode {
             url: "https://github.com/akiojin/gwt/pull/128".to_string(),
             ci_status: "SUCCESS".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         }
     }
@@ -1921,6 +1929,7 @@ fn main() -> ExitCode {
         assert!(out.contains("=== comment:7 (2026-04-20T01:00:00Z) ==="));
         assert!(out.contains("#128 [OPEN] Enforce coverage"));
         assert!(out.contains("ci: SUCCESS"));
+        assert!(out.contains("merge_state: CLEAN"));
         assert!(out.contains("workflow: coverage"));
         assert!(out.contains("=== review:review-1 [APPROVED] by reviewer"));
         assert!(out.contains(
@@ -2130,6 +2139,7 @@ fn main() -> ExitCode {
                 .expect("current pr")
                 .expect("current pr exists");
             assert_eq!(current.number, 12);
+            assert_eq!(current.merge_state_status, "CLEAN");
 
             let created = create_pr_via_gh(
                 "akiojin/gwt",
@@ -2199,6 +2209,17 @@ fn main() -> ExitCode {
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].workflow, "coverage");
             assert_eq!(checks.checks[0].url, "https://example.test/checks/12");
+        });
+
+        with_fake_gh("behind", |repo_path| {
+            let current = fetch_current_pr_via_gh(repo_path)
+                .expect("current pr")
+                .expect("current pr exists");
+            assert_eq!(current.effective_merge_status(), "BEHIND");
+
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert!(checks.summary.contains("Merge: BEHIND"));
+            assert_eq!(checks.merge_status, "BEHIND");
         });
 
         with_fake_gh("job-log-zip", |repo_path| {

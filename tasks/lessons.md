@@ -26,7 +26,211 @@ Codex 起動時の `Under-development features enabled: codex_hooks` warning に
    `rg` で最優先確認する。
 3. builder から削除した feature flag / arg は、fresh launch だけでなく
    session migration で legacy 値が scrub されるかまでテストで固定する。
+## 2026-04-21 — fix(review): vt100 shrink crash は parser 再構築で回避しない
 
+### 事象
+
+`Pane::resize()` の release crash workaround として、narrow resize 時に
+新しい `vt100::Parser` を作って可視行だけを replay していた。
+その結果、review で 2 件の回帰が見つかった:
+
+- alternate screen (`CSI ?1049h`) 中に shrink すると、saved primary grid と
+  `MODE_ALTERNATE_SCREEN` が落ち、`CSI ?1049l` で shell buffer へ戻れない。
+- trailing wide glyph を plain text で replay し直すため、その行の SGR /
+  background 属性が default に戻る。
+
+### 原因
+
+- 根本原因は gwt 側ではなく `vt100::row::resize()` にあり、列 shrink 時に
+  wide glyph の continuation cell だけが落ちても leading cell を消していなかった。
+- 依存 crate の内部不整合を、可視画面の再構築で外から補正しようとしたため、
+  `vt100` が内部に持つ alternate grid、saved cursor、active attributes を
+  再現できなかった。
+
+### 再発防止策
+
+1. terminal emulator の内部 state bug は、まず依存側の state machine / data
+   structureを patch できないか確認し、可視画面の replay workaround を最終手段にする。
+2. resize workaround を入れる前に、alternate screen restore と truncated row
+   attribute preservation を回帰テストに含める。
+3. `vt100` の shrink 修正では `Row::truncate()` 相当の sanitization を使い、
+   orphan wide glyph だけを消して残る cell 属性は保持する。
+## 2026-04-21 — fix(docker): gwt generated compose mount は user override と分離して所有する
+
+### 事象
+
+Issue #2035 の PR review で、gwt が `docker-compose.override.yml` を直接再生成しており、
+repo 利用者が自分で管理している override を launch 時に上書きし得ることが分かった。
+
+### 原因
+
+- generated mount layer と user-managed override layer の ownership を分離せず、
+  両方を同じ `docker-compose.override.yml` に載せていた。
+- generated file の更新要件だけを見て、既存の user file を gwt が触ってよいという
+  誤った前提で実装していた。
+
+### 再発防止策
+
+1. runtime が自動生成する compose layer は専用 file
+   (`docker-compose.gwt.override.yml`) に分離し、`docker-compose.override.yml` は
+   user-managed file として扱う。
+2. compose file の layering 順を `base -> user override -> generated override` で固定し、
+   既存 repo の local customization を壊さない contract test を追加する。
+3. 既に field に出た legacy generated override は header で判定して読み飛ばし、
+   stale mount を二重適用しない。
+
+## 2026-04-21 — fix(docker): explicit compose platform は unsupported 値で host fallback しない
+
+### 事象
+
+Issue #2035 の PR review で、compose service に `platform:` が明示されていても、
+unsupported value を parse できない場合に host arch fallback していることが分かった。
+そのまま進むと Docker bundle installer が誤った asset を選び、mount 後に
+`exec format error` を起こし得る。
+
+### 原因
+
+- `platform:` の有無と parse 成否を同じ `Option` に畳み込み、`None` を
+  「platform 未指定」と「unsupported platform」の両方に使っていた。
+- fallback を便利側に寄せたまま、explicit user input の validation failure を
+  runtime error として表に出していなかった。
+
+### 再発防止策
+
+1. compose service が `platform:` を明示した場合は、normalize 失敗を
+   即座にエラーとして返し、host fallback は未指定時だけに限定する。
+2. supported arch alias (`x86_64/amd64/x64`, `aarch64/arm64`) と unsupported
+   platform failure の両方を regression test で固定する。
+3. user-supplied runtime selector を parse する helper では、「未指定」と
+   「不正値」を別の戻り値で表現する。
+
+## 2026-04-21 — fix(docker): Linux bundle asset は host 固定ではなく target/container arch で選ぶ
+
+### 事象
+
+Issue #2035 の review follow-up で、Docker bundle auto-download が常に
+`gwt-linux-x86_64.tar.gz` を選んでいた。Apple Silicon / ARM Linux host で
+native arm64 container を起動すると、`/usr/local/bin/gwt` に mount された
+binary が `exec format error` で起動できなかった。
+
+### 原因
+
+- Docker bundle installer が target architecture を引数で受け取らず、
+  release asset 名を x86_64 固定文字列で引いていた。
+- compose service の `platform:` を parse しておらず、container target arch を
+  launch plan に保持していなかった。
+
+### 再発防止策
+
+1. Docker 向け release asset を選ぶ API は、bundle path だけでなく target arch を
+   明示的に受け取る。
+2. compose service が `platform:` を持つ場合はそこから container arch を解決し、
+   未指定時のみ host arch fallback を使う。
+3. x86_64 と aarch64 の両 asset を含む release fixture で、要求した arch の
+   tarball が実際に選ばれる regression test を追加する。
+
+## 2026-04-21 — fix(docker): service 名を埋め込む auto-generated override は内容差分で再生成する
+
+### 事象
+
+Issue #2035 の review follow-up で、`docker-compose.override.yml` が最初に起動した
+service 名のまま固定されることが分かった。multi-service repo で別 service を
+選ぶと、`GWT_BIN_PATH=/usr/local/bin/gwt` だけが新 service に渡り、対応する mount
+は stale override 側の旧 service に残ったままで binary が見つからなかった。
+
+### 原因
+
+- override file の生成条件が `!exists()` だけで、service 名や mount 内容が
+  現在の launch target と一致するかを比較していなかった。
+- 「auto-generated file だから毎回同じ内容」という前提で create-only contract に
+  してしまい、service ごとに内容が変わることを見落としていた。
+
+### 再発防止策
+
+1. service 名や mount path を埋め込む auto-generated file は、存在有無だけでなく
+   expected content との差分で write する。
+2. multi-service repo の regression test では、同じ repo で service を切り替えた
+   2 回目の launch でも generated override が更新されることを確認する。
+3. runtime setup が「初回だけ create」なのか「毎回 reconcile」なのかを review 時に
+   明示し、入力パラメータが変わる file を create-only にしない。
+
+## 2026-04-21 — fix(docker): 生成した compose override は全 Docker compose 経路へ流す
+
+### 事象
+
+Issue #2035 のレビューで、`docker-compose.override.yml` 自体は生成していたが、
+初回 `docker compose up` と後続の `exec` / status 判定が base compose file
+だけを見ており、`/usr/local/bin/gwt` と `/usr/local/bin/gwtd` の bind mount が
+実際には有効になっていなかった。加えて、Docker が存在しない mount source を
+ディレクトリとして自動生成したケースを `exists()` で有効バイナリ扱いしていた。
+
+### 原因
+
+- Docker bundle setup が override path を返さず、launch 側も compose file を
+  単一パスで保持していたため、runtime setup で生成した override を
+  `up` / `restart` / `exec` / probe へ伝播できなかった。
+- Linux bundle cache の健全性判定が `exists()` ベースで、regular file かどうかと
+  中身があるかを確認していなかった。
+
+### 再発防止策
+
+1. runtime 中に compose override を生成する処理は、生成直後の `up` だけでなく
+   status / recreate / exec / command probe まで同じ compose file set
+   (`-f base -f override`) を使う contract test を追加する。
+2. bind mount source として再利用するキャッシュ判定は `exists()` を使わず、
+   regular file かつ非空であることを確認する。
+3. Docker が placeholder directory を作る失敗パスを RED test で固定し、
+   installer の再実行と override 生成の両方を確認してから完了とする。
+
+## 2026-04-21 — test(gwt-docker): Windows の fake docker は Git Bash に渡す script path と埋め込み path を揃える
+
+### 事象
+
+`cargo test -p gwt-docker` を Windows で実行すると、fake docker script を
+そのまま実行していた既存テストが `%1 is not a valid Win32 application`
+(`os error 193`) でまとまって失敗した。Git Bash wrapper を足した後も、
+`\\?\` 付きの Windows path をそのまま `/...` へ変換してしまい、
+`docker.sh: No such file or directory` で落ちた。
+
+### 原因
+
+- test harness が POSIX shell script を前提にしており、Windows 実行パスを
+  用意していなかった。
+- shell script 内に埋め込む log file path と wrapper から Git Bash へ渡す
+  script path の両方で、Windows path をそのまま使っていた。
+
+### 再発防止策
+
+1. Windows で shell-script based fake command を使う test harness では、
+   wrapper (`.cmd`) と Git Bash path 解決を helper に閉じ込める。
+2. shell script に埋め込む file path は helper 経由で Git Bash 互換
+   (`/c/...`) へ正規化し、`\\?\` prefix を落としてから使う。
+3. cross-platform にした test helper を触ったら、対象 crate の full test を
+   Windows でも 1 回回して `os error 193` 系の latent failure を残さない。
+
+## 2026-04-21 — test: process-global HOME/USERPROFILE を読む assertion は並列テスト中に再読しない
+
+### 事象
+
+Issue #2035 の全体検証で `cargo test -p gwt-core -p gwt` を実行したところ、
+`paths::tests::gwt_config_path_ends_with_config_toml` などが失敗した。失敗した
+assertion は `let p = gwt_config_path(); assert!(p.starts_with(gwt_home()))` のように、
+同一 assertion 内で process-global な home 解決を 2 回読んでいた。
+
+### 原因
+
+別の並列テストが `HOME` / `USERPROFILE` を一時変更しており、`p` を作った時点の
+home と assertion 側で再読した `gwt_home()` が一致しなかった。`gwt_home()` 自体の
+契約ではなく、テスト assertion が process-global env の再読に依存していた。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` など process-global env に依存する path test では、
+   1 つの assertion 内で public resolver を再読して比較しない。
+2. path helper の layout test は、必要なら `.gwt/...` の suffix や file name など
+   env 変更に影響されない構造を検証する。
+3. env を実際に mutate するテストを追加する場合は、同じ process 内の path test と
+   競合しないよう、共有 lock か再読しない assertion 形式を先に確認する。
 ## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
 
 ### 事象
@@ -91,6 +295,56 @@ paragraph が続く場合、paragraph を積む前に pending list を flush し
 再発防止策: Optional なリンク値は `None = no-op` と短絡せず、既存 store の clear が必要かを
 必ず確認する。Markdown parser の flush 順序は、最終 flush だけでなく block type が切り替わる
 瞬間の順序も contract test に含める。
+
+## 2026-04-21 — fix: release latest のクラッシュは修正ブランチを develop / release ベースに載せてから確認する
+
+### 事象
+
+`bunx @akiojin/gwt@latest` が `v9.7.0` の Windows bundle を取得した直後、
+resize 後に `vt100-0.16.2/src/row.rs:89` の `clear_wide()` で
+`index out of bounds: the len is 82 but the index is 82` が発生した。
+`bugfix/crash` には wide glyph shrink 修正があったが、`origin/develop`
+の `v9.7.0` ベースでは `Pane::resize()` がまだ `Screen::set_size()` を直接呼んでいた。
+
+### 原因
+
+- 修正ブランチが古い develop から分岐したまま、release 対象の `origin/develop`
+  に統合されていなかった。
+- 手元の回帰テストは修正ブランチ上では通っていたが、`@latest` が取得する
+  release bundle のコードとの差分確認が不足していた。
+
+### 再発防止策
+
+1. release crash 修正では、対象 release version の `origin/develop` を取り込んだ
+   状態で同じ回帰テストを実行する。
+2. `@latest` で再現した問題は、`Cargo.toml` の version と `gwt.log` の起動
+   version を見て、実行中バイナリと作業ツリーの差分を先に確認する。
+3. wide glyph resize 回帰では、実報告の column boundary（今回なら 82 列）を
+   テスト名と fixture に固定する。
+
+## 2026-04-20 — fix: vt100 の列 shrink は trailing wide cell orphan を残さない形で扱う
+
+### 事象
+
+Windows で `gwt` 起動直後、PowerShell prompt に全角文字を含む行が terminal 右端付近にある状態で
+window fit / reconnect snapshot 後に `vt100` が panic した。
+panic は `vt100-0.16.2/src/row.rs` の `clear_wide()` で発生し、
+`len == index` の末尾外参照になっていた。
+
+### 原因
+
+- `vt100::Screen::set_size()` の列 shrink は内部的に row を短くするが、
+  右端で wide glyph の continuation cell が落ちると leading cell だけが残ることがある。
+- その invalid state のまま後続の erase/delete/snapshot 系の処理が走ると、
+  trailing continuation を前提にした `clear_wide()` が panic する。
+- gwt 側は resize をそのまま `set_size()` に委譲しており、wide glyph の末尾境界を補正していなかった。
+
+### 再発防止策
+
+1. terminal width を shrink するときは `vt100` 画面をそのまま縮めず、
+   右端ではみ出す wide glyph を落とした可視状態へ再構築してから新サイズを適用する。
+2. wide glyph 対応は renderer だけでなく resize / snapshot / reconnect 経路も同じ owner SPEC で管理する。
+3. 回帰テストでは「shrink 後の follow-up erase」と「snapshot 取得」の両方を固定する。
 
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
@@ -3435,3 +3689,53 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 1. Python と Rust の両方が同じ on-disk layout を読む場合、`HOME` / `USERPROFILE` / fallback の優先順を一致させる。
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
+
+## 2026-04-21 — fix: Launch Agent Resume と agent pane resume を混同しない
+
+### 事象
+
+Codex 起動後に Resume が有効にならないという報告を、最初に pane discussion
+側の resume 問題として扱いかけたが、実際の対象は Launch Agent の Quick Start
+Resume だった。
+
+### 原因
+
+- 「Codex」「Resume」という共通語だけで関連領域を推定し、Launch Wizard /
+  Quick Start の文脈確認が不足していた。
+- 既存の lesson に Quick Start resume の `agent_session_id` 確認が記録されていたが、
+  調査開始時の scope 固定に反映できていなかった。
+
+### 再発防止策
+
+1. Resume 不具合では最初に対象 UI を固定する。Launch Agent の Quick Start、
+   running pane の resume、session TOML の永続化を分けて扱う。
+2. Launch Agent の Resume は `launch_wizard` と session TOML の
+   `agent_session_id` を一次調査対象にする。
+3. ユーザーが UI 名を訂正した場合は、調査 plan とテスト観点を即座にその UI に
+   切り替える。
+
+## 2026-04-21 — fix: Quick Start resume fallback で resume id だけを借りない
+
+### 事象
+
+Launch Agent の Quick Start で、最新 session に `agent_session_id` がない場合でも
+Resume ボタンは出るようになったが、older resumable session の resume id だけを借りて、
+launch profile は newer session のまま使ってしまう review 指摘が入った。
+
+### 原因
+
+- fallback 実装が「Resume ボタンを出せるか」のみを見ており、resume 対象 session と
+  launch profile の整合性を 1 セットとして扱えていなかった。
+- `apply_quick_start_action()` が `QuickStartEntry` の model / version / runtime target /
+  docker service をそのまま resume launch に使う契約を、fallback helper 側で
+  回帰テストに落とし込めていなかった。
+
+### 再発防止策
+
+1. Quick Start の resume fallback では、resume id だけを借りず、resume 元に選んだ
+   session 全体を entry source として再利用する。
+2. session fallback を実装する helper では、`session_id`、model、reasoning、version、
+   runtime target、docker service、permission flags まで同一 session 由来であることを
+   pure test で固定する。
+3. 「表示用 session」と「実行に使う session」を分ける設計にする場合は、Resume launch が
+   参照する全フィールドの provenance をコード上で明示し、部分的な borrow を禁止する。

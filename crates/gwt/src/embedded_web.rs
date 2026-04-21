@@ -368,4 +368,30 @@ mod tests {
             "expected Profile window to expose an effective environment preview",
         );
     }
+
+    #[test]
+    fn embedded_web_settings_custom_agents_surface_tracks_probe_and_save_activity() {
+        let html = index_html();
+
+        assert!(
+            html.contains("probeInFlight"),
+            "expected embedded html to track backend probe state separately from generic status",
+        );
+        assert!(
+            html.contains("saveInFlight"),
+            "expected embedded html to track preset save state separately from generic status",
+        );
+        assert!(
+            html.contains("lastProbeModels"),
+            "expected embedded html to retain the last successful probe model list",
+        );
+        assert!(
+            html.contains("function renderSettingsActivitySection(scroll)"),
+            "expected settings activity rendering to be isolated behind a named helper",
+        );
+        assert!(
+            html.contains("Last probe"),
+            "expected settings surface to expose the last probe summary",
+        );
+    }
 }

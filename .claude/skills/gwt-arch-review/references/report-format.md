@@ -8,7 +8,7 @@ The final output of `gwt-arch-review` is a markdown report. Use this template as
 # Architecture Review Report
 
 **Repository**: <repo name>
-**Scope**: <full | crate subset | changed files>
+**Scope**: <full repository | changed files since <base>>
 **Date**: <YYYY-MM-DD>
 **Reviewed by**: gwt-arch-review
 

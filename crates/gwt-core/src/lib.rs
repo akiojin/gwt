@@ -11,9 +11,20 @@ pub mod index;
 pub mod logging;
 pub mod paths;
 pub mod process;
+mod release_contract;
 pub mod repo_hash;
 pub mod runtime;
 pub mod update;
 pub mod worktree_hash;
 
 pub use error::{GwtError, Result};
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, OnceLock};
+
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+}

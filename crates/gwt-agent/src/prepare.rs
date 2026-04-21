@@ -18,6 +18,10 @@ const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
+const DOCKER_GWT_OVERRIDE_HEADER: &str =
+    "# Auto-generated docker-compose override for gwt bundle mounting";
+const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
+const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
@@ -50,9 +54,18 @@ struct DockerBundleMounts {
 
 #[derive(Debug, Clone)]
 struct DockerLaunchPlan {
-    compose_file: PathBuf,
+    compose_files: Vec<PathBuf>,
     service: String,
     container_cwd: String,
+    target_arch: String,
+}
+
+impl DockerLaunchPlan {
+    fn include_compose_override(&mut self, override_file: PathBuf) {
+        if !self.compose_files.iter().any(|file| file == &override_file) {
+            self.compose_files.push(override_file);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,8 +452,11 @@ fn apply_docker_runtime_to_launch_config(
         .unwrap_or_else(|| repo_path.to_path_buf());
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
+    let mut launch = launch;
+    let compose_override_file =
+        ensure_docker_gwt_binary_setup(&worktree, &launch.service, &launch.target_arch)?;
+    launch.include_compose_override(compose_override_file);
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
@@ -471,14 +487,8 @@ fn finalize_docker_agent_launch_config(
         args: config.args.clone(),
     };
 
-    let mut args = vec![
-        "compose".to_string(),
-        "-f".to_string(),
-        launch.compose_file.display().to_string(),
-        "exec".to_string(),
-        "-w".to_string(),
-        launch.container_cwd,
-    ];
+    let mut args = docker_compose_command_prefix(&launch);
+    args.extend(["exec".to_string(), "-w".to_string(), launch.container_cwd]);
     args.extend(docker_compose_exec_env_args(&config.env_vars));
     args.push(launch.service);
     args.push(runtime_program.executable);
@@ -557,16 +567,17 @@ fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     Ok(())
 }
 
-fn gwt_bin_dir() -> PathBuf {
-    gwt_core::paths::gwt_home().join("bin")
-}
-
-fn docker_bundle_mounts() -> DockerBundleMounts {
-    let gwt_bin_dir = gwt_bin_dir();
+fn docker_bundle_mounts_for_gwt_home(gwt_home: &Path) -> DockerBundleMounts {
+    let gwt_bin_dir = gwt_home.join("bin");
     DockerBundleMounts {
         host_gwt: gwt_bin_dir.join(DOCKER_HOST_GWT_BIN_NAME),
         host_gwtd: gwt_bin_dir.join(DOCKER_HOST_GWTD_BIN_NAME),
     }
+}
+
+#[cfg(test)]
+fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
+    docker_bundle_mounts_for_gwt_home(&home.join(".gwt"))
 }
 
 fn docker_compose_mount_path(path: &Path) -> String {
@@ -577,49 +588,125 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
     let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
-        "# Auto-generated docker-compose override for gwt bundle mounting\n\
+        "{DOCKER_GWT_OVERRIDE_HEADER}\n\
          version: '3.8'\n\
          services:\n\
            {service}:\n\
              volumes:\n\
                - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
-               - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
+                - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
     )
 }
 
-fn ensure_docker_gwt_binary_setup(repo_path: &Path, service: &str) -> Result<(), String> {
+fn ensure_docker_gwt_binary_setup(
+    repo_path: &Path,
+    service: &str,
+    target_arch: &str,
+) -> Result<PathBuf, String> {
+    let gwt_home = gwt_core::paths::gwt_home();
+    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, |bundle| {
+        eprintln!(
+            "Installing Linux gwt bundle for Docker at {} and {}",
+            bundle.host_gwt.display(),
+            bundle.host_gwtd.display()
+        );
+        let installed = gwt_core::update::UpdateManager::new().install_latest_docker_linux_bundle(
+            target_arch,
+            &bundle.host_gwt,
+            &bundle.host_gwtd,
+        )?;
+        eprintln!(
+            "Installed Linux gwt bundle v{} for Docker",
+            installed.version
+        );
+        Ok(())
+    })
+}
+
+fn docker_compose_override_path(repo_path: &Path) -> PathBuf {
+    repo_path.join(DOCKER_GWT_OVERRIDE_FILE_NAME)
+}
+
+fn docker_compose_user_override_path(repo_path: &Path) -> PathBuf {
+    repo_path.join(DOCKER_USER_OVERRIDE_FILE_NAME)
+}
+
+fn is_legacy_gwt_generated_override(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|content| content.starts_with(DOCKER_GWT_OVERRIDE_HEADER))
+}
+
+#[cfg(test)]
+fn ensure_docker_gwt_binary_setup_for_home<F>(
+    repo_path: &Path,
+    service: &str,
+    home: &Path,
+    install_bundle: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(&DockerBundleMounts) -> Result<(), String>,
+{
+    let gwt_home = home.join(".gwt");
+    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, install_bundle)
+}
+
+fn ensure_docker_gwt_binary_setup_for_gwt_home<F>(
+    repo_path: &Path,
+    service: &str,
+    gwt_home: &Path,
+    mut install_bundle: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(&DockerBundleMounts) -> Result<(), String>,
+{
     use std::fs;
 
-    let bundle = docker_bundle_mounts();
+    let bundle = docker_bundle_mounts_for_gwt_home(gwt_home);
 
-    if !bundle.host_gwt.exists() || !bundle.host_gwtd.exists() {
-        let override_path = repo_path.join("docker-compose.override.yml");
-        if !override_path.exists() {
-            eprintln!(
-                "Note: Linux gwt bundle not found at {} and {}\n\
-                 This is required for Docker agent support.\n\
-                 You can either:\n\
-                 1. Download the Linux release bundle and place the extracted binaries at these paths\n\
-                 2. Run 'gwt setup docker' to set up Docker integration automatically",
+    if !docker_bundle_binary_ready(&bundle.host_gwt)
+        || !docker_bundle_binary_ready(&bundle.host_gwtd)
+    {
+        install_bundle(&bundle).map_err(|err| {
+            format!(
+                "Failed to install Linux gwt bundle for Docker: {err}\n\
+                 Expected cached binaries at {} and {}",
                 bundle.host_gwt.display(),
                 bundle.host_gwtd.display()
-            );
-        }
+            )
+        })?;
     }
 
-    let override_path = repo_path.join("docker-compose.override.yml");
-    if !override_path.exists() {
-        let override_content = docker_bundle_override_content(service, &bundle);
+    if !docker_bundle_binary_ready(&bundle.host_gwt)
+        || !docker_bundle_binary_ready(&bundle.host_gwtd)
+    {
+        return Err(format!(
+            "Linux gwt bundle setup did not create expected Docker binaries at {} and {}",
+            bundle.host_gwt.display(),
+            bundle.host_gwtd.display()
+        ));
+    }
+
+    let override_path = docker_compose_override_path(repo_path);
+    let override_content = docker_bundle_override_content(service, &bundle);
+    let rewrite_override = fs::read_to_string(&override_path)
+        .map(|existing| existing != override_content)
+        .unwrap_or(true);
+    if rewrite_override {
         fs::write(&override_path, override_content).map_err(|err| {
             format!(
-                "Failed to create docker-compose.override.yml: {err}\n\
+                "Failed to write generated Docker compose override: {err}\n\
                  Manually create {} with gwt/gwtd bundle mounts",
                 override_path.display()
             )
         })?;
     }
 
-    Ok(())
+    Ok(override_path)
+}
+
+fn docker_bundle_binary_ready(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
 fn maybe_inject_docker_sandbox_env(
@@ -631,13 +718,14 @@ fn maybe_inject_docker_sandbox_env(
         return Ok(());
     }
 
-    let is_root = gwt_docker::compose_service_user_is_root(&launch.compose_file, &launch.service)
-        .map_err(|err| {
-        format!(
-            "Failed to determine Docker user for service '{}': {err}",
-            launch.service
-        )
-    })?;
+    let is_root =
+        gwt_docker::compose_service_user_is_root_with_files(&launch.compose_files, &launch.service)
+            .map_err(|err| {
+                format!(
+                    "Failed to determine Docker user for service '{}': {err}",
+                    launch.service
+                )
+            })?;
     if is_root {
         config
             .env_vars
@@ -717,8 +805,8 @@ fn resolve_docker_package_runner(
     ];
 
     for candidate in candidates {
-        let output = gwt_docker::compose_service_exec_capture(
-            &launch.compose_file,
+        let output = gwt_docker::compose_service_exec_capture_with_files(
+            &launch.compose_files,
             &launch.service,
             Some(&launch.container_cwd),
             &candidate.probe_args(),
@@ -751,9 +839,12 @@ fn ensure_docker_launch_command_ready(
     launch: &DockerLaunchPlan,
     command: &str,
 ) -> Result<(), String> {
-    let available =
-        gwt_docker::compose_service_has_command(&launch.compose_file, &launch.service, command)
-            .map_err(|err| err.to_string())?;
+    let available = gwt_docker::compose_service_has_command_with_files(
+        &launch.compose_files,
+        &launch.service,
+        command,
+    )
+    .map_err(|err| err.to_string())?;
     if available {
         Ok(())
     } else {
@@ -786,21 +877,22 @@ fn ensure_docker_launch_service_ready(
     launch: &DockerLaunchPlan,
     intent: DockerLifecycleIntent,
 ) -> Result<(), String> {
-    let status = gwt_docker::compose_service_status(&launch.compose_file, &launch.service)
-        .map_err(|err| err.to_string())?;
+    let status =
+        gwt_docker::compose_service_status_with_files(&launch.compose_files, &launch.service)
+            .map_err(|err| err.to_string())?;
     match normalize_docker_launch_action(intent, status) {
         DockerLaunchServiceAction::Connect => Ok(()),
         DockerLaunchServiceAction::Start => {
-            gwt_docker::compose_up(&launch.compose_file, &launch.service)
+            gwt_docker::compose_up_with_files(&launch.compose_files, &launch.service)
                 .map_err(|err| err.to_string())?;
             Ok(())
         }
         DockerLaunchServiceAction::Restart => {
-            gwt_docker::compose_restart(&launch.compose_file, &launch.service)
+            gwt_docker::compose_restart_with_files(&launch.compose_files, &launch.service)
                 .map_err(|err| err.to_string())
         }
         DockerLaunchServiceAction::Recreate => {
-            gwt_docker::compose_up_force_recreate(&launch.compose_file, &launch.service)
+            gwt_docker::compose_up_force_recreate_with_files(&launch.compose_files, &launch.service)
                 .map_err(|err| err.to_string())
         }
     }
@@ -882,14 +974,78 @@ fn resolve_docker_launch_plan(
         })?;
 
     Ok(DockerLaunchPlan {
-        compose_file,
+        compose_files: docker_launch_compose_files(worktree, &compose_file),
         service: service.name.clone(),
         container_cwd,
+        target_arch: docker_bundle_target_arch(service)?,
     })
 }
 
 fn docker_binary_for_launch() -> String {
     std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+}
+
+fn docker_bundle_target_arch(service: &gwt_docker::ComposeService) -> Result<String, String> {
+    if let Some(platform) = service.platform.as_deref() {
+        return docker_platform_target_arch(platform).ok_or_else(|| {
+            format!(
+                "Docker service {} specifies unsupported platform {}; expected x86_64/amd64 or aarch64/arm64",
+                service.name, platform
+            )
+        });
+    }
+    Ok(host_docker_target_arch())
+}
+
+fn docker_platform_target_arch(platform: &str) -> Option<String> {
+    let platform = platform.trim();
+    let arch = platform
+        .split('/')
+        .nth(1)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(platform);
+    normalize_docker_target_arch(arch)
+}
+
+fn host_docker_target_arch() -> String {
+    normalize_docker_target_arch(std::env::consts::ARCH)
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+}
+
+fn normalize_docker_target_arch(raw: &str) -> Option<String> {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+    {
+        "x86_64" | "amd64" | "x64" => Some("x86_64".to_string()),
+        "aarch64" | "arm64" => Some("aarch64".to_string()),
+        _ => None,
+    }
+}
+
+fn docker_launch_compose_files(worktree: &Path, compose_file: &Path) -> Vec<PathBuf> {
+    let mut files = vec![compose_file.to_path_buf()];
+    let user_override_file = docker_compose_user_override_path(worktree);
+    if user_override_file.is_file() && !is_legacy_gwt_generated_override(&user_override_file) {
+        files.push(user_override_file);
+    }
+    let generated_override_file = docker_compose_override_path(worktree);
+    if generated_override_file.is_file() {
+        files.push(generated_override_file);
+    }
+    files
+}
+
+fn docker_compose_command_prefix(launch: &DockerLaunchPlan) -> Vec<String> {
+    let mut args = vec!["compose".to_string()];
+    for compose_file in &launch.compose_files {
+        args.push("-f".to_string());
+        args.push(compose_file.display().to_string());
+    }
+    args
 }
 
 fn docker_compose_file_for_launch(
@@ -1167,6 +1323,114 @@ mod tests {
             .exists());
         assert_eq!(prepared.session.launch_command, "npx");
         assert_eq!(prepared.session.branch, "feature/demo");
+    }
+
+    #[test]
+    fn docker_bundle_override_content_mounts_front_door_and_daemon() {
+        let home = PathBuf::from("/home/example");
+        let bundle = docker_bundle_mounts_for_home(&home);
+        let content = docker_bundle_override_content("app", &bundle);
+
+        assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
+        assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+    }
+
+    #[test]
+    fn docker_binary_setup_installs_missing_bundle_before_writing_override() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let mut installer_calls = 0;
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
+            installer_calls += 1;
+            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                .expect("create bin dir");
+            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+            Ok(())
+        })
+        .expect("docker setup");
+
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        assert_eq!(installer_calls, 1);
+        assert_eq!(fs::read(&bundle.host_gwt).expect("read gwt"), b"linux-gwt");
+        assert_eq!(
+            fs::read(&bundle.host_gwtd).expect("read gwtd"),
+            b"linux-gwtd"
+        );
+
+        let override_content = fs::read_to_string(docker_compose_override_path(repo.path()))
+            .expect("override content");
+        assert!(override_content.contains("gwt-linux:/usr/local/bin/gwt:ro"));
+        assert!(override_content.contains("gwtd-linux:/usr/local/bin/gwtd:ro"));
+    }
+
+    #[test]
+    fn docker_binary_setup_repairs_directory_placeholders_before_writing_override() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(&bundle.host_gwt).expect("create gwt placeholder dir");
+        fs::create_dir_all(&bundle.host_gwtd).expect("create gwtd placeholder dir");
+        let mut installer_calls = 0;
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
+            installer_calls += 1;
+            if bundle.host_gwt.is_dir() {
+                fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
+            }
+            if bundle.host_gwtd.is_dir() {
+                fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
+            }
+            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                .expect("create bin dir");
+            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+            Ok(())
+        })
+        .expect("docker setup");
+
+        assert_eq!(installer_calls, 1);
+        assert!(bundle.host_gwt.is_file());
+        assert!(bundle.host_gwtd.is_file());
+        assert!(docker_compose_override_path(repo.path()).is_file());
+    }
+
+    #[test]
+    fn docker_binary_setup_skips_installer_when_bundle_exists() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
+            panic!("installer should not run when both bundle binaries exist");
+        })
+        .expect("docker setup");
+
+        assert!(docker_compose_override_path(repo.path()).is_file());
+    }
+
+    #[test]
+    fn docker_launch_compose_files_skips_legacy_generated_default_override() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("repo");
+        fs::create_dir_all(&project).expect("project dir");
+        let compose_file = project.join("docker-compose.yml");
+        fs::write(&compose_file, "services: {}\n").expect("compose file");
+        fs::write(
+            docker_compose_user_override_path(&project),
+            format!("{DOCKER_GWT_OVERRIDE_HEADER}\nservices: {{}}\n"),
+        )
+        .expect("legacy default override");
+
+        assert_eq!(
+            docker_launch_compose_files(&project, &compose_file),
+            vec![compose_file]
+        );
     }
 
     #[test]

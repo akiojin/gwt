@@ -30,6 +30,7 @@ const DEFAULT_OWNER: &str = "akiojin";
 const DEFAULT_REPO: &str = "gwt";
 const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60 * 24);
 const DEFAULT_API_BASE_URL: &str = "https://api.github.com";
+const DOCKER_LINUX_PRIMARY_BINARY_NAME: &str = "gwt";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -116,6 +117,13 @@ pub enum PreparedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledDockerLinuxBundle {
+    pub version: String,
+    pub gwt_path: PathBuf,
+    pub gwtd_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ApplyPlan {
     Portable { url: String },
     Installer { url: String, kind: InstallerKind },
@@ -147,20 +155,44 @@ impl Platform {
     }
 
     fn binary_name(&self) -> String {
-        if self.os == "windows" {
-            "gwt.exe".to_string()
-        } else {
-            "gwt".to_string()
-        }
+        crate::release_contract::bundle_binary_names(&self.os)
+            .and_then(|names| names.into_iter().next())
+            .unwrap_or_else(|| {
+                if self.os == "windows" {
+                    "gwt.exe".to_string()
+                } else {
+                    "gwt".to_string()
+                }
+            })
     }
 
     fn portable_asset_name(&self) -> Option<String> {
-        let artifact = self.artifact()?;
-        if self.os == "windows" {
-            Some(format!("gwt-{artifact}.zip"))
-        } else {
-            Some(format!("gwt-{artifact}.tar.gz"))
-        }
+        crate::release_contract::portable_asset_name(&self.os, &self.arch)
+    }
+}
+
+fn normalize_docker_linux_arch(raw: &str) -> Option<&'static str> {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+    {
+        "x86_64" | "amd64" | "x64" => Some("x86_64"),
+        "aarch64" | "arm64" => Some("aarch64"),
+        _ => None,
+    }
+}
+
+fn docker_linux_bundle_asset_name(arch: &str) -> Result<String, String> {
+    match normalize_docker_linux_arch(arch) {
+        Some("x86_64") => Ok("gwt-linux-x86_64.tar.gz".to_string()),
+        Some("aarch64") => Ok("gwt-linux-aarch64.tar.gz".to_string()),
+        Some(other) => Ok(format!("gwt-linux-{other}.tar.gz")),
+        None => Err(format!(
+            "Unsupported Docker Linux bundle architecture: {arch}. Expected x86_64/amd64 or aarch64/arm64"
+        )),
     }
 }
 
@@ -342,25 +374,7 @@ impl UpdateManager {
         let asset_name = asset_name_from_url(asset_url).unwrap_or_else(|| "gwt-update".to_string());
         let dest = update_dir.join(&asset_name);
 
-        let res = self
-            .client
-            .get(asset_url)
-            .send()
-            .map_err(|e| format!("Download failed: {e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("Download failed with status {}", res.status()));
-        }
-
-        let mut file =
-            fs::File::create(&dest).map_err(|e| format!("Failed to create payload file: {e}"))?;
-        let mut reader = res;
-        io::copy(&mut reader, &mut file).map_err(|e| format!("Failed to write payload: {e}"))?;
-
-        let size = fs::metadata(&dest).map(|m| m.len()).unwrap_or_default();
-        if size == 0 {
-            let _ = fs::remove_file(&dest);
-            return Err("Downloaded payload is empty".to_string());
-        }
+        self.download_asset(asset_url, &dest)?;
 
         let dest_str = dest.to_string_lossy().to_string();
         if dest_str.ends_with(".tar.gz") || dest_str.ends_with(".zip") {
@@ -402,6 +416,108 @@ impl UpdateManager {
         // Portable direct binary.
         ensure_executable(&dest)?;
         Ok(PreparedPayload::PortableBinary { path: dest })
+    }
+
+    pub fn install_latest_docker_linux_bundle(
+        &self,
+        target_arch: &str,
+        target_gwt: &Path,
+        target_gwtd: &Path,
+    ) -> Result<InstalledDockerLinuxBundle, String> {
+        let release = self.fetch_latest_release()?;
+        let version = parse_tag_version(&release.tag_name)
+            .ok_or_else(|| {
+                format!(
+                    "Failed to parse release tag as version: {}",
+                    release.tag_name
+                )
+            })?
+            .to_string();
+        let asset_name = docker_linux_bundle_asset_name(target_arch)?;
+        let asset_url = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == asset_name)
+            .map(|asset| asset.browser_download_url.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Latest release {} does not include required Docker bundle asset {}",
+                    release.html_url, asset_name
+                )
+            })?;
+
+        self.install_docker_linux_bundle_from_url(
+            &version,
+            &asset_name,
+            asset_url,
+            target_gwt,
+            target_gwtd,
+        )
+    }
+
+    fn install_docker_linux_bundle_from_url(
+        &self,
+        version: &str,
+        asset_name: &str,
+        asset_url: &str,
+        target_gwt: &Path,
+        target_gwtd: &Path,
+    ) -> Result<InstalledDockerLinuxBundle, String> {
+        let update_dir = self
+            .updates_dir
+            .join("docker")
+            .join(format!("v{}", version.trim().trim_start_matches('v')));
+        fs::create_dir_all(&update_dir).map_err(|e| format!("Failed to create update dir: {e}"))?;
+
+        let dest = update_dir.join(asset_name);
+        self.download_asset(asset_url, &dest)?;
+
+        let extract_dir = update_dir.join("extract");
+        let _ = fs::remove_dir_all(&extract_dir);
+        fs::create_dir_all(&extract_dir)
+            .map_err(|e| format!("Failed to create extract dir: {e}"))?;
+        extract_archive(&dest, &extract_dir)?;
+        let (gwt_source, gwtd_source) =
+            find_extracted_bundle_binaries(&extract_dir, DOCKER_LINUX_PRIMARY_BINARY_NAME)?;
+        ensure_executable(&gwt_source)?;
+        ensure_executable(&gwtd_source)?;
+        replace_executables_with_retry(&[
+            (target_gwtd, gwtd_source.as_path()),
+            (target_gwt, gwt_source.as_path()),
+        ])?;
+
+        Ok(InstalledDockerLinuxBundle {
+            version: version.to_string(),
+            gwt_path: target_gwt.to_path_buf(),
+            gwtd_path: target_gwtd.to_path_buf(),
+        })
+    }
+
+    fn download_asset(&self, asset_url: &str, dest: &Path) -> Result<(), String> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create payload dir: {e}"))?;
+        }
+
+        let res = self
+            .client
+            .get(asset_url)
+            .send()
+            .map_err(|e| format!("Download failed: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("Download failed with status {}", res.status()));
+        }
+
+        let mut file =
+            fs::File::create(dest).map_err(|e| format!("Failed to create payload file: {e}"))?;
+        let mut reader = res;
+        io::copy(&mut reader, &mut file).map_err(|e| format!("Failed to write payload: {e}"))?;
+
+        let size = fs::metadata(dest).map(|m| m.len()).unwrap_or_default();
+        if size == 0 {
+            let _ = fs::remove_file(dest);
+            return Err("Downloaded payload is empty".to_string());
+        }
+        Ok(())
     }
 
     pub fn write_restart_args_file(&self, path: &Path, args: Vec<String>) -> Result<(), String> {
@@ -635,7 +751,7 @@ pub fn internal_run_installer(
                 #[cfg(target_os = "windows")]
                 {
                     run_windows_msi_with_uac(installer)?;
-                    target_exe.to_path_buf()
+                    resolve_windows_restart_executable(target_exe)
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -707,7 +823,16 @@ fn asset_name_from_url(url: &str) -> Option<String> {
 fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
     match platform.os.as_str() {
         "macos" => {
-            // New release flow: prefer DMG for macOS.
+            if let Some(asset_name) = crate::release_contract::installer_asset_name(&platform.os) {
+                if let Some(asset) = assets
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(&asset_name))
+                {
+                    return Some(asset.browser_download_url.clone());
+                }
+            }
+
+            // Legacy release flow: prefer any DMG for macOS.
             if let Some(asset) = assets.iter().find(|a| {
                 let lower = a.name.to_ascii_lowercase();
                 lower.ends_with(".dmg") && asset_matches_arch(&lower, &platform.arch)
@@ -736,7 +861,16 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 .map(|a| a.browser_download_url.clone())
         }
         "windows" => {
-            // New release flow: WiX MSI.
+            if let Some(asset_name) = crate::release_contract::installer_asset_name(&platform.os) {
+                if let Some(asset) = assets
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(&asset_name))
+                {
+                    return Some(asset.browser_download_url.clone());
+                }
+            }
+
+            // Legacy naming fallback.
             if let Some(asset) = assets
                 .iter()
                 .find(|a| a.name.eq_ignore_ascii_case("gwt-wix-windows-x86_64.msi"))
@@ -744,7 +878,6 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 return Some(asset.browser_download_url.clone());
             }
 
-            // Legacy naming fallback.
             if let Some(asset) = assets
                 .iter()
                 .find(|a| a.name.eq_ignore_ascii_case("gwt-windows-x86_64.msi"))
@@ -790,12 +923,62 @@ fn installer_kind_for_url(platform: &Platform, installer_url: &str) -> Option<In
     }
 }
 
+fn normalize_windows_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn windows_paths_equal(lhs: &Path, rhs: &Path) -> bool {
+    normalize_windows_path(lhs) == normalize_windows_path(rhs)
+}
+
+fn windows_per_user_install_executable(target_exe: &Path) -> Option<PathBuf> {
+    let file_name = target_exe.file_name()?;
+    std::env::var_os("LOCALAPPDATA").map(|root| {
+        PathBuf::from(root)
+            .join("Programs")
+            .join("GWT")
+            .join(file_name)
+    })
+}
+
+fn is_windows_per_user_install_executable(current_exe: &Path) -> bool {
+    windows_per_user_install_executable(current_exe)
+        .is_some_and(|expected| windows_paths_equal(&expected, current_exe))
+}
+
+fn is_windows_legacy_program_files_executable(current_exe: &Path) -> bool {
+    let normalized = normalize_windows_path(current_exe);
+    normalized.ends_with("\\gwt\\gwt.exe")
+        && (normalized.contains("\\program files\\")
+            || normalized.contains("\\program files (x86)\\"))
+}
+
+fn windows_should_prefer_installer(current_exe: &Path) -> bool {
+    is_windows_per_user_install_executable(current_exe)
+        || is_windows_legacy_program_files_executable(current_exe)
+}
+
 fn choose_apply_plan(
     platform: &Platform,
     current_exe: Option<&Path>,
     portable_url: Option<&str>,
     installer_url: Option<&str>,
 ) -> Option<ApplyPlan> {
+    if platform.os == "windows" {
+        if let (Some(current_exe), Some(url)) = (current_exe, installer_url) {
+            if windows_should_prefer_installer(current_exe) {
+                let kind = installer_kind_for_url(platform, url)?;
+                return Some(ApplyPlan::Installer {
+                    url: url.to_string(),
+                    kind,
+                });
+            }
+        }
+    }
+
     let running_from_app_bundle =
         current_exe.and_then(app_bundle_from_executable).is_some() || current_exe.is_none();
     let writable = current_exe
@@ -1142,6 +1325,16 @@ fn resolve_macos_restart_executable(
     target_exe.to_path_buf()
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn resolve_windows_restart_executable(target_exe: &Path) -> PathBuf {
+    if let Some(preferred) = windows_per_user_install_executable(target_exe) {
+        if preferred.exists() {
+            return preferred;
+        }
+    }
+    target_exe.to_path_buf()
+}
+
 #[cfg(any(test, target_os = "macos"))]
 fn build_macos_dmg_install_shell_cmd(
     source_app: &Path,
@@ -1268,14 +1461,25 @@ fn run_macos_dmg_installer_with_privileges(
     Ok(target_app)
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn windows_msi_argument_list(installer: &Path) -> Vec<String> {
+    vec![
+        "/i".to_string(),
+        installer.to_string_lossy().to_string(),
+        "/passive".to_string(),
+        "GWT_ALLOW_LEGACY_MIGRATION=1".to_string(),
+    ]
+}
+
 #[cfg(target_os = "windows")]
 fn run_windows_msi_with_uac(installer: &Path) -> Result<(), String> {
     // Trigger UAC for msiexec via PowerShell.
-    let msi = installer.to_string_lossy().to_string();
-    let args = format!(
-        "Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', '{}', '/passive')",
-        msi.replace('\'', "''")
-    );
+    let arg_list = windows_msi_argument_list(installer)
+        .into_iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = format!("Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @({arg_list})");
     let status = std::process::Command::new("powershell")
         .arg("-NoProfile")
         .arg("-Command")
@@ -1465,15 +1669,16 @@ mod tests {
         io::{Cursor, Read, Write},
         net::TcpListener,
         path::Path,
+        sync::Mutex,
         thread,
     };
 
     use super::*;
 
     #[cfg(target_os = "windows")]
-    use std::{sync::Mutex, time::Duration as StdDuration};
+    use std::time::Duration as StdDuration;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(test)]
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn serve_once(path: &str, status: &str, content_type: &str, body: Vec<u8>) -> String {
@@ -1513,6 +1718,35 @@ mod tests {
             .write_all(b"zip-daemon")
             .expect("write daemon zip body");
         writer.finish().expect("finish zip").into_inner()
+    }
+
+    fn tar_gz_bundle_body(primary: &[u8], daemon: &[u8]) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let encoder = flate2::write::GzEncoder::new(cursor, flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(primary.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "dist/gwt-linux-x86_64/gwt", primary)
+            .expect("append gwt");
+
+        let mut daemon_header = tar::Header::new_gnu();
+        daemon_header.set_size(daemon.len() as u64);
+        daemon_header.set_mode(0o755);
+        daemon_header.set_cksum();
+        archive
+            .append_data(&mut daemon_header, "dist/gwt-linux-x86_64/gwtd", daemon)
+            .expect("append gwtd");
+
+        archive
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("finish gzip")
+            .into_inner()
     }
 
     #[test]
@@ -1820,6 +2054,35 @@ mod tests {
     }
 
     #[test]
+    fn shared_release_contract_exposes_current_stable_bundle_assets() {
+        assert_eq!(
+            crate::release_contract::portable_asset_name("windows", "x86_64").as_deref(),
+            Some("gwt-windows-x86_64.zip")
+        );
+        assert_eq!(
+            crate::release_contract::installer_asset_name("windows").as_deref(),
+            Some("gwt-windows-x86_64.msi")
+        );
+        assert_eq!(
+            crate::release_contract::bundle_binary_names("windows").expect("bundle binaries"),
+            vec!["gwt.exe".to_string(), "gwtd.exe".to_string()]
+        );
+    }
+
+    #[test]
+    fn docker_linux_bundle_asset_name_normalizes_common_arch_aliases() {
+        assert_eq!(
+            docker_linux_bundle_asset_name("amd64").as_deref(),
+            Ok("gwt-linux-x86_64.tar.gz")
+        );
+        assert_eq!(
+            docker_linux_bundle_asset_name("arm64/v8").as_deref(),
+            Ok("gwt-linux-aarch64.tar.gz")
+        );
+        assert!(docker_linux_bundle_asset_name("ppc64le").is_err());
+    }
+
+    #[test]
     fn choose_apply_plan_prefers_portable_for_macos_cli_install() {
         let platform = Platform {
             os: "macos".to_string(),
@@ -1866,6 +2129,72 @@ mod tests {
     }
 
     #[test]
+    fn choose_apply_plan_prefers_installer_for_windows_per_user_msi_install() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("AppData").join("Local");
+        let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let plan = choose_apply_plan(
+            &Platform {
+                os: "windows".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            Some(&current_exe),
+            Some("https://example.com/gwt-windows-x86_64.zip"),
+            Some("https://example.com/gwt-windows-x86_64.msi"),
+        );
+
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt-windows-x86_64.msi".to_string(),
+                kind: InstallerKind::WindowsMsi,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_apply_plan_prefers_installer_for_legacy_program_files_windows_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let current_exe = temp
+            .path()
+            .join("Program Files")
+            .join("GWT")
+            .join("gwt.exe");
+        fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+
+        let plan = choose_apply_plan(
+            &Platform {
+                os: "windows".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            Some(&current_exe),
+            Some("https://example.com/gwt-windows-x86_64.zip"),
+            Some("https://example.com/gwt-windows-x86_64.msi"),
+        );
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Installer {
+                url: "https://example.com/gwt-windows-x86_64.msi".to_string(),
+                kind: InstallerKind::WindowsMsi,
+            })
+        );
+    }
+
+    #[test]
     fn resolve_macos_restart_executable_scans_applications_for_matching_binary() {
         let temp = tempfile::tempdir().unwrap();
         let other_bundle = temp.path().join("Other.app").join("Contents").join("MacOS");
@@ -1880,6 +2209,49 @@ mod tests {
             resolve_macos_restart_executable(temp.path(), Path::new("/usr/local/bin/gwt"), None);
 
         assert_eq!(restart_exe, gwt_bundle.join("gwt"));
+    }
+
+    #[test]
+    fn resolve_windows_restart_executable_prefers_per_user_install_after_migration() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("AppData").join("Local");
+        let migrated_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(migrated_exe.parent().unwrap()).unwrap();
+        fs::write(&migrated_exe, b"new-binary").unwrap();
+
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let restart_exe = resolve_windows_restart_executable(
+            &temp
+                .path()
+                .join("Program Files")
+                .join("GWT")
+                .join("gwt.exe"),
+        );
+
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+
+        assert_eq!(restart_exe, migrated_exe);
+    }
+
+    #[test]
+    fn windows_msi_argument_list_allows_legacy_migration() {
+        assert_eq!(
+            windows_msi_argument_list(Path::new("C:/temp/gwt-windows-x86_64.msi")),
+            vec![
+                "/i".to_string(),
+                "C:/temp/gwt-windows-x86_64.msi".to_string(),
+                "/passive".to_string(),
+                "GWT_ALLOW_LEGACY_MIGRATION=1".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1898,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn find_installer_asset_url_prefers_windows_wix_msi() {
+    fn find_installer_asset_url_prefers_contract_windows_msi() {
         let platform = Platform {
             os: "windows".to_string(),
             arch: "x86_64".to_string(),
@@ -1912,10 +2284,14 @@ mod tests {
                 name: "gwt-wix-windows-x86_64.msi".to_string(),
                 browser_download_url: "https://example.com/wix.msi".to_string(),
             },
+            GitHubAsset {
+                name: "gwt-windows-x86_64.msi".to_string(),
+                browser_download_url: "https://example.com/current.msi".to_string(),
+            },
         ];
 
         let url = find_installer_asset_url(&platform, &assets);
-        assert_eq!(url.as_deref(), Some("https://example.com/wix.msi"));
+        assert_eq!(url.as_deref(), Some("https://example.com/current.msi"));
     }
 
     #[test]
@@ -2319,6 +2695,94 @@ mod tests {
         let empty_url = serve_once("/empty.bin", "200 OK", "application/octet-stream", vec![]);
         let err = mgr.prepare_update("99.0.6", &empty_url).unwrap_err();
         assert!(err.contains("Downloaded payload is empty"));
+    }
+
+    #[test]
+    fn install_latest_docker_linux_bundle_downloads_release_tarball_to_cache_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let tarball_url = serve_once(
+            "/downloads/gwt-linux-x86_64.tar.gz",
+            "200 OK",
+            "application/gzip",
+            tar_gz_bundle_body(b"docker-gwt", b"docker-gwtd"),
+        );
+        let release_body = format!(
+            r#"{{
+  "tag_name": "v99.1.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v99.1.0",
+  "assets": [
+    {{
+      "name": "gwt-linux-x86_64.tar.gz",
+      "browser_download_url": "{tarball_url}"
+    }}
+  ]
+}}"#
+        );
+        let base_url = serve_once("/", "200 OK", "application/json", release_body.into_bytes());
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let target_gwt = temp.path().join(".gwt").join("bin").join("gwt-linux");
+        let target_gwtd = temp.path().join(".gwt").join("bin").join("gwtd-linux");
+
+        let installed = mgr
+            .install_latest_docker_linux_bundle("x86_64", &target_gwt, &target_gwtd)
+            .expect("install docker bundle");
+
+        assert_eq!(installed.version, "99.1.0");
+        assert_eq!(installed.gwt_path, target_gwt);
+        assert_eq!(installed.gwtd_path, target_gwtd);
+        assert_eq!(fs::read(&installed.gwt_path).unwrap(), b"docker-gwt");
+        assert_eq!(fs::read(&installed.gwtd_path).unwrap(), b"docker-gwtd");
+    }
+
+    #[test]
+    fn install_latest_docker_linux_bundle_uses_requested_arch_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let x64_url = serve_once(
+            "/downloads/gwt-linux-x86_64.tar.gz",
+            "200 OK",
+            "application/gzip",
+            tar_gz_bundle_body(b"x64-gwt", b"x64-gwtd"),
+        );
+        let arm64_url = serve_once(
+            "/downloads/gwt-linux-aarch64.tar.gz",
+            "200 OK",
+            "application/gzip",
+            tar_gz_bundle_body(b"arm64-gwt", b"arm64-gwtd"),
+        );
+        let release_body = format!(
+            r#"{{
+  "tag_name": "v99.1.1",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v99.1.1",
+  "assets": [
+    {{
+      "name": "gwt-linux-x86_64.tar.gz",
+      "browser_download_url": "{x64_url}"
+    }},
+    {{
+      "name": "gwt-linux-aarch64.tar.gz",
+      "browser_download_url": "{arm64_url}"
+    }}
+  ]
+}}"#
+        );
+        let base_url = serve_once("/", "200 OK", "application/json", release_body.into_bytes());
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+        let target_gwt = temp.path().join(".gwt").join("bin").join("gwt-linux");
+        let target_gwtd = temp.path().join(".gwt").join("bin").join("gwtd-linux");
+
+        let installed = mgr
+            .install_latest_docker_linux_bundle("aarch64", &target_gwt, &target_gwtd)
+            .expect("install docker bundle for aarch64");
+
+        assert_eq!(installed.version, "99.1.1");
+        assert_eq!(fs::read(&installed.gwt_path).unwrap(), b"arm64-gwt");
+        assert_eq!(fs::read(&installed.gwtd_path).unwrap(), b"arm64-gwtd");
     }
 
     #[test]
