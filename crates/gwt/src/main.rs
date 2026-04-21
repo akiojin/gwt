@@ -75,12 +75,12 @@ pub(crate) use launch_runtime::{
 };
 pub(crate) use runtime_support::{
     app_state_view_from_parts, close_window_from_workspace, combined_window_id, current_git_branch,
-    dedupe_recent_projects, fallback_project_target,
-    first_available_worktree_path, geometry_to_pty_size, knowledge_kind_for_preset,
-    local_branch_exists, normalize_active_tab_id, normalize_branch_name, origin_remote_ref,
-    resolve_launch_spec_with_fallback, resolve_launch_wizard_hydration, resolve_project_target,
-    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
-    spawn_env, synthetic_branch_entry, workspace_view_for_tab,
+    dedupe_recent_projects, fallback_project_target, first_available_worktree_path,
+    geometry_to_pty_size, knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id,
+    normalize_branch_name, origin_remote_ref, resolve_launch_spec_with_fallback,
+    resolve_launch_wizard_hydration, resolve_project_target, run_cli, same_worktree_path,
+    should_auto_close_agent_window, should_auto_start_restored_window, spawn_env,
+    synthetic_branch_entry, workspace_view_for_tab,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{

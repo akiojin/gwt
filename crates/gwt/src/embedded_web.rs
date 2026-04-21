@@ -209,6 +209,63 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
+        let html = index_html();
+        let open_flow = regex::Regex::new(
+            r#"function handleSocketOpen\(\)\s*\{\s*setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function connectSocket()"),
+            "expected socket transport bootstrap helper in embedded html",
+        );
+        assert!(
+            html.contains("socket = new WebSocket(websocketUrl());")
+                && html.contains("setConnectionState(false);")
+                && html.contains("installSocketEventHandlers(socket);"),
+            "expected socket bootstrap to create the websocket, reset connection state, and install handlers",
+        );
+        assert!(
+            open_flow.is_match(html),
+            "expected socket open flow to announce frontend readiness before replaying queued messages",
+        );
+    }
+
+    #[test]
+    fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
+        let html = index_html();
+        let workspace_state_flow = regex::Regex::new(
+            r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*renderAppState\(event\.workspace\);\s*break;"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function emptyWorkspace()"),
+            "expected workspace rendering fallback helper in embedded html",
+        );
+        assert!(
+            html.contains("function renderAppState(nextState)"),
+            "expected app state rendering to live in a named helper",
+        );
+        assert!(
+            html.contains("const tab = activeProjectTab();")
+                && html.contains("renderProjectOnboarding(tab);")
+                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());")
+                && html.contains("renderWindowList();"),
+            "expected app state rendering to drive onboarding, workspace, and window list updates from the active tab",
+        );
+        assert!(
+            html.contains("function renderWorkspace(workspace)"),
+            "expected workspace painting to stay isolated behind a named helper",
+        );
+        assert!(
+            workspace_state_flow.is_match(html),
+            "expected workspace_state events to clear project errors and re-render through renderAppState",
+        );
+    }
+
+    #[test]
     fn embedded_web_project_bar_includes_app_version_surface() {
         let html = index_html();
 
@@ -333,6 +390,56 @@ mod tests {
         assert!(
             html.contains("open_issue_launch_wizard"),
             "expected issue launch wizard event in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
+        let html = index_html();
+        let submit_bounds = regex::Regex::new(
+            r#"function sendWizardAction\(action\)\s*\{\s*const payload = \{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};\s*if\s*\(\s*action\.kind === "submit"\s*\)\s*\{\s*payload\.bounds = visibleBounds\(\);\s*\}\s*send\(payload\);\s*\}"#,
+        )
+        .expect("valid regex");
+        let close_controls = regex::Regex::new(
+            r#"wizardCloseButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*sendWizardAction\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);\s*wizardCancelButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*sendWizardAction\(\{\s*kind:\s*"cancel"\s*\}\);\s*\}\);"#,
+        )
+        .expect("valid regex");
+        let submit_button = regex::Regex::new(
+            r#"wizardSubmitButton\.addEventListener\("click",\s*\(\)\s*=>\s*\{\s*flushWizardBranchDraft\(\);\s*sendWizardAction\(\{\s*kind:\s*"submit"\s*\}\);\s*\}\);"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function openIssueLaunchWizard(windowId, issueNumber)"),
+            "expected issue-launch entrypoint helper in embedded html",
+        );
+        assert!(
+            html.contains("kind: \"open_issue_launch_wizard\"")
+                && html.contains("issue_number: issueNumber"),
+            "expected issue launch wizard entrypoint to send the canonical frontend event payload",
+        );
+        assert!(
+            submit_bounds.is_match(html),
+            "expected wizard actions to be normalized through launch_wizard_action and attach visible bounds on submit",
+        );
+        assert!(
+            close_controls.is_match(html),
+            "expected both close controls to route cancel through sendWizardAction",
+        );
+        assert!(
+            submit_button.is_match(html),
+            "expected submit control to flush branch draft before dispatching submit",
+        );
+        assert!(
+            html.contains("if (event.target === wizardModal) {")
+                && html.contains("sendWizardAction({ kind: \"cancel\" });"),
+            "expected backdrop dismissal to share the same wizard cancel transport",
+        );
+        assert!(
+            html.contains("case \"launch_wizard_state\":")
+                && html.contains("launchWizard = event.wizard;")
+                && html.contains("renderLaunchWizard();"),
+            "expected launch wizard state updates to hydrate the shared wizard renderer",
         );
     }
 }
