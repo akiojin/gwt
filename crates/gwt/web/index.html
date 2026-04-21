@@ -4906,6 +4906,9 @@
         presetsLoading: false,
         statusMessage: "",
         statusKind: "",
+        probeInFlight: false,
+        saveInFlight: false,
+        lastProbeModels: [],
       };
       const settingsWindowBodies = new Set();
       let pendingAddFromPreset = null;
@@ -4948,9 +4951,11 @@
         });
         settingsWindowBodies.add(body);
         renderSettingsAgentList();
+        let needsRefresh = false;
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
+          needsRefresh = true;
         }
         if (
           !customAgentsState.presetsLoading &&
@@ -4958,6 +4963,10 @@
         ) {
           customAgentsState.presetsLoading = true;
           send({ kind: "list_custom_agent_presets" });
+          needsRefresh = true;
+        }
+        if (needsRefresh) {
+          renderSettingsAgentList();
         }
       }
 
@@ -5001,6 +5010,8 @@
             section.appendChild(row);
             scroll.appendChild(section);
           }
+
+          renderSettingsActivitySection(scroll);
 
           if (customAgentsState.loading && customAgentsState.agents.length === 0) {
             const section = createDiv("mock-section");
@@ -5055,6 +5066,55 @@
         }
       }
 
+      function renderSettingsActivitySection(scroll) {
+        if (
+          !customAgentsState.presetsLoading &&
+          !customAgentsState.probeInFlight &&
+          !customAgentsState.saveInFlight &&
+          customAgentsState.lastProbeModels.length === 0
+        ) {
+          return;
+        }
+        const section = createDiv("mock-section");
+        const label = createDiv("mock-label");
+        label.textContent = "Activity";
+        section.appendChild(label);
+
+        if (customAgentsState.presetsLoading) {
+          const row = createDiv("mock-row");
+          const text = document.createElement("span");
+          text.textContent = "Loading preset catalog…";
+          row.appendChild(text);
+          section.appendChild(row);
+        }
+
+        if (customAgentsState.probeInFlight) {
+          const row = createDiv("mock-row");
+          const text = document.createElement("span");
+          text.textContent = "Probe status · Probing /v1/models…";
+          row.appendChild(text);
+          section.appendChild(row);
+        }
+
+        if (customAgentsState.lastProbeModels.length > 0) {
+          const row = createDiv("mock-row");
+          const text = document.createElement("span");
+          text.textContent = `Last probe · ${customAgentsState.lastProbeModels.length} model(s) discovered`;
+          row.appendChild(text);
+          section.appendChild(row);
+        }
+
+        if (customAgentsState.saveInFlight) {
+          const row = createDiv("mock-row");
+          const text = document.createElement("span");
+          text.textContent = "Save status · Saving preset…";
+          row.appendChild(text);
+          section.appendChild(row);
+        }
+
+        scroll.appendChild(section);
+      }
+
       function startAddFromPresetFlow(preset) {
         const baseUrl = window.prompt(
           "Upstream base_url (http:// or https://)\n\nExample: http://192.168.100.166:32768",
@@ -5065,6 +5125,9 @@
           "API key (forwarded as Bearer on /v1/models probe and ANTHROPIC_API_KEY at launch):",
         );
         if (!apiKey) return;
+        customAgentsState.probeInFlight = true;
+        customAgentsState.saveInFlight = false;
+        customAgentsState.lastProbeModels = [];
         setSettingsStatus("Probing /v1/models…", "info");
         pendingAddFromPreset = { presetId: preset.id, baseUrl, apiKey };
         send({ kind: "test_backend_connection", base_url: baseUrl, api_key: apiKey });
@@ -5078,11 +5141,14 @@
 
       function completeAddFromPreset(discoveredModels) {
         if (!pendingAddFromPreset) return;
+        customAgentsState.probeInFlight = false;
         if (!discoveredModels || discoveredModels.length === 0) {
+          customAgentsState.lastProbeModels = [];
           setSettingsStatus("Upstream /v1/models returned no entries.", "error");
           pendingAddFromPreset = null;
           return;
         }
+        customAgentsState.lastProbeModels = Array.from(discoveredModels);
         const modelList = discoveredModels.join("\n");
         const model = window.prompt(
           `Discovered ${discoveredModels.length} model(s). Choose default_model (copy one ID):\n\n${modelList}`,
@@ -5105,6 +5171,7 @@
           setSettingsStatus("Cancelled.", "info");
           return;
         }
+        customAgentsState.saveInFlight = true;
         setSettingsStatus("Saving preset…", "info");
         send({
           kind: "add_custom_agent_from_preset",
@@ -5420,6 +5487,7 @@
               }
             }
             customAgentsState.loading = false;
+            customAgentsState.saveInFlight = false;
             setSettingsStatus(
               `Saved custom agent "${event.agent ? event.agent.id : "?"}".`,
               "success",
@@ -5432,6 +5500,10 @@
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
             break;
           case "backend_connection_result":
+            customAgentsState.probeInFlight = false;
+            customAgentsState.lastProbeModels = Array.isArray(event.models)
+              ? Array.from(event.models)
+              : [];
             setSettingsStatus(
               `/v1/models returned ${event.models.length} model(s).`,
               "success",
@@ -5445,6 +5517,11 @@
             break;
           case "custom_agent_error":
             customAgentsState.loading = false;
+            customAgentsState.probeInFlight = false;
+            customAgentsState.saveInFlight = false;
+            if (event.code === "probe") {
+              customAgentsState.lastProbeModels = [];
+            }
             pendingAddFromPreset = null;
             setSettingsStatus(`Error [${event.code}]: ${event.message}`, "error");
             break;
