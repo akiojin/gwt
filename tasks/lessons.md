@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(branch-cleanup): remote row の `Safe` 継承は upstream 同値性まで確認する
+
+### 事象
+
+remote-tracking row の cleanup availability で、対応する local branch が canonical
+base に merge 済みなら `Safe` を継承していた。その結果、local branch が
+`origin/<branch>` より behind のときでも remote row が `Safe` になり、
+remote 側だけに残っている未マージ commit を削除対象に含め得た。
+
+### 原因
+
+- remote row の `merge_target` を execution local branch から流用し、
+  local と remote の tip が一致しているかを確認していなかった。
+- `Safe` 継承条件として「upstream ref が一致している」ことだけを見ており、
+  `behind > 0` の divergence を availability 判定に反映していなかった。
+
+### 再発防止策
+
+1. remote-tracking row が local execution branch の availability を継承するときは、
+   upstream 名だけでなく `ahead/behind` も見て remote-only commit の有無を確認する。
+2. cleanup が local + remote をまとめて削除し得る row では、local 側の
+   `merge_target` があるだけで `Safe` とせず、削除対象ごとの tip 同値性を
+   regression test で固定する。
+3. canonical base 判定を拡張した後は、`local safe / remote risky` になる
+   divergence case を必ず追加してから PR を出す。
+
 ## 2026-04-21 — fix(branch-cleanup): `Safe` は stale local base ではなく canonical remote base merge で判定する
 
 ### 事象
