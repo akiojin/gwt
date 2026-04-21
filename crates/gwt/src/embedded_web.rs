@@ -1,20 +1,42 @@
-use axum::response::Html;
+use axum::{
+    http::header,
+    response::{Html, IntoResponse},
+};
 
 pub(crate) fn index_html() -> &'static str {
     include_str!("../web/index.html")
+}
+
+pub(crate) fn app_js() -> &'static str {
+    include_str!("../web/app.js")
 }
 
 pub(crate) async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
 
+pub(crate) async fn app_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        app_js(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::index_html;
 
+    fn frontend_bundle_source() -> &'static str {
+        concat!(
+            include_str!("../web/index.html"),
+            "\n",
+            include_str!("../web/app.js")
+        )
+    }
+
     #[test]
     fn embedded_web_terminal_copy_shortcut_uses_ctrl_shift_c() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("function installTerminalCopyHandlers"),
@@ -36,7 +58,7 @@ mod tests {
 
     #[test]
     fn embedded_web_terminal_drag_selection_copies_on_mouseup() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("terminalRoot.addEventListener(\"mousedown\""),
@@ -58,7 +80,7 @@ mod tests {
 
     #[test]
     fn embedded_web_terminal_clipboard_fallback_restores_terminal_focus() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("restoreFocus"),
@@ -73,7 +95,7 @@ mod tests {
 
     #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let streaming_write = regex::Regex::new(
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
@@ -132,7 +154,7 @@ mod tests {
 
     #[test]
     fn embedded_web_repo_browser_scroll_surfaces_block_canvas_pan_at_edges() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let scroll_gate = regex::Regex::new(
             r"if\s*\(\s*!event\.ctrlKey\s*&&\s*!event\.metaKey\s*&&\s*nativeWheelScrollSurface\s*\)\s*\{\s*return;\s*\}",
         )
@@ -164,7 +186,7 @@ mod tests {
 
     #[test]
     fn embedded_web_canvas_wheel_routing_is_installed_through_named_handler() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("function handleCanvasWheelEvent(event)"),
@@ -182,7 +204,7 @@ mod tests {
 
     #[test]
     fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("function handleSocketOpen()"),
@@ -210,7 +232,7 @@ mod tests {
 
     #[test]
     fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let open_flow = regex::Regex::new(
             r#"function handleSocketOpen\(\)\s*\{\s*setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
         )
@@ -234,7 +256,7 @@ mod tests {
 
     #[test]
     fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_modes() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let websocket_url = regex::Regex::new(
             r#"function websocketUrl\(\)\s*\{\s*const url = new URL\(window\.location\.href\);\s*url\.protocol = url\.protocol === "https:" \? "wss:" : "ws:";\s*url\.pathname = "/ws";\s*url\.search = "";\s*url\.hash = "";\s*return url\.toString\(\);\s*\}"#,
         )
@@ -254,7 +276,7 @@ mod tests {
 
     #[test]
     fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let workspace_state_flow = regex::Regex::new(
             r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);\s*break;"#,
         )
@@ -287,7 +309,7 @@ mod tests {
 
     #[test]
     fn embedded_web_project_bar_includes_app_version_surface() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("id=\"app-version\""),
@@ -317,7 +339,7 @@ mod tests {
 
     #[test]
     fn embedded_web_branches_surface_includes_scope_filter_controls() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("data-branch-filter=\"local\""),
@@ -335,7 +357,7 @@ mod tests {
 
     #[test]
     fn embedded_web_branches_surface_includes_cleanup_flow_contract() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("branch-cleanup-modal"),
@@ -353,7 +375,7 @@ mod tests {
 
     #[test]
     fn embedded_web_branches_surface_keeps_loading_while_cleanup_hydration_is_pending() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("!entry.cleanup_ready"),
@@ -375,7 +397,7 @@ mod tests {
 
     #[test]
     fn embedded_web_branches_surface_keeps_inventory_failures_blocking_until_fresh_rows_arrive() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("state.receivedFreshEntries = false;"),
@@ -393,7 +415,7 @@ mod tests {
 
     #[test]
     fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("knowledge-root"),
@@ -415,7 +437,7 @@ mod tests {
 
     #[test]
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
             r#"function sendWizardAction\(action\)\s*\{\s*const payload = \{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};\s*if\s*\(\s*action\.kind === "submit"\s*\)\s*\{\s*payload\.bounds = visibleBounds\(\);\s*\}\s*send\(payload\);\s*\}"#,
         )
@@ -470,7 +492,7 @@ mod tests {
 
     #[test]
     fn embedded_web_shared_bundle_keeps_user_facing_copy_english_only() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let japanese_scripts = regex::Regex::new(r"[ぁ-んァ-ン一-龯]").expect("valid regex");
 
         assert!(
@@ -490,7 +512,7 @@ mod tests {
 
     #[test]
     fn embedded_web_frontend_units_group_stateful_surfaces() {
-        let html = index_html();
+        let html = frontend_bundle_source();
 
         assert!(
             html.contains("const frontendUnits = Object.freeze({"),
@@ -514,7 +536,7 @@ mod tests {
 
     #[test]
     fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
-        let html = index_html();
+        let html = frontend_bundle_source();
         let workspace_event = regex::Regex::new(
             r#"case\s*"workspace_state":\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);\s*break;"#,
         )
@@ -543,6 +565,28 @@ mod tests {
         assert!(
             wizard_event.is_match(html),
             "expected launch wizard state events to render through the wizard surface unit",
+        );
+    }
+
+    #[test]
+    fn embedded_web_inline_module_script_stays_under_phase_1b_budget() {
+        let html = index_html();
+        let lines: Vec<_> = html.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.contains("<script type=\"module\""))
+            .expect("module script tag");
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find_map(|(index, line)| line.contains("</script>").then_some(index))
+            .expect("module script end tag");
+        let inline_script_lines = end.saturating_sub(start + 1);
+
+        assert!(
+            inline_script_lines < 2_000,
+            "expected Phase 1B inline module script budget under 2000 lines, got {inline_script_lines}",
         );
     }
 }

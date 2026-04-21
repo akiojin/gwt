@@ -378,14 +378,19 @@ mod tests {
     fn gui_front_door_launch_surface_shares_one_embedded_bundle_contract() {
         let surface = gui_front_door_launch_surface("http://127.0.0.1:44557/");
         let html = crate::embedded_web::index_html();
+        let app_js = crate::embedded_web::app_js();
 
         assert_eq!(surface.browser_url, surface.webview_url);
         assert!(
-            html.contains("window.__POC__ = { receive, frontendStateOwners, frontendUnits };"),
+            html.contains("<script type=\"module\" src=\"/app.js\"></script>"),
+            "expected browser and native front door modes to point at the same embedded frontend bundle entrypoint",
+        );
+        assert!(
+            app_js.contains("window.__POC__ = { receive, frontendStateOwners, frontendUnits };"),
             "expected browser and native front door modes to load the same embedded bundle contract",
         );
         assert!(
-            html.contains("frontendUnits.socketTransport.connect();"),
+            app_js.contains("frontendUnits.socketTransport.connect();"),
             "expected the shared embedded bundle to bootstrap socket transport once for both front door modes",
         );
     }

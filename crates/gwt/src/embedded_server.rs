@@ -99,6 +99,7 @@ impl EmbeddedServer {
 
         let app = Router::new()
             .route("/", get(embedded_web::index_handler))
+            .route("/app.js", get(embedded_web::app_js_handler))
             .route("/healthz", get(health_handler))
             .route("/internal/hook-live", post(hook_live_handler))
             .route("/ws", get(websocket_handler))
@@ -442,6 +443,25 @@ mod tests {
             .expect("health request");
         assert_eq!(health.status(), HttpStatusCode::OK);
         assert_eq!(health.text().expect("health body"), "ok");
+
+        let app_js = client
+            .get(format!("{}app.js", server.url()))
+            .send()
+            .expect("app.js request");
+        assert_eq!(app_js.status(), HttpStatusCode::OK);
+        let content_type = app_js
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .expect("app.js content type");
+        assert_eq!(content_type, "text/javascript; charset=utf-8");
+        assert!(
+            app_js
+                .text()
+                .expect("app.js body")
+                .contains("function websocketUrl()"),
+            "expected embedded server to serve the shared frontend bundle script",
+        );
 
         let event = RuntimeHookEvent {
             kind: RuntimeHookEventKind::RuntimeState,
