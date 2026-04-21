@@ -5004,6 +5004,7 @@ mod tests {
         let service = gwt_docker::ComposeService {
             name: "app".to_string(),
             image: Some("alpine:3.20".to_string()),
+            platform: None,
             ports: Vec::new(),
             depends_on: Vec::new(),
             working_dir: None,
@@ -5338,6 +5339,17 @@ mod tests {
             super::resolve_docker_launch_plan(&no_cwd, Some("app")).expect_err("no cwd");
         assert!(no_cwd_err.contains("missing working_dir/workspaceFolder"));
 
+        let arm64 = temp.path().join("arm64");
+        fs::create_dir_all(&arm64).expect("create arm64 project");
+        fs::write(
+            arm64.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    platform: linux/arm64/v8\n    working_dir: /workspace/app\n",
+        )
+        .expect("write arm64 compose");
+        let arm64_plan =
+            super::resolve_docker_launch_plan(&arm64, Some("app")).expect("arm64 plan");
+        assert_eq!(arm64_plan.target_arch, "aarch64");
+
         let missing_compose =
             super::resolve_docker_launch_plan(temp.path(), None).expect_err("missing compose");
         assert!(missing_compose.contains("docker-compose.yml"));
@@ -5525,6 +5537,7 @@ mod tests {
         let service = gwt_docker::ComposeService {
             name: "app".to_string(),
             image: Some("alpine:3.19".to_string()),
+            platform: None,
             ports: Vec::new(),
             depends_on: Vec::new(),
             working_dir: Some("/workspace".to_string()),
@@ -6325,6 +6338,7 @@ struct DockerLaunchPlan {
     compose_files: Vec<PathBuf>,
     service: String,
     container_cwd: String,
+    target_arch: String,
 }
 
 impl DockerLaunchPlan {
@@ -6375,7 +6389,8 @@ fn apply_docker_runtime_to_launch_config(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     let mut launch = launch;
-    let compose_override_file = ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
+    let compose_override_file =
+        ensure_docker_gwt_binary_setup(&worktree, &launch.service, &launch.target_arch)?;
     launch.include_compose_override(compose_override_file);
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
@@ -6448,7 +6463,8 @@ fn build_shell_process_launch(
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
     let mut launch = launch;
-    let compose_override_file = ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
+    let compose_override_file =
+        ensure_docker_gwt_binary_setup(&worktree, &launch.service, &launch.target_arch)?;
     launch.include_compose_override(compose_override_file);
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
@@ -6867,11 +6883,49 @@ fn resolve_docker_launch_plan(
         compose_files: docker_launch_compose_files(worktree, &compose_file),
         service: service.name.clone(),
         container_cwd,
+        target_arch: docker_bundle_target_arch(service),
     })
 }
 
 fn docker_binary_for_launch() -> String {
     std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+}
+
+fn docker_bundle_target_arch(service: &gwt_docker::ComposeService) -> String {
+    service
+        .platform
+        .as_deref()
+        .and_then(docker_platform_target_arch)
+        .unwrap_or_else(host_docker_target_arch)
+}
+
+fn docker_platform_target_arch(platform: &str) -> Option<String> {
+    let platform = platform.trim();
+    let arch = platform
+        .split('/')
+        .nth(1)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(platform);
+    normalize_docker_target_arch(arch)
+}
+
+fn host_docker_target_arch() -> String {
+    normalize_docker_target_arch(std::env::consts::ARCH)
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+}
+
+fn normalize_docker_target_arch(raw: &str) -> Option<String> {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+    {
+        "x86_64" | "amd64" | "x64" => Some("x86_64".to_string()),
+        "aarch64" | "arm64" => Some("aarch64".to_string()),
+        _ => None,
+    }
 }
 
 fn docker_launch_compose_files(worktree: &Path, compose_file: &Path) -> Vec<PathBuf> {

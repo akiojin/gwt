@@ -1,5 +1,55 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(docker): Linux bundle asset は host 固定ではなく target/container arch で選ぶ
+
+### 事象
+
+Issue #2035 の review follow-up で、Docker bundle auto-download が常に
+`gwt-linux-x86_64.tar.gz` を選んでいた。Apple Silicon / ARM Linux host で
+native arm64 container を起動すると、`/usr/local/bin/gwt` に mount された
+binary が `exec format error` で起動できなかった。
+
+### 原因
+
+- Docker bundle installer が target architecture を引数で受け取らず、
+  release asset 名を x86_64 固定文字列で引いていた。
+- compose service の `platform:` を parse しておらず、container target arch を
+  launch plan に保持していなかった。
+
+### 再発防止策
+
+1. Docker 向け release asset を選ぶ API は、bundle path だけでなく target arch を
+   明示的に受け取る。
+2. compose service が `platform:` を持つ場合はそこから container arch を解決し、
+   未指定時のみ host arch fallback を使う。
+3. x86_64 と aarch64 の両 asset を含む release fixture で、要求した arch の
+   tarball が実際に選ばれる regression test を追加する。
+
+## 2026-04-21 — fix(docker): service 名を埋め込む auto-generated override は内容差分で再生成する
+
+### 事象
+
+Issue #2035 の review follow-up で、`docker-compose.override.yml` が最初に起動した
+service 名のまま固定されることが分かった。multi-service repo で別 service を
+選ぶと、`GWT_BIN_PATH=/usr/local/bin/gwt` だけが新 service に渡り、対応する mount
+は stale override 側の旧 service に残ったままで binary が見つからなかった。
+
+### 原因
+
+- override file の生成条件が `!exists()` だけで、service 名や mount 内容が
+  現在の launch target と一致するかを比較していなかった。
+- 「auto-generated file だから毎回同じ内容」という前提で create-only contract に
+  してしまい、service ごとに内容が変わることを見落としていた。
+
+### 再発防止策
+
+1. service 名や mount path を埋め込む auto-generated file は、存在有無だけでなく
+   expected content との差分で write する。
+2. multi-service repo の regression test では、同じ repo で service を切り替えた
+   2 回目の launch でも generated override が更新されることを確認する。
+3. runtime setup が「初回だけ create」なのか「毎回 reconcile」なのかを review 時に
+   明示し、入力パラメータが変わる file を create-only にしない。
+
 ## 2026-04-21 — fix(docker): 生成した compose override は全 Docker compose 経路へ流す
 
 ### 事象

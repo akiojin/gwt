@@ -85,6 +85,7 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
 pub(super) fn ensure_docker_gwt_binary_setup(
     repo_path: &Path,
     service: &str,
+    target_arch: &str,
 ) -> Result<PathBuf, String> {
     let gwt_home = gwt_core::paths::gwt_home();
     ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, |bundle| {
@@ -93,8 +94,11 @@ pub(super) fn ensure_docker_gwt_binary_setup(
             bundle.host_gwt.display(),
             bundle.host_gwtd.display()
         );
-        let installed = gwt_core::update::UpdateManager::new()
-            .install_latest_docker_linux_bundle(&bundle.host_gwt, &bundle.host_gwtd)?;
+        let installed = gwt_core::update::UpdateManager::new().install_latest_docker_linux_bundle(
+            target_arch,
+            &bundle.host_gwt,
+            &bundle.host_gwtd,
+        )?;
         eprintln!(
             "Installed Linux gwt bundle v{} for Docker",
             installed.version
@@ -158,11 +162,14 @@ where
     }
 
     let override_path = docker_compose_override_path(repo_path);
-    if !override_path.exists() {
-        let override_content = docker_bundle_override_content(service, &bundle);
+    let override_content = docker_bundle_override_content(service, &bundle);
+    let rewrite_override = fs::read_to_string(&override_path)
+        .map(|existing| existing != override_content)
+        .unwrap_or(true);
+    if rewrite_override {
         fs::write(&override_path, override_content).map_err(|err| {
             format!(
-                "Failed to create docker-compose.override.yml: {err}\n\
+                "Failed to write docker-compose.override.yml: {err}\n\
                  Manually create {} with gwt/gwtd bundle mounts",
                 override_path.display()
             )
@@ -308,5 +315,30 @@ mod tests {
             b"existing-gwtd"
         );
         assert!(repo.path().join("docker-compose.override.yml").exists());
+    }
+
+    #[test]
+    fn docker_binary_setup_rewrites_override_for_selected_service() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
+            panic!("installer should not run when both bundle binaries exist");
+        })
+        .expect("docker setup for app");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "worker", home.path(), |_| {
+            panic!("installer should not run when both bundle binaries exist");
+        })
+        .expect("docker setup for worker");
+
+        let override_content = fs::read_to_string(repo.path().join("docker-compose.override.yml"))
+            .expect("override content");
+        assert!(override_content.contains("worker:"));
+        assert!(!override_content.contains("app:"));
     }
 }
