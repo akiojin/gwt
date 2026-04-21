@@ -2050,6 +2050,14 @@ impl AppRuntime {
                 .unwrap_or_else(|| PathBuf::from(&project_root));
             refresh_managed_gwt_assets_for_worktree(&worktree_path)
                 .map_err(|error| error.to_string())?;
+            if let Err(error) = gwt::index_worker::bootstrap_project_index_for_path(&worktree_path)
+            {
+                tracing::warn!(
+                    worktree = %worktree_path.display(),
+                    error = %error,
+                    "project index bootstrap skipped during worktree prepare"
+                );
+            }
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
                 && apply_host_package_runner_fallback(&mut config)
