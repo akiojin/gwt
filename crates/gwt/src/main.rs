@@ -155,6 +155,42 @@ impl AppEventProxy {
     }
 }
 
+#[derive(Clone)]
+enum BlockingTaskSpawner {
+    Tokio(tokio::runtime::Handle),
+    #[cfg(test)]
+    Thread,
+}
+
+impl BlockingTaskSpawner {
+    fn tokio(handle: tokio::runtime::Handle) -> Self {
+        Self::Tokio(handle)
+    }
+
+    #[cfg(test)]
+    fn thread() -> Self {
+        Self::Thread
+    }
+
+    fn spawn<F>(&self, task: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        match self {
+            Self::Tokio(handle) => {
+                drop(handle.spawn_blocking(task));
+            }
+            #[cfg(test)]
+            Self::Thread => {
+                thread::Builder::new()
+                    .name("gwt-blocking-task".to_string())
+                    .spawn(task)
+                    .expect("spawn test blocking task");
+            }
+        }
+    }
+}
+
 struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
@@ -312,6 +348,7 @@ struct AppRuntime {
     window_lookup: HashMap<String, WindowAddress>,
     session_state_path: PathBuf,
     proxy: AppEventProxy,
+    blocking_tasks: BlockingTaskSpawner,
     sessions_dir: PathBuf,
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -341,6 +378,7 @@ impl AppRuntime {
     fn new(
         proxy: EventLoopProxy<UserEvent>,
         pty_writers: PtyWriterRegistry,
+        blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -374,6 +412,7 @@ impl AppRuntime {
             window_lookup: HashMap::new(),
             session_state_path,
             proxy: AppEventProxy::new(proxy),
+            blocking_tasks,
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
@@ -527,12 +566,25 @@ impl AppRuntime {
                 gwt::custom_agents_dispatch::delete_event(agent_id),
             )],
             FrontendEvent::TestBackendConnection { base_url, api_key } => {
-                vec![OutboundEvent::reply(
-                    client_id,
-                    gwt::custom_agents_dispatch::test_connection_event(&base_url, &api_key),
-                )]
+                self.spawn_backend_connection_probe(client_id, base_url, api_key);
+                Vec::new()
             }
         }
+    }
+
+    fn spawn_backend_connection_probe(
+        &self,
+        client_id: ClientId,
+        base_url: String,
+        api_key: String,
+    ) {
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = gwt::custom_agents_dispatch::test_connection_event(&base_url, &api_key);
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
     }
 
     fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
@@ -2688,8 +2740,9 @@ mod tests {
         docker_bundle_mounts_for_home, docker_bundle_override_content, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        AppEventProxy, AppRuntime, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
-        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub, DispatchTarget,
+        LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent,
+        WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -3056,6 +3109,7 @@ mod tests {
             window_lookup: HashMap::new(),
             session_state_path: temp_root.join("session-state.json"),
             proxy,
+            blocking_tasks: BlockingTaskSpawner::thread(),
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
@@ -4166,6 +4220,45 @@ mod tests {
                         if prepared.id == issue_id
                             && prepared.client_id == "client-1"
                             && prepared.issue_number == 42
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn test_backend_connection_replies_through_async_dispatch() {
+        let temp = tempdir().expect("tempdir");
+        let (mut runtime, events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::TestBackendConnection {
+                base_url: "ws://not-http".to_string(),
+                api_key: "secret".to_string(),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "blocking probe must not reply on the frontend event loop"
+        );
+        wait_for_recorded_event("backend connection dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.target,
+                                DispatchTarget::Client(client_id) if client_id == "client-1"
+                            ) && matches!(
+                                &outbound.event,
+                                BackendEvent::CustomAgentError {
+                                    code: gwt::CustomAgentErrorCode::Probe,
+                                    ..
+                                }
+                            )
+                        })
                 )
             })
         });
@@ -7246,7 +7339,12 @@ fn main() -> wry::Result<()> {
     #[cfg(target_os = "macos")]
     let clients = ClientHub::default();
     let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
-    let mut app = AppRuntime::new(proxy.clone(), pty_writers.clone()).expect("app runtime");
+    let mut app = AppRuntime::new(
+        proxy.clone(),
+        pty_writers.clone(),
+        BlockingTaskSpawner::tokio(runtime.handle().clone()),
+    )
+    .expect("app runtime");
     app.bootstrap();
 
     let mut server = EmbeddedServer::start(
