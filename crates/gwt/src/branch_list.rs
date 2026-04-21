@@ -311,7 +311,26 @@ fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
     name.split_once('/').map(|(_, branch_name)| branch_name)
 }
 
+fn canonical_local_rank(entry: &BranchListEntry) -> Option<u8> {
+    if entry.scope != BranchScope::Local {
+        return None;
+    }
+    match entry.name.as_str() {
+        "main" => Some(0),
+        "master" => Some(1),
+        "develop" => Some(2),
+        _ => None,
+    }
+}
+
 fn compare_branch_entries(left: &BranchListEntry, right: &BranchListEntry) -> Ordering {
+    match (canonical_local_rank(left), canonical_local_rank(right)) {
+        (Some(l), Some(r)) => return l.cmp(&r),
+        (Some(_), None) => return Ordering::Less,
+        (None, Some(_)) => return Ordering::Greater,
+        (None, None) => {}
+    }
+
     compare_branch_commit_dates(&left.last_commit_date, &right.last_commit_date)
         .then_with(|| right.is_head.cmp(&left.is_head))
         .then_with(|| match (left.scope, right.scope) {
@@ -349,49 +368,46 @@ fn parse_branch_commit_date(value: &str) -> Option<DateTime<FixedOffset>> {
 mod tests {
     use super::*;
 
+    fn make_branch(
+        name: &str,
+        is_local: bool,
+        is_head: bool,
+        last_commit_date: Option<&str>,
+    ) -> gwt_git::Branch {
+        gwt_git::Branch {
+            name: name.to_string(),
+            is_local,
+            is_remote: !is_local,
+            is_head,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            last_commit_date: last_commit_date.map(|value| value.to_string()),
+        }
+    }
+
     #[test]
-    fn adapt_branches_sorts_newest_first_then_head_local_then_remote() {
+    fn adapt_branches_sorts_canonical_first_then_newest_head_local() {
         let branches = vec![
-            gwt_git::Branch {
-                name: "origin/main".to_string(),
-                is_local: false,
-                is_remote: true,
-                is_head: false,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: Some("2026-04-19 12:00:00 +0000".to_string()),
-            },
-            gwt_git::Branch {
-                name: "feature/zeta".to_string(),
-                is_local: true,
-                is_remote: false,
-                is_head: false,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
-            },
-            gwt_git::Branch {
-                name: "main".to_string(),
-                is_local: true,
-                is_remote: false,
-                is_head: true,
-                upstream: Some("origin/main".to_string()),
-                ahead: 0,
-                behind: 0,
-                last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
-            },
-            gwt_git::Branch {
-                name: "feature/alpha".to_string(),
-                is_local: true,
-                is_remote: false,
-                is_head: false,
-                upstream: None,
-                ahead: 0,
-                behind: 0,
-                last_commit_date: Some("2026-04-18 09:00:00 +0000".to_string()),
-            },
+            make_branch(
+                "origin/main",
+                false,
+                false,
+                Some("2026-04-19 12:00:00 +0000"),
+            ),
+            make_branch(
+                "feature/zeta",
+                true,
+                false,
+                Some("2026-04-20 08:30:00 +0000"),
+            ),
+            make_branch("main", true, true, Some("2026-04-20 08:30:00 +0000")),
+            make_branch(
+                "feature/alpha",
+                true,
+                false,
+                Some("2026-04-18 09:00:00 +0000"),
+            ),
         ];
 
         let entries = adapt_branch_inventory(branches);
@@ -403,6 +419,66 @@ mod tests {
         assert_eq!(entries[0].scope, BranchScope::Local);
         assert!(entries[0].is_head);
         assert_eq!(entries[2].scope, BranchScope::Remote);
+    }
+
+    #[test]
+    fn canonical_local_branches_pin_to_top_in_main_master_develop_order() {
+        let branches = vec![
+            make_branch(
+                "feature/current",
+                true,
+                true,
+                Some("2026-04-21 10:00:00 +0000"),
+            ),
+            make_branch("develop", true, false, Some("2026-04-10 09:00:00 +0000")),
+            make_branch(
+                "origin/main",
+                false,
+                false,
+                Some("2026-04-21 09:00:00 +0000"),
+            ),
+            make_branch("master", true, false, Some("2026-04-05 09:00:00 +0000")),
+            make_branch("main", true, false, Some("2026-04-15 09:00:00 +0000")),
+            make_branch(
+                "feature/legacy",
+                true,
+                false,
+                Some("2026-03-01 09:00:00 +0000"),
+            ),
+        ];
+
+        let entries = adapt_branch_inventory(branches);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+
+        assert_eq!(
+            &names[..3],
+            &["main", "master", "develop"],
+            "canonical local branches must pin to the top in main/master/develop order"
+        );
+        assert!(
+            names.iter().position(|name| *name == "feature/current")
+                > names.iter().position(|name| *name == "develop"),
+            "HEAD on a non-canonical branch must not override canonical pinning"
+        );
+        assert!(
+            names.iter().position(|name| *name == "origin/main")
+                > names.iter().position(|name| *name == "develop"),
+            "remote origin/main must remain below canonical local branches"
+        );
+    }
+
+    #[test]
+    fn canonical_sorting_handles_partial_canonical_set() {
+        let branches = vec![
+            make_branch("feature/x", true, false, Some("2026-04-20 08:30:00 +0000")),
+            make_branch("develop", true, false, Some("2026-04-01 08:30:00 +0000")),
+            make_branch("feature/y", true, true, Some("2026-04-21 08:30:00 +0000")),
+        ];
+
+        let entries = adapt_branch_inventory(branches);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+
+        assert_eq!(names, vec!["develop", "feature/y", "feature/x"]);
     }
 
     #[test]
