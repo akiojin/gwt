@@ -1034,15 +1034,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_nodejs_distribution_npx_shim_does_not_collapse_to_node_exe() {
-        // Regression for `node.exe: bad option: --yes` on Windows launches of
-        // `npx --yes @pkg@version`. SPEC-1921 FR-081.
-        //
-        // Node.js's installer ships `npx` as a POSIX shell script whose
-        // $basedir lookup only locates `node.exe` -- the actual CLI script
-        // path is dereferenced via a separate `$CLI_BASEDIR` variable, so our
-        // `$basedir/`-marker scan never pairs it with `npx-cli.js`. The parser
-        // must refuse to substitute `node.exe` alone and fall back to the
-        // `.cmd` sibling.
+        // Regression for `node.exe: bad option: --yes` (SPEC-1921 FR-081).
+        // Mechanism is documented in `build_windows_shim_target`.
         let temp = tempfile::tempdir().expect("tempdir");
         let bin_dir = temp.path().join("Program Files").join("nodejs");
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
