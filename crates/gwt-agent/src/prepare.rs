@@ -594,7 +594,7 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
            {service}:\n\
              volumes:\n\
                - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
-                - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
+               - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
     )
 }
 
@@ -1169,7 +1169,11 @@ fn current_git_branch(repo_path: &Path) -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Err("git branch --show-current: detached HEAD".to_string());
+    }
+    Ok(branch)
 }
 
 fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
@@ -1225,6 +1229,7 @@ mod tests {
     use crate::{AgentLaunchBuilder, SessionMode};
     use std::{
         fs,
+        process::Command,
         sync::atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
@@ -1334,6 +1339,21 @@ mod tests {
         assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+        let volume_lines = content
+            .lines()
+            .filter(|line| {
+                line.contains(":/usr/local/bin/gwt:ro") || line.contains(":/usr/local/bin/gwtd:ro")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(volume_lines.len(), 2);
+        let leading_spaces = volume_lines
+            .iter()
+            .map(|line| line.chars().take_while(|ch| *ch == ' ').count())
+            .collect::<Vec<_>>();
+        assert_eq!(leading_spaces, vec![leading_spaces[0], leading_spaces[0]]);
+        assert!(volume_lines
+            .iter()
+            .all(|line| line.trim_start().starts_with("- ")));
     }
 
     #[test]
@@ -1473,5 +1493,64 @@ mod tests {
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_request_noops_when_repo_is_detached_and_base_is_missing() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+
+        let init = Command::new("git")
+            .args(["init", "-q", "-b", "develop"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+        let config_name = Command::new("git")
+            .args(["config", "user.name", "Codex"])
+            .current_dir(&repo)
+            .status()
+            .expect("git config user.name");
+        assert!(config_name.success(), "git config user.name failed");
+        let config_email = Command::new("git")
+            .args(["config", "user.email", "codex@example.com"])
+            .current_dir(&repo)
+            .status()
+            .expect("git config user.email");
+        assert!(config_email.success(), "git config user.email failed");
+        fs::write(repo.join("README.md"), "repo\n").expect("write readme");
+        let add = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo)
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add failed");
+        let commit = Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&repo)
+            .status()
+            .expect("git commit");
+        assert!(commit.success(), "git commit failed");
+        let detach = Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&repo)
+            .status()
+            .expect("git checkout --detach");
+        assert!(detach.success(), "git checkout --detach failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        resolve_launch_worktree_request(
+            &repo,
+            Some("feature/demo"),
+            None,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("detached repo without base branch should no-op");
+
+        assert!(working_dir.is_none());
+        assert!(env_vars.is_empty());
     }
 }

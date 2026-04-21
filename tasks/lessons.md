@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(review): text contract は success status だけでなく semantic validity を確認する
+
+### 事象
+
+PR #2129 の review で、`docker_bundle_override_content()` が成功していても
+2 行目の volume list item の字下げが 1 文字ずれており、生成される
+`docker-compose.gwt.override.yml` が invalid YAML になっていた。加えて
+`git branch --show-current` は detached HEAD でも exit code 0 を返すため、
+空文字列を branch 名として扱うと launch no-op 判定をすり抜けた。
+
+### 原因
+
+- text template / CLI stdout を「コマンド成功なら有効」とみなし、構文・意味の妥当性を
+  別途検証していなかった。
+- review 前の test が substring ベースで、list item の相対 indentation や
+  empty branch output を contract として固定できていなかった。
+
+### 再発防止策
+
+1. YAML / JSON / shell snippet を文字列で生成する helper では、重要な改行・字下げを
+   exact string か parser-level assertion で固定する。
+2. external command wrapper は exit status だけでなく、empty stdout が有効値かどうかを
+   helper ごとに明示的に判定する。
+3. review 指摘が text contract 起因だった場合は、修正と同時に「壊れた文字列そのもの」を
+  回帰テストへ追加する。
+
 ## 2026-04-21 — fix(agent): gwt 起動 warning は current launch builder だけでなく persisted session args も必ず確認する
 
 ### 事象
@@ -26,6 +52,64 @@ Codex 起動時の `Under-development features enabled: codex_hooks` warning に
    `rg` で最優先確認する。
 3. builder から削除した feature flag / arg は、fresh launch だけでなく
    session migration で legacy 値が scrub されるかまでテストで固定する。
+
+## 2026-04-21 — fix(branch-cleanup): remote row の `Safe` 継承は upstream 同値性まで確認する
+
+### 事象
+
+remote-tracking row の cleanup availability で、対応する local branch が canonical
+base に merge 済みなら `Safe` を継承していた。その結果、local branch が
+`origin/<branch>` より behind のときでも remote row が `Safe` になり、
+remote 側だけに残っている未マージ commit を削除対象に含め得た。
+
+### 原因
+
+- remote row の `merge_target` を execution local branch から流用し、
+  local と remote の tip が一致しているかを確認していなかった。
+- `Safe` 継承条件として「upstream ref が一致している」ことだけを見ており、
+  `behind > 0` の divergence を availability 判定に反映していなかった。
+
+### 再発防止策
+
+1. remote-tracking row が local execution branch の availability を継承するときは、
+   upstream 名だけでなく `ahead/behind` も見て remote-only commit の有無を確認する。
+2. cleanup が local + remote をまとめて削除し得る row では、local 側の
+   `merge_target` があるだけで `Safe` とせず、削除対象ごとの tip 同値性を
+   regression test で固定する。
+3. canonical base 判定を拡張した後は、`local safe / remote risky` になる
+   divergence case を必ず追加してから PR を出す。
+
+## 2026-04-21 — fix(branch-cleanup): `Safe` は stale local base ではなく canonical remote base merge で判定する
+
+### 事象
+
+Branches window の cleanup availability で、feature branch が `origin/develop` に
+取り込まれているのに local `develop` が古いだけで `Risky` と表示された。
+その結果、「安全に削除できない」理由が実際の Git 状態ではなく local base の
+鮮度に引きずられていた。
+
+### 原因
+
+- cleanup target 解決が local `develop/main/master` だけを見ており、gwt の通常
+  branch workflow（remote branch 作成後に local tracking branch を materialize）
+  を反映していなかった。
+- `Safe` の意味を「local base が最新であること」と暗黙に扱い、canonical remote
+  base に merge 済みかどうかという本来の削除安全性と切り分けていなかった。
+- remote-tracking row も row 種別だけで `remote_tracking` risk を付与しており、
+  execution local branch が `Safe` でも row 側が `Risky` から下がらなかった。
+
+### 再発防止策
+
+1. Branch Cleanup の `Safe` / `Risky` / `Blocked` を変更するときは、まず
+   「execution branch がどの canonical base に merge 済みなら safe か」を
+   SPEC で明文化する。
+2. gwt 管理 branch の cleanup 判定では upstream remote の
+   `develop -> main -> master` を優先し、その remote に canonical base がない
+   場合だけ `origin/*` を fallback に使う。
+3. remote-tracking row の availability は row 種別ではなく execution local
+   branch 基準で決め、manual local branch のような例外経路だけを別 risk
+   (`no upstream`) で表現する。
+
 ## 2026-04-21 — fix(review): vt100 shrink crash は parser 再構築で回避しない
 
 ### 事象
