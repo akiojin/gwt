@@ -1429,6 +1429,8 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
         return Ok(());
     }
 
+    crate::index_worker::bootstrap_project_index_for_path(project_root)?;
+
     let scope = gwt_core::daemon::RuntimeScope::from_project_root(
         project_root,
         gwt_core::daemon::RuntimeTarget::Host,

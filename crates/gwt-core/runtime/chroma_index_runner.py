@@ -99,6 +99,11 @@ DOC_ROOT_DIRECTORIES = {
 }
 
 
+def normalize_rel_path(path: Path) -> str:
+    """Normalize relative paths to forward-slash form across platforms."""
+    return path.as_posix()
+
+
 def load_gitignore_patterns(project_root: Path) -> List[str]:
     """Load patterns from .gitignore."""
     gitignore = project_root / ".gitignore"
@@ -1023,14 +1028,19 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
         import portalocker  # type: ignore
 
         flag = portalocker.LOCK_EX if exclusive else portalocker.LOCK_SH
-        with portalocker.Lock(str(lock_path), mode="a+", flags=flag) as fh:
+        lock = portalocker.Lock(str(lock_path), mode="a+", flags=flag)
+        fh = lock.acquire()
+        try:
+            yield
+        finally:
             try:
-                yield
-            finally:
-                try:
-                    fh.flush()
-                except Exception:
-                    pass
+                fh.flush()
+            except Exception:
+                pass
+            try:
+                lock.release()
+            except Exception:
+                pass
         return
     except ImportError:
         pass
@@ -1192,6 +1202,23 @@ def _make_chroma_collection(db_path: Path, collection_name: str):
     )
 
 
+def _open_chroma_collection(db_path: Path, collection_name: str):
+    """Open an existing collection without silently creating a new one."""
+    import chromadb  # type: ignore
+
+    client = chromadb.PersistentClient(path=str(db_path))
+    ef = E5EmbeddingFunction()
+    try:
+        collection = client.get_collection(
+            name=collection_name,
+            embedding_function=ef,
+        )
+    except Exception:
+        _close_chroma_client(client)
+        raise
+    return client, collection
+
+
 # ---------------------------------------------------------------------
 # Manifest helpers (incremental indexing)
 # ---------------------------------------------------------------------
@@ -1262,7 +1289,7 @@ def _scan_files(project_root: Path, bucket_filter: Optional[str]) -> List[Path]:
         return files
     out: List[Path] = []
     for fpath in files:
-        rel = str(fpath.relative_to(project_root))
+        rel = normalize_rel_path(fpath.relative_to(project_root))
         if classify_file_bucket(rel) == bucket_filter:
             out.append(fpath)
     return out
@@ -1275,7 +1302,7 @@ def _build_manifest_entries(project_root: Path, paths: List[Path]) -> List[Dict[
             stat = fpath.stat()
         except OSError:
             continue
-        rel = str(fpath.relative_to(project_root))
+        rel = normalize_rel_path(fpath.relative_to(project_root))
         entries.append({
             "path": rel,
             "mtime": int(stat.st_mtime),
@@ -1322,8 +1349,11 @@ def embed_documents_for_paths(
 
     for fpath in paths:
         try:
-            rel = str(fpath.relative_to(project_root))
+            rel = normalize_rel_path(fpath.relative_to(project_root))
         except ValueError:
+            continue
+        bucket = classify_file_bucket(rel)
+        if bucket == "skip":
             continue
         try:
             stat = fpath.stat()
@@ -1335,13 +1365,22 @@ def embed_documents_for_paths(
         except OSError:
             text = ""
         ids.append(rel)
-        documents.append(f"{rel}\n{desc}\n{text}")
+        documents.append(
+            build_embedding_document(
+                rel_path=rel,
+                description=desc,
+                text=text,
+                bucket=bucket,
+                file_type=fpath.suffix.lstrip(".") or "unknown",
+            )
+        )
         metadatas.append(
             {
                 "path": rel,
                 "description": desc,
                 "file_type": fpath.suffix.lstrip(".") or "unknown",
                 "size": int(stat.st_size),
+                "bucket": bucket,
             }
         )
 
@@ -1365,6 +1404,27 @@ def _delete_paths_from_collection(collection, rel_paths: Sequence[str]) -> None:
         collection.delete(ids=list(rel_paths))
     except Exception:
         pass
+
+
+def build_embedding_document(
+    rel_path: str,
+    description: str,
+    text: str,
+    bucket: str,
+    file_type: str,
+) -> str:
+    """Build a structured embedding payload for code/docs files."""
+    normalized_text = text.strip()
+    parts = [
+        f"path: {rel_path}",
+        f"bucket: {bucket}",
+        f"file_type: {file_type}",
+        f"description: {description}",
+        "content:",
+    ]
+    if normalized_text:
+        parts.append(normalized_text)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------
@@ -1404,51 +1464,64 @@ def action_index_files_v2(
             db_path,
             V2_FILES_CODE_COLLECTION if scope == "files" else V2_FILES_DOCS_COLLECTION,
         )
+        try:
+            if mode == "incremental":
+                old_entries = read_manifest(db_path, scope=scope)
+                diff = compute_manifest_diff(old_entries, new_entries)
+                to_embed = diff["added"] + diff["changed"]
+                to_delete = diff["removed"]
 
-        if mode == "incremental":
-            old_entries = read_manifest(db_path, scope=scope)
-            diff = compute_manifest_diff(old_entries, new_entries)
-            to_embed = diff["added"] + diff["changed"]
-            to_delete = diff["removed"]
+                embedded_paths = [root / rel for rel in to_embed]
+                count = embed_documents_for_paths(embedded_paths, root, collection)
+                _delete_paths_from_collection(collection, to_delete)
+                emit_progress(
+                    {
+                        "phase": "diff",
+                        "scope": scope,
+                        "added": len(diff["added"]),
+                        "changed": len(diff["changed"]),
+                        "removed": len(diff["removed"]),
+                    }
+                )
+            else:
+                # full mode
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
 
-            embedded_paths = [root / rel for rel in to_embed]
-            count = embed_documents_for_paths(embedded_paths, root, collection)
-            _delete_paths_from_collection(collection, to_delete)
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": scope,
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
+                count = embed_documents_for_paths(paths, root, collection)
+
+            write_manifest(db_path, scope=scope, entries=new_entries)
+            actual_count = _safe_collection_count(collection)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=worktree_hash,
+                scope=scope,
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": actual_count,
+                },
             )
-        else:
-            # full mode
-            try:
-                existing = collection.get()
-                if existing.get("ids"):
-                    collection.delete(ids=existing["ids"])
-            except Exception:
-                pass
-
-            count = embed_documents_for_paths(paths, root, collection)
-
-        write_manifest(db_path, scope=scope, entries=new_entries)
+        finally:
+            _close_chroma_client(client)
 
     emit_progress(
         {
             "phase": "complete",
             "scope": scope,
             "mode": mode,
-            "indexed": count,
+            "indexed": actual_count,
             "total": len(new_entries),
         }
     )
     return {
         "ok": True,
         "scope": scope,
-        "indexed": count,
+        "indexed": actual_count,
         "total": len(new_entries),
     }
 
@@ -1527,50 +1600,62 @@ def action_index_specs_v2(
 
     with acquire_lock(db_path, exclusive=True):
         client, collection = _make_chroma_collection(db_path, V2_SPECS_COLLECTION)
-
-        if mode == "incremental":
-            old_entries = read_manifest(db_path, scope="specs")
-            diff = compute_manifest_diff(old_entries, new_entries)
-            changed_spec_ids = set(diff["added"] + diff["changed"])
-            _delete_spec_records(collection, diff["changed"] + diff["removed"])
-            spec_records = _build_spec_records(
-                [
-                    spec
-                    for spec in spec_documents
-                    if spec["spec_id"] in changed_spec_ids
-                ]
-            )
-            emit_progress(
-                {
-                    "phase": "diff",
-                    "scope": "specs",
-                    "added": len(diff["added"]),
-                    "changed": len(diff["changed"]),
-                    "removed": len(diff["removed"]),
-                }
-            )
-        else:
-            try:
-                existing = collection.get()
-                if existing.get("ids"):
-                    collection.delete(ids=existing["ids"])
-            except Exception:
-                pass
-            spec_records = _build_spec_records(spec_documents)
-
-        if spec_records:
-            ids = [r["id"] for r in spec_records]
-            documents = [r["document"] for r in spec_records]
-            metadatas = [r["metadata"] for r in spec_records]
-            batch = 100
-            for i in range(0, len(ids), batch):
-                collection.upsert(
-                    ids=ids[i : i + batch],
-                    documents=documents[i : i + batch],
-                    metadatas=metadatas[i : i + batch],
+        try:
+            if mode == "incremental":
+                old_entries = read_manifest(db_path, scope="specs")
+                diff = compute_manifest_diff(old_entries, new_entries)
+                changed_spec_ids = set(diff["added"] + diff["changed"])
+                _delete_spec_records(collection, diff["changed"] + diff["removed"])
+                spec_records = _build_spec_records(
+                    [
+                        spec
+                        for spec in spec_documents
+                        if spec["spec_id"] in changed_spec_ids
+                    ]
                 )
+                emit_progress(
+                    {
+                        "phase": "diff",
+                        "scope": "specs",
+                        "added": len(diff["added"]),
+                        "changed": len(diff["changed"]),
+                        "removed": len(diff["removed"]),
+                    }
+                )
+            else:
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                spec_records = _build_spec_records(spec_documents)
 
-        write_manifest(db_path, scope="specs", entries=new_entries)
+            if spec_records:
+                ids = [r["id"] for r in spec_records]
+                documents = [r["document"] for r in spec_records]
+                metadatas = [r["metadata"] for r in spec_records]
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
+
+            write_manifest(db_path, scope="specs", entries=new_entries)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=worktree_hash,
+                scope="specs",
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": len(spec_records),
+                },
+            )
+        finally:
+            _close_chroma_client(client)
 
     emit_progress(
         {
@@ -1616,7 +1701,8 @@ def _parse_iso(value: str) -> Optional[datetime.datetime]:
 
 
 def _issue_cache_root(repo_hash: str) -> Path:
-    return Path.home() / ".gwt" / "cache" / "issues" / repo_hash
+    home = Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home())
+    return home / ".gwt" / "cache" / "issues" / repo_hash
 
 
 def _normalize_labels(labels: Any) -> List[str]:
@@ -1804,6 +1890,217 @@ def _delete_spec_records(collection, spec_ids: Sequence[str]) -> None:
             pass
 
 
+def _safe_collection_count(collection) -> int:
+    try:
+        return int(collection.count())
+    except Exception:
+        return 0
+
+
+def _scope_meta_path(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+) -> Path:
+    if scope == "specs":
+        return resolve_db_path(repo_hash, None, "specs", db_root=db_root) / META_FILENAME
+    if scope in WORKTREE_SCOPED:
+        worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
+        return worktree_dir / META_FILENAME
+    raise ValueError(f"scope meta unsupported for {scope}")
+
+
+def _read_scope_meta_blob(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    meta_path = _scope_meta_path(repo_hash, worktree_hash, scope, db_root=db_root)
+    if not meta_path.is_file():
+        return {"schema_version": INDEX_SCHEMA_VERSION, "scopes": {}}
+    try:
+        payload = json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {"schema_version": INDEX_SCHEMA_VERSION, "scopes": {}}
+    if not isinstance(payload, dict):
+        return {"schema_version": INDEX_SCHEMA_VERSION, "scopes": {}}
+    scopes = payload.get("scopes")
+    if not isinstance(scopes, dict):
+        payload["scopes"] = {}
+    payload.setdefault("schema_version", INDEX_SCHEMA_VERSION)
+    return payload
+
+
+def _read_scope_meta(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    payload = _read_scope_meta_blob(repo_hash, worktree_hash, scope, db_root=db_root)
+    scopes = payload.get("scopes") or {}
+    scope_payload = scopes.get(scope, {})
+    return scope_payload if isinstance(scope_payload, dict) else {}
+
+
+def _write_scope_meta(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+    updates: Optional[Dict[str, Any]] = None,
+) -> None:
+    meta_path = _scope_meta_path(repo_hash, worktree_hash, scope, db_root=db_root)
+    payload = _read_scope_meta_blob(repo_hash, worktree_hash, scope, db_root=db_root)
+    payload["schema_version"] = INDEX_SCHEMA_VERSION
+    scopes = payload.setdefault("scopes", {})
+    scope_payload = scopes.get(scope, {})
+    if not isinstance(scope_payload, dict):
+        scope_payload = {}
+    if updates:
+        scope_payload.update(updates)
+    scopes[scope] = scope_payload
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _scope_collection_name(scope: str) -> str:
+    return {
+        "files": V2_FILES_CODE_COLLECTION,
+        "files-docs": V2_FILES_DOCS_COLLECTION,
+        "specs": V2_SPECS_COLLECTION,
+        "issues": V2_ISSUES_COLLECTION,
+    }[scope]
+
+
+def _legacy_residue_detected(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    db_root: Optional[Path] = None,
+) -> bool:
+    if not worktree_hash:
+        return False
+    worktree_root = resolve_db_path(repo_hash, worktree_hash, "files", db_root=db_root).parent
+    return worktree_root.joinpath("specs").exists() or worktree_root.joinpath("manifest-specs.json").exists()
+
+
+def _close_chroma_client(client) -> None:
+    try:
+        client.close()
+    except Exception:
+        pass
+
+
+def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
+    chroma_sqlite = db_path / "chroma.sqlite3"
+    if not chroma_sqlite.exists():
+        return False, 0
+    try:
+        with acquire_lock(db_path, exclusive=False):
+            client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
+            try:
+                return True, _safe_collection_count(collection)
+            finally:
+                _close_chroma_client(client)
+    except Exception:
+        return False, 0
+
+
+def _scope_status_v2(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
+    manifest_path = _manifest_path(db_path, scope)
+    manifest_entries = read_manifest(db_path, scope=scope)
+    manifest_count = len(manifest_entries)
+    exists = (db_path / "chroma.sqlite3").exists()
+    count_ok, document_count = _scope_document_count(db_path, scope)
+    legacy_detected = _legacy_residue_detected(repo_hash, worktree_hash, db_root=db_root)
+    scope_meta = _read_scope_meta(repo_hash, worktree_hash, scope, db_root=db_root)
+
+    reason = "ready"
+    healthy = True
+    repair_required = False
+
+    if not exists or not count_ok:
+        reason = "collection_missing"
+        healthy = False
+        repair_required = True
+    elif not manifest_path.is_file():
+        reason = "manifest_missing"
+        healthy = False
+        repair_required = True
+    elif legacy_detected:
+        reason = "legacy_residue"
+        healthy = False
+        repair_required = True
+    elif document_count != manifest_count:
+        reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
+        healthy = False
+        repair_required = True
+
+    return {
+        "exists": exists,
+        "healthy": healthy,
+        "repair_required": repair_required,
+        "document_count": document_count,
+        "reason": reason,
+        "legacy_residue_detected": legacy_detected,
+        "last_repair_at": scope_meta.get("last_repair_at"),
+    }
+
+
+def _issue_status_v2(
+    repo_hash: str,
+    db_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
+    meta = _read_issue_meta(db_path) or {}
+    exists = (db_path / "chroma.sqlite3").exists() or (db_path / META_FILENAME).is_file()
+    count_ok, document_count = _scope_document_count(db_path, "issues")
+
+    reason = "ready"
+    healthy = True
+    repair_required = False
+
+    if not exists or not count_ok:
+        reason = "collection_missing"
+        healthy = False
+        repair_required = True
+    elif not meta:
+        reason = "metadata_missing"
+        healthy = False
+        repair_required = True
+
+    status: Dict[str, Any] = {
+        "exists": exists,
+        "healthy": healthy,
+        "repair_required": repair_required,
+        "document_count": document_count,
+        "reason": reason,
+        "legacy_residue_detected": False,
+        "last_repair_at": meta.get("last_full_refresh"),
+    }
+    if meta:
+        status.update(
+            {
+                "last_full_refresh": meta.get("last_full_refresh"),
+                "ttl_minutes": meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT),
+            }
+        )
+        last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
+        if last is not None:
+            age = (_now_utc() - last).total_seconds()
+            ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
+            status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
+    return status
+
+
 def action_index_issues_v2(
     repo_hash: str,
     project_root: str,
@@ -1850,49 +2147,53 @@ def action_index_issues_v2(
 
         client, collection = _make_chroma_collection(db_path, V2_ISSUES_COLLECTION)
         try:
-            existing = collection.get()
-            if existing.get("ids"):
-                collection.delete(ids=existing["ids"])
-        except Exception:
-            pass
+            try:
+                existing = collection.get()
+                if existing.get("ids"):
+                    collection.delete(ids=existing["ids"])
+            except Exception:
+                pass
 
-        if issues:
-            ids: List[str] = []
-            documents: List[str] = []
-            metadatas: List[Dict[str, Any]] = []
-            for issue in issues:
-                number = issue.get("number", 0)
-                title = issue.get("title", "")
-                body = issue.get("body", "")
-                state = issue.get("state", "")
-                labels = issue.get("labels", [])
-                ids.append(str(number))
-                documents.append(f"{title}\n{body}")
-                metadatas.append(
-                    {
-                        "number": number,
-                        "title": title,
-                        "url": "",
-                        "state": state,
-                        "labels": ",".join(labels),
-                    }
-                )
-            batch = 100
-            for i in range(0, len(ids), batch):
-                collection.upsert(
-                    ids=ids[i : i + batch],
-                    documents=documents[i : i + batch],
-                    metadatas=metadatas[i : i + batch],
-                )
+            if issues:
+                ids: List[str] = []
+                documents: List[str] = []
+                metadatas: List[Dict[str, Any]] = []
+                for issue in issues:
+                    number = issue.get("number", 0)
+                    title = issue.get("title", "")
+                    body = issue.get("body", "")
+                    state = issue.get("state", "")
+                    labels = issue.get("labels", [])
+                    ids.append(str(number))
+                    documents.append(f"{title}\n{body}")
+                    metadatas.append(
+                        {
+                            "number": number,
+                            "title": title,
+                            "url": "",
+                            "state": state,
+                            "labels": ",".join(labels),
+                        }
+                    )
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
 
-        _write_issue_meta(
-            db_path,
-            {
-                "schema_version": INDEX_SCHEMA_VERSION,
-                "last_full_refresh": _now_utc().isoformat(),
-                "ttl_minutes": ttl_minutes,
-            },
-        )
+            _write_issue_meta(
+                db_path,
+                {
+                    "schema_version": INDEX_SCHEMA_VERSION,
+                    "last_full_refresh": _now_utc().isoformat(),
+                    "ttl_minutes": ttl_minutes,
+                    "document_count": len(issues),
+                },
+            )
+        finally:
+            _close_chroma_client(client)
 
     emit_progress(
         {
@@ -2016,17 +2317,26 @@ def action_search_v2(
     scope = scope_for_action[action]
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
-    chroma_sqlite = db_path / "chroma.sqlite3"
+    if scope == "issues":
+        health = _issue_status_v2(repo_hash, db_root=db_root)
+    else:
+        health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
-    needs_build = not chroma_sqlite.exists()
-    needs_spec_refresh = scope == "specs" and chroma_sqlite.exists() and not no_auto_build
+    needs_build = not health["exists"] or health.get("repair_required", False)
+    needs_spec_refresh = scope == "specs" and health.get("healthy", False) and not no_auto_build
 
     if needs_build or needs_spec_refresh:
         if no_auto_build and needs_build:
+            error_code = "INDEX_UNHEALTHY" if health["exists"] else "INDEX_MISSING"
             return {
                 "ok": False,
-                "error_code": "INDEX_MISSING",
-                "error": f"index not found at {db_path}",
+                "error_code": error_code,
+                "error": (
+                    f"index unhealthy at {db_path}: {health.get('reason', 'repair_required')}"
+                    if error_code == "INDEX_UNHEALTHY"
+                    else f"index not found at {db_path}"
+                ),
+                "status": health,
             }
         if project_root is None:
             return {
@@ -2064,17 +2374,14 @@ def action_search_v2(
         emit_progress({"phase": "complete", "scope": scope, "total": build.get("indexed", 0)})
 
     with acquire_lock(db_path, exclusive=False):
-        collection_name = {
-            "files": V2_FILES_CODE_COLLECTION,
-            "files-docs": V2_FILES_DOCS_COLLECTION,
-            "specs": V2_SPECS_COLLECTION,
-            "issues": V2_ISSUES_COLLECTION,
-        }[scope]
-        client, collection = _make_chroma_collection(db_path, collection_name)
-        # SPECs are chunked, so a single SPEC can span many Chroma records.
-        # Over-fetch by 5x then collapse by spec_id in the formatter.
-        fetch_n = n_results * 5 if scope == "specs" else n_results
-        items = _search_collection_v2(collection, query, fetch_n)
+        client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
+        try:
+            # SPECs are chunked, so a single SPEC can span many Chroma records.
+            # Over-fetch by 5x then collapse by spec_id in the formatter.
+            fetch_n = n_results * 5 if scope == "specs" else n_results
+            items = _search_collection_v2(collection, query, fetch_n)
+        finally:
+            _close_chroma_client(client)
 
     if scope in ("files", "files-docs"):
         return {"ok": True, "results": _format_file_results(items)}
@@ -2093,30 +2400,13 @@ def action_status_v2(
     worktree_hash: Optional[str],
     db_root: Optional[Path] = None,
 ) -> dict:
-    issues_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
-    issues_status: Dict[str, Any] = {
-        "exists": (issues_path / "chroma.sqlite3").exists()
-        or (issues_path / META_FILENAME).is_file(),
+    out: Dict[str, Any] = {
+        "issues": _issue_status_v2(repo_hash, db_root=db_root),
+        "specs": _scope_status_v2(repo_hash, None, "specs", db_root=db_root),
     }
-    meta = _read_issue_meta(issues_path)
-    if meta:
-        issues_status.update(
-            {
-                "last_full_refresh": meta.get("last_full_refresh"),
-                "ttl_minutes": meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT),
-            }
-        )
-        last = _parse_iso(meta.get("last_full_refresh", "")) if meta.get("last_full_refresh") else None
-        if last is not None:
-            age = (_now_utc() - last).total_seconds()
-            ttl_secs = meta.get("ttl_minutes", ISSUE_TTL_MINUTES_DEFAULT) * 60
-            issues_status["ttl_remaining_seconds"] = max(0, int(ttl_secs - age))
-
-    out: Dict[str, Any] = {"issues": issues_status}
     if worktree_hash:
-        for scope in ("specs", "files", "files-docs"):
-            db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
-            out[scope] = {"exists": (db_path / "chroma.sqlite3").exists()}
+        for scope in ("files", "files-docs"):
+            out[scope] = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
     return {"ok": True, "status": out}
 

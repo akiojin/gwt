@@ -157,23 +157,43 @@ pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
     }
 }
 
+/// Platform-specific priority list of package-runner executables to probe via
+/// `which::which`. Each entry is `(name, needs_yes)`.
+///
+/// On Windows, `.cmd` variants come first because `which::which` returns the
+/// bare POSIX-shim sibling first (see SPEC-1921 FR-080). `CreateProcess` can
+/// execute `.cmd` directly (via `cmd.exe` wrapping); the bare bash shim
+/// cannot. On non-Windows platforms the bare names are the canonical entry.
+fn package_runner_candidates() -> &'static [(&'static str, bool)] {
+    #[cfg(windows)]
+    {
+        &[
+            ("bunx.cmd", false),
+            ("bunx", false),
+            ("npx.cmd", true),
+            ("npx", true),
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        &[("bunx", false), ("npx", true)]
+    }
+}
+
 /// Find bunx or npx executable, preferring global bunx over local node_modules.
 ///
 /// Returns `(executable_name, needs_yes_flag)`.
 /// - bunx: no `--yes` needed
 /// - npx: `--yes` needed to suppress interactive prompt
 fn find_bunx_or_npx() -> (String, bool) {
-    // Try bunx first, but skip if it's a local node_modules/.bin/bunx
-    if let Ok(path) = which::which("bunx") {
-        let path_str = path.to_string_lossy();
-        if !path_str.contains("node_modules") {
-            return (path.to_string_lossy().into_owned(), false);
+    for (name, needs_yes) in package_runner_candidates() {
+        if let Ok(path) = which::which(name) {
+            let path_str = path.to_string_lossy();
+            if path_str.contains("node_modules") {
+                continue;
+            }
+            return (path_str.into_owned(), *needs_yes);
         }
-    }
-
-    // Fall back to npx (needs --yes)
-    if let Ok(path) = which::which("npx") {
-        return (path.to_string_lossy().into_owned(), true);
     }
 
     // Last resort: assume bunx is available
@@ -586,8 +606,6 @@ impl AgentLaunchBuilder {
                 args.push("web_search_request".to_string());
             }
         }
-        args.push("--enable".to_string());
-        args.push("codex_hooks".to_string());
 
         // Sandbox & shell env policies
         args.push("--sandbox".to_string());
@@ -949,10 +967,10 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_enables_hooks_feature_flag() {
+    fn build_codex_does_not_enable_hooks_feature_flag_by_default() {
         let config = AgentLaunchBuilder::new(AgentId::Codex).build();
 
-        assert!(config
+        assert!(!config
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
@@ -1141,6 +1159,33 @@ mod tests {
         let runner = resolve_runner(&AgentId::OpenCode, "latest");
         assert_eq!(runner.executable, "opencode");
         assert!(runner.base_args.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_package_runner_candidates_prefer_cmd_variants() {
+        // SPEC-1921 FR-080. On Windows we must consult `bunx.cmd` / `npx.cmd`
+        // before the POSIX-shim bare-name siblings, because `which::which`
+        // returns the bare name first and that file is not spawnable through
+        // `CreateProcess` on its own.
+        let candidates = package_runner_candidates();
+        let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+
+        assert_eq!(names, vec!["bunx.cmd", "bunx", "npx.cmd", "npx"]);
+
+        let needs_yes: Vec<bool> = candidates.iter().map(|(_, yes)| *yes).collect();
+        assert_eq!(needs_yes, vec![false, false, true, true]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn nonwindows_package_runner_candidates_use_bare_names() {
+        let candidates = package_runner_candidates();
+        let names: Vec<&str> = candidates.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, vec!["bunx", "npx"]);
+
+        let needs_yes: Vec<bool> = candidates.iter().map(|(_, yes)| *yes).collect();
+        assert_eq!(needs_yes, vec![false, true]);
     }
 
     #[test]
