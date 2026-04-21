@@ -232,6 +232,24 @@ impl AppRuntime {
                 },
             )];
         }
+        let source_window_still_open = self
+            .window_lookup
+            .get(&id)
+            .and_then(|address| {
+                self.tab(&address.tab_id)
+                    .and_then(|tab| tab.workspace.window(&address.raw_id))
+            })
+            .is_some_and(|window| knowledge_kind_for_preset(window.preset) == Some(knowledge_kind));
+        if !source_window_still_open {
+            return vec![OutboundEvent::reply(
+                &client_id,
+                BackendEvent::KnowledgeError {
+                    id,
+                    knowledge_kind,
+                    message: "Issue/Knowledge window closed".to_string(),
+                },
+            )];
+        }
 
         match result {
             Ok(branch_name) => match self.open_launch_wizard_for_branch(
@@ -283,7 +301,10 @@ impl AppRuntime {
                     return vec![self.launch_wizard_state_outbound()];
                 };
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
-                    return Vec::new();
+                    session.wizard.error =
+                        Some("The selected session tab is no longer available".to_string());
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
                 };
                 if !tab.workspace.focus_window(&address.raw_id, None) {
                     session.wizard.error =

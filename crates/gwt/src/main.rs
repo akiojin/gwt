@@ -3929,6 +3929,7 @@ mod tests {
             )],
             Some("tab-1"),
         );
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
         let claude_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
 
         assert!(runtime
@@ -3991,7 +3992,7 @@ mod tests {
         let prepared_error =
             runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
                 client_id: "client-1".to_string(),
-                id: "issue-1".to_string(),
+                id: issue_id.clone(),
                 knowledge_kind: KnowledgeKind::Issue,
                 tab_id: "tab-1".to_string(),
                 project_root: repo.clone(),
@@ -4007,7 +4008,7 @@ mod tests {
         let prepared_ok =
             runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
                 client_id: "client-1".to_string(),
-                id: "issue-1".to_string(),
+                id: issue_id.clone(),
                 knowledge_kind: KnowledgeKind::Issue,
                 tab_id: "tab-1".to_string(),
                 project_root: repo.clone(),
@@ -4024,6 +4025,22 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
         });
+        assert_eq!(runtime.close_window_events(&issue_id).len(), 1);
+        let prepared_closed =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: issue_id.clone(),
+                knowledge_kind: KnowledgeKind::Issue,
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+                issue_number: 7,
+                result: Ok("feature/demo".to_string()),
+            });
+        assert!(matches!(
+            prepared_closed[0].event,
+            BackendEvent::KnowledgeError { ref message, .. }
+                if message == "Issue/Knowledge window closed"
+        ));
 
         runtime.launch_wizard = None;
         assert!(runtime
@@ -4043,6 +4060,51 @@ mod tests {
             None,
         );
         assert!(!missing_focus.is_empty());
+        runtime.window_lookup.insert(
+            "stale-focus".to_string(),
+            WindowAddress {
+                tab_id: "missing".to_string(),
+                raw_id: "claude-1".to_string(),
+            },
+        );
+        runtime.launch_wizard = Some(LaunchWizardSession {
+            tab_id: "tab-1".to_string(),
+            wizard_id: "wizard-stale-focus".to_string(),
+            wizard: LaunchWizardState::open_with(
+                LaunchWizardContext {
+                    selected_branch: sample_branch_entry("feature/demo"),
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: Some(repo.clone()),
+                    quick_start_root: repo.clone(),
+                    live_sessions: vec![gwt::LiveSessionEntry {
+                        session_id: "session-1".to_string(),
+                        window_id: "stale-focus".to_string(),
+                        agent_id: "codex".to_string(),
+                        kind: "agent".to_string(),
+                        name: "Codex".to_string(),
+                        detail: Some(repo.display().to_string()),
+                        active: true,
+                    }],
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                sample_wizard_agent_options(),
+                Vec::new(),
+            ),
+        });
+        let stale_tab_focus = runtime.handle_launch_wizard_action(
+            LaunchWizardAction::FocusExistingSession { index: 0 },
+            None,
+        );
+        assert_eq!(stale_tab_focus.len(), 1);
+        assert_eq!(
+            runtime
+                .launch_wizard
+                .as_ref()
+                .and_then(|session| session.wizard.error.as_deref()),
+            Some("The selected session tab is no longer available")
+        );
 
         runtime.launch_wizard = Some(sample_focus_launch_wizard_session(
             "tab-1",
