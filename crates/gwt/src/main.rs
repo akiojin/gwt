@@ -111,6 +111,12 @@ fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<
     }
 }
 
+fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) {
+    clients.dispatch(vec![OutboundEvent::broadcast(
+        BackendEvent::LogEntryAppended { entry },
+    )]);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -134,6 +140,9 @@ enum UserEvent {
     Frontend {
         client_id: ClientId,
         event: FrontendEvent,
+    },
+    LogEntry {
+        entry: gwt_core::logging::LogEvent,
     },
     RuntimeOutput {
         id: String,
@@ -202,14 +211,15 @@ mod tests {
         ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_core::logging::{LogEvent, LogLevel};
     use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
-        close_window_from_workspace, combined_window_id, current_git_branch,
-        docker_bundle_mounts_for_home, docker_bundle_override_content,
+        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
+        build_shell_process_launch, close_window_from_workspace, combined_window_id,
+        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
         gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
@@ -364,6 +374,25 @@ mod tests {
         assert_eq!(native_payload, browser_payload);
         assert!(native_payload.contains("\"kind\":\"runtime_hook_event\""));
         assert!(native_payload.contains("\"source_event\":\"PreToolUse\""));
+    }
+
+    #[test]
+    fn log_entry_broadcast_reaches_all_registered_clients() {
+        let clients = ClientHub::default();
+        let mut native = clients.register("native".to_string());
+        let mut browser = clients.register("browser".to_string());
+
+        broadcast_log_entry(
+            &clients,
+            LogEvent::new(LogLevel::Warn, "pty", "reader stalled").with_detail("retrying"),
+        );
+
+        let native_payload = native.try_recv().expect("native payload");
+        let browser_payload = browser.try_recv().expect("browser payload");
+        assert_eq!(native_payload, browser_payload);
+        assert!(native_payload.contains("\"kind\":\"log_entry_appended\""));
+        assert!(native_payload.contains("\"severity\":\"Warn\""));
+        assert!(native_payload.contains("\"message\":\"reader stalled\""));
     }
 
     #[test]
@@ -601,7 +630,9 @@ mod tests {
     ) -> (AppRuntime, Arc<Mutex<Vec<UserEvent>>>) {
         let (proxy, events) = AppEventProxy::stub();
         let sessions_dir = temp_root.join("sessions");
+        let log_dir = temp_root.join("logs");
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        fs::create_dir_all(&log_dir).expect("create log dir");
         let mut runtime = AppRuntime {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
@@ -610,6 +641,7 @@ mod tests {
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
             session_state_path: temp_root.join("session-state.json"),
+            log_dir,
             proxy,
             blocking_tasks: BlockingTaskSpawner::thread(),
             sessions_dir,
@@ -3333,12 +3365,12 @@ fn main() -> wry::Result<()> {
 
     // Install the tracing subscriber so that `tracing::debug!/info!` lands in
     // `~/.gwt/logs/gwt.log`. The returned guard must outlive the event loop;
-    // we bind it to `_log_handles` and keep it until `main` returns.
+    // we bind it to `log_handles` and keep it until `main` returns.
     //
     // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
     // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
     // `RUST_LOG=gwt_input_trace=debug`.
-    let _log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
+    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
         gwt_core::paths::gwt_logs_dir(),
     ))
     .map_err(|error| {
@@ -3373,6 +3405,16 @@ fn main() -> wry::Result<()> {
     )
     .expect("app runtime");
     app.bootstrap();
+    if let Some(log_handles) = log_handles.as_mut() {
+        if let Some(mut ui_rx) = log_handles.take_ui_rx() {
+            let log_proxy = proxy.clone();
+            drop(runtime.handle().spawn(async move {
+                while let Some(entry) = ui_rx.recv().await {
+                    let _ = log_proxy.send_event(UserEvent::LogEntry { entry });
+                }
+            }));
+        }
+    }
 
     let mut server = EmbeddedServer::start(
         &runtime,
@@ -3443,6 +3485,9 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let events = app.handle_frontend_event(client_id, event);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LogEntry { entry }) => {
+                broadcast_log_entry(&clients, entry);
             }
             Event::UserEvent(UserEvent::RuntimeOutput { id, data }) => {
                 let events = app.handle_runtime_output(id, data);

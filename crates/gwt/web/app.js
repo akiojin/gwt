@@ -52,6 +52,7 @@
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const boardStateMap = new Map();
+      const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
       const pendingMessages = [];
       // Phase 1B extraction map: each entry names the surface that owns the
@@ -97,6 +98,16 @@
             "renderBoard",
             "requestBoard",
             "submitBoardEntry",
+          ]),
+        }),
+        logStateMap: Object.freeze({
+          owner: "logs-surface",
+          mutatedBy: Object.freeze([
+            "ensureLogState",
+            "requestLogs",
+            "renderLogs",
+            "appendLiveLogEntry",
+            "jumpToUnreadLogs",
           ]),
         }),
         knowledgeBridgeStateMap: Object.freeze({
@@ -225,6 +236,9 @@
         }
         if (preset === "board") {
           return "board";
+        }
+        if (preset === "logs") {
+          return "logs";
         }
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
@@ -1273,6 +1287,22 @@
         return state;
       }
 
+      function ensureLogState(windowId) {
+        if (!logStateMap.has(windowId)) {
+          logStateMap.set(windowId, {
+            entries: [],
+            loading: false,
+            error: "",
+            severity: "debug",
+            query: "",
+            selectedEntryId: null,
+            unreadAlerts: 0,
+            unreadEntryId: null,
+          });
+        }
+        return logStateMap.get(windowId);
+      }
+
       function ensureBoardState(windowId) {
         if (!boardStateMap.has(windowId)) {
           boardStateMap.set(windowId, {
@@ -1288,6 +1318,31 @@
           });
         }
         return boardStateMap.get(windowId);
+      }
+
+      function normalizeLogSeverity(severity) {
+        switch (String(severity || "").toLowerCase()) {
+          case "error":
+          case "warn":
+          case "info":
+          case "debug":
+            return String(severity).toLowerCase();
+          default:
+            return "info";
+        }
+      }
+
+      function logSeverityRank(severity) {
+        switch (normalizeLogSeverity(severity)) {
+          case "error":
+            return 3;
+          case "warn":
+            return 2;
+          case "info":
+            return 1;
+          default:
+            return 0;
+        }
       }
 
       function requestFileTree(windowId, path = "") {
@@ -1325,6 +1380,19 @@
         state.error = "";
         send({
           kind: "load_board",
+          id: windowId,
+        });
+      }
+
+      function requestLogs(windowId) {
+        const state = ensureLogState(windowId);
+        if (state.loading) {
+          return;
+        }
+        state.loading = true;
+        state.error = "";
+        send({
+          kind: "load_logs",
           id: windowId,
         });
       }
@@ -1438,6 +1506,209 @@
           hour: "2-digit",
           minute: "2-digit",
         });
+      }
+
+      function logMatchesQuery(entry, query) {
+        if (!query) {
+          return true;
+        }
+        const haystacks = [
+          entry.message,
+          entry.source,
+          entry.detail,
+          JSON.stringify(entry.fields || {}),
+        ];
+        return haystacks.some((value) =>
+          String(value || "").toLowerCase().includes(query),
+        );
+      }
+
+      function filteredLogEntries(state) {
+        const minimumRank = logSeverityRank(state.severity);
+        const query = String(state.query || "").trim().toLowerCase();
+        return (state.entries || [])
+          .filter(
+            (entry) =>
+              logSeverityRank(entry.severity) >= minimumRank &&
+              logMatchesQuery(entry, query),
+          )
+          .slice()
+          .reverse();
+      }
+
+      function appendLiveLogEntry(entry) {
+        for (const [windowId, state] of logStateMap.entries()) {
+          state.entries.push(entry);
+          if (state.entries.length > 1000) {
+            state.entries = state.entries.slice(-1000);
+          }
+          if (logSeverityRank(entry.severity) >= logSeverityRank("warn")) {
+            state.unreadAlerts += 1;
+            state.unreadEntryId = entry.id;
+          }
+          renderLogs(windowId);
+        }
+      }
+
+      function jumpToUnreadLogs(windowId) {
+        const state = ensureLogState(windowId);
+        const unreadEntry =
+          (state.unreadEntryId &&
+            state.entries.find((entry) => entry.id === state.unreadEntryId)) ||
+          [...state.entries]
+            .reverse()
+            .find((entry) => logSeverityRank(entry.severity) >= logSeverityRank("warn"));
+        if (unreadEntry) {
+          state.selectedEntryId = unreadEntry.id;
+        }
+        state.unreadAlerts = 0;
+        state.unreadEntryId = null;
+        renderLogs(windowId);
+      }
+
+      function renderLogs(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const body = element.querySelector(".window-body");
+        if (!body) {
+          return;
+        }
+        const state = ensureLogState(windowId);
+        const status = body.querySelector(".logs-status");
+        const unreadButton = body.querySelector(".logs-unread-button");
+        const severitySelect = body.querySelector(".logs-severity-select");
+        const searchInput = body.querySelector(".logs-search-input");
+        const timeline = body.querySelector(".logs-timeline");
+        const detailPane = body.querySelector(".logs-detail-pane");
+        if (
+          !status ||
+          !unreadButton ||
+          !severitySelect ||
+          !searchInput ||
+          !timeline ||
+          !detailPane
+        ) {
+          return;
+        }
+
+        const filteredEntries = filteredLogEntries(state);
+        const selectedEntry =
+          state.entries.find((entry) => entry.id === state.selectedEntryId) ||
+          filteredEntries[0] ||
+          null;
+        if (selectedEntry) {
+          state.selectedEntryId = selectedEntry.id;
+        } else {
+          state.selectedEntryId = null;
+        }
+
+        status.textContent = state.error
+          ? state.error
+          : state.loading
+            ? "Loading logs..."
+            : `${filteredEntries.length} visible / ${state.entries.length} total`;
+        status.className = "logs-status";
+        if (state.error) {
+          status.classList.add("error");
+        } else if (state.loading) {
+          status.classList.add("info");
+        }
+
+        unreadButton.hidden = state.unreadAlerts === 0;
+        unreadButton.textContent =
+          state.unreadAlerts === 1
+            ? "1 unread alert"
+            : `${state.unreadAlerts} unread alerts`;
+        severitySelect.value = state.severity;
+        searchInput.value = state.query;
+
+        timeline.innerHTML = "";
+        if (!state.loading && filteredEntries.length === 0) {
+          timeline.appendChild(createNode("div", "logs-empty", "No log entries match."));
+        }
+        for (const entry of filteredEntries) {
+          const row = createNode("button", "logs-entry");
+          row.type = "button";
+          if (selectedEntry && selectedEntry.id === entry.id) {
+            row.classList.add("selected");
+          }
+          row.addEventListener("click", () => {
+            state.selectedEntryId = entry.id;
+            if (logSeverityRank(entry.severity) >= logSeverityRank("warn")) {
+              state.unreadAlerts = 0;
+              state.unreadEntryId = null;
+            }
+            renderLogs(windowId);
+          });
+
+          const header = createNode("div", "logs-entry-header");
+          header.appendChild(
+            createNode(
+              "span",
+              `logs-severity-chip ${normalizeLogSeverity(entry.severity)}`,
+              String(entry.severity || "info").toUpperCase(),
+            ),
+          );
+          header.appendChild(
+            createNode("span", "logs-entry-source", entry.source || "gwt"),
+          );
+          header.appendChild(
+            createNode(
+              "span",
+              "logs-entry-time",
+              boardTimestampLabel(entry.timestamp),
+            ),
+          );
+          row.appendChild(header);
+          row.appendChild(
+            createNode("div", "logs-entry-message", entry.message || "(empty log event)"),
+          );
+          if (entry.detail) {
+            row.appendChild(createNode("div", "logs-entry-detail", entry.detail));
+          }
+          timeline.appendChild(row);
+        }
+
+        detailPane.innerHTML = "";
+        if (!selectedEntry) {
+          detailPane.appendChild(
+            createNode("div", "logs-empty", "Select a log entry to inspect details."),
+          );
+          return;
+        }
+
+        detailPane.appendChild(createNode("div", "mock-label", "Log detail"));
+        detailPane.appendChild(
+          createNode(
+            "div",
+            "logs-detail-message",
+            selectedEntry.message || "(empty log event)",
+          ),
+        );
+        detailPane.appendChild(
+          createNode(
+            "div",
+            "logs-detail-meta",
+            `${String(selectedEntry.severity || "info").toUpperCase()} · ${selectedEntry.source || "gwt"} · ${boardTimestampLabel(selectedEntry.timestamp)}`,
+          ),
+        );
+        if (selectedEntry.detail) {
+          detailPane.appendChild(
+            createNode("pre", "logs-detail-block", selectedEntry.detail),
+          );
+        }
+        const fields = selectedEntry.fields || {};
+        if (Object.keys(fields).length > 0) {
+          detailPane.appendChild(
+            createNode(
+              "pre",
+              "logs-detail-block",
+              JSON.stringify(fields, null, 2),
+            ),
+          );
+        }
       }
 
       function boardAgentKey(entry) {
@@ -3287,6 +3558,7 @@
           "surface-file-tree",
           "surface-branches",
           "surface-board",
+          "surface-logs",
           "surface-knowledge",
           "surface-mock",
         );
@@ -3471,6 +3743,78 @@
             frontendUnits.boardSurface.requestBoard(windowData.id);
           }
           frontendUnits.boardSurface.renderBoard(windowData.id);
+          return;
+        }
+
+        if (surface === "logs") {
+          body.innerHTML = `
+            <div class="logs-root">
+              <div class="knowledge-toolbar">
+                <div class="knowledge-toolbar-main">
+                  <div class="knowledge-heading">Structured logs</div>
+                  <div class="logs-status"></div>
+                </div>
+                <div class="knowledge-toolbar-actions">
+                  <button class="text-button logs-unread-button" type="button" hidden>0 unread alerts</button>
+                  <button class="icon-button" data-action="refresh-logs" aria-label="Refresh logs">↻</button>
+                </div>
+              </div>
+              <div class="logs-filter-bar">
+                <label class="logs-filter-field">
+                  <span>Severity</span>
+                  <select class="logs-severity-select">
+                    <option value="debug">Debug+</option>
+                    <option value="info">Info+</option>
+                    <option value="warn">Warn+</option>
+                    <option value="error">Error</option>
+                  </select>
+                </label>
+                <label class="logs-filter-field">
+                  <span>Search</span>
+                  <input class="logs-search-input" type="search" placeholder="Filter message, source, or fields" />
+                </label>
+              </div>
+              <div class="logs-layout">
+                <div class="logs-timeline"></div>
+                <div class="logs-detail-pane"></div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
+          });
+          const state = frontendUnits.logsSurface.ensureLogState(windowData.id);
+          body
+            .querySelector("[data-action='refresh-logs']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              state.error = "";
+              frontendUnits.logsSurface.requestLogs(windowData.id);
+              frontendUnits.logsSurface.renderLogs(windowData.id);
+            });
+          body
+            .querySelector(".logs-unread-button")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              frontendUnits.logsSurface.jumpToUnread(windowData.id);
+            });
+          body
+            .querySelector(".logs-severity-select")
+            .addEventListener("change", (event) => {
+              state.severity = event.target.value;
+              frontendUnits.logsSurface.renderLogs(windowData.id);
+            });
+          body
+            .querySelector(".logs-search-input")
+            .addEventListener("input", (event) => {
+              state.query = event.target.value;
+              frontendUnits.logsSurface.renderLogs(windowData.id);
+            });
+          if (state.entries.length === 0 && !state.loading && !state.error) {
+            frontendUnits.logsSurface.requestLogs(windowData.id);
+          }
+          frontendUnits.logsSurface.renderLogs(windowData.id);
           return;
         }
 
@@ -3920,6 +4264,7 @@
           fileTreeStateMap.delete(windowId);
           branchListStateMap.delete(windowId);
           boardStateMap.delete(windowId);
+          logStateMap.delete(windowId);
           knowledgeBridgeStateMap.delete(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
@@ -4018,6 +4363,14 @@
         handleRuntimeHookEvent: handleBoardHookEvent,
       });
 
+      const logsSurface = Object.freeze({
+        ensureLogState,
+        requestLogs,
+        renderLogs,
+        appendLiveEntry: appendLiveLogEntry,
+        jumpToUnread: jumpToUnreadLogs,
+      });
+
       const knowledgeSettingsSurface = Object.freeze({
         ensureKnowledgeBridgeState,
         requestKnowledgeBridge,
@@ -4037,6 +4390,7 @@
         launchWizardSurface,
         branchesFileTreeSurface,
         boardSurface,
+        logsSurface,
         knowledgeSettingsSurface,
       });
 
@@ -4122,6 +4476,23 @@
             frontendUnits.boardSurface.renderBoard(event.id);
             break;
           }
+          case "log_entries": {
+            const state = frontendUnits.logsSurface.ensureLogState(event.id);
+            state.entries = event.entries || [];
+            state.loading = false;
+            state.error = "";
+            state.unreadAlerts = 0;
+            state.unreadEntryId = null;
+            if (!state.selectedEntryId || !state.entries.some((entry) => entry.id === state.selectedEntryId)) {
+              state.selectedEntryId =
+                state.entries.length > 0 ? state.entries[state.entries.length - 1].id : null;
+            }
+            frontendUnits.logsSurface.renderLogs(event.id);
+            break;
+          }
+          case "log_entry_appended":
+            frontendUnits.logsSurface.appendLiveEntry(event.entry);
+            break;
           case "knowledge_entries": {
             const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
               event.id,
@@ -4186,6 +4557,13 @@
             state.submitting = false;
             state.error = event.message;
             frontendUnits.boardSurface.renderBoard(event.id);
+            break;
+          }
+          case "log_error": {
+            const state = frontendUnits.logsSurface.ensureLogState(event.id);
+            state.loading = false;
+            state.error = event.message;
+            frontendUnits.logsSurface.renderLogs(event.id);
             break;
           }
           case "knowledge_error": {

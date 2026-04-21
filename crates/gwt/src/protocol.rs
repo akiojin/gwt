@@ -1,5 +1,8 @@
 use gwt_agent::CustomCodingAgent;
-use gwt_core::coordination::{BoardEntry, BoardEntryKind};
+use gwt_core::{
+    coordination::{BoardEntry, BoardEntryKind},
+    logging::LogEvent,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -102,6 +105,9 @@ pub enum FrontendEvent {
         id: String,
     },
     LoadBoard {
+        id: String,
+    },
+    LoadLogs {
         id: String,
     },
     LoadKnowledgeBridge {
@@ -247,6 +253,13 @@ pub enum BackendEvent {
         id: String,
         entries: Vec<BoardEntry>,
     },
+    LogEntries {
+        id: String,
+        entries: Vec<LogEvent>,
+    },
+    LogEntryAppended {
+        entry: LogEvent,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -269,6 +282,10 @@ pub enum BackendEvent {
         message: String,
     },
     BoardError {
+        id: String,
+        message: String,
+    },
+    LogError {
         id: String,
         message: String,
     },
@@ -335,7 +352,10 @@ pub enum CustomAgentErrorCode {
 
 #[cfg(test)]
 mod tests {
-    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+    use gwt_core::{
+        coordination::{AuthorKind, BoardEntry, BoardEntryKind},
+        logging::{LogEvent, LogLevel},
+    };
     use serde_json::Value;
 
     use crate::branch_list::{
@@ -458,6 +478,39 @@ mod tests {
             value["entries"][0]["related_topics"][0],
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
+        );
+    }
+
+    #[test]
+    fn log_entries_serializes_snapshot_contract() {
+        let event = BackendEvent::LogEntries {
+            id: "logs-1".to_string(),
+            entries: vec![
+                LogEvent::new(LogLevel::Warn, "gwt", "watcher stalled").with_detail("tail retry")
+            ],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize log entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("log_entries".to_string()))
+        );
+        assert_eq!(value.get("id"), Some(&Value::String("logs-1".to_string())));
+        assert_eq!(
+            value["entries"][0]["severity"],
+            Value::String("Warn".to_string())
+        );
+        assert_eq!(
+            value["entries"][0]["source"],
+            Value::String("gwt".to_string())
+        );
+        assert_eq!(
+            value["entries"][0]["message"],
+            Value::String("watcher stalled".to_string())
+        );
+        assert_eq!(
+            value["entries"][0]["detail"],
+            Value::String("tail retry".to_string())
         );
     }
 

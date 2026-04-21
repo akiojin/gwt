@@ -498,6 +498,28 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_logs_surface_uses_cache_backed_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("logs-root"),
+            "expected Logs root scaffold in embedded html",
+        );
+        assert!(
+            html.contains("load_logs"),
+            "expected Logs load event in embedded html",
+        );
+        assert!(
+            html.contains("log_entries") && html.contains("log_entry_appended"),
+            "expected Logs surface to accept both snapshot and live append events",
+        );
+        assert!(
+            html.contains("logs-unread-button"),
+            "expected Logs surface to expose an unread warning/error badge control",
+        );
+    }
+
+    #[test]
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
@@ -592,8 +614,9 @@ mod tests {
                 && html.contains("launchWizardSurface,")
                 && html.contains("branchesFileTreeSurface,")
                 && html.contains("boardSurface,")
+                && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Board, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Board, Logs, and knowledge/settings surfaces",
         );
         assert!(
             !html.contains("window.__POC__"),

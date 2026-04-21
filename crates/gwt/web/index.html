@@ -326,6 +326,7 @@
       .workspace-window.surface-file-tree,
       .workspace-window.surface-branches,
       .workspace-window.surface-board,
+      .workspace-window.surface-logs,
       .workspace-window.surface-mock {
         background: rgba(255, 255, 255, 0.98);
       }
@@ -349,6 +350,7 @@
       .surface-file-tree .titlebar,
       .surface-branches .titlebar,
       .surface-board .titlebar,
+      .surface-logs .titlebar,
       .surface-mock .titlebar {
         background: rgba(248, 250, 252, 0.98);
         color: #0f172a;
@@ -392,6 +394,7 @@
       .surface-file-tree .status-chip,
       .surface-branches .status-chip,
       .surface-board .status-chip,
+      .surface-logs .status-chip,
       .surface-knowledge .status-chip,
       .surface-mock .status-chip {
         color: #334155;
@@ -442,6 +445,7 @@
       .surface-file-tree .icon-button,
       .surface-branches .icon-button,
       .surface-board .icon-button,
+      .surface-logs .icon-button,
       .surface-knowledge .icon-button,
       .surface-mock .icon-button {
         color: #334155;
@@ -472,6 +476,7 @@
       .surface-file-tree .window-body,
       .surface-branches .window-body,
       .surface-board .window-body,
+      .surface-logs .window-body,
       .surface-knowledge .window-body,
       .surface-mock .window-body {
         background: #ffffff;
@@ -533,6 +538,7 @@
       .file-tree-root,
       .branch-list-root,
       .board-root,
+      .logs-root,
       .knowledge-root,
       .mock-root {
         position: absolute;
@@ -992,6 +998,167 @@
         margin-bottom: 10px;
       }
 
+      .logs-filter-bar {
+        display: flex;
+        align-items: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .logs-filter-field {
+        display: grid;
+        gap: 6px;
+        min-width: 0;
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .logs-filter-field span {
+        font-weight: 600;
+        color: #334155;
+      }
+
+      .logs-filter-field select,
+      .logs-filter-field input {
+        min-width: 0;
+        height: 32px;
+        padding: 0 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
+        font: inherit;
+        color: #0f172a;
+      }
+
+      .logs-status {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .logs-status.info {
+        color: #1d4ed8;
+      }
+
+      .logs-status.error {
+        color: #b91c1c;
+      }
+
+      .logs-layout {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(260px, 0.95fr) minmax(0, 1.05fr);
+      }
+
+      .logs-timeline,
+      .logs-detail-pane {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .logs-timeline {
+        overflow: auto;
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .logs-detail-pane {
+        overflow: auto;
+        padding: 12px;
+        display: grid;
+        align-content: start;
+        gap: 10px;
+      }
+
+      .logs-entry {
+        display: grid;
+        gap: 8px;
+        width: 100%;
+        padding: 12px;
+        border: none;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .logs-entry:hover {
+        background: rgba(59, 130, 246, 0.06);
+      }
+
+      .logs-entry.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .logs-entry-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .logs-severity-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .logs-severity-chip.debug {
+        background: rgba(148, 163, 184, 0.18);
+        color: #475569;
+      }
+
+      .logs-severity-chip.info {
+        background: rgba(59, 130, 246, 0.1);
+        color: #1d4ed8;
+      }
+
+      .logs-severity-chip.warn {
+        background: rgba(245, 158, 11, 0.14);
+        color: #b45309;
+      }
+
+      .logs-severity-chip.error {
+        background: rgba(239, 68, 68, 0.12);
+        color: #b91c1c;
+      }
+
+      .logs-entry-source,
+      .logs-entry-time,
+      .logs-entry-detail,
+      .logs-detail-meta {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .logs-entry-time {
+        margin-left: auto;
+      }
+
+      .logs-entry-message,
+      .logs-detail-message {
+        font-size: 13px;
+        color: #0f172a;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .logs-detail-block {
+        margin: 0;
+        padding: 10px;
+        border-radius: 6px;
+        background: #f8fafc;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        font-family: inherit;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #334155;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
       .file-tree-list,
       .branch-list {
         padding: 8px 0;
@@ -1272,6 +1439,7 @@
       .file-tree-empty,
       .branch-empty,
       .board-empty,
+      .logs-empty,
       .mock-empty {
         padding: 16px 12px;
         font-size: 12px;

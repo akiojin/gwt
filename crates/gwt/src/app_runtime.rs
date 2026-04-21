@@ -235,6 +235,7 @@ pub(crate) struct AppRuntime {
     pub(crate) window_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
     pub(crate) session_state_path: PathBuf,
+    pub(crate) log_dir: PathBuf,
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
     pub(crate) sessions_dir: PathBuf,
@@ -269,6 +270,7 @@ impl AppRuntime {
         blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
+        let log_dir = gwt_core::paths::gwt_logs_dir();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
@@ -299,6 +301,7 @@ impl AppRuntime {
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
             session_state_path,
+            log_dir,
             proxy: AppEventProxy::new(proxy),
             blocking_tasks,
             sessions_dir,
@@ -389,6 +392,7 @@ impl AppRuntime {
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
+            FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
                 knowledge_kind,
@@ -1080,6 +1084,62 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn load_logs_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::LogError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::LogError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::LogError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Logs {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::LogError {
+                    id: id.to_string(),
+                    message: "Window is not a Logs surface".to_string(),
+                },
+            )];
+        }
+
+        match load_log_entries_from_dir(&self.log_dir) {
+            Ok(entries) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::LogEntries {
+                    id: id.to_string(),
+                    entries,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::LogError {
+                    id: id.to_string(),
+                    message: error,
+                },
+            )],
+        }
+    }
+
     pub(crate) fn post_board_entry_events(
         &self,
         client_id: &str,
@@ -1357,6 +1417,45 @@ fn sanitize_board_list(values: &[String]) -> Vec<String> {
         sanitized.push(trimmed.to_string());
     }
     sanitized
+}
+
+fn load_log_entries_from_dir(log_dir: &Path) -> Result<Vec<gwt_core::logging::LogEvent>, String> {
+    let path = gwt_core::logging::current_log_file(log_dir);
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to open log file {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut entries = Vec::new();
+    for (index, line) in std::io::BufRead::lines(reader).enumerate() {
+        let line = line.map_err(|error| {
+            format!(
+                "Failed to read log line {} from {}: {error}",
+                index + 1,
+                path.display()
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let entry =
+            serde_json::from_str::<gwt_core::logging::LogEvent>(trimmed).map_err(|error| {
+                format!(
+                    "Failed to parse log line {} from {}: {error}",
+                    index + 1,
+                    path.display()
+                )
+            })?;
+        entries.push(entry);
+    }
+    Ok(entries)
 }
 
 fn spawn_branch_cleanup_async(
@@ -2758,8 +2857,9 @@ mod tests {
         LaunchWizardState, ProjectKind, WindowGeometry, WindowPreset, WindowProcessStatus,
         WorkspaceState,
     };
-    use gwt_core::coordination::{
-        load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind,
+    use gwt_core::{
+        coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind},
+        logging::{current_log_file, LogEvent, LogLevel},
     };
     use gwt_terminal::Pane;
 
@@ -2865,7 +2965,9 @@ mod tests {
     ) -> AppRuntime {
         let (proxy, _events) = AppEventProxy::stub();
         let sessions_dir = temp_root.join("sessions");
+        let log_dir = temp_root.join("logs");
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        fs::create_dir_all(&log_dir).expect("create log dir");
         let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
         let mut runtime = AppRuntime {
             tabs,
@@ -2875,6 +2977,7 @@ mod tests {
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
             session_state_path: temp_root.join("session-state.json"),
+            log_dir,
             proxy,
             blocking_tasks: BlockingTaskSpawner::thread(),
             sessions_dir,
@@ -3252,6 +3355,52 @@ mod tests {
                 && id == &window_id
                 && entries.len() == 1
                 && entries[0].body == "Need review"
+        ));
+    }
+
+    #[test]
+    fn app_runtime_load_logs_replies_with_current_log_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "logs-1",
+            repo,
+            WindowPreset::Logs,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "logs-1");
+        let log_path = current_log_file(&runtime.log_dir);
+        let entry =
+            LogEvent::new(LogLevel::Warn, "pty", "runtime stalled").with_detail("retrying read");
+        fs::write(
+            &log_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&entry).expect("serialize log event")
+            ),
+        )
+        .expect("write log snapshot");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadLogs {
+                id: window_id.clone(),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::LogEntries { id, entries },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && entries.len() == 1
+                && entries[0].message == "runtime stalled"
+                && matches!(entries[0].severity, LogLevel::Warn)
         ));
     }
 
