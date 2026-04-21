@@ -1,5 +1,40 @@
 # Lessons Learned
 
+## 2026-04-21 — `gwt issue spec --edit <section> -f <file>` に artifact marker を入れると body が復旧不能になる
+
+### 事象
+
+SPEC #2133 に `gwt issue spec 2133 --edit plan -f tasks/plan-agent-color.md`
+を実行。ファイル先頭末尾に `<!-- artifact:plan BEGIN/END -->` マーカーを
+自分で入れていたところ、CLI は「セクション content をマーカーで包んで
+comment に投稿」する処理を行うため、出力された comment 本文に
+`<!-- artifact:plan BEGIN -->` が 2 行連続する nested 状態が発生した。
+以降 `gwt issue view 2133` / `gwt issue spec 2133` / `gwt issue comment
+2133` すべてが `body parse error: malformed marker: nested BEGIN for
+'plan' inside 'plan'` で失敗し、CLI からの復旧が一切効かなくなった。
+
+### 原因
+
+- lessons.md 2026-04-15 の教訓「`spec create` はマーカー必要、`--edit
+  spec` はマーカー不要」を `--edit plan` / `--edit tasks` にも展開して
+  適用すべきだったが、本番前に `--edit` 全体のマーカー扱いを確認せず
+  に投入した。
+- `gwt issue spec create -f` と `gwt issue spec --edit -f` で必要な
+  ファイル形式が逆転しているという非対称は直感に反する。`--help` 等で
+  見える形になっていないため、毎回再確認が必要。
+
+### 再発防止策
+
+1. `gwt issue spec --edit <section> -f <file>` に渡すファイルに
+   `<!-- artifact:<section> BEGIN/END -->` マーカーを入れない。CLI 側で
+   wrap される前提。
+2. `gwt issue spec create --title … -f <file>` に渡すファイルはマーカー
+   付きにする (既存教訓)。
+3. section を初めて書き込む前に必ず小さいテストファイルで 1 回試す
+   (1 セクション分の数行だけ)。フル本文を一発で投げない。
+4. 壊れた comment は gwt CLI で復旧できないので、GitHub Web / workflow-
+   policy で許容された API を通じて手動修復が必要。未然防止がすべて。
+
 ## 2026-04-21 — fix(review): text contract は success status だけでなく semantic validity を確認する
 
 ### 事象

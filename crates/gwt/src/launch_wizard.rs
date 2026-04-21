@@ -38,6 +38,12 @@ pub struct LaunchWizardOptionView {
     pub value: String,
     pub label: String,
     pub description: Option<String>,
+    /// Agent-specific color hint used by the frontend for candidate rows.
+    /// `agent_options` から派生した option のみが `Some` を持ち、branch
+    /// type や model など agent 非関連の他選択肢は常に `None`。
+    /// SPEC #2133 FR-009.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<gwt_agent::AgentColor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1142,6 +1148,7 @@ impl LaunchWizardState {
                 value: agent.id.clone(),
                 label: agent.name.clone(),
                 description: Some(agent_description(agent)),
+                color: agent_option_color(&agent.id),
             })
             .collect()
     }
@@ -1153,6 +1160,7 @@ impl LaunchWizardState {
                 value: option.label.to_string(),
                 label: option.label.to_string(),
                 description: Some(option.description.to_string()),
+                color: None,
             })
             .collect()
     }
@@ -1164,6 +1172,7 @@ impl LaunchWizardState {
                 value: option.stored_value.to_string(),
                 label: option.label.to_string(),
                 description: Some(option.description.to_string()),
+                color: None,
             })
             .collect()
     }
@@ -1175,6 +1184,7 @@ impl LaunchWizardState {
                 value: service.clone(),
                 label: service,
                 description: Some("Docker Compose service".to_string()),
+                color: None,
             })
             .collect()
     }
@@ -1186,6 +1196,7 @@ impl LaunchWizardState {
                 value: docker_lifecycle_value(option.intent).to_string(),
                 label: option.label.to_string(),
                 description: Some(option.description.to_string()),
+                color: None,
             })
             .collect()
     }
@@ -1197,6 +1208,7 @@ impl LaunchWizardState {
                 value: option.value,
                 label: option.label,
                 description: Some("Tool version".to_string()),
+                color: None,
             })
             .collect()
     }
@@ -1621,12 +1633,14 @@ impl LaunchWizardState {
                             value: format!("reuse:{index}"),
                             label: format!("{reuse_action_label} {}", entry.tool_label),
                             description: Some(summary.clone()),
+                            color: None,
                         });
                     }
                     options.push(LaunchWizardOptionView {
                         value: format!("start_new:{index}"),
                         label: format!("Start new with {}", entry.tool_label),
                         description: Some(summary),
+                        color: None,
                     });
                 }
                 if !self.context.live_sessions.is_empty() {
@@ -1634,12 +1648,14 @@ impl LaunchWizardState {
                         value: "focus_existing".to_string(),
                         label: "Focus existing session".to_string(),
                         description: Some("Jump to a running window on this branch".to_string()),
+                        color: None,
                     });
                 }
                 options.push(LaunchWizardOptionView {
                     value: "choose_different".to_string(),
                     label: "Choose different".to_string(),
                     description: Some("Open the full launch wizard".to_string()),
+                    color: None,
                 });
                 options
             }
@@ -1651,6 +1667,7 @@ impl LaunchWizardState {
                     value: entry.window_id.clone(),
                     label: entry.name.clone(),
                     description: entry.detail.clone(),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::BranchAction => vec![
@@ -1658,6 +1675,7 @@ impl LaunchWizardState {
                     value: "use_selected".to_string(),
                     label: "Use selected branch".to_string(),
                     description: Some("Launch on the selected branch".to_string()),
+                    color: None,
                 },
                 LaunchWizardOptionView {
                     value: "create_new".to_string(),
@@ -1665,6 +1683,7 @@ impl LaunchWizardState {
                     description: Some(
                         "Create a new branch based on the selected branch".to_string(),
                     ),
+                    color: None,
                 },
             ],
             LaunchWizardStep::BranchTypeSelect => BRANCH_TYPE_PREFIXES
@@ -1676,6 +1695,7 @@ impl LaunchWizardState {
                         "Use {} as the branch prefix",
                         prefix.trim_end_matches('/')
                     )),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::LaunchTarget => launch_target_options_view(),
@@ -1686,6 +1706,7 @@ impl LaunchWizardState {
                     value: agent.id.clone(),
                     label: agent.name.clone(),
                     description: Some(agent_description(agent)),
+                    color: agent_option_color(&agent.id),
                 })
                 .collect(),
             LaunchWizardStep::ModelSelect => model_display_options(self.effective_agent_id())
@@ -1694,6 +1715,7 @@ impl LaunchWizardState {
                     value: option.label.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::ReasoningLevel => self
@@ -1703,6 +1725,7 @@ impl LaunchWizardState {
                     value: option.stored_value.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::RuntimeTarget => RUNTIME_TARGET_OPTIONS
@@ -1711,6 +1734,7 @@ impl LaunchWizardState {
                     value: option.label.to_ascii_lowercase(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::DockerServiceSelect => self
@@ -1720,6 +1744,7 @@ impl LaunchWizardState {
                     value: service.clone(),
                     label: service,
                     description: Some("Docker Compose service".to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::DockerLifecycle => self
@@ -1729,6 +1754,7 @@ impl LaunchWizardState {
                     value: docker_lifecycle_value(option.intent).to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::VersionSelect => self
@@ -1738,6 +1764,7 @@ impl LaunchWizardState {
                     value: option.value,
                     label: option.label,
                     description: Some("Tool version".to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::ExecutionMode => EXECUTION_MODE_OPTIONS
@@ -1746,6 +1773,7 @@ impl LaunchWizardState {
                     value: option.value.to_string(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::SkipPermissions => YES_NO_OPTIONS
@@ -1754,6 +1782,7 @@ impl LaunchWizardState {
                     value: option.label.to_ascii_lowercase(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::CodexFastMode => FAST_MODE_OPTIONS
@@ -1762,6 +1791,7 @@ impl LaunchWizardState {
                     value: option.label.to_ascii_lowercase(),
                     label: option.label.to_string(),
                     description: Some(option.description.to_string()),
+                    color: None,
                 })
                 .collect(),
             LaunchWizardStep::BranchNameInput => Vec::new(),
@@ -2355,6 +2385,7 @@ fn branch_type_options_view() -> Vec<LaunchWizardOptionView> {
                 "Use {} as the branch prefix",
                 prefix.trim_end_matches('/')
             )),
+            color: None,
         })
         .collect()
 }
@@ -2365,11 +2396,13 @@ fn launch_target_options_view() -> Vec<LaunchWizardOptionView> {
             value: "agent".to_string(),
             label: "Agent".to_string(),
             description: Some("Launch a coding agent terminal".to_string()),
+            color: None,
         },
         LaunchWizardOptionView {
             value: "shell".to_string(),
             label: "Shell".to_string(),
             description: Some("Open a plain shell terminal".to_string()),
+            color: None,
         },
     ]
 }
@@ -2381,6 +2414,7 @@ fn runtime_target_options_view() -> Vec<LaunchWizardOptionView> {
             value: option.label.to_ascii_lowercase(),
             label: option.label.to_string(),
             description: Some(option.description.to_string()),
+            color: None,
         })
         .collect()
 }
@@ -2392,6 +2426,7 @@ fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
             value: option.value.to_string(),
             label: option.label.to_string(),
             description: Some(option.description.to_string()),
+            color: None,
         })
         .collect()
 }
@@ -2464,6 +2499,13 @@ fn agent_description(agent: &AgentOption) -> String {
     }
 }
 
+/// Map the raw agent option id (command name or custom agent id) to the
+/// AgentColor rendered on the Launch Wizard candidate row.
+/// SPEC #2133 FR-009 / シナリオ 2.
+fn agent_option_color(agent_id: &str) -> Option<gwt_agent::AgentColor> {
+    gwt_agent::resolve_agent_id(agent_id).map(|id| id.default_color())
+}
+
 pub fn default_wizard_version_cache_path() -> PathBuf {
     gwt_core::paths::gwt_cache_dir().join("agent-versions.json")
 }
@@ -2523,6 +2565,32 @@ mod tests {
                 versions: vec!["0.109.0".to_string(), "0.110.0".to_string()],
             },
         ]
+    }
+
+    #[test]
+    fn agent_option_color_maps_known_ids_and_falls_back_to_gray() {
+        assert_eq!(
+            agent_option_color("claude"),
+            Some(gwt_agent::AgentColor::Yellow)
+        );
+        assert_eq!(
+            agent_option_color("codex"),
+            Some(gwt_agent::AgentColor::Cyan)
+        );
+        assert_eq!(
+            agent_option_color("gemini"),
+            Some(gwt_agent::AgentColor::Magenta)
+        );
+        assert_eq!(
+            agent_option_color("opencode"),
+            Some(gwt_agent::AgentColor::Green)
+        );
+        assert_eq!(agent_option_color("gh"), Some(gwt_agent::AgentColor::Blue));
+        assert_eq!(
+            agent_option_color("my-custom"),
+            Some(gwt_agent::AgentColor::Gray)
+        );
+        assert_eq!(agent_option_color(""), None);
     }
 
     fn branch(name: &str) -> BranchListEntry {

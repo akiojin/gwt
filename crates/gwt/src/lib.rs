@@ -74,8 +74,8 @@ pub use profiles_service::{
     ProfileView,
 };
 pub use protocol::{
-    AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FocusCycleDirection, FrontendEvent, ProfileErrorCode, ProjectTabView, RecentProjectView,
-    WorkspaceView,
+    AppStateView, ArrangeMode, BackendEvent, BoardEntryView, BranchEntriesPhase,
+    CustomAgentErrorCode, FocusCycleDirection, FrontendEvent, ProfileErrorCode, ProjectTabView,
+    RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;
