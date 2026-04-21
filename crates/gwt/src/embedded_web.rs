@@ -88,6 +88,10 @@ mod tests {
             "expected embedded html to reference repo browser scroll containers",
         );
         assert!(
+            html.contains(".knowledge-list-pane") && html.contains(".knowledge-detail-scroll"),
+            "expected knowledge bridge list and detail panes to keep plain wheel input inside the window",
+        );
+        assert!(
             html.contains(
                 "const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);",
             ),
@@ -274,6 +278,20 @@ mod tests {
         assert!(
             html.contains("open_issue_launch_wizard"),
             "expected issue launch wizard event in embedded html",
+        );
+        assert!(
+            html.contains(".workspace-window.surface-knowledge")
+                && html.contains(".surface-knowledge .titlebar"),
+            "expected knowledge bridge windows to define non-transparent window and titlebar chrome",
+        );
+        assert!(
+            html.contains("function renderMarkdownFragment("),
+            "expected knowledge bridge detail sections to render Markdown through a named renderer",
+        );
+        assert!(
+            html.contains("renderMarkdownFragment(section.body)")
+                && !html.contains("createNode(\"pre\", \"knowledge-section-body\", section.body)"),
+            "expected knowledge bridge detail bodies to avoid plain preformatted Markdown output",
         );
     }
 }

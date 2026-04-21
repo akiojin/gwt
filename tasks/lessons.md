@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
+
+### 事象
+
+SPEC-1938 FR-014 は「Issue を選択した launch が成功した場合、local linkage store を更新する」
+を実装済みとしていたが、現在の `crates/gwt/src/main.rs` には
+`~/.gwt/cache/issue-links/<repo_hash>.json` への書き込みが存在しなかった。あわせて
+GUI Issue Bridge は `surface-knowledge` が titlebar/background と wheel routing の対象から漏れ、
+Markdown 詳細も `pre` でプレーン表示されていた。
+
+### 原因
+
+- SPEC/tasks の完了レポートを信じ、現行コードに FR-014 の書き込み経路が残っているかを
+  grep で確認していなかった。
+- Branches / File Tree の scroll surface 追加時に、同じ canvas window 系の
+  Knowledge Bridge surface を wheel ownership の対象に含めていなかった。
+- cache-backed detail の body を Markdown として扱う仕様なのに、WebView 側では
+  text node として安全に表示するだけで renderer 契約を固定していなかった。
+
+### 再発防止策
+
+1. SPEC の「実装済み」状態を見た場合でも、対象 FR の read/write path を `rg` で確認し、
+   code path が消えていないかを実装前チェックに含める。
+2. canvas window に新しい surface class を追加したら、window chrome、status/action style、
+   wheel ownership、cleanup state の対象 selector を同時に点検する。
+3. Markdown を扱う GUI surface では、plain text fallback ではなく renderer の有無を
+   embedded HTML contract test で固定する。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象

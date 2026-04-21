@@ -182,6 +182,57 @@ struct ActiveAgentSession {
     tab_id: String,
 }
 
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct IssueBranchLinkStore {
+    #[serde(default)]
+    branches: HashMap<String, u64>,
+}
+
+fn record_issue_branch_link(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: u64,
+) -> Result<(), String> {
+    record_issue_branch_link_with_cache_dir(
+        repo_path,
+        branch_name,
+        issue_number,
+        &gwt_core::paths::gwt_cache_dir(),
+    )
+}
+
+fn record_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: u64,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Ok(());
+    }
+    let Some(repo_hash) = gwt::index_worker::detect_repo_hash(repo_path) else {
+        return Err("repository hash is unavailable for issue linkage".to_string());
+    };
+    let path = cache_dir
+        .join("issue-links")
+        .join(format!("{}.json", repo_hash.as_str()));
+
+    let mut store = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<IssueBranchLinkStore>(&bytes)
+            .map_err(|error| format!("failed to parse issue linkage store: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            IssueBranchLinkStore::default()
+        }
+        Err(error) => return Err(format!("failed to read issue linkage store: {error}")),
+    };
+    store.branches.insert(branch_name.to_string(), issue_number);
+    let bytes = serde_json::to_vec_pretty(&store)
+        .map_err(|error| format!("failed to serialize issue linkage store: {error}"))?;
+    gwt_github::cache::write_atomic(&path, &bytes)
+        .map_err(|error| format!("failed to write issue linkage store: {error}"))
+}
+
 #[derive(Debug, Clone)]
 enum DispatchTarget {
     Broadcast,
@@ -2122,6 +2173,19 @@ impl AppRuntime {
             gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
                 .save(&runtime_path)
                 .map_err(|error| error.to_string())?;
+            if let Some(issue_number) = config.linked_issue_number {
+                if let Err(error) =
+                    record_issue_branch_link(&worktree_path, &branch_name, issue_number)
+                {
+                    tracing::warn!(
+                        worktree = %worktree_path.display(),
+                        branch = %branch_name,
+                        issue_number,
+                        error = %error,
+                        "issue branch linkage update skipped during agent launch"
+                    );
+                }
+            }
 
             let process_launch = ProcessLaunch {
                 command: config.command.clone(),
@@ -2684,7 +2748,8 @@ mod tests {
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
         close_window_from_workspace, combined_window_id, current_git_branch,
         docker_bundle_mounts_for_home, docker_bundle_override_content, hook_forward_authorized,
-        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        record_issue_branch_link_with_cache_dir, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
         AppEventProxy, AppRuntime, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
         ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
@@ -3093,6 +3158,29 @@ mod tests {
                 Vec::new(),
             ),
         }
+    }
+
+    #[test]
+    fn issue_branch_linkage_store_records_and_merges_launch_links() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("cache");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+
+        record_issue_branch_link_with_cache_dir(&repo, "feature/old", 7, &cache_root)
+            .expect("record old link");
+        record_issue_branch_link_with_cache_dir(&repo, "feature/demo", 42, &cache_root)
+            .expect("record launch link");
+
+        let repo_hash = gwt::index_worker::detect_repo_hash(&repo).expect("repo hash");
+        let path = cache_root
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str()));
+        let raw = fs::read_to_string(path).expect("read issue links");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse issue links");
+
+        assert_eq!(value["branches"]["feature/old"], 7);
+        assert_eq!(value["branches"]["feature/demo"], 42);
     }
 
     fn sample_branch_entry(name: &str) -> BranchListEntry {
