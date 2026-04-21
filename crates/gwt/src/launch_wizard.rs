@@ -5,6 +5,10 @@ use std::{
 
 use crate::BranchListEntry;
 
+mod quick_start;
+
+pub use quick_start::load_quick_start_entries;
+
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "release/"];
 
@@ -2495,109 +2499,6 @@ pub fn build_builtin_agent_options(
         .collect()
 }
 
-pub fn load_quick_start_entries(
-    repo_path: &Path,
-    sessions_dir: &Path,
-    branch_name: &str,
-) -> Vec<QuickStartEntry> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-
-    let mut latest_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
-    let mut latest_resumable_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
-            continue;
-        };
-        if session.branch != branch_name || session.worktree_path != repo_path {
-            continue;
-        }
-
-        let agent_key = session.agent_id.command().to_string();
-        if agent_session_resume_id(&session).is_some() {
-            let replace = latest_resumable_by_agent
-                .get(&agent_key)
-                .map(|current| session_is_newer(&session, current))
-                .unwrap_or(true);
-            if replace {
-                latest_resumable_by_agent.insert(agent_key.clone(), session.clone());
-            }
-        }
-
-        let replace = latest_by_agent
-            .get(&agent_key)
-            .map(|current| session_is_newer(&session, current))
-            .unwrap_or(true);
-        if replace {
-            latest_by_agent.insert(agent_key, session);
-        }
-    }
-
-    let mut sessions = latest_by_agent.into_values().collect::<Vec<_>>();
-    sessions.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| right.created_at.cmp(&left.created_at))
-    });
-
-    let fallback_resume_by_agent = latest_resumable_by_agent
-        .into_iter()
-        .filter_map(|(agent_key, session)| {
-            agent_session_resume_id(&session).map(|resume_id| (agent_key, resume_id))
-        })
-        .collect::<HashMap<_, _>>();
-
-    sessions
-        .into_iter()
-        .map(|session| {
-            let agent_key = session.agent_id.command().to_string();
-            let resume_session_id = agent_session_resume_id(&session)
-                .or_else(|| fallback_resume_by_agent.get(&agent_key).cloned());
-
-            QuickStartEntry {
-                session_id: session.id.clone(),
-                agent_id: agent_key,
-                tool_label: session.display_name.clone(),
-                model: session.model.clone(),
-                reasoning: session.reasoning_level.clone(),
-                version: session.tool_version.clone().or_else(|| {
-                    session
-                        .agent_id
-                        .package_name()
-                        .map(|_| "installed".to_string())
-                }),
-                resume_session_id,
-                live_window_id: None,
-                skip_permissions: session.skip_permissions,
-                codex_fast_mode: session.codex_fast_mode,
-                runtime_target: session.runtime_target,
-                docker_service: session.docker_service.clone(),
-                docker_lifecycle_intent: session.docker_lifecycle_intent,
-            }
-        })
-        .collect()
-}
-
-fn session_is_newer(candidate: &gwt_agent::Session, current: &gwt_agent::Session) -> bool {
-    candidate.updated_at > current.updated_at
-        || (candidate.updated_at == current.updated_at && candidate.created_at > current.created_at)
-}
-
-fn agent_session_resume_id(session: &gwt_agent::Session) -> Option<String> {
-    session
-        .agent_session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -2692,6 +2593,30 @@ mod tests {
         session.updated_at = updated_at;
         session.last_activity_at = updated_at;
         session.save(dir).expect("save session");
+    }
+
+    fn sample_session_record(
+        branch: &str,
+        worktree_path: &Path,
+        agent_id: gwt_agent::AgentId,
+        updated_at: chrono::DateTime<Utc>,
+        resume_id: Option<&str>,
+    ) -> gwt_agent::Session {
+        let mut session = gwt_agent::Session::new(worktree_path, branch, agent_id);
+        session.display_name = session.agent_id.display_name().to_string();
+        session.agent_session_id = resume_id.map(str::to_string);
+        session.tool_version = Some("installed".to_string());
+        session.model = Some("gpt-5.4".to_string());
+        session.reasoning_level = Some("high".to_string());
+        session.skip_permissions = true;
+        session.codex_fast_mode = true;
+        session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        session.docker_service = Some("gwt".to_string());
+        session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        session.created_at = updated_at;
+        session.updated_at = updated_at;
+        session.last_activity_at = updated_at;
+        session
     }
 
     fn quick_start_entry(
@@ -2872,6 +2797,38 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_id, "codex");
         assert!(entries[0].resume_session_id.is_none());
+    }
+
+    #[test]
+    fn collect_quick_start_entries_from_sessions_separates_display_and_resume_source() {
+        let worktree = PathBuf::from("/tmp/repo");
+        let entries = super::quick_start::collect_quick_start_entries_from_sessions(
+            &worktree,
+            "feature/gui",
+            vec![
+                sample_session_record(
+                    "feature/gui",
+                    &worktree,
+                    gwt_agent::AgentId::Codex,
+                    Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+                    Some("resume-older"),
+                ),
+                sample_session_record(
+                    "feature/gui",
+                    &worktree,
+                    gwt_agent::AgentId::Codex,
+                    Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "codex");
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("resume-older")
+        );
     }
 
     #[test]
