@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "axum",
  "base64",
@@ -1193,6 +1193,8 @@ dependencies = [
  "dunce",
  "futures-util",
  "gwt-agent",
+ "gwt-ai",
+ "gwt-config",
  "gwt-core",
  "gwt-docker",
  "gwt-git",
@@ -1212,6 +1214,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
+ "tracing",
  "uuid",
  "which",
  "wry",
@@ -1219,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "chrono",
  "gwt-core",
@@ -1238,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1248,7 +1251,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1257,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "dirs",
  "serde",
@@ -1269,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -1300,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1312,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "dirs",
  "gwt-core",
@@ -1323,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "fs2",
  "regex",
@@ -1337,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1352,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1368,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.6.0"
+version = "9.7.0"
 dependencies = [
  "gwt-core",
  "tempfile",

@@ -5,6 +5,7 @@
 //! (gwt-git, gwt-agent, etc.) build on top of these primitives.
 
 pub mod coordination;
+pub mod daemon;
 pub mod error;
 pub mod index;
 pub mod logging;

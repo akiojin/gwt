@@ -257,4 +257,56 @@ mod tests {
         assert!(updated.contains("### Proposal A - Hook-driven resume [parked]"));
         assert!(!updated.contains("### Proposal A - Hook-driven resume [active]"));
     }
+
+    #[test]
+    fn build_resume_prompt_includes_focus_and_optional_question() {
+        let prompt = build_resume_prompt(&PendingDiscussionResume {
+            proposal_label: "Proposal A".to_string(),
+            proposal_title: "Hook-driven resume".to_string(),
+            next_question: Some("Which hook should surface the proposal?".to_string()),
+        });
+        assert!(prompt.contains("Use gwt-discussion"));
+        assert!(prompt.contains("Proposal A - Hook-driven resume"));
+        assert!(prompt.contains("Next question: Which hook should surface the proposal?"));
+
+        let prompt_without_question = build_resume_prompt(&PendingDiscussionResume {
+            proposal_label: "Proposal B".to_string(),
+            proposal_title: "Manual follow-up only".to_string(),
+            next_question: None,
+        });
+        assert!(!prompt_without_question.contains("Next question:"));
+    }
+
+    #[test]
+    fn parse_helpers_fall_back_to_active_without_question() {
+        let proposals = parse_proposals(
+            r#"## Discussion TODO
+
+### Proposal C - Resume fallback [active]
+- Summary: Keep the proposal active.
+- Next Question:
+
+### Proposal D - Already chosen [chosen]
+- Summary: Done.
+"#,
+        );
+
+        assert_eq!(parse_status("active"), ProposalStatus::Active);
+        assert_eq!(parse_status("unexpected"), ProposalStatus::Unknown);
+        assert_eq!(
+            parse_field_value("- Next Question: clarify resume state", "Next Question"),
+            Some(Some("clarify resume state".to_string()))
+        );
+        assert_eq!(
+            parse_field_value("- Next Question:", "Next Question"),
+            Some(None)
+        );
+
+        let pending = select_pending_resume(&proposals).expect("pending proposal");
+        assert_eq!(pending.proposal_label, "Proposal C");
+        assert_eq!(pending.next_question, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
+    }
 }

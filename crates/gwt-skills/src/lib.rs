@@ -750,6 +750,25 @@ mod tests {
                 "expected discussion skill to define Discussion TODO scratch state in {relative}"
             );
             assert!(
+                discussion_skill.contains("## Discussion Depth Gate")
+                    && discussion_skill.contains("Coverage Checks")
+                    && discussion_skill.contains("Exit Blockers"),
+                "expected discussion skill to define a depth gate with coverage and exit blocker tracking in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("scope boundary")
+                    && discussion_skill.contains("ownership / integration")
+                    && discussion_skill.contains("failure / edge case")
+                    && discussion_skill.contains("migration / compatibility")
+                    && discussion_skill.contains("verification / success signal"),
+                "expected discussion skill to enumerate the discussion coverage categories in {relative}"
+            );
+            assert!(
+                discussion_skill.contains("Start the discussion in Plan Mode")
+                    && discussion_skill.contains("leave Plan Mode"),
+                "expected discussion skill to define Plan Mode entry and exit expectations in {relative}"
+            );
+            assert!(
                 discussion_skill.contains(".claude/settings.local.json")
                     && discussion_skill.contains(".codex/hooks.json")
                     && discussion_skill.contains("SessionStart")
@@ -824,11 +843,64 @@ mod tests {
                 "expected discussion command to mention discussion artifacts in {relative}"
             );
             assert!(
+                discussion_command.contains("Plan Mode")
+                    && discussion_command.contains("leave Plan Mode")
+                    && discussion_command.contains("Coverage Checks")
+                    && discussion_command.contains("Exit Blockers"),
+                "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
+            );
+            assert!(
                 discussion_command.contains(".gwt/discussion.md")
                     && discussion_command.contains("Resume discussion")
                     && discussion_command.contains("Park proposal")
                     && discussion_command.contains("Dismiss for now"),
                 "expected discussion command to describe the resume prompt contract in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/references/clarification.md",
+            ".codex/skills/gwt-discussion/references/clarification.md",
+        ] {
+            let clarification = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                clarification.contains("Do not stop because a fixed question count was reached.")
+                    && clarification.contains("Continue asking follow-up clarification questions"),
+                "expected clarification guidance to continue beyond a fixed number of questions in {relative}"
+            );
+            assert!(
+                clarification.contains("Planning-ready requires covering the applicable categories")
+                    && !clarification.contains("Ask at most 5 questions"),
+                "expected clarification guidance to require checklist coverage instead of a five-question cap in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/references/deepening.md",
+            ".codex/skills/gwt-discussion/references/deepening.md",
+        ] {
+            let deepening = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                deepening.contains("Escalate from the normal discussion flow into deepening")
+                    && deepening.contains("top 3 highest-impact points"),
+                "expected deepening guidance to allow automatic escalation and pre-prioritization in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/references/intake.md",
+            ".codex/skills/gwt-discussion/references/intake.md",
+        ] {
+            let intake = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                intake.contains("Do not stop after the first slice success condition alone.")
+                    && intake.contains("integration target")
+                    && intake.contains("explicit non-goals")
+                    && intake.contains("verification signal"),
+                "expected intake guidance to continue beyond the first-slice success signal in {relative}"
             );
         }
 
@@ -979,20 +1051,24 @@ mod tests {
 
         let release_command = include_str!("../../../.claude/commands/release.md");
         assert!(
-            release_command.contains("gwt issue comment"),
-            "expected release command to use gwt issue comment"
+            release_command.contains("GWT_BIN_PATH"),
+            "expected release command to route shell snippets through GWT_BIN_PATH"
         );
         assert!(
-            release_command.contains("gwt pr current"),
-            "expected release command to use gwt pr current"
+            release_command.contains("\"$GWT_BIN\" issue comment"),
+            "expected release command to use the canonical gwt issue comment via GWT_BIN"
         );
         assert!(
-            release_command.contains("gwt pr create"),
-            "expected release command to use gwt pr create"
+            release_command.contains("\"$GWT_BIN\" pr current"),
+            "expected release command to use the canonical gwt pr current via GWT_BIN"
         );
         assert!(
-            release_command.contains("gwt pr edit"),
-            "expected release command to use gwt pr edit"
+            release_command.contains("\"$GWT_BIN\" pr create"),
+            "expected release command to use the canonical gwt pr create via GWT_BIN"
+        );
+        assert!(
+            release_command.contains("\"$GWT_BIN\" pr edit"),
+            "expected release command to use the canonical gwt pr edit via GWT_BIN"
         );
         assert!(
             !release_command.contains("gh issue comment"),
@@ -1001,8 +1077,8 @@ mod tests {
 
         let pr_command = include_str!("../../../.claude/commands/gwt-manage-pr.md");
         assert!(
-            pr_command.contains("`gwt pr current` should succeed"),
-            "expected gwt-manage-pr command wrapper to point to canonical gwt auth check"
+            pr_command.contains("GWT_BIN_PATH"),
+            "expected gwt-manage-pr command wrapper to point to canonical GWT_BIN_PATH auth check"
         );
         assert!(
             pr_command.contains("conflicting") || pr_command.contains("behind"),
@@ -1144,8 +1220,8 @@ mod tests {
                 "unexpected retired distributed asset {retired}"
             );
         }
-        assert_no_gwt_hook_scripts(&wt, ".claude");
-        assert_no_gwt_hook_scripts(&wt, ".codex");
+        assert_no_gwt_hook_scripts(wt, ".claude");
+        assert_no_gwt_hook_scripts(wt, ".codex");
     }
 
     // ── helpers ──

@@ -26,6 +26,10 @@ pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
 /// Environment variable injected into agent PTYs so skills can locate the
 /// gwt binary for calling gwt CLI (GitHub operations, etc.).
 pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
+/// Loopback endpoint used by daemon-owned hook live events.
+pub const GWT_HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
+/// Bearer token paired with [`GWT_HOOK_FORWARD_URL_ENV`].
+pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 
 /// Represents a single agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +62,11 @@ pub struct Session {
     pub launch_command: String,
     #[serde(default)]
     pub launch_args: Vec<String>,
+    /// Schema version of this persisted session. SPEC-1921 Phase 53 / FR-066:
+    /// bumped by `Session::migrate_legacy_launch_args` so migrations are
+    /// idempotent. Legacy TOML files without this field deserialize as `0`.
+    #[serde(default)]
+    pub schema_version: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -86,6 +95,11 @@ pub struct SessionRuntimeState {
 }
 
 impl Session {
+    /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
+    /// Bump when adding a new migration in `migrate_legacy_launch_args` and
+    /// ensure the new migration is idempotent relative to this value.
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
     /// Create a new session with a generated UUID.
     pub fn new(
         worktree_path: impl Into<PathBuf>,
@@ -113,6 +127,7 @@ impl Session {
             workflow_bypass: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
+            schema_version: Self::CURRENT_SCHEMA_VERSION,
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -151,17 +166,39 @@ impl Session {
         std::fs::write(path, content)
     }
 
-    /// Load a session from a TOML file.
+    /// Deserialize a session from a TOML file verbatim. SPEC-1921 FR-066:
+    /// `load` must not silently rewrite `launch_args`. Callers that need
+    /// legacy migration applied should use [`Session::load_and_migrate`].
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut session: Self = toml::from_str(&content)
+        let session: Self = toml::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        normalize_launch_args(
-            &session.agent_id,
-            &session.launch_command,
-            &mut session.launch_args,
-        );
         Ok(session)
+    }
+
+    /// Load a session and apply any pending legacy migrations. Production
+    /// call sites (runtime hooks, daemon, wizard Quick Start, board view)
+    /// should prefer this over [`Session::load`] so legacy TOML files get
+    /// their default `launch_args` filled in. SPEC-1921 FR-066.
+    pub fn load_and_migrate(path: &Path) -> std::io::Result<Self> {
+        let mut session = Self::load(path)?;
+        session.migrate_legacy_launch_args();
+        Ok(session)
+    }
+
+    /// Idempotent migration helper for pre-Phase-53 session TOML files.
+    /// Walks the `schema_version` forward to
+    /// [`Session::CURRENT_SCHEMA_VERSION`], injecting any missing canonical
+    /// launch args (such as Codex's `--no-alt-screen`) along the way.
+    pub fn migrate_legacy_launch_args(&mut self) {
+        if self.schema_version >= Self::CURRENT_SCHEMA_VERSION {
+            return;
+        }
+        // Schema 0 -> 1: apply canonical default args at the correct runner
+        // prefix position so legacy sessions written before SPEC-1921 FR-064
+        // pick up agent-neutral defaults (Issue #2091).
+        normalize_launch_args(&self.agent_id, &self.launch_command, &mut self.launch_args);
+        self.schema_version = Self::CURRENT_SCHEMA_VERSION;
     }
 }
 
@@ -263,7 +300,7 @@ pub fn persist_session_status(
     status: AgentStatus,
 ) -> std::io::Result<()> {
     let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load(&session_path)?;
+    let mut session = Session::load_and_migrate(&session_path)?;
     session.update_status(status);
     session.save(sessions_dir)?;
     SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
@@ -283,7 +320,7 @@ pub fn persist_agent_session_id(
     }
 
     let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load(&session_path)?;
+    let mut session = Session::load_and_migrate(&session_path)?;
     if session.agent_session_id.as_deref() == Some(agent_session_id) {
         return Ok(());
     }
@@ -495,10 +532,142 @@ mod tests {
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
     }
 
+    // SPEC-1921 Phase 53 / FR-066: Session::load must not silently rewrite
+    // launch_args. Migration must live in a named helper invoked explicitly.
+
     #[test]
-    fn load_legacy_codex_toml_injects_no_alt_screen_into_launch_args() {
+    fn session_new_initializes_schema_version_to_current() {
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        assert_eq!(
+            session.schema_version,
+            Session::CURRENT_SCHEMA_VERSION,
+            "fresh sessions must use the current schema version"
+        );
+    }
+
+    #[test]
+    fn load_legacy_codex_toml_preserves_launch_args_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-codex-verbatim.toml");
+        write_legacy_codex_session_file(
+            &path,
+            &[
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ],
+        );
+
+        let loaded = Session::load(&path).unwrap();
+
+        assert_eq!(
+            loaded.schema_version, 0,
+            "legacy TOML without schema_version must deserialize as version 0"
+        );
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ],
+            "Session::load must not rewrite launch_args (FR-066)"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_injects_no_alt_screen_for_codex() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = 0;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--model=gpt-5.4".to_string(),
+            "resume".to_string(),
+            "sess-legacy".to_string(),
+        ];
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            session.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_is_idempotent() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = 0;
+        session.launch_command = "codex".into();
+        session.launch_args = Vec::new();
+
+        session.migrate_legacy_launch_args();
+        let first_pass_args = session.launch_args.clone();
+        let first_pass_version = session.schema_version;
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.launch_args, first_pass_args);
+        assert_eq!(session.schema_version, first_pass_version);
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_skips_already_current_schema() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = Session::CURRENT_SCHEMA_VERSION;
+        session.launch_command = "codex".into();
+        session.launch_args = vec!["resume".to_string(), "sess-id".to_string()];
+        let original = session.launch_args.clone();
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(
+            session.launch_args, original,
+            "sessions already at current schema must not be touched"
+        );
+    }
+
+    #[test]
+    fn load_and_migrate_legacy_codex_toml_injects_no_alt_screen_into_launch_args() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy-codex.toml");
+        write_legacy_codex_session_file(
+            &path,
+            &[
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ],
+        );
+
+        let loaded = Session::load_and_migrate(&path).unwrap();
+
+        assert!(
+            loaded
+                .launch_args
+                .iter()
+                .any(|arg| arg == "--no-alt-screen"),
+            "legacy Codex sessions loaded through load_and_migrate should preserve inline scrollback"
+        );
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--model=gpt-5.4".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+            ]
+        );
+        assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
+    }
+
+    fn write_legacy_codex_session_file(path: &Path, launch_args: &[String]) {
         let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
         let mut legacy = toml::map::Map::new();
         legacy.insert("id".into(), toml::Value::String(session.id.clone()));
@@ -521,11 +690,12 @@ mod tests {
         );
         legacy.insert(
             "launch_args".into(),
-            toml::Value::Array(vec![
-                toml::Value::String("--model=gpt-5.4".to_string()),
-                toml::Value::String("resume".to_string()),
-                toml::Value::String("sess-legacy".to_string()),
-            ]),
+            toml::Value::Array(
+                launch_args
+                    .iter()
+                    .map(|arg| toml::Value::String(arg.clone()))
+                    .collect(),
+            ),
         );
         legacy.insert(
             "created_at".into(),
@@ -544,25 +714,7 @@ mod tests {
             toml::Value::String(session.display_name.clone()),
         );
 
-        std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
-
-        let loaded = Session::load(&path).unwrap();
-        assert!(
-            loaded
-                .launch_args
-                .iter()
-                .any(|arg| arg == "--no-alt-screen"),
-            "legacy Codex sessions should be normalized to preserve inline scrollback"
-        );
-        assert_eq!(
-            loaded.launch_args,
-            vec![
-                "--no-alt-screen".to_string(),
-                "--model=gpt-5.4".to_string(),
-                "resume".to_string(),
-                "sess-legacy".to_string(),
-            ]
-        );
+        std::fs::write(path, toml::to_string(&legacy).unwrap()).unwrap();
     }
 
     #[test]

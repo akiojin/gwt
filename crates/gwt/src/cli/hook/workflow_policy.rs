@@ -8,7 +8,7 @@
 //!   sections before code implementation proceeds
 //! - allow read-only investigation and docs/chore-style edits
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, io::Read, path::Path};
 
 use gwt_agent::{
     session::{Session, GWT_SESSION_ID_ENV},
@@ -97,7 +97,13 @@ pub fn evaluate(
 }
 
 pub fn handle() -> Result<Option<BlockDecision>, HookError> {
-    let Some(event) = HookEvent::read_from_stdin()? else {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    handle_with_input(&input)
+}
+
+pub fn handle_with_input(input: &str) -> Result<Option<BlockDecision>, HookError> {
+    let Some(event) = HookEvent::read_from_str(input)? else {
         return Ok(None);
     };
     let root = crate::cli::hook::worktree::detect_worktree_root();
@@ -152,7 +158,7 @@ fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
 fn load_session_from_env() -> Option<Session> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV).ok()?;
     let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
-    Session::load(&session_path).ok()
+    Session::load_and_migrate(&session_path).ok()
 }
 
 fn resolve_issue_from_linkage_store(
@@ -188,4 +194,193 @@ fn has_nonempty_section(spec_body: &SpecBody, name: &str) -> bool {
         .sections
         .get(&SectionName(name.to_string()))
         .is_some_and(|content| !content.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, ffi::OsString, fs};
+
+    use gwt_agent::{session::Session, types::AgentId};
+    use gwt_github::{
+        client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+        Cache,
+    };
+
+    use super::*;
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn init_repo(repo: &Path) {
+        fs::create_dir_all(repo).expect("create repo");
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed");
+
+        let remote = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(repo)
+            .output()
+            .expect("git remote add");
+        assert!(remote.status.success(), "git remote add failed");
+
+        let branch = std::process::Command::new("git")
+            .args(["checkout", "-b", "feature/coverage"])
+            .current_dir(repo)
+            .output()
+            .expect("git checkout");
+        assert!(branch.status.success(), "git checkout failed");
+    }
+
+    fn issue_snapshot(number: u64, labels: &[&str], body: &str) -> IssueSnapshot {
+        IssueSnapshot {
+            number: IssueNumber(number),
+            title: format!("Issue {number}"),
+            body: body.to_string(),
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-04-20T00:00:00Z"),
+            comments: Vec::new(),
+        }
+    }
+
+    fn spec_body_with_plan_and_tasks() -> &'static str {
+        r#"<!-- gwt-spec id=2001 version=1 -->
+<!-- sections:
+spec=body
+plan=body
+tasks=body
+-->
+<!-- artifact:spec BEGIN -->
+Coverage requirements.
+<!-- artifact:spec END -->
+
+<!-- artifact:plan BEGIN -->
+1. Add tests.
+<!-- artifact:plan END -->
+
+<!-- artifact:tasks BEGIN -->
+- [ ] Enforce pre-push coverage.
+<!-- artifact:tasks END -->
+"#
+    }
+
+    fn write_issue_links(repo_path: &Path, links: &[(&str, u64)]) {
+        let repo_hash = crate::index_worker::detect_repo_hash(repo_path).expect("repo hash");
+        let path = gwt_cache_dir()
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str()));
+        fs::create_dir_all(path.parent().expect("issue-links dir"))
+            .expect("create issue-links dir");
+        let branches = links
+            .iter()
+            .map(|(branch, number)| ((*branch).to_string(), *number))
+            .collect::<HashMap<_, _>>();
+        fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({ "branches": branches })).expect("json"),
+        )
+        .expect("write issue links");
+    }
+
+    #[test]
+    fn handle_with_input_ignores_empty_and_rejects_invalid_json() {
+        assert!(handle_with_input("").expect("empty input").is_none());
+        assert!(matches!(
+            handle_with_input("{not-json"),
+            Err(HookError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_workflow_context_uses_session_cache_and_linkage_store() {
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(41, &["bug"], "plain issue body"))
+            .expect("write plain issue");
+        cache
+            .write_snapshot(&issue_snapshot(
+                42,
+                &["gwt-spec", "phase/in-progress"],
+                spec_body_with_plan_and_tasks(),
+            ))
+            .expect("write spec issue");
+
+        let mut session = Session::new(&repo, "feature/coverage", AgentId::Codex);
+        session.linked_issue_number = Some(42);
+        session.workflow_bypass = Some(WorkflowBypass::Chore);
+        session.save(&gwt_sessions_dir()).expect("save session");
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+
+        let context = resolve_workflow_context(&repo);
+        assert_eq!(context.owner, WorkflowOwner::Spec(42));
+        assert!(context.has_plan);
+        assert!(context.has_tasks);
+        assert_eq!(context.bypass, Some(WorkflowBypass::Chore));
+
+        let loaded = load_session_from_env().expect("session from env");
+        assert_eq!(loaded.id, session.id);
+
+        write_issue_links(&repo, &[("feature/coverage", 41)]);
+        session.linked_issue_number = None;
+        session.save(&gwt_sessions_dir()).expect("update session");
+
+        let linked_issue = resolve_issue_from_linkage_store(&repo, Some(&session));
+        assert_eq!(linked_issue, Some(41));
+        assert_eq!(
+            resolve_branch_name(&repo, Some(&session)).as_deref(),
+            Some("feature/coverage")
+        );
+
+        let plain_context = resolve_workflow_context(&repo);
+        assert_eq!(plain_context.owner, WorkflowOwner::Issue(41));
+        assert!(!plain_context.has_plan);
+        assert!(!plain_context.has_tasks);
+
+        let spec_body = gwt_github::body::SpecBody::parse(spec_body_with_plan_and_tasks(), &[])
+            .expect("parse spec body");
+        assert!(has_nonempty_section(&spec_body, "plan"));
+        assert!(has_nonempty_section(&spec_body, "tasks"));
+        assert!(!has_nonempty_section(&spec_body, "notes"));
+    }
 }

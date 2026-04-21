@@ -241,6 +241,8 @@ pub enum CliCommand {
     InternalApplyUpdate { rest: Vec<String> },
     /// `gwt __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
     InternalRunInstaller { rest: Vec<String> },
+    /// `gwt __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
+    InternalDaemonHook { name: String, rest: Vec<String> },
 }
 
 /// Errors surfaced by argv parsing.
@@ -386,6 +388,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
         }
+        CliCommand::InternalDaemonHook { name, rest } => {
+            return run_daemon_hook(env, &name, &rest);
+        }
         CliCommand::Update { check_only } => {
             let cmd = if check_only {
                 update::UpdateCommand::CheckOnly
@@ -407,6 +412,12 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
 
 fn io_as_api_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
+}
+
+#[cfg(test)]
+pub(crate) fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 fn issue_state_label(state: IssueState) -> &'static str {
@@ -1365,33 +1376,101 @@ fn fetch_actions_job_log_via_gh(
 
 /// Dispatch a `gwt hook <name> [args...]` invocation.
 ///
-/// SPEC #1942 (CORE-CLI) scope: this is the single entry point for every
-/// in-binary hook handler. Each handler reads stdin (usually JSON), performs
-/// its judgment, and either:
-///
-/// - exits 0 (allow / success, stdout empty or a human-readable status)
-/// - exits 2 with a `{"decision":"block",...}` JSON on stdout (block)
-///
-/// Dispatches to the hook handlers in [`crate::cli::hook`]. Unknown hooks
-/// exit 2 with a `gwt hook: unknown hook '<name>'` message on stderr so
-/// that settings_local typos surface loudly. Runtime errors from known
-/// handlers exit 1 with the error chain on stderr; they are never turned
-/// into `decision=block` to avoid false positives under partial outages.
+/// SPEC-2077 Phase 2: `gwt hook ...` remains the outward-facing surface, but
+/// the front door now relays to the hidden `gwt __internal daemon-hook ...`
+/// helper so runtime evolution stays behind the same operator-facing binary.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{
-        block_bash_policy, coordination_event, forward, runtime_state, workflow_policy,
-        BlockDecision, HookKind,
+    use crate::cli::hook::HookKind;
+    let Some(_kind) = HookKind::from_name(name) else {
+        let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
+        return Ok(2);
     };
+
+    best_effort_prepare_daemon_front_door(env.repo_path());
+    let stdin = env.read_stdin().map_err(io_as_api_error)?;
+    let output = env
+        .run_internal_command(&daemon_hook_argv(name, rest), &stdin)
+        .map_err(io_as_api_error)?;
+    write_internal_command_output(env, output)
+}
+
+fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "gwt".to_string(),
+        "__internal".to_string(),
+        "daemon-hook".to_string(),
+        name.to_string(),
+    ];
+    argv.extend(rest.iter().cloned());
+    argv
+}
+
+fn write_internal_command_output<E: CliEnv>(
+    env: &mut E,
+    output: crate::cli::env::InternalCommandOutput,
+) -> Result<i32, SpecOpsError> {
+    env.stdout()
+        .write_all(&output.stdout)
+        .map_err(io_as_api_error)?;
+    env.stdout().flush().map_err(io_as_api_error)?;
+    env.stderr()
+        .write_all(&output.stderr)
+        .map_err(io_as_api_error)?;
+    env.stderr().flush().map_err(io_as_api_error)?;
+    Ok(output.status)
+}
+
+fn best_effort_prepare_daemon_front_door(project_root: &std::path::Path) {
+    let _ = prepare_daemon_front_door_for_path(project_root);
+}
+
+pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
+    if !project_root.exists() {
+        return Ok(());
+    }
+
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        project_root,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .map_err(|err| err.to_string())?;
+    let gwt_home = gwt_core::paths::gwt_home();
+    let action = gwt_core::daemon::resolve_bootstrap_action(
+        &gwt_home,
+        &scope,
+        gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+        |pid| pid == std::process::id(),
+    )
+    .map_err(|err| err.to_string())?;
+
+    if let gwt_core::daemon::DaemonBootstrapAction::Spawn { endpoint_path } = action {
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            "internal://gwt-front-door".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+pub fn run_daemon_hook<E: CliEnv>(
+    env: &mut E,
+    name: &str,
+    rest: &[String],
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::hook::{block_bash_policy, workflow_policy, BlockDecision, HookKind};
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
         return Ok(2);
     };
+    let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
-    // Every block hook returns `Result<Option<BlockDecision>, HookError>`.
-    // `emit_block_decision` serializes a decision to stdout and yields
-    // the block exit code (2). `emit_hook_error` reports a handler
-    // error on stderr and yields 1.
     fn emit_block_decision<E: CliEnv>(env: &mut E, decision: &BlockDecision) -> i32 {
         match serde_json::to_vec(decision) {
             Ok(bytes) => {
@@ -1422,7 +1501,7 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 );
                 return Ok(2);
             };
-            match runtime_state::handle(event) {
+            match crate::daemon_runtime::handle_runtime_state(event, &stdin) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
@@ -1435,22 +1514,35 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
                 );
                 return Ok(2);
             };
-            match coordination_event::handle(event) {
+            match crate::daemon_runtime::handle_coordination_event(event, &stdin) {
                 Ok(()) => Ok(0),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
-        HookKind::BlockBashPolicy => match block_bash_policy::handle() {
+        HookKind::BoardReminder => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwt hook board-reminder: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin, env.stdout()) {
+                Ok(()) => Ok(0),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
-        HookKind::WorkflowPolicy => match workflow_policy::handle() {
+        HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
             Ok(None) => Ok(0),
             Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
-        HookKind::Forward => match forward::handle() {
+        HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
             Ok(()) => Ok(0),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
@@ -1468,7 +1560,206 @@ fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+    };
+
+    use tempfile::tempdir;
+
+    use crate::cli::env::{InternalCommandOutput, TestEnv};
+    use gwt_github::{
+        CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+    };
+
     use super::*;
+
+    fn compile_fake_gh(bin_dir: &Path) {
+        let source = r###"
+use std::{env, fs, process::ExitCode};
+
+fn pr_json(number: &str, title: &str) -> String {
+    format!(
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+    )
+}
+
+fn review_threads_json(resolved_after_fail: bool) -> String {
+    let resolved = if resolved_after_fail { "true" } else { "false" };
+    r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+{"id":"thread-1","isResolved":__RESOLVED__,"isOutdated":false,"path":"src/lib.rs","line":10,"comments":{"nodes":[{"id":"comment-1","body":"done","createdAt":"2026-04-20T00:00:00Z","updatedAt":"2026-04-20T00:00:00Z","author":{"login":"reviewer"}}]}},
+{"id":"thread-2","isResolved":false,"isOutdated":false,"path":"src/main.rs","line":12,"comments":{"nodes":[{"id":"comment-2","body":"needs changes","createdAt":"2026-04-20T01:00:00Z","updatedAt":"2026-04-20T01:00:00Z","author":{"login":"reviewer"}}]}}
+]}}}}}"#
+        .replace("__RESOLVED__", resolved)
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let mode = env::var("GWT_FAKE_GH_MODE").unwrap_or_else(|_| "success".to_string());
+    let state_file = env::var("GWT_FAKE_GH_STATE_FILE").ok();
+
+    match args.as_slice() {
+        [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
+            if mode == "no-current-pr" {
+                eprintln!("no pull requests found for branch");
+                return ExitCode::from(1);
+            }
+            println!("{}", pr_json("12", "Current PR"));
+            return ExitCode::SUCCESS;
+        }
+        [pr, view, number, repo_flag, _, json_flag, ..]
+            if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
+        {
+            println!("{}", pr_json(number, "Fetched PR"));
+            return ExitCode::SUCCESS;
+        }
+        [pr, create, ..] if pr == "pr" && create == "create" => {
+            println!("https://github.com/akiojin/gwt/pull/12");
+            return ExitCode::SUCCESS;
+        }
+        [pr, edit, ..] if pr == "pr" && edit == "edit" => {
+            return ExitCode::SUCCESS;
+        }
+        [pr, comment, ..] if pr == "pr" && comment == "comment" => {
+            return ExitCode::SUCCESS;
+        }
+        [pr, checks, _, json_flag, fields] if pr == "pr" && checks == "checks" && json_flag == "--json" => {
+            if mode == "checks-fallback" && !fields.contains("bucket") {
+                eprintln!("unknown JSON field\nAvailable fields:\n  name\n  state\n  bucket\n  link\n  startedAt\n  completedAt\n  workflow");
+                return ExitCode::from(1);
+            }
+            if fields.contains("bucket") {
+                println!("[{{\"name\":\"CI\",\"state\":\"COMPLETED\",\"bucket\":\"pass\",\"link\":\"https://example.test/checks/12\",\"startedAt\":\"2026-04-20T00:00:00Z\",\"completedAt\":\"2026-04-20T00:01:00Z\",\"workflow\":\"coverage\"}}]");
+            } else {
+                println!("[{{\"name\":\"CI\",\"state\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"detailsUrl\":\"https://example.test/checks/12\",\"startedAt\":\"2026-04-20T00:00:00Z\",\"completedAt\":\"2026-04-20T00:01:00Z\"}}]");
+            }
+            return ExitCode::SUCCESS;
+        }
+        [run, view, run_id, log_flag] if run == "run" && view == "view" && log_flag == "--log" => {
+            println!("run log {run_id}");
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12/reviews" => {
+            println!("[{{\"id\":42,\"state\":\"APPROVED\",\"body\":\"Looks good\",\"submitted_at\":\"2026-04-20T02:00:00Z\",\"user\":{{\"login\":\"reviewer\"}}}}]");
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
+            if mode == "job-log-zip" {
+                print!("PKZIP");
+            } else {
+                print!("job log 91");
+            }
+            return ExitCode::SUCCESS;
+        }
+        [api, graphql, ..] if api == "api" && graphql == "graphql" => {
+            let joined = args.join("\n");
+            if joined.contains("timelineItems") {
+                println!(
+                    "{}",
+                    r#"{"data":{"repository":{"issue":{"timelineItems":{"nodes":[
+{"__typename":"CrossReferencedEvent","source":{"__typename":"PullRequest","number":12,"title":"Coverage Gate","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/12"}},
+{"__typename":"ConnectedEvent","subject":{"__typename":"PullRequest","number":13,"title":"Follow-up","state":"MERGED","url":"https://github.com/akiojin/gwt/pull/13"}},
+{"__typename":"ConnectedEvent","subject":{"__typename":"PullRequest","number":12,"title":"Duplicate","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/12"}}
+]}}}}}"#
+                );
+                return ExitCode::SUCCESS;
+            }
+            if joined.contains("reviewThreads") {
+                let resolved_after_fail = state_file
+                    .as_deref()
+                    .map(fs::metadata)
+                    .transpose()
+                    .ok()
+                    .flatten()
+                    .is_some();
+                println!("{}", review_threads_json(resolved_after_fail));
+                return ExitCode::SUCCESS;
+            }
+            if joined.contains("addPullRequestReviewThreadReply") {
+                println!("{{\"data\":{{\"addPullRequestReviewThreadReply\":{{\"comment\":{{\"id\":\"reply-1\"}}}}}}}}");
+                return ExitCode::SUCCESS;
+            }
+            if joined.contains("resolveReviewThread") {
+                if mode == "resolve-fails-but-resolved" {
+                    let already_failed = state_file
+                        .as_deref()
+                        .map(fs::metadata)
+                        .transpose()
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    if !already_failed {
+                        if let Some(state_file) = state_file.as_deref() {
+                            let _ = fs::write(state_file, "resolved");
+                        }
+                        eprintln!("thread already resolved");
+                        return ExitCode::from(1);
+                    }
+                }
+                println!("{{\"data\":{{\"resolveReviewThread\":{{\"thread\":{{\"id\":\"thread-1\",\"isResolved\":true}}}}}}}}");
+                return ExitCode::SUCCESS;
+            }
+        }
+        _ => {}
+    }
+
+    eprintln!("unexpected fake gh args: {args:?}");
+    ExitCode::from(1)
+}
+"###;
+
+        let source_path = bin_dir.join("gh.rs");
+        fs::write(&source_path, source).expect("write fake gh source");
+        let output_path = bin_dir.join(format!("gh{}", env::consts::EXE_SUFFIX));
+        let status = std::process::Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&output_path)
+            .status()
+            .expect("compile fake gh");
+        assert!(status.success(), "fake gh compilation failed");
+    }
+
+    fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
+        let _lock = super::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        compile_fake_gh(temp.path());
+
+        let repo_path = temp.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let old_path = env::var_os("PATH");
+        let old_mode = env::var_os("GWT_FAKE_GH_MODE");
+        let old_state = env::var_os("GWT_FAKE_GH_STATE_FILE");
+        let state_file = temp.path().join("gh-state");
+        let joined_path = env::join_paths(
+            std::iter::once(PathBuf::from(temp.path()))
+                .chain(old_path.iter().flat_map(env::split_paths)),
+        )
+        .expect("join PATH");
+        env::set_var("PATH", joined_path);
+        env::set_var("GWT_FAKE_GH_MODE", mode);
+        env::set_var("GWT_FAKE_GH_STATE_FILE", &state_file);
+
+        let result = test(&repo_path);
+
+        match old_path {
+            Some(value) => env::set_var("PATH", value),
+            None => env::remove_var("PATH"),
+        }
+        match old_mode {
+            Some(value) => env::set_var("GWT_FAKE_GH_MODE", value),
+            None => env::remove_var("GWT_FAKE_GH_MODE"),
+        }
+        match old_state {
+            Some(value) => env::set_var("GWT_FAKE_GH_STATE_FILE", value),
+            None => env::remove_var("GWT_FAKE_GH_STATE_FILE"),
+        }
+
+        result
+    }
 
     fn sample_thread() -> PrReviewThread {
         PrReviewThread {
@@ -1533,5 +1824,395 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "test");
         assert_eq!(items[0].conclusion, "SUCCESS");
+    }
+
+    fn sample_issue_snapshot() -> IssueSnapshot {
+        IssueSnapshot {
+            number: IssueNumber(42),
+            title: "Coverage gate".to_string(),
+            body: "Raise the project coverage gate.\n".to_string(),
+            labels: vec!["gwt-spec".to_string(), "coverage".to_string()],
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new("2026-04-20T00:00:00Z"),
+            comments: vec![CommentSnapshot {
+                id: CommentId(7),
+                body: "Need more tests.".to_string(),
+                updated_at: UpdatedAt::new("2026-04-20T01:00:00Z"),
+            }],
+        }
+    }
+
+    fn sample_pr_status() -> PrStatus {
+        PrStatus {
+            number: 128,
+            title: "Enforce coverage".to_string(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://github.com/akiojin/gwt/pull/128".to_string(),
+            ci_status: "SUCCESS".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            review_status: "APPROVED".to_string(),
+        }
+    }
+
+    #[test]
+    fn render_helpers_include_issue_pr_and_review_details() {
+        let mut out = String::new();
+        let issue = sample_issue_snapshot();
+        let pr = sample_pr_status();
+
+        render_issue(&mut out, &issue);
+        render_issue_comments(&mut out, &issue);
+        render_linked_prs(
+            &mut out,
+            &[LinkedPrSummary {
+                number: 128,
+                title: "Enforce coverage".to_string(),
+                state: "OPEN".to_string(),
+                url: pr.url.clone(),
+            }],
+        );
+        render_pr(&mut out, &pr);
+        render_pr_checks(
+            &mut out,
+            &PrChecksSummary {
+                summary: "All checks passed".to_string(),
+                ci_status: "SUCCESS".to_string(),
+                merge_status: "MERGEABLE".to_string(),
+                review_status: "APPROVED".to_string(),
+                checks: vec![PrCheckItem {
+                    name: "CI".to_string(),
+                    state: "COMPLETED".to_string(),
+                    conclusion: "SUCCESS".to_string(),
+                    url: "https://github.com/akiojin/gwt/actions/runs/1".to_string(),
+                    started_at: "2026-04-20T00:00:00Z".to_string(),
+                    completed_at: "2026-04-20T00:01:00Z".to_string(),
+                    workflow: "coverage".to_string(),
+                }],
+            },
+        );
+        render_pr_reviews(
+            &mut out,
+            &[PrReview {
+                id: "review-1".to_string(),
+                state: "APPROVED".to_string(),
+                author: "reviewer".to_string(),
+                submitted_at: "2026-04-20T02:00:00Z".to_string(),
+                body: "Looks good.".to_string(),
+            }],
+        );
+        render_pr_review_threads(
+            &mut out,
+            &[PrReviewThread {
+                comments: vec![PrReviewThreadComment {
+                    id: "comment-1".to_string(),
+                    body: "Please add a push gate.".to_string(),
+                    created_at: "2026-04-20T03:00:00Z".to_string(),
+                    updated_at: "2026-04-20T03:00:00Z".to_string(),
+                    author: "reviewer".to_string(),
+                }],
+                ..sample_thread()
+            }],
+        );
+
+        assert!(out.contains("#42 [OPEN] Coverage gate"));
+        assert!(out.contains("labels: gwt-spec, coverage"));
+        assert!(out.contains("=== comment:7 (2026-04-20T01:00:00Z) ==="));
+        assert!(out.contains("#128 [OPEN] Enforce coverage"));
+        assert!(out.contains("ci: SUCCESS"));
+        assert!(out.contains("workflow: coverage"));
+        assert!(out.contains("=== review:review-1 [APPROVED] by reviewer"));
+        assert!(out.contains(
+            "=== thread:thread-1 resolved=false outdated=false path=src/lib.rs line=12 ==="
+        ));
+    }
+
+    #[test]
+    fn cache_and_parse_helpers_cover_fallback_paths() {
+        let temp = tempdir().expect("tempdir");
+        let number = IssueNumber(77);
+        let linked_prs = vec![LinkedPrSummary {
+            number: 9,
+            title: "Hook coverage".to_string(),
+            state: "MERGED".to_string(),
+            url: "https://github.com/akiojin/gwt/pull/9".to_string(),
+        }];
+
+        assert!(read_linked_prs_cache(temp.path(), number)
+            .unwrap()
+            .is_none());
+        write_linked_prs_cache(temp.path(), number, &linked_prs).unwrap();
+        assert_eq!(
+            read_linked_prs_cache(temp.path(), number).unwrap(),
+            Some(linked_prs)
+        );
+
+        assert_eq!(
+            extract_pr_url("note\n https://github.com/akiojin/gwt/pull/55 \nignored"),
+            Some("https://github.com/akiojin/gwt/pull/55".to_string())
+        );
+        assert_eq!(
+            parse_pr_number_from_url("https://github.com/akiojin/gwt/pull/55/"),
+            Some(55)
+        );
+        assert_eq!(
+            parse_available_fields("error\nAvailable fields:\n  number\n  title\n"),
+            vec!["number".to_string(), "title".to_string()]
+        );
+
+        let checks = parse_pr_checks_items_json(
+            r#"[{"name":"coverage","status":"IN_PROGRESS","bucket":"pending","link":"https://example.com/check"}]"#,
+        )
+        .unwrap();
+        assert_eq!(checks[0].state, "IN_PROGRESS");
+        assert_eq!(checks[0].conclusion, "pending");
+        assert_eq!(checks[0].url, "https://example.com/check");
+    }
+
+    #[test]
+    fn daemon_hook_argv_and_internal_command_output_preserve_streams() {
+        let argv = daemon_hook_argv(
+            "runtime-state",
+            &["start".to_string(), "--json".to_string()],
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "gwt".to_string(),
+                "__internal".to_string(),
+                "daemon-hook".to_string(),
+                "runtime-state".to_string(),
+                "start".to_string(),
+                "--json".to_string(),
+            ]
+        );
+
+        let temp = tempdir().expect("tempdir");
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let status = write_internal_command_output(
+            &mut env,
+            InternalCommandOutput {
+                status: 7,
+                stdout: b"stdout-bytes".to_vec(),
+                stderr: b"stderr-bytes".to_vec(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(status, 7);
+        assert_eq!(env.stdout, b"stdout-bytes");
+        assert_eq!(env.stderr, b"stderr-bytes");
+    }
+
+    #[test]
+    fn parse_and_guard_helpers_cover_additional_error_paths() {
+        assert!(should_dispatch_cli(&[
+            "gwt".to_string(),
+            "issue".to_string()
+        ]));
+        assert!(!should_dispatch_cli(&[
+            "gwt".to_string(),
+            "help".to_string()
+        ]));
+
+        let check = "--check".to_string();
+        assert!(expect_flag(Some(&check), "--check").is_ok());
+        assert!(expect_flag(Some(&check), "--refresh").is_err());
+
+        let number = "42".to_string();
+        let bad_number = "abc".to_string();
+        assert_eq!(parse_required_number(Some(&number)).unwrap(), 42);
+        assert!(parse_required_number(Some(&bad_number)).is_err());
+        assert!(ensure_no_remaining_args([].iter()).is_ok());
+        assert!(ensure_no_remaining_args([check].iter()).is_err());
+
+        assert!(matches!(parse_hook_args(&[]), Err(CliParseError::Usage)));
+        assert_eq!(issue_state_label(IssueState::Closed), "CLOSED");
+        assert!(io_as_api_error(io::Error::other("boom"))
+            .to_string()
+            .contains("boom"));
+        assert!(edit_or_create_repo_guard("", "repo").is_err());
+        assert!(edit_or_create_repo_guard("akiojin", "gwt").is_ok());
+    }
+
+    #[test]
+    fn render_helpers_cover_empty_states_and_url_parsing_fallbacks() {
+        let issue = IssueSnapshot {
+            comments: Vec::new(),
+            ..sample_issue_snapshot()
+        };
+        let mut out = String::new();
+
+        render_issue_comments(&mut out, &issue);
+        render_linked_prs(&mut out, &[]);
+        render_pr_checks(
+            &mut out,
+            &PrChecksSummary {
+                summary: "pending".to_string(),
+                ci_status: "PENDING".to_string(),
+                merge_status: "UNKNOWN".to_string(),
+                review_status: "PENDING".to_string(),
+                checks: Vec::new(),
+            },
+        );
+        render_pr_reviews(&mut out, &[]);
+        render_pr_review_threads(&mut out, &[]);
+
+        assert!(out.contains("no comments"));
+        assert!(out.contains("no linked pull requests"));
+        assert!(out.contains("no checks"));
+        assert!(out.contains("no reviews"));
+        assert!(out.contains("no review threads"));
+        assert_eq!(extract_pr_url("no pull request here"), None);
+        assert_eq!(
+            parse_pr_number_from_url("https://github.com/akiojin/gwt/pull/not-a-number"),
+            None
+        );
+        assert!(parse_available_fields("plain error").is_empty());
+        assert_eq!(
+            parse_available_fields("oops\nAvailable fields:\n  number\n\n  title\n"),
+            vec!["number".to_string(), "title".to_string()]
+        );
+    }
+
+    #[test]
+    fn cache_backed_issue_and_linked_pr_helpers_reuse_cached_data() {
+        let temp = tempdir().expect("tempdir");
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let snapshot = sample_issue_snapshot();
+        env.client.seed(snapshot.clone());
+
+        let loaded = load_or_refresh_issue(&mut env, snapshot.number, false).expect("load issue");
+        assert_eq!(loaded.snapshot.number, snapshot.number);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+
+        let cached = load_or_refresh_issue(&mut env, snapshot.number, false).expect("cached issue");
+        assert_eq!(cached.snapshot.title, snapshot.title);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+
+        env.seed_linked_prs(
+            42,
+            vec![LinkedPrSummary {
+                number: 128,
+                title: "Enforce coverage".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/akiojin/gwt/pull/128".to_string(),
+            }],
+        );
+        let linked =
+            load_or_refresh_linked_prs(&mut env, snapshot.number, false).expect("linked prs");
+        assert_eq!(linked.len(), 1);
+        assert_eq!(env.linked_pr_calls(), vec![42]);
+
+        env.clear_linked_pr_calls();
+        let cached_linked = load_or_refresh_linked_prs(&mut env, snapshot.number, false)
+            .expect("cached linked prs");
+        assert_eq!(cached_linked.len(), 1);
+        assert!(env.linked_pr_calls().is_empty());
+
+        let cache_path = linked_prs_cache_path(temp.path(), snapshot.number);
+        std::fs::create_dir_all(cache_path.parent().expect("cache dir")).expect("create cache dir");
+        std::fs::write(&cache_path, "{not-json").expect("write invalid json");
+        assert!(read_linked_prs_cache(temp.path(), snapshot.number).is_err());
+    }
+
+    #[test]
+    fn gh_wrappers_parse_successful_responses() {
+        with_fake_gh("success", |repo_path| {
+            let linked =
+                fetch_linked_prs_via_gh("akiojin", "gwt", IssueNumber(42)).expect("linked");
+            assert_eq!(linked.len(), 2);
+            assert_eq!(linked[0].number, 12);
+            assert_eq!(linked[1].state, "MERGED");
+
+            let current = fetch_current_pr_via_gh(repo_path)
+                .expect("current pr")
+                .expect("current pr exists");
+            assert_eq!(current.number, 12);
+
+            let created = create_pr_via_gh(
+                "akiojin/gwt",
+                repo_path,
+                &PrCreateCall {
+                    base: "develop".to_string(),
+                    head: Some("feature/coverage".to_string()),
+                    title: "Raise coverage".to_string(),
+                    body: "Body".to_string(),
+                    labels: vec!["coverage".to_string()],
+                    draft: true,
+                },
+            )
+            .expect("create pr");
+            assert_eq!(created.number, 12);
+
+            let edited = edit_pr_via_gh(
+                "akiojin/gwt",
+                repo_path,
+                12,
+                Some("Edited"),
+                Some("Updated body"),
+                &["tested".to_string()],
+            )
+            .expect("edit pr");
+            assert_eq!(edited.number, 12);
+
+            comment_on_pr_via_gh(repo_path, 12, "done").expect("comment");
+
+            let reviews = fetch_pr_reviews_via_gh("akiojin", "gwt", 12).expect("reviews");
+            assert_eq!(reviews.len(), 1);
+            assert_eq!(reviews[0].author, "reviewer");
+
+            let threads =
+                fetch_pr_review_threads_via_gh("akiojin", "gwt", 12).expect("review threads");
+            assert_eq!(threads.len(), 2);
+            assert_eq!(threads[0].line, Some(10));
+
+            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
+                .expect("reply and resolve");
+            assert_eq!(resolved, 2);
+
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert!(checks.summary.contains("PR #12"));
+            assert_eq!(checks.checks.len(), 1);
+            assert_eq!(checks.checks[0].conclusion, "SUCCESS");
+
+            let run_log = fetch_actions_run_log_via_gh(repo_path, 90).expect("run log");
+            assert_eq!(run_log.trim(), "run log 90");
+
+            let job_log =
+                fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91).expect("job log");
+            assert_eq!(job_log, "job log 91");
+        });
+    }
+
+    #[test]
+    fn gh_wrappers_cover_none_fallback_and_zip_error_paths() {
+        with_fake_gh("no-current-pr", |repo_path| {
+            assert!(fetch_current_pr_via_gh(repo_path)
+                .expect("current pr result")
+                .is_none());
+        });
+
+        with_fake_gh("checks-fallback", |repo_path| {
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert_eq!(checks.checks.len(), 1);
+            assert_eq!(checks.checks[0].workflow, "coverage");
+            assert_eq!(checks.checks[0].url, "https://example.test/checks/12");
+        });
+
+        with_fake_gh("job-log-zip", |repo_path| {
+            let err =
+                fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91).expect_err("zip");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("zip archive"));
+        });
+    }
+
+    #[test]
+    fn gh_wrappers_tolerate_resolve_failure_after_remote_state_changes() {
+        with_fake_gh("resolve-fails-but-resolved", |_repo_path| {
+            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
+                .expect("resolved after retry");
+            assert_eq!(resolved, 2);
+        });
     }
 }

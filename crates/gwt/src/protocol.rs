@@ -1,8 +1,11 @@
+use gwt_agent::CustomCodingAgent;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
+    custom_agents_service::{ClaudeCodeOpenaiCompatInput, PresetDefinition},
+    daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
@@ -24,6 +27,13 @@ pub enum ArrangeMode {
 pub enum FocusCycleDirection {
     Forward,
     Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchEntriesPhase {
+    Inventory,
+    Hydrated,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -120,6 +130,38 @@ pub enum FrontendEvent {
         bounds: Option<WindowGeometry>,
     },
     ApplyUpdate,
+    /// Settings > Custom Agents: list every stored custom agent. Response is
+    /// [`BackendEvent::CustomAgentList`].
+    ListCustomAgents,
+    /// Settings > Custom Agents > Add from preset: enumerate built-in preset
+    /// definitions for the picker. Response is
+    /// [`BackendEvent::CustomAgentPresetList`].
+    ListCustomAgentPresets,
+    /// Settings > Custom Agents > Add > Claude Code (OpenAI-compat backend):
+    /// persist a new custom agent seeded from the preset payload. Response
+    /// is [`BackendEvent::CustomAgentSaved`] on success or
+    /// [`BackendEvent::CustomAgentError`] on failure.
+    AddCustomAgentFromPreset {
+        input: ClaudeCodeOpenaiCompatInput,
+    },
+    /// Settings > Custom Agents > Edit: replace an existing custom agent in
+    /// place. The agent id must match an existing entry.
+    UpdateCustomAgent {
+        agent: Box<CustomCodingAgent>,
+    },
+    /// Settings > Custom Agents > Delete: remove the custom agent with the
+    /// given id.
+    DeleteCustomAgent {
+        agent_id: String,
+    },
+    /// Settings > Custom Agents > Test connection: probe
+    /// `GET {base_url}/v1/models` with the provided api key. Response is
+    /// [`BackendEvent::BackendConnectionResult`] on success or
+    /// [`BackendEvent::CustomAgentError`] on failure.
+    TestBackendConnection {
+        base_url: String,
+        api_key: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +188,7 @@ pub struct RecentProjectView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStateView {
+    pub app_version: String,
     pub tabs: Vec<ProjectTabView>,
     pub active_tab_id: Option<String>,
     pub recent_projects: Vec<RecentProjectView>,
@@ -185,6 +228,7 @@ pub enum BackendEvent {
     },
     BranchEntries {
         id: String,
+        phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
     },
     KnowledgeEntries {
@@ -223,5 +267,61 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
+    RuntimeHookEvent {
+        event: RuntimeHookEvent,
+    },
     UpdateState(gwt_core::update::UpdateState),
+    /// Response to [`FrontendEvent::ListCustomAgents`].
+    CustomAgentList {
+        agents: Vec<CustomCodingAgent>,
+    },
+    /// Response to [`FrontendEvent::ListCustomAgentPresets`].
+    CustomAgentPresetList {
+        presets: Vec<PresetDefinition>,
+    },
+    /// Response to [`FrontendEvent::AddCustomAgentFromPreset`] /
+    /// [`FrontendEvent::UpdateCustomAgent`] (save success).
+    CustomAgentSaved {
+        agent: Box<CustomCodingAgent>,
+    },
+    /// Response to [`FrontendEvent::DeleteCustomAgent`].
+    CustomAgentDeleted {
+        agent_id: String,
+    },
+    /// Response to [`FrontendEvent::TestBackendConnection`] (success).
+    BackendConnectionResult {
+        models: Vec<String>,
+    },
+    /// Error reply for any custom-agent mutation or probe request.
+    /// `code` is a stable machine-readable tag; `message` is human-readable.
+    CustomAgentError {
+        code: String,
+        message: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::{BackendEvent, BranchEntriesPhase};
+
+    #[test]
+    fn branch_entries_serializes_explicit_phase_contract() {
+        let event = BackendEvent::BranchEntries {
+            id: "branches-1".to_string(),
+            phase: BranchEntriesPhase::Inventory,
+            entries: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize branch entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("branch_entries".to_string()))
+        );
+        assert_eq!(
+            value.get("phase"),
+            Some(&Value::String("inventory".to_string()))
+        );
+    }
 }

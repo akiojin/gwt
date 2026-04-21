@@ -1,6 +1,7 @@
 //! Repo-local coordination storage for a shared board chat timeline.
 
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -94,9 +95,30 @@ pub struct BoardEntry {
     pub related_topics: Vec<String>,
     #[serde(default)]
     pub related_owners: Vec<String>,
+    #[serde(default)]
+    pub origin_branch: Option<String>,
+    #[serde(default)]
+    pub origin_session_id: Option<String>,
+    #[serde(default)]
+    pub origin_agent_id: Option<String>,
 }
 
 impl BoardEntry {
+    pub fn with_origin_branch(mut self, value: impl Into<String>) -> Self {
+        self.origin_branch = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_session_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_session_id = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_agent_id = Some(value.into());
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         author_kind: AuthorKind,
@@ -121,91 +143,18 @@ impl BoardEntry {
             updated_at: now,
             related_topics,
             related_owners,
+            origin_branch: None,
+            origin_session_id: None,
+            origin_agent_id: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCard {
-    pub agent_id: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    pub branch: String,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub responsibility: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub current_focus: Option<String>,
-    #[serde(default)]
-    pub next_action: Option<String>,
-    #[serde(default)]
-    pub blocked_reason: Option<String>,
-    #[serde(default)]
-    pub related_topics: Vec<String>,
-    #[serde(default)]
-    pub related_owners: Vec<String>,
-    #[serde(default)]
-    pub working_scope: Option<String>,
-    #[serde(default)]
-    pub handoff_target: Option<String>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl AgentCard {
-    pub fn key(&self) -> String {
-        if let Some(session_id) = self.session_id.as_deref() {
-            if !session_id.trim().is_empty() {
-                return format!("session:{session_id}");
-            }
-        }
-        format!("agent:{}:{}", self.agent_id, self.branch)
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCardPatch {
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub responsibility: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub current_focus: Option<String>,
-    #[serde(default)]
-    pub next_action: Option<String>,
-    #[serde(default)]
-    pub blocked_reason: Option<String>,
-    #[serde(default)]
-    pub related_topics: Option<Vec<String>>,
-    #[serde(default)]
-    pub related_owners: Option<Vec<String>>,
-    #[serde(default)]
-    pub working_scope: Option<String>,
-    #[serde(default)]
-    pub handoff_target: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCardContext {
-    pub agent_id: String,
-    pub session_id: Option<String>,
-    pub branch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoordinationEvent {
     #[serde(alias = "board_post")]
-    MessageAppended {
-        entry: BoardEntry,
-    },
-    AgentCardUpsert {
-        card: AgentCard,
-    },
+    MessageAppended { entry: BoardEntry },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,26 +173,9 @@ impl Default for BoardProjection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentCardsProjection {
-    #[serde(default)]
-    pub cards: Vec<AgentCard>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Default for AgentCardsProjection {
-    fn default() -> Self {
-        Self {
-            cards: Vec::new(),
-            updated_at: Utc::now(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoordinationSnapshot {
     pub board: BoardProjection,
-    pub cards: AgentCardsProjection,
 }
 
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
@@ -289,109 +221,11 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
     Ok(CoordinationSnapshot {
         board: load_json_or_default(&coordination_board_projection_path(worktree_root))?,
-        cards: AgentCardsProjection::default(),
     })
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
     append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
-}
-
-pub fn apply_agent_card_patch(
-    worktree_root: &Path,
-    context: AgentCardContext,
-    patch: AgentCardPatch,
-) -> Result<CoordinationSnapshot> {
-    ensure_repo_local_files(worktree_root)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(coordination_lock_path(worktree_root))?;
-    lock.lock_exclusive()?;
-
-    let result = apply_agent_card_patch_locked(worktree_root, context, patch);
-    let unlock_result = lock.unlock();
-    match (result, unlock_result) {
-        (Ok(snapshot), Ok(())) => Ok(snapshot),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err.into()),
-    }
-}
-
-fn apply_agent_card_patch_locked(
-    worktree_root: &Path,
-    context: AgentCardContext,
-    patch: AgentCardPatch,
-) -> Result<CoordinationSnapshot> {
-    let snapshot = load_snapshot(worktree_root)?;
-    let key = if let Some(session_id) = context.session_id.as_deref() {
-        if !session_id.trim().is_empty() {
-            format!("session:{session_id}")
-        } else {
-            format!("agent:{}:{}", context.agent_id, context.branch)
-        }
-    } else {
-        format!("agent:{}:{}", context.agent_id, context.branch)
-    };
-    let now = Utc::now();
-    let mut card = snapshot
-        .cards
-        .cards
-        .iter()
-        .find(|candidate| candidate.key() == key)
-        .cloned()
-        .unwrap_or(AgentCard {
-            agent_id: context.agent_id,
-            session_id: context.session_id,
-            branch: context.branch,
-            role: None,
-            responsibility: None,
-            status: None,
-            current_focus: None,
-            next_action: None,
-            blocked_reason: None,
-            related_topics: Vec::new(),
-            related_owners: Vec::new(),
-            working_scope: None,
-            handoff_target: None,
-            updated_at: now,
-        });
-
-    if let Some(value) = patch.role {
-        card.role = Some(value);
-    }
-    if let Some(value) = patch.responsibility {
-        card.responsibility = Some(value);
-    }
-    if let Some(value) = patch.status {
-        card.status = Some(value);
-    }
-    if let Some(value) = patch.current_focus {
-        card.current_focus = Some(value);
-    }
-    if let Some(value) = patch.next_action {
-        card.next_action = Some(value);
-    }
-    if let Some(value) = patch.blocked_reason {
-        card.blocked_reason = Some(value);
-    }
-    if let Some(value) = patch.related_topics {
-        card.related_topics = value;
-    }
-    if let Some(value) = patch.related_owners {
-        card.related_owners = value;
-    }
-    if let Some(value) = patch.working_scope {
-        card.working_scope = Some(value);
-    }
-    if let Some(value) = patch.handoff_target {
-        card.handoff_target = Some(value);
-    }
-    card.updated_at = now;
-
-    append_event_locked(worktree_root, &CoordinationEvent::AgentCardUpsert { card })
 }
 
 pub fn append_event(
@@ -451,10 +285,21 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
         if trimmed.is_empty() {
             continue;
         }
-        let event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
-        match event {
-            CoordinationEvent::MessageAppended { entry } => board_entries.push(entry),
-            CoordinationEvent::AgentCardUpsert { .. } => {}
+        // Parse as a generic Value first so legacy event types (e.g. the
+        // retired `agent_card_upsert` from the pre-shared-chat era) can be
+        // skipped without failing the whole rebuild.
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(json_error)?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match event_type {
+            "message_appended" | "board_post" => {
+                let event: CoordinationEvent = serde_json::from_value(value).map_err(json_error)?;
+                let CoordinationEvent::MessageAppended { entry } = event;
+                board_entries.push(entry);
+            }
+            _ => continue,
         }
     }
 
@@ -467,7 +312,6 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
             entries: board_entries,
             updated_at: now,
         },
-        cards: AgentCardsProjection::default(),
     })
 }
 
@@ -620,21 +464,12 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
         }
         file.sync_all()?;
     }
-    if cfg!(windows) && path.exists() {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    replace_path_with_temp(path, &tmp_path)
 }
 
 fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
     match event {
         CoordinationEvent::MessageAppended { entry } => entry.created_at,
-        CoordinationEvent::AgentCardUpsert { card } => card.updated_at,
     }
 }
 
@@ -662,25 +497,135 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(b"\n")?;
         file.sync_all()?;
     }
-    if cfg!(windows) && path.exists() {
+    replace_path_with_temp(path, &tmp_path)
+}
+
+fn replace_path_with_temp(path: &Path, tmp_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        const MAX_RETRIES: usize = 20;
+        const SLEEP_MS: u64 = 25;
+
+        for attempt in 0..MAX_RETRIES {
+            match try_replace_path_with_temp(path, tmp_path) {
+                Ok(()) => return Ok(()),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt + 1 < MAX_RETRIES =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        unreachable!("Windows retry loop should always return or error");
+    }
+
+    #[cfg(not(windows))]
+    {
+        try_replace_path_with_temp(path, tmp_path)?;
+        Ok(())
+    }
+}
+
+fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if path.exists() {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         }
     }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+
+    std::fs::rename(tmp_path, path)
 }
 
 fn json_error(err: serde_json::Error) -> GwtError {
     GwtError::Other(err.to_string())
 }
 
+// --- Phase 8.1: diff-injection / reminders sidecar APIs ---
+
+/// Per-agent-session reminder state persisted at
+/// `~/.gwt/projects/<hash>/coordination/reminders/<agent-session-id>.json`.
+///
+/// Owned by the `board-reminder` hook; not part of the shared Board projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemindersState {
+    #[serde(default)]
+    pub last_injected_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
+}
+
+/// Directory that stores per-agent-session reminder sidecar files.
+pub fn reminders_dir(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join("reminders")
+}
+
+fn reminders_path(worktree_root: &Path, agent_session_id: &str) -> PathBuf {
+    reminders_dir(worktree_root).join(format!("{agent_session_id}.json"))
+}
+
+/// Load reminder state for the given agent session. Returns a default state
+/// when no sidecar file exists yet.
+pub fn load_reminders_state(
+    worktree_root: &Path,
+    agent_session_id: &str,
+) -> Result<RemindersState> {
+    load_json_or_default(&reminders_path(worktree_root, agent_session_id))
+}
+
+/// Atomically persist reminder state for the given agent session.
+pub fn write_reminders_state(
+    worktree_root: &Path,
+    agent_session_id: &str,
+    state: &RemindersState,
+) -> Result<()> {
+    let path = reminders_path(worktree_root, agent_session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_atomic_json(&path, state)
+}
+
+/// Return Board entries whose `updated_at` is strictly later than `since`,
+/// sorted chronologically (same ordering as the projection).
+pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
+    let snapshot = load_snapshot(worktree_root)?;
+    Ok(snapshot
+        .board
+        .entries
+        .into_iter()
+        .filter(|entry| entry.updated_at > since)
+        .collect())
+}
+
+/// Check whether `author` has posted a message of the given `kind` within the
+/// trailing `within` duration. Used by `board-reminder` for redundancy
+/// suppression.
+pub fn has_recent_post_by(
+    worktree_root: &Path,
+    author: &str,
+    kind: &BoardEntryKind,
+    within: chrono::Duration,
+) -> Result<bool> {
+    let snapshot = load_snapshot(worktree_root)?;
+    let threshold = Utc::now() - within;
+    Ok(snapshot
+        .board
+        .entries
+        .iter()
+        .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         ffi::OsString,
+        str::FromStr,
         sync::{Arc, Mutex, OnceLock},
         thread,
     };
@@ -730,6 +675,58 @@ mod tests {
         assert!(!coordination_dir(dir.path())
             .join("cards.latest.json")
             .exists());
+    }
+
+    #[test]
+    fn rebuild_skips_legacy_agent_card_upsert_events() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+
+        // Simulate an events.jsonl written by the pre-shared-chat code path.
+        // The legacy `agent_card_upsert` line must be tolerated and simply
+        // skipped — not treated as a parse error.
+        let events_path = coordination_events_path(dir.path());
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&events_path)
+                .unwrap();
+            let entry = BoardEntry::new(
+                AuthorKind::User,
+                "user",
+                BoardEntryKind::Request,
+                "after legacy line",
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            let legacy = serde_json::json!({
+                "type": "agent_card_upsert",
+                "card": {
+                    "agent_id": "codex",
+                    "branch": "feature/legacy",
+                    "updated_at": "2026-04-14T00:00:00Z"
+                }
+            });
+            writeln!(file, "{}", legacy).unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "type": "message_appended",
+                    "entry": entry,
+                })
+            )
+            .unwrap();
+        }
+
+        let rebuilt = rebuild_snapshot_from_events(&events_path).unwrap();
+        assert_eq!(rebuilt.board.entries.len(), 1);
+        assert_eq!(rebuilt.board.entries[0].body, "after legacy line");
     }
 
     #[test]
@@ -802,7 +799,6 @@ mod tests {
         assert_eq!(rebuilt.board.entries.len(), 2);
         assert_eq!(rebuilt.board.entries[0].body, "Initial request");
         assert_eq!(rebuilt.board.entries[1].body, "Investigating");
-        assert!(rebuilt.cards.cards.is_empty());
     }
 
     #[test]
@@ -1020,6 +1016,161 @@ mod tests {
         }
     }
 
+    #[test]
+    fn load_entries_since_returns_only_newer_entries() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut old_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "old post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        old_entry.updated_at = old_entry.created_at;
+        post_entry(dir.path(), old_entry).unwrap();
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "new post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+        post_entry(dir.path(), new_entry).unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "new post");
+    }
+
+    #[test]
+    fn has_recent_post_by_respects_within_window() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let now = chrono::Utc::now();
+        let recent = now - chrono::Duration::minutes(5);
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "recent status",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = recent;
+        entry.updated_at = recent;
+        post_entry(dir.path(), entry).unwrap();
+
+        assert!(has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+
+        assert!(!has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
+            chrono::Duration::minutes(1)
+        )
+        .unwrap());
+
+        assert!(!has_recent_post_by(
+            dir.path(),
+            "Claude",
+            &BoardEntryKind::Status,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+
+        assert!(!has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Decision,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn reminders_sidecar_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_session_id = "sess-test-123";
+
+        let empty = load_reminders_state(dir.path(), agent_session_id).unwrap();
+        assert!(empty.last_injected_at.is_none());
+        assert!(empty.last_reminded_kind.is_empty());
+
+        let now = chrono::Utc::now();
+        let state = RemindersState {
+            last_injected_at: Some(now),
+            last_reminded_kind: HashMap::from([("status".to_string(), now)]),
+        };
+        write_reminders_state(dir.path(), agent_session_id, &state).unwrap();
+
+        let loaded = load_reminders_state(dir.path(), agent_session_id).unwrap();
+        assert_eq!(loaded.last_injected_at, Some(now));
+        assert_eq!(loaded.last_reminded_kind.get("status").copied(), Some(now));
+
+        let sidecar_path = reminders_dir(dir.path()).join("sess-test-123.json");
+        assert!(sidecar_path.exists());
+    }
+
+    #[test]
+    fn board_entry_has_origin_metadata() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "started work",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_branch("feature/update-board")
+        .with_origin_session_id("sess-a3f2")
+        .with_origin_agent_id("agent-codex-001");
+
+        assert_eq!(entry.origin_branch.as_deref(), Some("feature/update-board"));
+        assert_eq!(entry.origin_session_id.as_deref(), Some("sess-a3f2"));
+        assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-codex-001"));
+    }
+
+    #[test]
+    fn board_entry_deserializes_legacy_without_origin_fields() {
+        let legacy_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z"
+        }"#;
+
+        let entry: BoardEntry = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(entry.origin_session_id, None);
+        assert_eq!(entry.origin_agent_id, None);
+    }
+
     fn write_legacy_board_post(path: &std::path::Path, entry: &BoardEntry) {
         let parent = path.parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
@@ -1033,5 +1184,24 @@ mod tests {
         )
         .unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn board_entry_kind_round_trip() {
+        for (kind, value) in [
+            (BoardEntryKind::Request, "request"),
+            (BoardEntryKind::Status, "status"),
+            (BoardEntryKind::Next, "next"),
+            (BoardEntryKind::Claim, "claim"),
+            (BoardEntryKind::Impact, "impact"),
+            (BoardEntryKind::Question, "question"),
+            (BoardEntryKind::Blocked, "blocked"),
+            (BoardEntryKind::Handoff, "handoff"),
+            (BoardEntryKind::Decision, "decision"),
+        ] {
+            assert_eq!(BoardEntryKind::from_str(value).unwrap(), kind);
+            assert_eq!(kind.as_str(), value);
+        }
+        assert!(BoardEntryKind::from_str("mystery").is_err());
     }
 }

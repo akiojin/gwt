@@ -7,6 +7,7 @@
 
 use std::{
     io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -83,7 +84,7 @@ fn pending_discussion_for_session(
     sessions_dir: &Path,
     session_id: &str,
 ) -> io::Result<Option<PendingDiscussionResume>> {
-    let session = Session::load(&sessions_dir.join(format!("{session_id}.toml")))?;
+    let session = Session::load_and_migrate(&sessions_dir.join(format!("{session_id}.toml")))?;
     load_pending_resume(&session.worktree_path)
 }
 
@@ -95,7 +96,7 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
     if !path.exists() {
         return Ok(None);
     }
-    Session::load(&path).map(Some)
+    Session::load_and_migrate(&path).map(Some)
 }
 
 fn sync_agent_session_id(
@@ -120,8 +121,14 @@ fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 /// sessions launched outside of gwt (e.g. a raw `claude` invocation) are
 /// not broken by a hook we shipped.
 pub fn handle(event: &str) -> Result<(), HookError> {
-    let hook_event = HookEvent::read_from_stdin()?;
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    handle_with_input(event, &input)
+}
+
+pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
+    let hook_event = HookEvent::read_from_str(input)?;
+    let sessions_dir = sessions_dir_for_current_runtime();
     let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
     let agent_session_id = hook_event
         .as_ref()
@@ -133,6 +140,19 @@ pub fn handle(event: &str) -> Result<(), HookError> {
     };
     let path = PathBuf::from(path);
     write_for_event(&path, event)
+}
+
+fn sessions_dir_for_current_runtime() -> PathBuf {
+    let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
+        return gwt_core::paths::gwt_sessions_dir();
+    };
+    let runtime_path = PathBuf::from(runtime_path);
+    runtime_path
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(gwt_core::paths::gwt_sessions_dir)
 }
 
 #[cfg(test)]

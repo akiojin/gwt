@@ -54,7 +54,7 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
     if !path.exists() {
         return Ok(None);
     }
-    Session::load(&path).map(Some)
+    Session::load_and_migrate(&path).map(Some)
 }
 
 fn sync_coordination_for_session_with_paths(
@@ -108,7 +108,7 @@ fn board_entry_for_event_with_paths(
         _ => return Ok(None),
     };
 
-    Ok(Some(BoardEntry::new(
+    let mut entry = BoardEntry::new(
         AuthorKind::Agent,
         session.display_name.clone(),
         BoardEntryKind::Status,
@@ -117,7 +117,17 @@ fn board_entry_for_event_with_paths(
         None,
         Vec::new(),
         vec![context.number.to_string()],
-    )))
+    );
+    if !session.branch.trim().is_empty() {
+        entry = entry.with_origin_branch(session.branch.clone());
+    }
+    if !session.id.trim().is_empty() {
+        entry = entry.with_origin_session_id(session.id.clone());
+    }
+    if !session.display_name.trim().is_empty() {
+        entry = entry.with_origin_agent_id(session.display_name.clone());
+    }
+    Ok(Some(entry))
 }
 
 fn resolve_issue_context_with_paths(
@@ -245,6 +255,9 @@ mod tests {
         assert!(entry.body.contains("Coordination Domain"));
         assert!(entry.body.contains("feature/spec-1974"));
         assert_eq!(entry.related_owners, vec!["1974".to_string()]);
+        assert_eq!(entry.origin_branch.as_deref(), Some("feature/spec-1974"));
+        assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+        assert!(entry.origin_session_id.is_some());
     }
 
     #[test]

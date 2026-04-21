@@ -150,6 +150,36 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_project_bar_includes_app_version_surface() {
+        let html = index_html();
+
+        assert!(
+            html.contains("id=\"app-version\""),
+            "expected embedded html to expose a project bar surface for the app version",
+        );
+        assert!(
+            html.contains("function formatVersionLabel()"),
+            "expected version label formatting to live in a named helper",
+        );
+        assert!(
+            html.contains("function renderAppVersion()"),
+            "expected project bar version rendering to live in a named helper",
+        );
+        assert!(
+            html.contains("function setVersionState(current, latest = null)"),
+            "expected version state updates to be centralized behind a helper",
+        );
+        assert!(
+            html.contains("setVersionState(appState.app_version, versionState.latest);"),
+            "expected workspace state rendering to seed the current app version",
+        );
+        assert!(
+            html.contains("setVersionState(event.current, event.latest);"),
+            "expected update events to refresh both current and latest version labels",
+        );
+    }
+
+    #[test]
     fn embedded_web_branches_surface_includes_scope_filter_controls() {
         let html = index_html();
 
@@ -182,6 +212,46 @@ mod tests {
         assert!(
             html.contains("branch_cleanup_result"),
             "expected branch cleanup result handler in embedded html",
+        );
+    }
+
+    #[test]
+    fn embedded_web_branches_surface_keeps_loading_while_cleanup_hydration_is_pending() {
+        let html = index_html();
+
+        assert!(
+            html.contains("!entry.cleanup_ready"),
+            "expected embedded html to branch on cleanup hydration readiness",
+        );
+        assert!(
+            html.contains("const phase = String(event.phase || \"hydrated\").toLowerCase();"),
+            "expected branch entries handler to normalize the explicit event phase before using it",
+        );
+        assert!(
+            html.contains("state.loading = phase !== \"hydrated\";"),
+            "expected branch entries handler to derive loading state from the normalized phase",
+        );
+        assert!(
+            html.contains("Loading branch details"),
+            "expected embedded html to surface loading copy while branch hydration continues",
+        );
+    }
+
+    #[test]
+    fn embedded_web_branches_surface_keeps_inventory_failures_blocking_until_fresh_rows_arrive() {
+        let html = index_html();
+
+        assert!(
+            html.contains("state.receivedFreshEntries = false;"),
+            "expected each branch load request to reset fresh-entry tracking",
+        );
+        assert!(
+            html.contains("state.receivedFreshEntries = true;"),
+            "expected branch entries handler to mark when the current request delivered fresh rows",
+        );
+        assert!(
+            html.contains("if (state.receivedFreshEntries) {"),
+            "expected branch errors to downgrade to notices only after fresh rows were delivered",
         );
     }
 

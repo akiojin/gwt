@@ -41,7 +41,8 @@ Keep these artifacts throughout the discussion:
 - `Action Bundle` for the concrete follow-up actions that should happen next
 
 `Discussion TODO` is not an implementation task list. It tracks unresolved
-questions, dependency checks, deferred decisions, and the next question to ask.
+questions, dependency checks, deferred decisions, coverage gaps, exit blockers,
+and the next question to ask.
 
 Mirror structure for `.gwt/discussion.md`:
 
@@ -53,12 +54,28 @@ Mirror structure for `.gwt/discussion.md`:
 - Open Questions:
 - Dependency Checks:
 - Deferred Decisions:
+- Coverage Checks:
+- Exit Blockers:
 - Next Question:
 - Promotable Changes:
 ```
 
 Promote an item from `Discussion TODO` into `Action Delta` only after the
 high-impact unknown behind it has been resolved.
+
+## Mode contract
+
+- Start the discussion in Plan Mode. If the caller is not already in Plan
+  Mode, enter it before Phase 1 begins.
+- Resume paths should also re-enter Plan Mode before continuing the
+  discussion.
+- Stay in Plan Mode while investigation, questioning, and artifact shaping are
+  in progress.
+- The final discussion result should assume the workflow is about to leave
+  Plan Mode.
+- Do not leave Plan Mode before the official discussion result (`Action Delta`
+  and `Action Bundle`, or a decision-complete `<proposed_plan>` when the
+  discussion ends in a plan handoff) is ready.
 
 ## Resume hooks
 
@@ -78,10 +95,12 @@ Use this contract:
   `[active]` to `[parked]`.
 - `Dismiss for now` suppresses the prompt only for the current agent session. A
   later session may surface it again.
-- `PreToolUse` may also dispatch `workflow-policy` before tool calls.
-- `workflow-policy` enforces safety guardrails only: branch switching,
-  worktree escape, and direct `gh` CLI are blocked. It does not gate
-  implementation by owner Issue/SPEC or plan/tasks presence.
+- `PreToolUse` may also dispatch `workflow-policy` before mutating tool calls.
+- `workflow-policy` should allow read-only investigation, but block
+  implementation edits until an owner Issue or SPEC is linked.
+- If the owner is a `gwt-spec` Issue, `workflow-policy` should block
+  implementation until the owner SPEC cache has non-empty `plan` and `tasks`
+  sections; local files alone do not unblock it.
 
 ## Platform question tool
 
@@ -151,6 +170,36 @@ After each answer:
 - remove or refine the resolved unknown
 - re-rank the remaining unresolved questions
 - Ask the next highest-impact question if any remain
+
+## Discussion Depth Gate
+
+Do not stop because one answer landed or because an arbitrary question count
+was reached. Re-run this gate after each answer.
+
+Coverage Checks:
+
+- scope boundary
+- ownership / integration
+- failure / edge case
+- migration / compatibility
+- verification / success signal
+
+Exit Blockers:
+
+- a high-impact unknown still changes implementation, routing, or ownership
+- an applicable coverage category above has not been addressed
+- `Open Questions`, `Dependency Checks`, or `Deferred Decisions` still contain
+  unresolved high-impact items
+- the latest answer introduced a new high-impact unknown
+
+Question depth ladder:
+
+1. Direction / proposal choice
+2. Boundary, exceptions, and failure handling
+3. Acceptance, verification, and implementation-affecting detail
+
+Keep asking one question at a time until the relevant coverage categories are
+closed or explicitly deferred with rationale in `Discussion TODO`.
 
 When the runtime and user allow delegation, a bounded subagent may be used for
 objective review of competing proposals. Keep that subagent scoped to
@@ -222,6 +271,8 @@ Reason: <one sentence>
 - Write Lesson
 - No Action
 ```
+
+This final result is the handoff point where the workflow may leave Plan Mode.
 
 `Action Bundle` may contain multiple actions. Examples:
 
