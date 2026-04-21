@@ -595,14 +595,6 @@ impl AppRuntime {
                 std::thread::spawn(apply_update_and_exit);
                 vec![]
             }
-            custom_agents_event @ (FrontendEvent::ListCustomAgents
-            | FrontendEvent::ListCustomAgentPresets
-            | FrontendEvent::AddCustomAgentFromPreset { .. }
-            | FrontendEvent::UpdateCustomAgent { .. }
-            | FrontendEvent::DeleteCustomAgent { .. }
-            | FrontendEvent::TestBackendConnection { .. }) => self
-                .custom_agents
-                .handle_event(client_id, custom_agents_event),
             FrontendEvent::ListProfiles {
                 id,
                 selected_profile,
@@ -692,6 +684,14 @@ impl AppRuntime {
             } => vec![OutboundEvent::broadcast(
                 gwt::profiles_dispatch::delete_disabled_env_event(id, profile_name, key),
             )],
+            custom_agents_event @ (FrontendEvent::ListCustomAgents
+            | FrontendEvent::ListCustomAgentPresets
+            | FrontendEvent::AddCustomAgentFromPreset { .. }
+            | FrontendEvent::UpdateCustomAgent { .. }
+            | FrontendEvent::DeleteCustomAgent { .. }
+            | FrontendEvent::TestBackendConnection { .. }) => self
+                .custom_agents
+                .handle_event(client_id, custom_agents_event),
         }
     }
 
@@ -2501,7 +2501,10 @@ mod tests {
         ProjectKind, QuickStartEntry, QuickStartLaunchMode, RuntimeHookEvent, RuntimeHookEventKind,
         ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
-    use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_agent::custom::CustomAgentType;
+    use gwt_agent::{
+        AgentId, AgentLaunchBuilder, CustomCodingAgent, DockerLifecycleIntent, LaunchRuntimeTarget,
+    };
     use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
 
@@ -4246,6 +4249,75 @@ mod tests {
             BackendEvent::CustomAgentPresetList { presets } => assert!(!presets.is_empty()),
             other => panic!("expected CustomAgentPresetList, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn custom_agents_controller_supports_only_custom_agent_events() {
+        assert!(
+            super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::ListCustomAgents,
+            )
+        );
+        assert!(
+            super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::ListCustomAgentPresets,
+            )
+        );
+        assert!(
+            super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::AddCustomAgentFromPreset {
+                    preset_id: gwt::PresetId::ClaudeCodeOpenaiCompat,
+                    payload: serde_json::json!({
+                        "id": "claude-code-openai",
+                        "display_name": "Claude Code (OpenAI-compat)",
+                        "base_url": "http://127.0.0.1:8000",
+                        "api_key": "secret",
+                        "default_model": "openai/gpt-oss-20b",
+                    }),
+                },
+            )
+        );
+        assert!(
+            super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::UpdateCustomAgent {
+                    agent: Box::new(CustomCodingAgent {
+                        id: "custom-1".to_string(),
+                        display_name: "Custom 1".to_string(),
+                        agent_type: CustomAgentType::Command,
+                        command: "codex".to_string(),
+                        default_args: Vec::new(),
+                        mode_args: None,
+                        skip_permissions_args: Vec::new(),
+                        env: HashMap::new(),
+                    }),
+                },
+            )
+        );
+        assert!(
+            super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::DeleteCustomAgent {
+                    agent_id: "custom-1".to_string(),
+                },
+            )
+        );
+        assert!(
+            super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::TestBackendConnection {
+                    base_url: "http://127.0.0.1:8000".to_string(),
+                    api_key: "secret".to_string(),
+                },
+            )
+        );
+        assert!(
+            !super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::FrontendReady,
+            )
+        );
+        assert!(
+            !super::custom_agents_controller::CustomAgentsController::supports(
+                &gwt::FrontendEvent::ApplyUpdate,
+            )
+        );
     }
 
     #[test]
