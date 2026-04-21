@@ -4,7 +4,7 @@
 //! `specs/data-model.md` must map to its enum variant, and every unknown
 //! string must map to `None`.
 
-use gwt::cli::hook::{BlockDecision, HookEvent, HookKind};
+use gwt::cli::hook::{HookEvent, HookKind, HookOutput};
 
 #[test]
 fn hook_kind_from_name_covers_every_documented_hook() {
@@ -57,14 +57,16 @@ fn hook_event_command_returns_none_when_command_field_is_not_a_string() {
 }
 
 #[test]
-fn block_decision_serializes_as_hook_specific_output() {
+fn pre_tool_use_permission_serializes_as_hook_specific_output() {
     // Claude Code PreToolUse contract: the hook must emit
     // `hookSpecificOutput.permissionDecisionReason` so the reason text is
     // actually surfaced to the LLM/user. The legacy `decision`/`reason`/
     // `stopReason` top-level fields are intentionally dropped because
     // `stopReason` is ignored on PreToolUse and only `reason` was visible.
-    let decision = BlockDecision::new("forbidden command", "policy violation");
-    let json = serde_json::to_value(&decision).unwrap();
+    let decision = HookOutput::pre_tool_use_permission("forbidden command", "policy violation");
+    let mut buf = Vec::new();
+    decision.serialize_to(&mut buf).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
 
     assert!(
         json.get("decision").is_none(),
@@ -103,8 +105,8 @@ fn block_decision_serializes_as_hook_specific_output() {
 }
 
 #[test]
-fn block_decision_accessors_expose_summary_and_detail() {
-    let decision = BlockDecision::new("forbidden command", "policy violation");
+fn pre_tool_use_permission_accessors_expose_summary_and_detail() {
+    let decision = HookOutput::pre_tool_use_permission("forbidden command", "policy violation");
     assert_eq!(decision.summary(), "forbidden command");
     assert_eq!(decision.detail(), "policy violation");
     assert!(decision

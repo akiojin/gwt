@@ -2,9 +2,10 @@
 //!
 //! These tests verify the stdout contract of the board-reminder hook:
 //!
-//! - `SessionStart` / `UserPromptSubmit` / `Stop` emit
+//! - `SessionStart` / `UserPromptSubmit` emit
 //!   `{"hookSpecificOutput": {"hookEventName": "...", "additionalContext": "..."}}`
 //!   to stdout.
+//! - `Stop` emits `{"systemMessage":"..."}`.
 //! - `PreToolUse` / `PostToolUse` are silent (no stdout).
 //! - Reminder text carries the DO / DO-NOT guard clauses required by
 //!   FR-036.
@@ -18,7 +19,8 @@ fn run(event: &str) -> (String, usize) {
     // hook should fall through to a silent no-op rather than touching
     // a real session file. This pins the "no session" branch of the
     // public handler.
-    board_reminder::handle_with_input(event, "", &mut stdout).unwrap();
+    let output = board_reminder::handle_with_input(event, "").unwrap();
+    output.serialize_to(&mut stdout).unwrap();
     let text = String::from_utf8(stdout).unwrap();
     let lines = text.lines().count();
     (text, lines)
@@ -54,19 +56,12 @@ fn reminder_payload_shape_matches_claude_code_contract() {
         s
     };
 
-    let computed = board_reminder::compute_output("UserPromptSubmit", &session, Utc::now())
+    let plan = board_reminder::compute_plan("UserPromptSubmit", &session, Utc::now())
         .unwrap()
         .expect("UserPromptSubmit must produce output");
-
-    // Model what emit_output produces by round-tripping the data
-    // through the same JSON shape Claude Code consumes.
-    let json = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": computed.additional_context,
-        }
-    });
-    let parsed: Value = serde_json::from_value(json).unwrap();
+    let mut buf = Vec::new();
+    plan.output.serialize_to(&mut buf).unwrap();
+    let parsed: Value = serde_json::from_slice(&buf).unwrap();
 
     assert_eq!(
         parsed["hookSpecificOutput"]["hookEventName"],
@@ -77,4 +72,27 @@ fn reminder_payload_shape_matches_claude_code_contract() {
         .unwrap();
     assert!(additional.contains("phase"));
     assert!(additional.contains("Do NOT"));
+}
+
+#[test]
+fn stop_payload_uses_system_message_contract() {
+    use chrono::Utc;
+    use gwt_agent::{AgentId, Session};
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = {
+        let mut s = Session::new(dir.path(), "feature/test", AgentId::Codex);
+        s.display_name = "Codex".to_string();
+        s
+    };
+
+    let plan = board_reminder::compute_plan("Stop", &session, Utc::now())
+        .unwrap()
+        .expect("Stop must produce output");
+    let mut buf = Vec::new();
+    plan.output.serialize_to(&mut buf).unwrap();
+    let parsed: Value = serde_json::from_slice(&buf).unwrap();
+
+    assert!(parsed.get("hookSpecificOutput").is_none());
+    assert!(parsed["systemMessage"].as_str().unwrap().contains("Stop"));
 }

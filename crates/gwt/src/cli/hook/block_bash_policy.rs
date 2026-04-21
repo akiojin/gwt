@@ -6,11 +6,11 @@
 use std::{io::Read, path::Path};
 
 use super::{
-    block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, BlockDecision,
-    HookError, HookEvent,
+    block_cd_command, block_file_ops, block_git_branch_ops, block_git_dir_override, HookError,
+    HookEvent, HookOutput,
 };
 
-pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<BlockDecision> {
+pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<HookOutput> {
     block_git_branch_ops::evaluate_bash_command(command)
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
@@ -18,34 +18,31 @@ pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<Bloc
         .or_else(|| evaluate_github_workflow_cli(command))
 }
 
-pub fn evaluate(
-    event: &HookEvent,
-    worktree_root: &Path,
-) -> Result<Option<BlockDecision>, HookError> {
+pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     if event.tool_name.as_deref() != Some("Bash") {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
-    Ok(evaluate_bash_command(command, worktree_root))
+    Ok(evaluate_bash_command(command, worktree_root).unwrap_or(HookOutput::Silent))
 }
 
-pub fn handle() -> Result<Option<BlockDecision>, HookError> {
+pub fn handle() -> Result<HookOutput, HookError> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     handle_with_input(&input)
 }
 
-pub fn handle_with_input(input: &str) -> Result<Option<BlockDecision>, HookError> {
+pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
     let Some(event) = HookEvent::read_from_str(input)? else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
     let root = crate::cli::hook::worktree::detect_worktree_root();
     evaluate(&event, &root)
 }
 
-fn evaluate_github_workflow_cli(command: &str) -> Option<BlockDecision> {
+fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
     for segment in super::segments::split_command_segments(command) {
         let tokens = command_tokens(&segment);
         let Some(command_name) = tokens.first().copied() else {
@@ -92,8 +89,8 @@ fn is_blocked_run_subcommand(subcommand: Option<&str>) -> bool {
     matches!(subcommand, Some("view"))
 }
 
-fn github_workflow_block_decision(command: &str) -> BlockDecision {
-    BlockDecision::new(
+fn github_workflow_block_decision(command: &str) -> HookOutput {
+    HookOutput::pre_tool_use_permission(
         "\u{1F6AB} Direct GitHub workflow CLI commands are not allowed",
         format!(
             "Use the gwt workflow surfaces instead of direct `gh issue`, `gh pr`, `gh run`, or workflow-focused `gh api` commands.\n\n\

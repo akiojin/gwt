@@ -1467,7 +1467,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{block_bash_policy, workflow_policy, BlockDecision, HookKind};
+    use crate::cli::hook::{block_bash_policy, workflow_policy, HookKind, HookOutput};
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1475,18 +1475,11 @@ pub fn run_daemon_hook<E: CliEnv>(
     };
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
-    fn emit_block_decision<E: CliEnv>(env: &mut E, decision: &BlockDecision) -> i32 {
-        match serde_json::to_vec(decision) {
-            Ok(bytes) => {
-                let _ = env.stdout().write_all(&bytes);
-                let _ = env.stdout().flush();
-                2
-            }
+    fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match output.serialize_to(env.stdout()) {
+            Ok(()) => output.exit_code(),
             Err(err) => {
-                let _ = writeln!(
-                    env.stderr(),
-                    "gwt hook: failed to serialize decision: {err}"
-                );
+                let _ = writeln!(env.stderr(), "gwt hook: failed to serialize output: {err}");
                 1
             }
         }
@@ -1531,19 +1524,17 @@ pub fn run_daemon_hook<E: CliEnv>(
                 );
                 return Ok(2);
             };
-            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin, env.stdout()) {
-                Ok(()) => Ok(0),
+            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
         HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Ok(output) => Ok(emit_hook_output(env, &output)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
         HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Ok(output) => Ok(emit_hook_output(env, &output)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
         HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {

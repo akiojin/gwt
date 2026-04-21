@@ -623,22 +623,12 @@ pub fn has_recent_post_by(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        ffi::OsString,
-        str::FromStr,
-        sync::{Arc, Mutex, OnceLock},
-        thread,
-    };
+    use std::{ffi::OsString, str::FromStr, sync::Arc, thread};
 
     use chrono::TimeZone;
 
     use super::*;
-    use crate::paths::gwt_project_dir_for_repo_path;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::{paths::gwt_project_dir_for_repo_path, test_support::env_lock};
 
     struct ScopedEnvVar {
         key: &'static str,

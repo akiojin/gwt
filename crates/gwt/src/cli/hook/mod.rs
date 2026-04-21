@@ -4,8 +4,8 @@
 //!
 //! - [`HookKind`] — the enumerated hook name set.
 //! - [`HookEvent`] — the stdin JSON payload Claude Code / Codex send.
-//! - [`BlockDecision`] — the stdout JSON payload a block hook writes
-//!   when it refuses to let the tool call proceed.
+//! - [`HookOutput`] — the stdout JSON envelope hooks write when they need
+//!   to deny a tool call, inject context, or show a system message.
 //! - [`HookError`] — the error enum every hook handler returns.
 //!
 //! Individual hook handlers (runtime-state, block-*, forward) will live in
@@ -18,6 +18,7 @@ pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
 pub mod coordination_event;
+pub mod envelope;
 pub mod forward;
 pub mod runtime_state;
 pub mod segments;
@@ -26,7 +27,9 @@ pub mod worktree;
 
 use std::io::{self, Read};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+pub use envelope::{HookOutput, IntentBoundaryEvent};
 
 /// Every hook name exposed via `gwt hook <name>`.
 ///
@@ -93,73 +96,6 @@ impl HookEvent {
     /// Convenience accessor for `tool_input.command` (Bash tool payloads).
     pub fn command(&self) -> Option<&str> {
         self.tool_input.as_ref()?.get("command")?.as_str()
-    }
-}
-
-/// PreToolUse `hookSpecificOutput` denial payload.
-///
-/// The wire format exposes only `permissionDecisionReason` because the
-/// legacy top-level `stopReason` is ignored on PreToolUse and only the
-/// short `reason` was reaching the user before this was introduced.
-#[derive(Debug, Clone, Serialize)]
-pub struct BlockDecision {
-    #[serde(rename = "hookSpecificOutput")]
-    hook_specific_output: HookSpecificOutput,
-    #[serde(skip)]
-    summary: String,
-    #[serde(skip)]
-    detail: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HookSpecificOutput {
-    #[serde(rename = "hookEventName")]
-    hook_event_name: &'static str,
-    #[serde(rename = "permissionDecision")]
-    permission_decision: &'static str,
-    #[serde(rename = "permissionDecisionReason")]
-    permission_decision_reason: String,
-}
-
-impl HookSpecificOutput {
-    const EVENT_NAME: &'static str = "PreToolUse";
-    const DECISION_DENY: &'static str = "deny";
-}
-
-impl BlockDecision {
-    pub fn new(summary: impl Into<String>, detail: impl Into<String>) -> Self {
-        let summary = summary.into();
-        let detail = detail.into();
-        let permission_decision_reason = match (summary.is_empty(), detail.is_empty()) {
-            (true, _) => detail.clone(),
-            (_, true) => summary.clone(),
-            _ => format!("{summary}\n\n{detail}"),
-        };
-        Self {
-            hook_specific_output: HookSpecificOutput {
-                hook_event_name: HookSpecificOutput::EVENT_NAME,
-                permission_decision: HookSpecificOutput::DECISION_DENY,
-                permission_decision_reason,
-            },
-            summary,
-            detail,
-        }
-    }
-
-    /// Short headline. Kept separate from `detail` so tests can assert the
-    /// rule name without scanning the merged reason.
-    pub fn summary(&self) -> &str {
-        &self.summary
-    }
-
-    /// Full guidance (alternatives, blocked command, etc.).
-    pub fn detail(&self) -> &str {
-        &self.detail
-    }
-
-    /// The merged text Claude Code / Codex surface to the LLM and user.
-    pub fn permission_decision_reason(&self) -> &str {
-        &self.hook_specific_output.permission_decision_reason
     }
 }
 

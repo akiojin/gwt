@@ -3,7 +3,7 @@
 //!
 //! Ported 1:1 from the retired external branch-policy hook.
 //! The pure evaluation logic ([`evaluate_bash_command`]) takes a raw
-//! Bash command string and returns `Some(BlockDecision)` when the hook
+//! Bash command string and returns `Some(HookOutput)` when the hook
 //! must veto the tool call, or `None` when it should allow. The CLI
 //! wrapper ([`handle`]) reads the stdin event, extracts the command,
 //! and delegates.
@@ -12,11 +12,11 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::{segments::split_command_segments, BlockDecision, HookError, HookEvent};
+use super::{segments::split_command_segments, HookError, HookEvent, HookOutput};
 
 /// Evaluate a single raw command string. Returns `Some` if any segment
 /// triggers a block rule, `None` if every segment is allowed.
-pub fn evaluate_bash_command(command: &str) -> Option<BlockDecision> {
+pub fn evaluate_bash_command(command: &str) -> Option<HookOutput> {
     for segment in split_command_segments(command) {
         if let Some(decision) = evaluate_segment(&segment, command) {
             return Some(decision);
@@ -27,20 +27,20 @@ pub fn evaluate_bash_command(command: &str) -> Option<BlockDecision> {
 
 /// Wire-up from a parsed [`HookEvent`] stdin payload. Non-Bash tool calls
 /// are unconditionally allowed.
-pub fn evaluate(event: &HookEvent) -> Result<Option<BlockDecision>, HookError> {
+pub fn evaluate(event: &HookEvent) -> Result<HookOutput, HookError> {
     if event.tool_name.as_deref() != Some("Bash") {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
-    Ok(evaluate_bash_command(command))
+    Ok(evaluate_bash_command(command).unwrap_or(HookOutput::Silent))
 }
 
 /// Production entry point. Reads the event from stdin and evaluates it.
-pub fn handle() -> Result<Option<BlockDecision>, HookError> {
+pub fn handle() -> Result<HookOutput, HookError> {
     let Some(event) = HookEvent::read_from_stdin()? else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
     evaluate(&event)
 }
@@ -49,13 +49,13 @@ pub fn handle() -> Result<Option<BlockDecision>, HookError> {
 // Segment-level rules
 // ---------------------------------------------------------------------------
 
-fn evaluate_segment(segment: &str, original: &str) -> Option<BlockDecision> {
+fn evaluate_segment(segment: &str, original: &str) -> Option<HookOutput> {
     // Rule 1: interactive rebase against origin/main.
     if starts_with_git_rebase(segment)
         && has_interactive_flag(segment)
         && targets_origin_main(segment)
     {
-        return Some(BlockDecision::new(
+        return Some(HookOutput::pre_tool_use_permission(
             "\u{1F6AB} Interactive rebase against origin/main is not allowed",
             format!(
                 "Interactive rebase against origin/main initiated by LLMs is blocked because it \
@@ -72,7 +72,7 @@ fn evaluate_segment(segment: &str, original: &str) -> Option<BlockDecision> {
     // Rule 2: checkout / switch — block branch switching, allow
     // explicit file-level operations with `-- <file>`.
     if mentions_checkout_or_switch(segment) && !is_file_level_checkout(segment) {
-        return Some(BlockDecision::new(
+        return Some(HookOutput::pre_tool_use_permission(
             "\u{1F6AB} Branch switching commands (checkout/switch) are not allowed",
             format!(
                 "Worktree is designed to complete work on the launched branch. Branch operations \
@@ -85,7 +85,7 @@ fn evaluate_segment(segment: &str, original: &str) -> Option<BlockDecision> {
     // Rule 3: git branch — read-only forms OK, anything else blocked.
     if let Some(branch_args) = match_git_branch_subcommand(segment) {
         if !is_read_only_git_branch(branch_args) {
-            return Some(BlockDecision::new(
+            return Some(HookOutput::pre_tool_use_permission(
                 "\u{1F6AB} Branch modification commands are not allowed",
                 format!(
                     "Worktree is designed to complete work on the launched branch. Destructive \
@@ -100,7 +100,7 @@ fn evaluate_segment(segment: &str, original: &str) -> Option<BlockDecision> {
 
     // Rule 4: git worktree — always blocked.
     if matches_git_worktree_subcommand(segment) {
-        return Some(BlockDecision::new(
+        return Some(HookOutput::pre_tool_use_permission(
             "\u{1F6AB} Worktree commands are not allowed",
             format!(
                 "Worktree management operations such as git worktree add/remove cannot be \

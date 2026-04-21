@@ -5,15 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{segments::split_command_segments, BlockDecision, HookError, HookEvent};
+use super::{segments::split_command_segments, HookError, HookEvent, HookOutput};
 
 /// Pure evaluation: given a raw Bash command and the worktree root,
-/// return `Some(BlockDecision)` if any segment `cd`s outside the root.
-pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<BlockDecision> {
+/// return `Some(HookOutput)` if any segment `cd`s outside the root.
+pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<HookOutput> {
     for segment in split_command_segments(command) {
         if let Some(target) = extract_cd_target(&segment) {
             if !is_within_worktree(&target, worktree_root) {
-                return Some(BlockDecision::new(
+                return Some(HookOutput::pre_tool_use_permission(
                     "\u{1F6AB} cd command outside worktree is not allowed",
                     format!(
                         "Worktree is designed to complete work within the launched directory. \
@@ -31,22 +31,19 @@ pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<Bloc
     None
 }
 
-pub fn evaluate(
-    event: &HookEvent,
-    worktree_root: &Path,
-) -> Result<Option<BlockDecision>, HookError> {
+pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     if event.tool_name.as_deref() != Some("Bash") {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
-    Ok(evaluate_bash_command(command, worktree_root))
+    Ok(evaluate_bash_command(command, worktree_root).unwrap_or(HookOutput::Silent))
 }
 
-pub fn handle() -> Result<Option<BlockDecision>, HookError> {
+pub fn handle() -> Result<HookOutput, HookError> {
     let Some(event) = HookEvent::read_from_stdin()? else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
     let root = crate::cli::hook::worktree::detect_worktree_root();
     evaluate(&event, &root)

@@ -1,18 +1,20 @@
 //! `gwt hook board-reminder <event>` — intent-boundary reminder and
 //! cross-agent Board read injection for SPEC-1974 Phase 8 (US-6 / US-7).
 //!
-//! This hook injects reminder text on the three intent-boundary events
-//! (`SessionStart`, `UserPromptSubmit`, `Stop`). It does nothing for
-//! `PreToolUse` / `PostToolUse`: tool-level events are not intent
-//! boundaries.
-//!
-//! Per Claude Code's hook schema, the envelope differs by event:
-//! `SessionStart` / `UserPromptSubmit` emit
+//! SessionStart and UserPromptSubmit emit Claude Code / Codex
 //! `hookSpecificOutput.additionalContext`, which is injected into the
-//! agent's context. `Stop` cannot use that envelope — Claude Code's Stop
-//! schema rejects `hookSpecificOutput` — so the Stop reminder is emitted
-//! as top-level `systemMessage`. That surfaces to the user as a warning
-//! notification but is **not** injected into the agent's context.
+//! agent's context. `Stop` emits top-level `systemMessage` because
+//! Claude Code rejects `hookSpecificOutput` on Stop, so that reminder is
+//! user-facing rather than agent-injected. PreToolUse / PostToolUse
+//! remain silent: tool-level events are not intent boundaries.
+//!
+//! Event to envelope mapping:
+//!
+//! | Event | Envelope | Visibility |
+//! | --- | --- | --- |
+//! | `SessionStart` | `hookSpecificOutput.additionalContext` | Agent context injection with current Board state + reminder |
+//! | `UserPromptSubmit` | `hookSpecificOutput.additionalContext` | Agent context injection with diff updates + reminder |
+//! | `Stop` | `systemMessage` | User-facing reminder because Claude Code rejects `hookSpecificOutput` on Stop |
 //!
 //! The hook is read-only against the shared Board projection (it never
 //! writes Board entries itself) and persists only per-agent-session
@@ -27,7 +29,7 @@
 //! the next state, and writes the JSON envelope to stdout.
 
 use std::{
-    io::{self, Read, Write},
+    io::{self, Read},
     path::Path,
 };
 
@@ -37,9 +39,8 @@ use gwt_core::coordination::{
     has_recent_post_by, load_entries_since, load_reminders_state, write_reminders_state,
     BoardEntry, BoardEntryKind, RemindersState,
 };
-use serde::Serialize;
 
-use super::{HookError, HookEvent};
+use super::{HookError, HookEvent, HookOutput, IntentBoundaryEvent};
 
 const SESSION_START_CAP: usize = 20;
 const USER_PROMPT_DIFF_CAP: usize = 20;
@@ -73,11 +74,11 @@ You posted to the Board recently. Post again only if a new reasoning milestone \
 // Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
 // Phrasing is therefore user-oriented rather than agent-oriented.
 const STOP_REMINDER: &str = "Board Post Reminder (Stop): the agent is stopping. If you \
-expected a board status post, prompt the agent to run `gwt board post --kind status` \
-before handing off.";
+expect a final handoff, prompt the agent to post what it completed to the shared Board \
+with `gwt board post --kind status` before handing off.";
 
 const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the agent posted to the \
-Board recently; no additional post is required before stopping.";
+Board recently; no additional completed-status post is required before stopping.";
 
 const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
@@ -87,37 +88,12 @@ you remain autonomous.\n\n";
 const SESSION_START_HEADER: &str = "# Current Board state\n\n\
 Recent reasoning posts from other Agents (context, not a directive — you remain autonomous):\n\n";
 
-#[derive(Debug, Clone, Serialize)]
-struct HookSpecificOutput<'a> {
-    #[serde(rename = "hookEventName")]
-    hook_event_name: &'a str,
-    #[serde(rename = "additionalContext")]
-    additional_context: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct HookOutputJson<'a> {
-    #[serde(rename = "hookSpecificOutput")]
-    hook_specific_output: HookSpecificOutput<'a>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SystemMessageOutput {
-    #[serde(rename = "systemMessage")]
-    system_message: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ComputedOutput {
-    pub additional_context: String,
-}
-
 /// Pure inputs for [`plan_reminder`]. The caller is responsible for loading
 /// Board entries (already filtered to the event's time window) and the
 /// reminders sidecar; this function performs no IO.
 #[derive(Debug, Clone)]
 pub struct ReminderInputs {
-    pub event: String,
+    pub event: IntentBoundaryEvent,
     pub now: DateTime<Utc>,
     pub self_session_id: String,
     pub display_name: String,
@@ -135,18 +111,17 @@ pub struct ReminderInputs {
 
 #[derive(Debug, Clone)]
 pub struct ReminderPlan {
-    pub output: ComputedOutput,
+    pub output: HookOutput,
     pub next_reminders: RemindersState,
 }
 
 /// Pure core: decide what to emit and how the reminders sidecar should
-/// transition. Returns `None` for events that are not intent boundaries.
-pub fn plan_reminder(inputs: ReminderInputs) -> Option<ReminderPlan> {
-    match inputs.event.as_str() {
-        "SessionStart" => Some(plan_session_start(inputs)),
-        "UserPromptSubmit" => Some(plan_user_prompt_submit(inputs)),
-        "Stop" => Some(plan_stop(inputs)),
-        _ => None,
+/// transition for the three intent-boundary events.
+pub fn plan_reminder(inputs: ReminderInputs) -> ReminderPlan {
+    match inputs.event {
+        IntentBoundaryEvent::SessionStart => plan_session_start(inputs),
+        IntentBoundaryEvent::UserPromptSubmit => plan_user_prompt_submit(inputs),
+        IntentBoundaryEvent::Stop => plan_stop(inputs),
     }
 }
 
@@ -160,9 +135,10 @@ fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
     ReminderPlan {
-        output: ComputedOutput {
-            additional_context: text,
-        },
+        output: HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::SessionStart,
+            text,
+        ),
         next_reminders: next,
     }
 }
@@ -189,9 +165,10 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
     ReminderPlan {
-        output: ComputedOutput {
-            additional_context: context,
-        },
+        output: HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::UserPromptSubmit,
+            context,
+        ),
         next_reminders: next,
     }
 }
@@ -205,9 +182,7 @@ fn plan_stop(inputs: ReminderInputs) -> ReminderPlan {
     // Stop does not mutate last_injected_at: a diff injection on the next
     // UserPromptSubmit should still see entries posted after the last prompt.
     ReminderPlan {
-        output: ComputedOutput {
-            additional_context: text.to_string(),
-        },
+        output: HookOutput::system_message(text),
         next_reminders: inputs.reminders,
     }
 }
@@ -215,31 +190,29 @@ fn plan_stop(inputs: ReminderInputs) -> ReminderPlan {
 pub fn handle(event: &str) -> Result<(), HookError> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
-    handle_with_input(event, &input, &mut io::stdout())
+    let output = handle_with_input(event, &input)?;
+    output.serialize_to(&mut io::stdout())
 }
 
-pub fn handle_with_input<W: Write + ?Sized>(
-    event: &str,
-    input: &str,
-    writer: &mut W,
-) -> Result<(), HookError> {
+pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookError> {
     let _ = HookEvent::read_from_str(input)?;
-    if !is_intent_boundary(event) {
-        return Ok(());
-    }
+    let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
+        return Ok(HookOutput::Silent);
+    };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let Some(session) = current_session_from_env(&sessions_dir)? else {
-        return Ok(());
+        return Ok(HookOutput::Silent);
     };
     let Some(plan) = compute_plan(event, &session, Utc::now())? else {
-        return Ok(());
+        return Ok(HookOutput::Silent);
     };
     write_reminders_state(&session.worktree_path, &session.id, &plan.next_reminders)?;
-    emit_output(event, &plan.output, writer)
+    debug_assert_eq!(intent_event, plan_event(&plan.output));
+    Ok(plan.output)
 }
 
 pub fn is_intent_boundary(event: &str) -> bool {
-    matches!(event, "SessionStart" | "UserPromptSubmit" | "Stop")
+    IntentBoundaryEvent::from_name(event).is_some()
 }
 
 fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> {
@@ -261,25 +234,24 @@ pub fn compute_plan(
     session: &Session,
     now: DateTime<Utc>,
 ) -> Result<Option<ReminderPlan>, HookError> {
-    if !is_intent_boundary(event) {
+    let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
         return Ok(None);
-    }
+    };
 
     let reminders = load_reminders_state(&session.worktree_path, &session.id)?;
 
-    let recent_entries = match event {
-        "SessionStart" => {
+    let recent_entries = match intent_event {
+        IntentBoundaryEvent::SessionStart => {
             let threshold = now - session_start_window();
             load_entries_since(&session.worktree_path, threshold)?
         }
-        "UserPromptSubmit" => {
+        IntentBoundaryEvent::UserPromptSubmit => {
             let since = reminders
                 .last_injected_at
                 .unwrap_or(now - session_start_window());
             load_entries_since(&session.worktree_path, since)?
         }
-        "Stop" => Vec::new(),
-        _ => Vec::new(),
+        IntentBoundaryEvent::Stop => Vec::new(),
     };
 
     let has_recent_own_status = has_recent_post_by(
@@ -289,25 +261,15 @@ pub fn compute_plan(
         redundancy_window(),
     )?;
 
-    Ok(plan_reminder(ReminderInputs {
-        event: event.to_string(),
+    Ok(Some(plan_reminder(ReminderInputs {
+        event: intent_event,
         now,
         self_session_id: session.id.clone(),
         display_name: session.display_name.clone(),
         recent_entries,
         reminders,
         has_recent_own_status,
-    }))
-}
-
-/// Back-compat helper: returns just the output computed by [`compute_plan`].
-/// Exposes the same surface that earlier tests relied on.
-pub fn compute_output(
-    event: &str,
-    session: &Session,
-    now: DateTime<Utc>,
-) -> Result<Option<ComputedOutput>, HookError> {
-    Ok(compute_plan(event, session, now)?.map(|plan| plan.output))
+    })))
 }
 
 fn filter_and_cap_latest(
@@ -358,28 +320,14 @@ fn format_entry_line(entry: &BoardEntry) -> String {
     )
 }
 
-fn emit_output<W: Write + ?Sized>(
-    event: &str,
-    output: &ComputedOutput,
-    writer: &mut W,
-) -> Result<(), HookError> {
-    let bytes = match event {
-        // Stop cannot use hookSpecificOutput per Claude Code's schema, so
-        // fall back to systemMessage. This surfaces the reminder to the
-        // user but does not inject it into the agent's context.
-        "Stop" => serde_json::to_vec(&SystemMessageOutput {
-            system_message: output.additional_context.clone(),
-        })?,
-        _ => serde_json::to_vec(&HookOutputJson {
-            hook_specific_output: HookSpecificOutput {
-                hook_event_name: event,
-                additional_context: output.additional_context.clone(),
-            },
-        })?,
-    };
-    writer.write_all(&bytes)?;
-    writer.write_all(b"\n")?;
-    Ok(())
+fn plan_event(output: &HookOutput) -> IntentBoundaryEvent {
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, .. } => *event,
+        HookOutput::SystemMessage(_) => IntentBoundaryEvent::Stop,
+        HookOutput::PreToolUsePermission { .. } | HookOutput::Silent => {
+            panic!("board reminder plans must emit intent-boundary output")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -445,22 +393,36 @@ mod tests {
         e
     }
 
+    fn additional_context(output: &HookOutput) -> &str {
+        match output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text,
+            other => panic!("expected additional context output, got {other:?}"),
+        }
+    }
+
+    fn system_message(output: &HookOutput) -> &str {
+        match output {
+            HookOutput::SystemMessage(text) => text,
+            other => panic!("expected system message output, got {other:?}"),
+        }
+    }
+
     // ---- pure plan_reminder tests (no IO) ----
 
     #[test]
     fn plan_user_prompt_submit_contains_phase_and_do_not_guard() {
         let plan = plan_reminder(ReminderInputs {
-            event: "UserPromptSubmit".into(),
+            event: IntentBoundaryEvent::UserPromptSubmit,
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
-        })
-        .unwrap();
-        assert!(plan.output.additional_context.contains("phase"));
-        assert!(plan.output.additional_context.contains("Do NOT"));
+        });
+        let text = additional_context(&plan.output);
+        assert!(text.contains("phase"));
+        assert!(text.contains("Do NOT"));
     }
 
     #[test]
@@ -469,52 +431,40 @@ mod tests {
         // `emit_output`), so the text is phrased for the user, not the
         // agent. Guard the key phrases that make the reminder actionable.
         let plan = plan_reminder(ReminderInputs {
-            event: "Stop".into(),
+            event: IntentBoundaryEvent::Stop,
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
-        })
-        .unwrap();
-        assert!(plan.output.additional_context.contains("Stop"));
-        assert!(plan.output.additional_context.contains("Board"));
-        assert!(plan.output.additional_context.contains("gwt board post"));
+        });
+        let text = system_message(&plan.output);
+        assert!(text.contains("Stop"));
+        assert!(text.contains("completed"));
+        assert!(text.contains("Board"));
+        assert!(text.contains("gwt board post"));
     }
 
     #[test]
-    fn plan_returns_none_for_non_intent_boundary_events() {
-        for event in ["PreToolUse", "PostToolUse", "Notification"] {
-            let plan = plan_reminder(ReminderInputs {
-                event: event.to_string(),
-                now: Utc::now(),
-                self_session_id: "sess-1".into(),
-                display_name: "Codex".into(),
-                recent_entries: vec![],
-                reminders: RemindersState::default(),
-                has_recent_own_status: false,
-            });
-            assert!(plan.is_none(), "event {event} must be silent");
-        }
+    fn non_intent_boundary_events_are_filtered_before_planning() {
+        assert!(!is_intent_boundary("PreToolUse"));
+        assert!(!is_intent_boundary("PostToolUse"));
+        assert!(!is_intent_boundary("Notification"));
     }
 
     #[test]
     fn plan_user_prompt_submit_short_reminder_when_redundant() {
         let plan = plan_reminder(ReminderInputs {
-            event: "UserPromptSubmit".into(),
+            event: IntentBoundaryEvent::UserPromptSubmit,
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: true,
-        })
-        .unwrap();
-        assert!(plan
-            .output
-            .additional_context
-            .contains("posted to the Board recently"));
+        });
+        assert!(additional_context(&plan.output).contains("posted to the Board recently"));
     }
 
     #[test]
@@ -539,43 +489,36 @@ mod tests {
             ),
         ];
         let plan = plan_reminder(ReminderInputs {
-            event: "SessionStart".into(),
+            event: IntentBoundaryEvent::SessionStart,
             now,
             self_session_id: "sess-1".into(),
             display_name: "Claude".into(),
             recent_entries: entries,
             reminders: RemindersState::default(),
             has_recent_own_status: false,
-        })
-        .unwrap();
-        let ctx = &plan.output.additional_context;
-        assert!(ctx.contains("investigating broken test"));
-        assert!(!ctx.contains("my own should be excluded"));
-        assert!(ctx.contains("sess-other"));
-        assert!(ctx.contains("feature/other"));
+        });
+        let text = additional_context(&plan.output);
+        assert!(text.contains("investigating broken test"));
+        assert!(!text.contains("my own should be excluded"));
+        assert!(text.contains("sess-other"));
+        assert!(text.contains("feature/other"));
         assert_eq!(plan.next_reminders.last_injected_at, Some(now));
     }
 
     #[test]
     fn plan_user_prompt_submit_empty_diff_still_emits_reminder() {
         let plan = plan_reminder(ReminderInputs {
-            event: "UserPromptSubmit".into(),
+            event: IntentBoundaryEvent::UserPromptSubmit,
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
-        })
-        .unwrap();
-        assert!(plan
-            .output
-            .additional_context
-            .contains("Board Post Reminder"));
-        assert!(!plan
-            .output
-            .additional_context
-            .contains("Recent Board updates"));
+        });
+        let text = additional_context(&plan.output);
+        assert!(text.contains("Board Post Reminder"));
+        assert!(!text.contains("Recent Board updates"));
     }
 
     #[test]
@@ -587,15 +530,14 @@ mod tests {
             ..Default::default()
         };
         let plan = plan_reminder(ReminderInputs {
-            event: "Stop".into(),
+            event: IntentBoundaryEvent::Stop,
             now,
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             recent_entries: vec![],
             reminders,
             has_recent_own_status: false,
-        })
-        .unwrap();
+        });
         assert_eq!(plan.next_reminders.last_injected_at, Some(before));
     }
 
@@ -653,9 +595,9 @@ mod tests {
         let plan = compute_plan("UserPromptSubmit", &session, now)
             .unwrap()
             .unwrap();
-        let ctx = &plan.output.additional_context;
-        assert!(!ctx.contains("old post before last inject"));
-        assert!(ctx.contains("brand new post"));
+        let text = additional_context(&plan.output);
+        assert!(!text.contains("old post before last inject"));
+        assert!(text.contains("brand new post"));
         assert_eq!(plan.next_reminders.last_injected_at, Some(now));
     }
 
@@ -684,17 +626,28 @@ mod tests {
         let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
             .unwrap()
             .unwrap();
-        assert!(plan
-            .output
-            .additional_context
-            .contains("posted to the Board recently"));
+        assert!(additional_context(&plan.output).contains("posted to the Board recently"));
+    }
+
+    #[test]
+    fn compute_plan_redundancy_shortens_stop_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = make_session(dir.path(), "feature/me", "Codex");
+        push_entry(
+            dir.path(),
+            "Codex",
+            BoardEntryKind::Status,
+            "recent self status",
+            "feature/me",
+            &session.id,
+        );
+
+        let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
+        assert!(system_message(&plan.output).contains("posted to the Board recently"));
     }
 
     #[test]
     fn compute_plan_is_isolated_per_session_sidecar() {
-        // Two sessions in the same repo must not corrupt each other's
-        // reminders sidecar: each session id maps to a distinct file,
-        // and `last_injected_at` advances independently.
         let dir = tempfile::tempdir().unwrap();
         let session_a = make_session(dir.path(), "feature/a", "Codex");
         let session_b = make_session(dir.path(), "feature/b", "Codex");
@@ -729,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_with_input_emits_hook_specific_output_envelope() {
+    fn user_prompt_submit_serializes_additional_context_envelope() {
         let dir = tempfile::tempdir().unwrap();
         let session = make_session(dir.path(), "feature/me", "Codex");
 
@@ -738,7 +691,7 @@ mod tests {
             .unwrap();
 
         let mut buf = Vec::new();
-        emit_output("UserPromptSubmit", &plan.output, &mut buf).unwrap();
+        plan.output.serialize_to(&mut buf).unwrap();
 
         let text = String::from_utf8(buf).unwrap();
         let json: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
@@ -752,112 +705,23 @@ mod tests {
             .contains("Board Post Reminder"));
     }
 
-    // ---- emit_output envelope shape per event (regression guard) ----
-
     #[test]
-    fn emit_output_stop_uses_system_message_envelope() {
-        // Claude Code's Stop hook schema rejects `hookSpecificOutput`. The
-        // only legal text-bearing field is `systemMessage`, which surfaces
-        // the reminder to the user (not to Claude's context).
-        let output = ComputedOutput {
-            additional_context: "stop reminder body".into(),
-        };
+    fn stop_serializes_system_message_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = make_session(dir.path(), "feature/me", "Codex");
+
+        let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
+
         let mut buf = Vec::new();
-        emit_output("Stop", &output, &mut buf).unwrap();
+        plan.output.serialize_to(&mut buf).unwrap();
 
         let text = String::from_utf8(buf).unwrap();
         let json: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
-        let obj = json.as_object().expect("Stop output must be a JSON object");
-        assert!(
-            !obj.contains_key("hookSpecificOutput"),
-            "Stop must not emit hookSpecificOutput (invalid per Claude Code schema), got: {json}"
-        );
         assert_eq!(
-            obj.get("systemMessage").and_then(|v| v.as_str()),
-            Some("stop reminder body"),
-            "Stop must emit the reminder as systemMessage, got: {json}"
-        );
-    }
-
-    #[test]
-    fn emit_output_session_start_uses_hook_specific_output() {
-        let output = ComputedOutput {
-            additional_context: "session start body".into(),
-        };
-        let mut buf = Vec::new();
-        emit_output("SessionStart", &output, &mut buf).unwrap();
-
-        let json: serde_json::Value =
-            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
-        assert_eq!(
-            json["hookSpecificOutput"]["hookEventName"],
-            serde_json::json!("SessionStart")
-        );
-        assert_eq!(
-            json["hookSpecificOutput"]["additionalContext"],
-            serde_json::json!("session start body")
-        );
-        assert!(
-            !json.as_object().unwrap().contains_key("systemMessage"),
-            "SessionStart must not emit systemMessage"
-        );
-    }
-
-    #[test]
-    fn emit_output_user_prompt_submit_uses_hook_specific_output() {
-        let output = ComputedOutput {
-            additional_context: "prompt body".into(),
-        };
-        let mut buf = Vec::new();
-        emit_output("UserPromptSubmit", &output, &mut buf).unwrap();
-
-        let json: serde_json::Value =
-            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
-        assert_eq!(
-            json["hookSpecificOutput"]["hookEventName"],
-            serde_json::json!("UserPromptSubmit")
-        );
-        assert_eq!(
-            json["hookSpecificOutput"]["additionalContext"],
-            serde_json::json!("prompt body")
-        );
-        assert!(
-            !json.as_object().unwrap().contains_key("systemMessage"),
-            "UserPromptSubmit must not emit systemMessage"
-        );
-    }
-
-    #[test]
-    fn emit_output_stop_carries_plan_stop_reminder_text() {
-        // Integration with the real plan_reminder output: feeding the Stop
-        // reminder text through emit_output must still land in systemMessage.
-        let plan = plan_reminder(ReminderInputs {
-            event: "Stop".into(),
-            now: Utc::now(),
-            self_session_id: "sess-1".into(),
-            display_name: "Codex".into(),
-            recent_entries: vec![],
-            reminders: RemindersState::default(),
-            has_recent_own_status: false,
-        })
-        .unwrap();
-
-        let mut buf = Vec::new();
-        emit_output("Stop", &plan.output, &mut buf).unwrap();
-
-        let json: serde_json::Value =
-            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
-        let sys = json
-            .get("systemMessage")
-            .and_then(|v| v.as_str())
-            .expect("Stop must carry reminder via systemMessage");
-        assert!(
-            sys.contains("Board"),
-            "systemMessage should include the Board reminder text, got: {sys}"
-        );
-        assert!(
-            !json.as_object().unwrap().contains_key("hookSpecificOutput"),
-            "Stop must never include hookSpecificOutput"
+            json,
+            serde_json::json!({
+                "systemMessage": system_message(&plan.output)
+            })
         );
     }
 }
