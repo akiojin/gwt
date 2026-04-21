@@ -96,17 +96,7 @@ enum UserEvent {
     },
     LaunchComplete {
         window_id: String,
-        result: Result<
-            (
-                ProcessLaunch,
-                String,
-                String,
-                String,
-                PathBuf,
-                gwt_agent::AgentId,
-            ),
-            String,
-        >,
+        result: Result<AgentLaunchReady, String>,
     },
     ShellLaunchComplete {
         window_id: String,
@@ -209,6 +199,17 @@ struct ProcessLaunch {
 }
 
 #[derive(Debug, Clone)]
+struct AgentLaunchReady {
+    process_launch: ProcessLaunch,
+    session_id: String,
+    branch_name: String,
+    display_name: String,
+    worktree_path: PathBuf,
+    agent_id: gwt_agent::AgentId,
+    linked_issue_number: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
 struct ActiveAgentSession {
     window_id: String,
     session_id: String,
@@ -217,6 +218,70 @@ struct ActiveAgentSession {
     display_name: String,
     worktree_path: PathBuf,
     tab_id: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct IssueBranchLinkStore {
+    #[serde(default)]
+    branches: HashMap<String, u64>,
+}
+
+fn record_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: u64,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    update_issue_branch_link_with_cache_dir(repo_path, branch_name, Some(issue_number), cache_dir)
+}
+
+fn clear_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    update_issue_branch_link_with_cache_dir(repo_path, branch_name, None, cache_dir)
+}
+
+fn update_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: Option<u64>,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Ok(());
+    }
+    let Some(repo_hash) = gwt::index_worker::detect_repo_hash(repo_path) else {
+        return Err("repository hash is unavailable for issue linkage".to_string());
+    };
+    let path = cache_dir
+        .join("issue-links")
+        .join(format!("{}.json", repo_hash.as_str()));
+
+    let mut store = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<IssueBranchLinkStore>(&bytes)
+            .map_err(|error| format!("failed to parse issue linkage store: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            IssueBranchLinkStore::default()
+        }
+        Err(error) => return Err(format!("failed to read issue linkage store: {error}")),
+    };
+    match issue_number {
+        Some(issue_number) => {
+            store.branches.insert(branch_name.to_string(), issue_number);
+        }
+        None => {
+            if store.branches.remove(branch_name).is_none() {
+                return Ok(());
+            }
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(&store)
+        .map_err(|error| format!("failed to serialize issue linkage store: {error}"))?;
+    gwt_github::cache::write_atomic(&path, &bytes)
+        .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +419,7 @@ struct AppRuntime {
     launch_wizard: Option<LaunchWizardSession>,
     active_agent_sessions: HashMap<String, ActiveAgentSession>,
     hook_forward_target: Option<HookForwardTarget>,
+    issue_link_cache_dir: PathBuf,
     /// Cached update state so late-connecting WebView clients get the toast.
     pending_update: Option<gwt_core::update::UpdateState>,
     /// Shared PTY writer registry published to the WebSocket fast-path.
@@ -422,6 +488,7 @@ impl AppRuntime {
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
             hook_forward_target: None,
+            issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers,
         };
@@ -1694,27 +1761,18 @@ impl AppRuntime {
     fn handle_launch_complete(
         &mut self,
         window_id: String,
-        result: Result<
-            (
-                ProcessLaunch,
-                String,
-                String,
-                String,
-                PathBuf,
-                gwt_agent::AgentId,
-            ),
-            String,
-        >,
+        result: Result<AgentLaunchReady, String>,
     ) -> Vec<OutboundEvent> {
         match result {
-            Ok((
+            Ok(AgentLaunchReady {
                 process_launch,
                 session_id,
                 branch_name,
                 display_name,
                 worktree_path,
                 agent_id,
-            )) => {
+                linked_issue_number,
+            }) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
                         id: window_id,
@@ -1738,26 +1796,48 @@ impl AppRuntime {
                 };
                 let geometry = window.geometry.clone();
 
-                self.active_agent_sessions.insert(
-                    window_id.clone(),
-                    ActiveAgentSession {
-                        window_id: window_id.clone(),
-                        session_id,
-                        agent_id: agent_id.to_string(),
-                        branch_name,
-                        display_name,
-                        worktree_path,
-                        tab_id: address.tab_id,
-                    },
-                );
-
-                let _ = self.persist();
-
                 match self.spawn_process_window(&window_id, geometry, process_launch) {
-                    Ok(event) => vec![
-                        self.workspace_state_broadcast(),
-                        OutboundEvent::broadcast(event),
-                    ],
+                    Ok(event) => {
+                        self.active_agent_sessions.insert(
+                            window_id.clone(),
+                            ActiveAgentSession {
+                                window_id: window_id.clone(),
+                                session_id,
+                                agent_id: agent_id.to_string(),
+                                branch_name: branch_name.clone(),
+                                display_name,
+                                worktree_path: worktree_path.clone(),
+                                tab_id: address.tab_id,
+                            },
+                        );
+                        let linkage_result = match linked_issue_number {
+                            Some(issue_number) => record_issue_branch_link_with_cache_dir(
+                                &worktree_path,
+                                &branch_name,
+                                issue_number,
+                                &self.issue_link_cache_dir,
+                            ),
+                            None => clear_issue_branch_link_with_cache_dir(
+                                &worktree_path,
+                                &branch_name,
+                                &self.issue_link_cache_dir,
+                            ),
+                        };
+                        if let Err(error) = linkage_result {
+                            tracing::warn!(
+                                worktree = %worktree_path.display(),
+                                branch = %branch_name,
+                                ?linked_issue_number,
+                                error = %error,
+                                "issue branch linkage update skipped after agent launch"
+                            );
+                        }
+                        let _ = self.persist();
+                        vec![
+                            self.workspace_state_broadcast(),
+                            OutboundEvent::broadcast(event),
+                        ]
+                    }
                     Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
                         id: window_id,
                         status: WindowProcessStatus::Error,
@@ -2156,35 +2236,22 @@ impl AppRuntime {
                 cwd: config.working_dir.clone(),
             };
 
-            Ok((
+            Ok(AgentLaunchReady {
                 process_launch,
                 session_id,
                 branch_name,
-                config.display_name,
+                display_name: config.display_name,
                 worktree_path,
                 agent_id,
-            ))
+                linked_issue_number: config.linked_issue_number,
+            })
         })();
 
         match result {
-            Ok((
-                process_launch,
-                session_id,
-                branch_name,
-                display_name,
-                worktree_path,
-                agent_id,
-            )) => {
+            Ok(launch) => {
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
-                    result: Ok((
-                        process_launch,
-                        session_id,
-                        branch_name,
-                        display_name,
-                        worktree_path,
-                        agent_id,
-                    )),
+                    result: Ok(launch),
                 });
             }
             Err(error) => {
@@ -2710,11 +2777,12 @@ mod tests {
         broadcast_runtime_hook_event, build_frontend_sync_events, build_shell_process_launch,
         close_window_from_workspace, combined_window_id, current_git_branch,
         docker_bundle_mounts_for_home, docker_bundle_override_content, hook_forward_authorized,
-        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        record_issue_branch_link_with_cache_dir, resolve_project_target,
         should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub, DispatchTarget,
-        LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent,
-        WindowAddress,
+        AgentLaunchReady, AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub,
+        DispatchTarget, LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime,
+        UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -3089,6 +3157,7 @@ mod tests {
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
             hook_forward_target: None,
+            issue_link_cache_dir: temp_root.join("cache"),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -3124,6 +3193,191 @@ mod tests {
                 Vec::new(),
             ),
         }
+    }
+
+    #[test]
+    fn issue_branch_linkage_store_records_and_merges_launch_links() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("cache");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+
+        record_issue_branch_link_with_cache_dir(&repo, "feature/old", 7, &cache_root)
+            .expect("record old link");
+        record_issue_branch_link_with_cache_dir(&repo, "feature/demo", 42, &cache_root)
+            .expect("record launch link");
+
+        let repo_hash = gwt::index_worker::detect_repo_hash(&repo).expect("repo hash");
+        let path = cache_root
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str()));
+        let raw = fs::read_to_string(path).expect("read issue links");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse issue links");
+
+        assert_eq!(value["branches"]["feature/old"], 7);
+        assert_eq!(value["branches"]["feature/demo"], 42);
+    }
+
+    fn issue_branch_link_path(repo_path: &Path, cache_root: &Path) -> PathBuf {
+        let repo_hash = gwt::index_worker::detect_repo_hash(repo_path).expect("repo hash");
+        cache_root
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str()))
+    }
+
+    fn successful_test_process_launch(cwd: &Path) -> ProcessLaunch {
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd".to_string(),
+            vec!["/C".to_string(), "exit".to_string(), "0".to_string()],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "sh".to_string(),
+            vec!["-c".to_string(), "exit 0".to_string()],
+        );
+
+        ProcessLaunch {
+            command,
+            args,
+            env: HashMap::new(),
+            cwd: Some(cwd.to_path_buf()),
+        }
+    }
+
+    fn missing_test_process_launch(cwd: &Path) -> ProcessLaunch {
+        ProcessLaunch {
+            command: "__gwt_missing_command_for_issue_link_test__".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: Some(cwd.to_path_buf()),
+        }
+    }
+
+    fn agent_launch_ready(
+        process_launch: ProcessLaunch,
+        session_id: &str,
+        branch_name: &str,
+        worktree_path: PathBuf,
+        linked_issue_number: Option<u64>,
+    ) -> AgentLaunchReady {
+        AgentLaunchReady {
+            process_launch,
+            session_id: session_id.to_string(),
+            branch_name: branch_name.to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path,
+            agent_id: AgentId::Codex,
+            linked_issue_number,
+        }
+    }
+
+    #[test]
+    fn agent_launch_completion_records_issue_link_only_after_spawn_success() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+        let cache_root = temp.path().join("cache");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Claude, WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.issue_link_cache_dir = cache_root.clone();
+        let link_path = issue_branch_link_path(&repo, &cache_root);
+        let failing_window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
+        let successful_window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 1);
+
+        let failed = runtime.handle_launch_complete(
+            failing_window_id,
+            Ok(agent_launch_ready(
+                missing_test_process_launch(&repo),
+                "session-failed",
+                "feature/demo",
+                repo.clone(),
+                Some(42),
+            )),
+        );
+        assert!(matches!(
+            failed[0].event,
+            BackendEvent::TerminalStatus { ref status, .. }
+                if *status == WindowProcessStatus::Error
+        ));
+        assert!(
+            !link_path.exists(),
+            "failed process spawn must not persist issue linkage"
+        );
+
+        let launched = runtime.handle_launch_complete(
+            successful_window_id,
+            Ok(agent_launch_ready(
+                successful_test_process_launch(&repo),
+                "session-ok",
+                "feature/demo",
+                repo.clone(),
+                Some(42),
+            )),
+        );
+        assert!(launched.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+        let raw = fs::read_to_string(link_path).expect("read issue link store");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse issue link store");
+        assert_eq!(value["branches"]["feature/demo"], 42);
+    }
+
+    #[test]
+    fn agent_launch_completion_clears_stale_issue_link_after_unlinked_success() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+        let cache_root = temp.path().join("cache");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.issue_link_cache_dir = cache_root.clone();
+        record_issue_branch_link_with_cache_dir(&repo, "feature/demo", 42, &cache_root)
+            .expect("seed stale issue link");
+        let link_path = issue_branch_link_path(&repo, &cache_root);
+        let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
+
+        let events = runtime.handle_launch_complete(
+            window_id,
+            Ok(agent_launch_ready(
+                successful_test_process_launch(&repo),
+                "session-unlinked",
+                "feature/demo",
+                repo.clone(),
+                None,
+            )),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+        let raw = fs::read_to_string(link_path).expect("read issue link store");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse issue link store");
+        let branches = value["branches"].as_object().expect("branches object");
+        assert!(
+            !branches.contains_key("feature/demo"),
+            "unlinked launch success must clear stale issue linkage"
+        );
     }
 
     fn sample_branch_entry(name: &str) -> BranchListEntry {
@@ -3722,18 +3976,17 @@ mod tests {
 
         let missing_window_launch = runtime.handle_launch_complete(
             "tab-1::missing".to_string(),
-            Ok((
+            Ok(agent_launch_ready(
                 ProcessLaunch {
                     command: "echo".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),
                     cwd: None,
                 },
-                "session-3".to_string(),
-                "feature/demo".to_string(),
-                "Codex".to_string(),
+                "session-3",
+                "feature/demo",
                 repo.clone(),
-                AgentId::Codex,
+                None,
             )),
         );
         assert!(matches!(
@@ -4474,18 +4727,17 @@ mod tests {
         );
         let project_missing = runtime.handle_launch_complete(
             project_missing_id.clone(),
-            Ok((
+            Ok(agent_launch_ready(
                 ProcessLaunch {
                     command: "echo".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),
                     cwd: None,
                 },
-                "session-1".to_string(),
-                "feature/demo".to_string(),
-                "Codex".to_string(),
+                "session-1",
+                "feature/demo",
                 repo.clone(),
-                AgentId::Codex,
+                None,
             )),
         );
         assert!(matches!(
@@ -4504,18 +4756,17 @@ mod tests {
         );
         let raw_missing = runtime.handle_launch_complete(
             raw_missing_id.clone(),
-            Ok((
+            Ok(agent_launch_ready(
                 ProcessLaunch {
                     command: "echo".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),
                     cwd: None,
                 },
-                "session-2".to_string(),
-                "feature/demo".to_string(),
-                "Codex".to_string(),
+                "session-2",
+                "feature/demo",
                 repo.clone(),
-                AgentId::Codex,
+                None,
             )),
         );
         assert!(matches!(
