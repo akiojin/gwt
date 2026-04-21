@@ -1,5 +1,59 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(docker): 生成した compose override は全 Docker compose 経路へ流す
+
+### 事象
+
+Issue #2035 のレビューで、`docker-compose.override.yml` 自体は生成していたが、
+初回 `docker compose up` と後続の `exec` / status 判定が base compose file
+だけを見ており、`/usr/local/bin/gwt` と `/usr/local/bin/gwtd` の bind mount が
+実際には有効になっていなかった。加えて、Docker が存在しない mount source を
+ディレクトリとして自動生成したケースを `exists()` で有効バイナリ扱いしていた。
+
+### 原因
+
+- Docker bundle setup が override path を返さず、launch 側も compose file を
+  単一パスで保持していたため、runtime setup で生成した override を
+  `up` / `restart` / `exec` / probe へ伝播できなかった。
+- Linux bundle cache の健全性判定が `exists()` ベースで、regular file かどうかと
+  中身があるかを確認していなかった。
+
+### 再発防止策
+
+1. runtime 中に compose override を生成する処理は、生成直後の `up` だけでなく
+   status / recreate / exec / command probe まで同じ compose file set
+   (`-f base -f override`) を使う contract test を追加する。
+2. bind mount source として再利用するキャッシュ判定は `exists()` を使わず、
+   regular file かつ非空であることを確認する。
+3. Docker が placeholder directory を作る失敗パスを RED test で固定し、
+   installer の再実行と override 生成の両方を確認してから完了とする。
+
+## 2026-04-21 — test(gwt-docker): Windows の fake docker は Git Bash に渡す script path と埋め込み path を揃える
+
+### 事象
+
+`cargo test -p gwt-docker` を Windows で実行すると、fake docker script を
+そのまま実行していた既存テストが `%1 is not a valid Win32 application`
+(`os error 193`) でまとまって失敗した。Git Bash wrapper を足した後も、
+`\\?\` 付きの Windows path をそのまま `/...` へ変換してしまい、
+`docker.sh: No such file or directory` で落ちた。
+
+### 原因
+
+- test harness が POSIX shell script を前提にしており、Windows 実行パスを
+  用意していなかった。
+- shell script 内に埋め込む log file path と wrapper から Git Bash へ渡す
+  script path の両方で、Windows path をそのまま使っていた。
+
+### 再発防止策
+
+1. Windows で shell-script based fake command を使う test harness では、
+   wrapper (`.cmd`) と Git Bash path 解決を helper に閉じ込める。
+2. shell script に埋め込む file path は helper 経由で Git Bash 互換
+   (`/c/...`) へ正規化し、`\\?\` prefix を落としてから使う。
+3. cross-platform にした test helper を触ったら、対象 crate の full test を
+   Windows でも 1 回回して `os error 193` 系の latent failure を残さない。
+
 ## 2026-04-21 — test: process-global HOME/USERPROFILE を読む assertion は並列テスト中に再読しない
 
 ### 事象

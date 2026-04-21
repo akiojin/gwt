@@ -8,7 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::docker_setup::{ensure_docker_gwt_binary_setup, install_launch_gwt_bin_env};
+use crate::docker_setup::{
+    docker_compose_override_path, ensure_docker_gwt_binary_setup, install_launch_gwt_bin_env,
+};
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
 use axum::{
     extract::{
@@ -5303,7 +5305,7 @@ mod tests {
         let plan = super::resolve_docker_launch_plan(&project, None).expect("launch plan");
         assert_eq!(plan.service, "app");
         assert_eq!(plan.container_cwd, "/workspace/dev");
-        assert_eq!(plan.compose_file, project.join("docker-compose.yml"));
+        assert_eq!(plan.compose_files, vec![project.join("docker-compose.yml")]);
 
         let (context, status) = super::detect_wizard_docker_context_and_status(&project);
         let context = context.expect("docker context");
@@ -5403,6 +5405,65 @@ mod tests {
             Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
             None => std::env::remove_var("GWT_DOCKER_BIN"),
         }
+    }
+
+    #[test]
+    fn finalized_docker_agent_launch_includes_generated_override_file() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        let compose_file = project.join("docker-compose.yml");
+        let override_file = project.join("docker-compose.override.yml");
+        fs::write(
+            &compose_file,
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
+        )
+        .expect("write compose");
+        fs::write(
+            &override_file,
+            "services:\n  app:\n    volumes:\n      - /host/gwt:/usr/local/bin/gwt:ro\n",
+        )
+        .expect("write override");
+
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
+            .runtime_target(LaunchRuntimeTarget::Docker)
+            .working_dir(project.clone())
+            .docker_service("app")
+            .build();
+        config.command = "claude".to_string();
+        config.args = vec!["--version".to_string()];
+
+        super::finalize_docker_agent_launch_config(&project, &mut config)
+            .expect("finalize docker launch");
+
+        assert_eq!(config.command, super::docker_binary_for_launch());
+        assert_eq!(
+            &config.args[..5],
+            vec![
+                "compose".to_string(),
+                "-f".to_string(),
+                compose_file.display().to_string(),
+                "-f".to_string(),
+                override_file.display().to_string(),
+            ]
+        );
+        assert_eq!(
+            config
+                .args
+                .iter()
+                .rev()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "--version".to_string(),
+                "claude".to_string(),
+                "app".to_string(),
+            ]
+        );
+        assert!(config.args.windows(3).any(|window| {
+            window[0] == "exec" && window[1] == "-w" && window[2] == "/workspace/app"
+        }));
     }
 
     #[test]
@@ -6261,9 +6322,17 @@ fn resolve_shell_launch_worktree(
 
 #[derive(Debug, Clone)]
 struct DockerLaunchPlan {
-    compose_file: PathBuf,
+    compose_files: Vec<PathBuf>,
     service: String,
     container_cwd: String,
+}
+
+impl DockerLaunchPlan {
+    fn include_compose_override(&mut self, override_file: PathBuf) {
+        if !self.compose_files.iter().any(|file| file == &override_file) {
+            self.compose_files.push(override_file);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6305,8 +6374,10 @@ fn apply_docker_runtime_to_launch_config(
         .unwrap_or_else(|| repo_path.to_path_buf());
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
+    let mut launch = launch;
+    let compose_override_file = ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
+    launch.include_compose_override(compose_override_file);
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
@@ -6337,14 +6408,8 @@ fn finalize_docker_agent_launch_config(
         args: config.args.clone(),
     };
 
-    let mut args = vec![
-        "compose".to_string(),
-        "-f".to_string(),
-        launch.compose_file.display().to_string(),
-        "exec".to_string(),
-        "-w".to_string(),
-        launch.container_cwd,
-    ];
+    let mut args = docker_compose_command_prefix(&launch);
+    args.extend(["exec".to_string(), "-w".to_string(), launch.container_cwd]);
     args.extend(docker_compose_exec_env_args(&config.env_vars));
     args.push(launch.service);
     args.push(runtime_program.executable);
@@ -6382,22 +6447,22 @@ fn build_shell_process_launch(
 
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
+    let mut launch = launch;
+    let compose_override_file = ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
+    launch.include_compose_override(compose_override_file);
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
     env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Docker)?;
     config.docker_service = Some(launch.service.clone());
     config.env_vars = env.clone();
 
-    let mut args = vec![
-        "compose".to_string(),
-        "-f".to_string(),
-        launch.compose_file.display().to_string(),
+    let mut args = docker_compose_command_prefix(&launch);
+    args.extend([
         "exec".to_string(),
         "-w".to_string(),
         launch.container_cwd.clone(),
-    ];
+    ]);
     args.extend(docker_compose_exec_env_args(&env));
     args.push(launch.service);
     args.push(shell_command);
@@ -6515,13 +6580,14 @@ fn maybe_inject_docker_sandbox_env(
         return Ok(());
     }
 
-    let is_root = gwt_docker::compose_service_user_is_root(&launch.compose_file, &launch.service)
-        .map_err(|err| {
-        format!(
-            "Failed to determine Docker user for service '{}': {err}",
-            launch.service
-        )
-    })?;
+    let is_root =
+        gwt_docker::compose_service_user_is_root_with_files(&launch.compose_files, &launch.service)
+            .map_err(|err| {
+                format!(
+                    "Failed to determine Docker user for service '{}': {err}",
+                    launch.service
+                )
+            })?;
     if is_root {
         config
             .env_vars
@@ -6601,8 +6667,8 @@ fn resolve_docker_package_runner(
     ];
 
     for candidate in candidates {
-        let output = gwt_docker::compose_service_exec_capture(
-            &launch.compose_file,
+        let output = gwt_docker::compose_service_exec_capture_with_files(
+            &launch.compose_files,
             &launch.service,
             Some(&launch.container_cwd),
             &candidate.probe_args(),
@@ -6633,8 +6699,8 @@ fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String>
 
 fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String, String> {
     for candidate in ["bash", "sh"] {
-        let available = gwt_docker::compose_service_has_command(
-            &launch.compose_file,
+        let available = gwt_docker::compose_service_has_command_with_files(
+            &launch.compose_files,
             &launch.service,
             candidate,
         )
@@ -6654,9 +6720,12 @@ fn ensure_docker_launch_command_ready(
     launch: &DockerLaunchPlan,
     command: &str,
 ) -> Result<(), String> {
-    let available =
-        gwt_docker::compose_service_has_command(&launch.compose_file, &launch.service, command)
-            .map_err(|err| err.to_string())?;
+    let available = gwt_docker::compose_service_has_command_with_files(
+        &launch.compose_files,
+        &launch.service,
+        command,
+    )
+    .map_err(|err| err.to_string())?;
     if available {
         Ok(())
     } else {
@@ -6689,21 +6758,22 @@ fn ensure_docker_launch_service_ready(
     launch: &DockerLaunchPlan,
     intent: gwt_agent::DockerLifecycleIntent,
 ) -> Result<(), String> {
-    let status = gwt_docker::compose_service_status(&launch.compose_file, &launch.service)
-        .map_err(|err| err.to_string())?;
+    let status =
+        gwt_docker::compose_service_status_with_files(&launch.compose_files, &launch.service)
+            .map_err(|err| err.to_string())?;
     match normalize_docker_launch_action(intent, status) {
         DockerLaunchServiceAction::Connect => Ok(()),
         DockerLaunchServiceAction::Start => {
-            gwt_docker::compose_up(&launch.compose_file, &launch.service)
+            gwt_docker::compose_up_with_files(&launch.compose_files, &launch.service)
                 .map_err(|err| err.to_string())?;
             Ok(())
         }
         DockerLaunchServiceAction::Restart => {
-            gwt_docker::compose_restart(&launch.compose_file, &launch.service)
+            gwt_docker::compose_restart_with_files(&launch.compose_files, &launch.service)
                 .map_err(|err| err.to_string())
         }
         DockerLaunchServiceAction::Recreate => {
-            gwt_docker::compose_up_force_recreate(&launch.compose_file, &launch.service)
+            gwt_docker::compose_up_force_recreate_with_files(&launch.compose_files, &launch.service)
                 .map_err(|err| err.to_string())
         }
     }
@@ -6794,7 +6864,7 @@ fn resolve_docker_launch_plan(
         })?;
 
     Ok(DockerLaunchPlan {
-        compose_file,
+        compose_files: docker_launch_compose_files(worktree, &compose_file),
         service: service.name.clone(),
         container_cwd,
     })
@@ -6802,6 +6872,24 @@ fn resolve_docker_launch_plan(
 
 fn docker_binary_for_launch() -> String {
     std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
+}
+
+fn docker_launch_compose_files(worktree: &Path, compose_file: &Path) -> Vec<PathBuf> {
+    let mut files = vec![compose_file.to_path_buf()];
+    let override_file = docker_compose_override_path(worktree);
+    if override_file.is_file() {
+        files.push(override_file);
+    }
+    files
+}
+
+fn docker_compose_command_prefix(launch: &DockerLaunchPlan) -> Vec<String> {
+    let mut args = vec!["compose".to_string()];
+    for compose_file in &launch.compose_files {
+        args.push("-f".to_string());
+        args.push(compose_file.display().to_string());
+    }
+    args
 }
 
 fn docker_compose_file_for_launch(
