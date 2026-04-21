@@ -343,13 +343,21 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+        time::Duration,
     };
 
-    use gwt::FrontendEvent;
+    use gwt::{FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
+    use reqwest::StatusCode as HttpStatusCode;
+    use tao::event_loop::EventLoopBuilder;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    use tao::platform::unix::EventLoopBuilderExtUnix;
+    #[cfg(target_os = "windows")]
+    use tao::platform::windows::EventLoopBuilderExtWindows;
+    use tokio::runtime::Runtime;
 
     use crate::{AppEventProxy, UserEvent};
 
-    use super::{handle_frontend_message, ClientHub, ServerState};
+    use super::{handle_frontend_message, ClientHub, EmbeddedServer, ServerState};
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
         let (proxy, events) = AppEventProxy::stub();
@@ -407,5 +415,80 @@ mod tests {
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
         ));
+    }
+
+    #[test]
+    fn embedded_server_exposes_health_and_authenticated_hook_live_routes() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
+        #[cfg(target_os = "windows")]
+        event_loop_builder.with_any_thread(true);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        event_loop_builder.with_any_thread(true);
+        let event_loop = event_loop_builder.build();
+        let proxy = event_loop.create_proxy();
+        let clients = ClientHub::default();
+        let pty_writers = Arc::new(RwLock::new(HashMap::new()));
+        let mut server = EmbeddedServer::start(&runtime, proxy, clients.clone(), pty_writers)
+            .expect("embedded server");
+        let hook = server.hook_forward_target();
+        let client = reqwest::blocking::Client::new();
+
+        assert_eq!(hook.url, format!("{}internal/hook-live", server.url()));
+
+        let health = client
+            .get(format!("{}healthz", server.url()))
+            .send()
+            .expect("health request");
+        assert_eq!(health.status(), HttpStatusCode::OK);
+        assert_eq!(health.text().expect("health body"), "ok");
+
+        let event = RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("PreToolUse".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: Some("agent-1".to_string()),
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/runtime".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: Some("Bash".to_string()),
+            message: None,
+            occurred_at: "2026-04-21T00:00:00Z".to_string(),
+        };
+
+        let unauthorized = client
+            .post(&hook.url)
+            .json(&event)
+            .send()
+            .expect("unauthorized hook request");
+        assert_eq!(unauthorized.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let wrong_token = client
+            .post(&hook.url)
+            .bearer_auth("wrong-token")
+            .json(&event)
+            .send()
+            .expect("wrong token hook request");
+        assert_eq!(wrong_token.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let mut browser = clients.register("browser".to_string());
+        let accepted = client
+            .post(&hook.url)
+            .bearer_auth(&hook.token)
+            .json(&event)
+            .send()
+            .expect("authorized hook request");
+        assert_eq!(accepted.status(), HttpStatusCode::NO_CONTENT);
+
+        let payload = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), browser.recv())
+                .await
+                .expect("runtime hook broadcast timeout")
+                .expect("runtime hook payload")
+        });
+        assert!(payload.contains("\"kind\":\"runtime_hook_event\""));
+        assert!(payload.contains("\"source_event\":\"PreToolUse\""));
+
+        server.shutdown();
     }
 }
