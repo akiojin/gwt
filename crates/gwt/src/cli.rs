@@ -21,11 +21,15 @@
 
 mod actions;
 mod board;
+mod build;
+mod discuss;
 mod env;
 pub mod hook;
 mod issue;
 mod issue_spec;
+mod plan;
 mod pr;
+mod skill_state_runtime;
 pub mod update;
 
 use std::{
@@ -243,6 +247,30 @@ pub enum CliCommand {
     InternalRunInstaller { rest: Vec<String> },
     /// `gwt __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
     InternalDaemonHook { name: String, rest: Vec<String> },
+    /// `gwt discuss <resolve|park|reject|clear-next-question> --proposal <label>`.
+    Discuss(DiscussAction),
+    /// `gwt plan <start|phase|complete|abort> --spec <n> [...]`.
+    Plan(SkillStateAction),
+    /// `gwt build <start|phase|complete|abort> --spec <n> [...]`.
+    Build(SkillStateAction),
+}
+
+/// Sub-action for `gwt discuss ...` (SPEC-1935 FR-014p).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscussAction {
+    Resolve { proposal: String },
+    Park { proposal: String },
+    Reject { proposal: String },
+    ClearNextQuestion { proposal: String },
+}
+
+/// Sub-action for `gwt plan ...` / `gwt build ...` (SPEC-1935 FR-014q/r).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillStateAction {
+    Start { spec: u64 },
+    Phase { spec: u64, label: String },
+    Complete { spec: u64 },
+    Abort { spec: u64, reason: Option<String> },
 }
 
 /// Errors surfaced by argv parsing.
@@ -279,7 +307,16 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
         .map(|s| {
             matches!(
                 s.as_str(),
-                "issue" | "pr" | "actions" | "board" | "hook" | "update" | "__internal"
+                "issue"
+                    | "pr"
+                    | "actions"
+                    | "board"
+                    | "hook"
+                    | "update"
+                    | "__internal"
+                    | "discuss"
+                    | "plan"
+                    | "build"
             )
         })
         .unwrap_or(false)
@@ -346,6 +383,83 @@ pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     })
 }
 
+/// Parse `gwt discuss <action> --proposal <label>` (SPEC-1935 FR-014p).
+pub fn parse_discuss_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
+    let proposal = parse_named_string(rest, "--proposal")?;
+    let action = match head.as_str() {
+        "resolve" => DiscussAction::Resolve { proposal },
+        "park" => DiscussAction::Park { proposal },
+        "reject" => DiscussAction::Reject { proposal },
+        "clear-next-question" => DiscussAction::ClearNextQuestion { proposal },
+        other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+    };
+    Ok(CliCommand::Discuss(action))
+}
+
+/// Parse `gwt plan <action> --spec <n> [...]` (SPEC-1935 FR-014q).
+pub fn parse_plan_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    parse_skill_state_args(args).map(CliCommand::Plan)
+}
+
+/// Parse `gwt build <action> --spec <n> [...]` (SPEC-1935 FR-014r).
+pub fn parse_build_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    parse_skill_state_args(args).map(CliCommand::Build)
+}
+
+fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction, CliParseError> {
+    let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
+    match head.as_str() {
+        "start" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            Ok(SkillStateAction::Start { spec })
+        }
+        "phase" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            let label = parse_named_string(rest, "--label")?;
+            Ok(SkillStateAction::Phase { spec, label })
+        }
+        "complete" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            Ok(SkillStateAction::Complete { spec })
+        }
+        "abort" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            let reason = parse_optional_named_string(rest, "--reason");
+            Ok(SkillStateAction::Abort { spec, reason })
+        }
+        other => Err(CliParseError::UnknownSubcommand(other.to_string())),
+    }
+}
+
+fn parse_named_string(args: &[String], flag: &'static str) -> Result<String, CliParseError> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            let value = args.get(i + 1).ok_or(CliParseError::MissingFlag(flag))?;
+            return Ok(value.clone());
+        }
+        i += 1;
+    }
+    Err(CliParseError::MissingFlag(flag))
+}
+
+fn parse_optional_named_string(args: &[String], flag: &'static str) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            return args.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_named_u64(args: &[String], flag: &'static str) -> Result<u64, CliParseError> {
+    let raw = parse_named_string(args, flag)?;
+    raw.parse().map_err(|_| CliParseError::InvalidNumber(raw))
+}
+
 /// Dispatch a parsed [`CliCommand`] against the given [`CliEnv`].
 ///
 /// We collect output into a String buffer first so the [`SpecOps`] borrow of
@@ -385,6 +499,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         cmd @ (CliCommand::BoardShow { .. } | CliCommand::BoardPost { .. }) => {
             board::run(env, cmd, &mut out)?
         }
+        CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
+        CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
+        CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
         }
@@ -1467,7 +1584,10 @@ pub fn run_daemon_hook<E: CliEnv>(
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{block_bash_policy, workflow_policy, HookKind, HookOutput};
+    use crate::cli::hook::{
+        block_bash_policy, skill_build_spec_stop_check, skill_discussion_stop_check,
+        skill_plan_spec_stop_check, workflow_policy, HookKind, HookOutput,
+    };
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1541,6 +1661,31 @@ pub fn run_daemon_hook<E: CliEnv>(
             Ok(()) => Ok(0),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
+        HookKind::SkillDiscussionStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillPlanSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_plan_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillBuildSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_build_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
     }
 }
 

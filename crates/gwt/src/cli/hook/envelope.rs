@@ -43,6 +43,12 @@ pub enum HookOutput {
     },
     SystemMessage(String),
     Silent,
+    /// Stop-hook block envelope: `{"decision":"block","reason":"<reason>"}`.
+    /// Claude Code / Codex interpret this as "do not stop; continue with
+    /// <reason> as the new instruction". exit code is 0.
+    StopBlock {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +87,12 @@ struct SystemMessagePayload<'a> {
     system_message: &'a str,
 }
 
+#[derive(Debug, Serialize)]
+struct StopBlockPayload<'a> {
+    decision: &'static str,
+    reason: &'a str,
+}
+
 impl HookOutput {
     pub fn pre_tool_use_permission(summary: impl Into<String>, detail: impl Into<String>) -> Self {
         let summary = summary.into();
@@ -111,6 +123,12 @@ impl HookOutput {
         Self::SystemMessage(text.into())
     }
 
+    pub fn stop_block(reason: impl Into<String>) -> Self {
+        Self::StopBlock {
+            reason: reason.into(),
+        }
+    }
+
     pub fn summary(&self) -> &str {
         match self {
             Self::PreToolUsePermission { summary, .. } => summary,
@@ -135,7 +153,10 @@ impl HookOutput {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::PreToolUsePermission { .. } => 2,
-            Self::HookSpecificAdditionalContext { .. } | Self::SystemMessage(_) | Self::Silent => 0,
+            Self::HookSpecificAdditionalContext { .. }
+            | Self::SystemMessage(_)
+            | Self::Silent
+            | Self::StopBlock { .. } => 0,
         }
     }
 
@@ -182,9 +203,33 @@ impl HookOutput {
                 writer.write_all(b"\n")?;
             }
             Self::Silent => {}
+            Self::StopBlock { reason } => {
+                let payload = StopBlockPayload {
+                    decision: "block",
+                    reason,
+                };
+                serde_json::to_writer(&mut *writer, &payload)?;
+                writer.write_all(b"\n")?;
+            }
         }
         Ok(())
     }
+}
+
+/// Extract `stop_hook_active` from a Stop hook's stdin JSON payload.
+///
+/// Returns `true` only when the input JSON is a valid object containing
+/// `stop_hook_active: true`. Any parse failure, missing key, or non-boolean
+/// value resolves to `false`. Callers should treat `true` as the Claude Code
+/// built-in loop guard: do not emit `StopBlock` when this flag is set.
+pub fn stop_hook_active_from(input: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return false;
+    };
+    value
+        .get("stop_hook_active")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -263,6 +308,47 @@ mod tests {
     fn silent_emits_no_stdout() {
         let text = serialize(&HookOutput::Silent);
         assert!(text.is_empty(), "silent output must not write stdout");
+    }
+
+    #[test]
+    fn stop_block_serializes_as_decision_block_envelope() {
+        let text = serialize(&HookOutput::stop_block("discussion is active"));
+        let json: Value = serde_json::from_str(text.trim()).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "decision": "block",
+                "reason": "discussion is active"
+            })
+        );
+        assert!(
+            json.get("hookSpecificOutput").is_none(),
+            "StopBlock envelope must not contain hookSpecificOutput"
+        );
+        assert!(
+            json.get("systemMessage").is_none(),
+            "StopBlock envelope must not contain systemMessage"
+        );
+    }
+
+    #[test]
+    fn stop_block_exit_code_is_zero() {
+        assert_eq!(HookOutput::stop_block("x").exit_code(), 0);
+    }
+
+    #[test]
+    fn stop_hook_active_from_reads_true_only_when_field_is_explicit_true() {
+        use super::stop_hook_active_from;
+        assert!(stop_hook_active_from(r#"{"stop_hook_active":true}"#));
+        assert!(!stop_hook_active_from(r#"{"stop_hook_active":false}"#));
+        assert!(!stop_hook_active_from(r#"{"stop_hook_active":"true"}"#));
+        assert!(!stop_hook_active_from(r#"{"session_id":"abc"}"#));
+        assert!(!stop_hook_active_from("{}"));
+        assert!(!stop_hook_active_from(""));
+        assert!(!stop_hook_active_from("not json"));
+        assert!(stop_hook_active_from(
+            r#"{"session_id":"abc","stop_hook_active":true}"#
+        ));
     }
 
     #[test]

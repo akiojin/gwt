@@ -14,6 +14,7 @@ pub mod process;
 mod release_contract;
 pub mod repo_hash;
 pub mod runtime;
+pub mod skill_state;
 pub mod update;
 pub mod worktree_hash;
 

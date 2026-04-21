@@ -28,6 +28,9 @@ const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
     " hook block-file-ops",
     " hook block-git-dir-override",
     " hook forward",
+    " hook skill-discussion-stop-check",
+    " hook skill-plan-spec-stop-check",
+    " hook skill-build-spec-stop-check",
 ];
 const CLAUDE_HOOK_COMMAND_TYPE: &str = "command";
 const MANAGED_EVENT_ORDER: &[&str] = &[
@@ -290,6 +293,9 @@ fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Val
             forward_hook(shell),
             coordination_hook("Stop", shell),
             board_reminder_hook("Stop", shell),
+            skill_stop_check_hook("skill-discussion-stop-check", shell),
+            skill_stop_check_hook("skill-plan-spec-stop-check", shell),
+            skill_stop_check_hook("skill-build-spec-stop-check", shell),
         ]),
     );
     hooks
@@ -341,6 +347,35 @@ fn forward_hook(shell: HookShell) -> Value {
             }
         ]
     })
+}
+
+/// Managed Stop-hook handler that lets a skill block the Stop event
+/// until the skill reports completion via its exit CLI
+/// (`gwt discuss|plan|build ...`). See SPEC-1935 FR-014n.
+fn skill_stop_check_hook(hook_name: &str, shell: HookShell) -> Value {
+    json!({
+        "matcher": "*",
+        "hooks": [
+            {
+                "command": skill_stop_check_hook_command(hook_name, shell),
+                "type": CLAUDE_HOOK_COMMAND_TYPE,
+            }
+        ]
+    })
+}
+
+fn skill_stop_check_hook_command(hook_name: &str, shell: HookShell) -> String {
+    let bin = gwt_hook_bin_path();
+    match shell {
+        HookShell::Posix => {
+            let bin_quoted = posix_shell_quote(&bin);
+            format!("{bin_quoted} hook {hook_name}")
+        }
+        HookShell::PowerShell => {
+            let bin_quoted = powershell_quote(&bin);
+            format!("powershell -NoProfile -Command \"& {{ & {bin_quoted} hook {hook_name} }}\"")
+        }
+    }
 }
 
 /// Environment variable that pins the absolute path of the gwt
@@ -563,6 +598,88 @@ mod tests {
                     .iter()
                     .all(|c| !c.contains(" hook board-reminder ")),
                 "board-reminder must NOT be registered on {event}; commands: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_stop_chain_includes_three_skill_check_handlers_after_board_reminder() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let stop_commands = commands_for_event(&value, "Stop");
+        let suffixes = [
+            " hook skill-discussion-stop-check",
+            " hook skill-plan-spec-stop-check",
+            " hook skill-build-spec-stop-check",
+        ];
+        for suffix in &suffixes {
+            let count = stop_commands.iter().filter(|c| c.contains(suffix)).count();
+            assert_eq!(
+                count, 1,
+                "Stop chain must include exactly one {suffix} entry; got {count}: {stop_commands:?}"
+            );
+        }
+        let board_reminder_pos = stop_commands
+            .iter()
+            .position(|c| c.contains(" hook board-reminder Stop"))
+            .expect("Stop chain must include board-reminder");
+        for suffix in &suffixes {
+            let position = stop_commands
+                .iter()
+                .position(|c| c.contains(suffix))
+                .expect("suffix present (checked above)");
+            assert!(
+                position > board_reminder_pos,
+                "{suffix} must appear after board-reminder; chain: {stop_commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_stop_chain_does_not_register_skill_checks_on_non_stop_events() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+        ] {
+            let commands = commands_for_event(&value, event);
+            for suffix in [
+                " hook skill-discussion-stop-check",
+                " hook skill-plan-spec-stop-check",
+                " hook skill-build-spec-stop-check",
+            ] {
+                assert!(
+                    commands.iter().all(|c| !c.contains(suffix)),
+                    "{suffix} must NOT be registered on {event}; commands: {commands:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn managed_stop_chain_does_not_register_short_lived_skill_handlers() {
+        // Regression guard for FR-014s: gwt-register-issue / gwt-fix-issue /
+        // gwt-issue-search / gwt-search must never have a Stop-check handler
+        // registered. We assert those hook names are not emitted anywhere.
+        let dir = tempfile::tempdir().unwrap();
+        generate_settings_local(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        for forbidden in [
+            " hook skill-register-issue-stop-check",
+            " hook skill-fix-issue-stop-check",
+            " hook skill-issue-search-stop-check",
+            " hook skill-search-stop-check",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "short-lived skill {forbidden} must not appear in managed hooks"
             );
         }
     }

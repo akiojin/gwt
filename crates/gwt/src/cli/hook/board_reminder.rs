@@ -324,7 +324,9 @@ fn plan_event(output: &HookOutput) -> IntentBoundaryEvent {
     match output {
         HookOutput::HookSpecificAdditionalContext { event, .. } => *event,
         HookOutput::SystemMessage(_) => IntentBoundaryEvent::Stop,
-        HookOutput::PreToolUsePermission { .. } | HookOutput::Silent => {
+        HookOutput::PreToolUsePermission { .. }
+        | HookOutput::Silent
+        | HookOutput::StopBlock { .. } => {
             panic!("board reminder plans must emit intent-boundary output")
         }
     }
