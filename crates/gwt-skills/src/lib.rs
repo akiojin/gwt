@@ -1133,6 +1133,55 @@ mod tests {
     }
 
     #[test]
+    fn gwt_arch_review_uses_scope_based_contract() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let command =
+            std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-arch-review.md"))
+                .unwrap_or_else(|err| panic!("failed to read gwt-arch-review command: {err}"));
+        assert!(
+            command.contains("/gwt:gwt-arch-review --scope repo")
+                && command.contains("/gwt:gwt-arch-review --scope changed --base"),
+            "expected gwt-arch-review command to document the scope-based CLI"
+        );
+        assert!(
+            command.contains("If omitted, prompt for the scope first."),
+            "expected gwt-arch-review command to mention prompt-on-omit behavior"
+        );
+        assert!(
+            !command.contains("/gwt:gwt-arch-review [path]"),
+            "unexpected legacy path-based gwt-arch-review usage"
+        );
+
+        for relative in [
+            ".claude/skills/gwt-arch-review/SKILL.md",
+            ".codex/skills/gwt-arch-review/SKILL.md",
+        ] {
+            let skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                skill.contains("`--scope repo`")
+                    && skill.contains("`--scope changed --base <ref>`"),
+                "expected scope-based CLI guidance in {relative}"
+            );
+            assert!(
+                skill.contains("Changed files since a base ref"),
+                "expected changed-files scope wording in {relative}"
+            );
+            assert!(
+                skill.contains("If the caller omits scope arguments")
+                    && skill.contains("Non-interactive runs must pass `--base`"),
+                "expected prompt and non-interactive base rules in {relative}"
+            );
+            assert!(
+                !skill.contains("Crate/package subset")
+                    && !skill.contains("specific crates, packages, or modules"),
+                "unexpected repository-specific subset guidance in {relative}"
+            );
+        }
+    }
+
+    #[test]
     fn gwt_spec_skills_require_user_language_outputs() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
 
