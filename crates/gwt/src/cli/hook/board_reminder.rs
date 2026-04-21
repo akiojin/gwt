@@ -1,10 +1,18 @@
 //! `gwt hook board-reminder <event>` — intent-boundary reminder and
 //! cross-agent Board read injection for SPEC-1974 Phase 8 (US-6 / US-7).
 //!
-//! This hook emits Claude Code / Codex `hookSpecificOutput.additionalContext`
-//! on the three intent-boundary events (`SessionStart`, `UserPromptSubmit`,
-//! `Stop`). It does nothing for `PreToolUse` / `PostToolUse`: tool-level
-//! events are not intent boundaries.
+//! This hook injects reminder text on the three intent-boundary events
+//! (`SessionStart`, `UserPromptSubmit`, `Stop`). It does nothing for
+//! `PreToolUse` / `PostToolUse`: tool-level events are not intent
+//! boundaries.
+//!
+//! Per Claude Code's hook schema, the envelope differs by event:
+//! `SessionStart` / `UserPromptSubmit` emit
+//! `hookSpecificOutput.additionalContext`, which is injected into the
+//! agent's context. `Stop` cannot use that envelope — Claude Code's Stop
+//! schema rejects `hookSpecificOutput` — so the Stop reminder is emitted
+//! as top-level `systemMessage`. That surfaces to the user as a warning
+//! notification but is **not** injected into the agent's context.
 //!
 //! The hook is read-only against the shared Board projection (it never
 //! writes Board entries itself) and persists only per-agent-session
@@ -61,18 +69,15 @@ const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
 (phase change, alternative chosen, concern raised) has emerged.\n";
 
-const STOP_REMINDER: &str = "# Board Post Reminder (Stop)\n\
-\n\
-You are about to stop or hand off. Before stopping, post to the shared Board:\n\
-- What you completed (reasoning-level summary, not a tool log).\n\
-- What phase comes next if work continues, or the handoff signal if you are done.\n\
-\n\
-Use: gwt board post --kind status --body '<summary>'\n";
+// Stop reminders are emitted as `systemMessage` (user-facing) because
+// Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
+// Phrasing is therefore user-oriented rather than agent-oriented.
+const STOP_REMINDER: &str = "Board Post Reminder (Stop): the agent is stopping. If you \
+expected a board status post, prompt the agent to run `gwt board post --kind status` \
+before handing off.";
 
-const STOP_REMINDER_SHORT: &str = "# Board Post Reminder (Stop)\n\
-\n\
-You posted to the Board recently. If the final status is unchanged, no additional \
-Board entry is required before stopping.\n";
+const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the agent posted to the \
+Board recently; no additional post is required before stopping.";
 
 const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
@@ -94,6 +99,12 @@ struct HookSpecificOutput<'a> {
 struct HookOutputJson<'a> {
     #[serde(rename = "hookSpecificOutput")]
     hook_specific_output: HookSpecificOutput<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SystemMessageOutput {
+    #[serde(rename = "systemMessage")]
+    system_message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -352,13 +363,20 @@ fn emit_output<W: Write + ?Sized>(
     output: &ComputedOutput,
     writer: &mut W,
 ) -> Result<(), HookError> {
-    let payload = HookOutputJson {
-        hook_specific_output: HookSpecificOutput {
-            hook_event_name: event,
-            additional_context: output.additional_context.clone(),
-        },
+    let bytes = match event {
+        // Stop cannot use hookSpecificOutput per Claude Code's schema, so
+        // fall back to systemMessage. This surfaces the reminder to the
+        // user but does not inject it into the agent's context.
+        "Stop" => serde_json::to_vec(&SystemMessageOutput {
+            system_message: output.additional_context.clone(),
+        })?,
+        _ => serde_json::to_vec(&HookOutputJson {
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: event,
+                additional_context: output.additional_context.clone(),
+            },
+        })?,
     };
-    let bytes = serde_json::to_vec(&payload)?;
     writer.write_all(&bytes)?;
     writer.write_all(b"\n")?;
     Ok(())
@@ -446,7 +464,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_stop_contains_completed_label() {
+    fn plan_stop_reminder_is_user_facing() {
+        // Stop reminders surface to the user via `systemMessage` (see
+        // `emit_output`), so the text is phrased for the user, not the
+        // agent. Guard the key phrases that make the reminder actionable.
         let plan = plan_reminder(ReminderInputs {
             event: "Stop".into(),
             now: Utc::now(),
@@ -458,7 +479,8 @@ mod tests {
         })
         .unwrap();
         assert!(plan.output.additional_context.contains("Stop"));
-        assert!(plan.output.additional_context.contains("completed"));
+        assert!(plan.output.additional_context.contains("Board"));
+        assert!(plan.output.additional_context.contains("gwt board post"));
     }
 
     #[test]
@@ -728,5 +750,114 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Board Post Reminder"));
+    }
+
+    // ---- emit_output envelope shape per event (regression guard) ----
+
+    #[test]
+    fn emit_output_stop_uses_system_message_envelope() {
+        // Claude Code's Stop hook schema rejects `hookSpecificOutput`. The
+        // only legal text-bearing field is `systemMessage`, which surfaces
+        // the reminder to the user (not to Claude's context).
+        let output = ComputedOutput {
+            additional_context: "stop reminder body".into(),
+        };
+        let mut buf = Vec::new();
+        emit_output("Stop", &output, &mut buf).unwrap();
+
+        let text = String::from_utf8(buf).unwrap();
+        let json: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        let obj = json.as_object().expect("Stop output must be a JSON object");
+        assert!(
+            !obj.contains_key("hookSpecificOutput"),
+            "Stop must not emit hookSpecificOutput (invalid per Claude Code schema), got: {json}"
+        );
+        assert_eq!(
+            obj.get("systemMessage").and_then(|v| v.as_str()),
+            Some("stop reminder body"),
+            "Stop must emit the reminder as systemMessage, got: {json}"
+        );
+    }
+
+    #[test]
+    fn emit_output_session_start_uses_hook_specific_output() {
+        let output = ComputedOutput {
+            additional_context: "session start body".into(),
+        };
+        let mut buf = Vec::new();
+        emit_output("SessionStart", &output, &mut buf).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
+        assert_eq!(
+            json["hookSpecificOutput"]["hookEventName"],
+            serde_json::json!("SessionStart")
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["additionalContext"],
+            serde_json::json!("session start body")
+        );
+        assert!(
+            !json.as_object().unwrap().contains_key("systemMessage"),
+            "SessionStart must not emit systemMessage"
+        );
+    }
+
+    #[test]
+    fn emit_output_user_prompt_submit_uses_hook_specific_output() {
+        let output = ComputedOutput {
+            additional_context: "prompt body".into(),
+        };
+        let mut buf = Vec::new();
+        emit_output("UserPromptSubmit", &output, &mut buf).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
+        assert_eq!(
+            json["hookSpecificOutput"]["hookEventName"],
+            serde_json::json!("UserPromptSubmit")
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["additionalContext"],
+            serde_json::json!("prompt body")
+        );
+        assert!(
+            !json.as_object().unwrap().contains_key("systemMessage"),
+            "UserPromptSubmit must not emit systemMessage"
+        );
+    }
+
+    #[test]
+    fn emit_output_stop_carries_plan_stop_reminder_text() {
+        // Integration with the real plan_reminder output: feeding the Stop
+        // reminder text through emit_output must still land in systemMessage.
+        let plan = plan_reminder(ReminderInputs {
+            event: "Stop".into(),
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        })
+        .unwrap();
+
+        let mut buf = Vec::new();
+        emit_output("Stop", &plan.output, &mut buf).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
+        let sys = json
+            .get("systemMessage")
+            .and_then(|v| v.as_str())
+            .expect("Stop must carry reminder via systemMessage");
+        assert!(
+            sys.contains("Board"),
+            "systemMessage should include the Board reminder text, got: {sys}"
+        );
+        assert!(
+            !json.as_object().unwrap().contains_key("hookSpecificOutput"),
+            "Stop must never include hookSpecificOutput"
+        );
     }
 }
