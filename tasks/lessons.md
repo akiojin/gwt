@@ -1,5 +1,34 @@
 # Lessons Learned
 
+## 2026-04-21 — fix(review): vt100 shrink crash は parser 再構築で回避しない
+
+### 事象
+
+`Pane::resize()` の release crash workaround として、narrow resize 時に
+新しい `vt100::Parser` を作って可視行だけを replay していた。
+その結果、review で 2 件の回帰が見つかった:
+
+- alternate screen (`CSI ?1049h`) 中に shrink すると、saved primary grid と
+  `MODE_ALTERNATE_SCREEN` が落ち、`CSI ?1049l` で shell buffer へ戻れない。
+- trailing wide glyph を plain text で replay し直すため、その行の SGR /
+  background 属性が default に戻る。
+
+### 原因
+
+- 根本原因は gwt 側ではなく `vt100::row::resize()` にあり、列 shrink 時に
+  wide glyph の continuation cell だけが落ちても leading cell を消していなかった。
+- 依存 crate の内部不整合を、可視画面の再構築で外から補正しようとしたため、
+  `vt100` が内部に持つ alternate grid、saved cursor、active attributes を
+  再現できなかった。
+
+### 再発防止策
+
+1. terminal emulator の内部 state bug は、まず依存側の state machine / data
+   structureを patch できないか確認し、可視画面の replay workaround を最終手段にする。
+2. resize workaround を入れる前に、alternate screen restore と truncated row
+   attribute preservation を回帰テストに含める。
+3. `vt100` の shrink 修正では `Row::truncate()` 相当の sanitization を使い、
+   orphan wide glyph だけを消して残る cell 属性は保持する。
 ## 2026-04-21 — fix(docker): gwt generated compose mount は user override と分離して所有する
 
 ### 事象
@@ -176,7 +205,6 @@ home と assertion 側で再読した `gwt_home()` が一致しなかった。`g
    env 変更に影響されない構造を検証する。
 3. env を実際に mutate するテストを追加する場合は、同じ process 内の path test と
    競合しないよう、共有 lock か再読しない assertion 形式を先に確認する。
-
 ## 2026-04-21 — fix(gui): Issue Bridge の SPEC 完了主張はコード実体で再検証する
 
 ### 事象
@@ -241,6 +269,56 @@ paragraph が続く場合、paragraph を積む前に pending list を flush し
 再発防止策: Optional なリンク値は `None = no-op` と短絡せず、既存 store の clear が必要かを
 必ず確認する。Markdown parser の flush 順序は、最終 flush だけでなく block type が切り替わる
 瞬間の順序も contract test に含める。
+
+## 2026-04-21 — fix: release latest のクラッシュは修正ブランチを develop / release ベースに載せてから確認する
+
+### 事象
+
+`bunx @akiojin/gwt@latest` が `v9.7.0` の Windows bundle を取得した直後、
+resize 後に `vt100-0.16.2/src/row.rs:89` の `clear_wide()` で
+`index out of bounds: the len is 82 but the index is 82` が発生した。
+`bugfix/crash` には wide glyph shrink 修正があったが、`origin/develop`
+の `v9.7.0` ベースでは `Pane::resize()` がまだ `Screen::set_size()` を直接呼んでいた。
+
+### 原因
+
+- 修正ブランチが古い develop から分岐したまま、release 対象の `origin/develop`
+  に統合されていなかった。
+- 手元の回帰テストは修正ブランチ上では通っていたが、`@latest` が取得する
+  release bundle のコードとの差分確認が不足していた。
+
+### 再発防止策
+
+1. release crash 修正では、対象 release version の `origin/develop` を取り込んだ
+   状態で同じ回帰テストを実行する。
+2. `@latest` で再現した問題は、`Cargo.toml` の version と `gwt.log` の起動
+   version を見て、実行中バイナリと作業ツリーの差分を先に確認する。
+3. wide glyph resize 回帰では、実報告の column boundary（今回なら 82 列）を
+   テスト名と fixture に固定する。
+
+## 2026-04-20 — fix: vt100 の列 shrink は trailing wide cell orphan を残さない形で扱う
+
+### 事象
+
+Windows で `gwt` 起動直後、PowerShell prompt に全角文字を含む行が terminal 右端付近にある状態で
+window fit / reconnect snapshot 後に `vt100` が panic した。
+panic は `vt100-0.16.2/src/row.rs` の `clear_wide()` で発生し、
+`len == index` の末尾外参照になっていた。
+
+### 原因
+
+- `vt100::Screen::set_size()` の列 shrink は内部的に row を短くするが、
+  右端で wide glyph の continuation cell が落ちると leading cell だけが残ることがある。
+- その invalid state のまま後続の erase/delete/snapshot 系の処理が走ると、
+  trailing continuation を前提にした `clear_wide()` が panic する。
+- gwt 側は resize をそのまま `set_size()` に委譲しており、wide glyph の末尾境界を補正していなかった。
+
+### 再発防止策
+
+1. terminal width を shrink するときは `vt100` 画面をそのまま縮めず、
+   右端ではみ出す wide glyph を落とした可視状態へ再構築してから新サイズを適用する。
+2. wide glyph 対応は renderer だけでなく resize / snapshot / reconnect 経路も同じ owner SPEC で管理する。
+3. 回帰テストでは「shrink 後の follow-up erase」と「snapshot 取得」の両方を固定する。
 
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
