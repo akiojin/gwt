@@ -293,5 +293,9 @@ mod tests {
                 && !html.contains("createNode(\"pre\", \"knowledge-section-body\", section.body)"),
             "expected knowledge bridge detail bodies to avoid plain preformatted Markdown output",
         );
+        assert!(
+            html.contains("flushList();\n          paragraph.push(line.trim());"),
+            "expected pending Markdown lists to flush before a following paragraph preserves source order",
+        );
     }
 }

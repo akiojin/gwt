@@ -195,6 +195,23 @@ fn record_issue_branch_link_with_cache_dir(
     issue_number: u64,
     cache_dir: &Path,
 ) -> Result<(), String> {
+    update_issue_branch_link_with_cache_dir(repo_path, branch_name, Some(issue_number), cache_dir)
+}
+
+fn clear_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    update_issue_branch_link_with_cache_dir(repo_path, branch_name, None, cache_dir)
+}
+
+fn update_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: Option<u64>,
+    cache_dir: &Path,
+) -> Result<(), String> {
     let branch_name = branch_name.trim();
     if branch_name.is_empty() {
         return Ok(());
@@ -214,7 +231,16 @@ fn record_issue_branch_link_with_cache_dir(
         }
         Err(error) => return Err(format!("failed to read issue linkage store: {error}")),
     };
-    store.branches.insert(branch_name.to_string(), issue_number);
+    match issue_number {
+        Some(issue_number) => {
+            store.branches.insert(branch_name.to_string(), issue_number);
+        }
+        None => {
+            if store.branches.remove(branch_name).is_none() {
+                return Ok(());
+            }
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&store)
         .map_err(|error| format!("failed to serialize issue linkage store: {error}"))?;
     gwt_github::cache::write_atomic(&path, &bytes)
@@ -1758,21 +1784,27 @@ impl AppRuntime {
                                 tab_id: address.tab_id,
                             },
                         );
-                        if let Some(issue_number) = linked_issue_number {
-                            if let Err(error) = record_issue_branch_link_with_cache_dir(
+                        let linkage_result = match linked_issue_number {
+                            Some(issue_number) => record_issue_branch_link_with_cache_dir(
                                 &worktree_path,
                                 &branch_name,
                                 issue_number,
                                 &self.issue_link_cache_dir,
-                            ) {
-                                tracing::warn!(
-                                    worktree = %worktree_path.display(),
-                                    branch = %branch_name,
-                                    issue_number,
-                                    error = %error,
-                                    "issue branch linkage update skipped after agent launch"
-                                );
-                            }
+                            ),
+                            None => clear_issue_branch_link_with_cache_dir(
+                                &worktree_path,
+                                &branch_name,
+                                &self.issue_link_cache_dir,
+                            ),
+                        };
+                        if let Err(error) = linkage_result {
+                            tracing::warn!(
+                                worktree = %worktree_path.display(),
+                                branch = %branch_name,
+                                ?linked_issue_number,
+                                error = %error,
+                                "issue branch linkage update skipped after agent launch"
+                            );
                         }
                         let _ = self.persist();
                         vec![
@@ -3269,6 +3301,53 @@ mod tests {
         let raw = fs::read_to_string(link_path).expect("read issue link store");
         let value: serde_json::Value = serde_json::from_str(&raw).expect("parse issue link store");
         assert_eq!(value["branches"]["feature/demo"], 42);
+    }
+
+    #[test]
+    fn agent_launch_completion_clears_stale_issue_link_after_unlinked_success() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let _origin = init_git_clone_with_origin(&repo);
+        let cache_root = temp.path().join("cache");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Claude],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.issue_link_cache_dir = cache_root.clone();
+        record_issue_branch_link_with_cache_dir(&repo, "feature/demo", 42, &cache_root)
+            .expect("seed stale issue link");
+        let link_path = issue_branch_link_path(&repo, &cache_root);
+        let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
+
+        let events = runtime.handle_launch_complete(
+            window_id,
+            Ok(agent_launch_ready(
+                successful_test_process_launch(&repo),
+                "session-unlinked",
+                "feature/demo",
+                repo.clone(),
+                None,
+            )),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Running,
+                ..
+            }
+        )));
+        let raw = fs::read_to_string(link_path).expect("read issue link store");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse issue link store");
+        let branches = value["branches"].as_object().expect("branches object");
+        assert!(
+            !branches.contains_key("feature/demo"),
+            "unlinked launch success must clear stale issue linkage"
+        );
     }
 
     fn sample_branch_entry(name: &str) -> BranchListEntry {
