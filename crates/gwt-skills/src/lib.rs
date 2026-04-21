@@ -509,6 +509,12 @@ mod tests {
             "missing gwt-build-spec skill dir"
         );
         assert!(
+            dirs.contains(&"gwt-arch-review"),
+            "missing gwt-arch-review skill dir"
+        );
+        assert!(dirs.contains(&"gwt-search"), "missing gwt-search skill dir");
+        assert!(dirs.contains(&"gwt-agent"), "missing gwt-agent skill dir");
+        assert!(
             dirs.contains(&"gwt-manage-pr"),
             "missing gwt-manage-pr skill dir"
         );
@@ -558,6 +564,18 @@ mod tests {
         assert!(
             files.contains(&"gwt-build-spec.md"),
             "missing gwt-build-spec.md command"
+        );
+        assert!(
+            files.contains(&"gwt-arch-review.md"),
+            "missing gwt-arch-review.md command"
+        );
+        assert!(
+            files.contains(&"gwt-search.md"),
+            "missing gwt-search.md command"
+        );
+        assert!(
+            files.contains(&"gwt-agent.md"),
+            "missing gwt-agent.md command"
         );
         assert!(
             files.contains(&"gwt-manage-pr.md"),
@@ -1137,6 +1155,9 @@ mod tests {
             "gwt-discussion",
             "gwt-plan-spec",
             "gwt-build-spec",
+            "gwt-arch-review",
+            "gwt-search",
+            "gwt-agent",
             "gwt-manage-pr",
         ] {
             assert!(
@@ -1155,6 +1176,102 @@ mod tests {
             assert!(
                 !agents.contains(retired),
                 "unexpected retired public documentation entry {retired}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_workflow_chain_uses_current_entrypoints() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        assert!(
+            agents.contains("gwt-register-issue / gwt-fix-issue"),
+            "expected AGENTS workflow to start from the current issue entrypoints"
+        );
+        assert!(
+            agents.contains("gwt-discussion → gwt-plan-spec → gwt-build-spec → gwt-manage-pr"),
+            "expected AGENTS workflow to document the current planning/build chain"
+        );
+        assert!(
+            agents.contains("gwt-arch-review"),
+            "expected AGENTS workflow to include gwt-arch-review feedback"
+        );
+        for retired in [
+            "gwt-design",
+            "gwt-plan ",
+            "gwt-build ",
+            "gwt-review",
+            "design → plan → build → review",
+        ] {
+            assert!(
+                !agents.contains(retired),
+                "unexpected retired workflow entry {retired}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-discussion/SKILL.md",
+            ".codex/skills/gwt-discussion/SKILL.md",
+            ".claude/skills/gwt-arch-review/SKILL.md",
+            ".codex/skills/gwt-arch-review/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("gwt-plan-spec") && content.contains("gwt-build-spec"),
+                "expected current plan/build chain guidance in {relative}"
+            );
+            assert!(
+                content.contains("gwt-discussion"),
+                "expected current discussion entrypoint guidance in {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_support_entrypoints_document_current_mode_contracts() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("Single skill for the full PR lifecycle")
+                    && content.contains("Auto-detect"),
+                "expected unified PR lifecycle contract in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-search/SKILL.md",
+            ".codex/skills/gwt-search/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("Mandatory preflight")
+                    && content.contains("--specs")
+                    && content.contains("--issues")
+                    && content.contains("--files"),
+                "expected unified search contract in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-agent/SKILL.md",
+            ".codex/skills/gwt-agent/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("Auto-detect the operation mode from arguments")
+                    && content.contains("broadcast"),
+                "expected agent auto-detect contract in {relative}"
             );
         }
     }
