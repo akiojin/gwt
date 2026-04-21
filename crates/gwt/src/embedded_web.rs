@@ -72,6 +72,49 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
+        let html = index_html();
+        let streaming_write = regex::Regex::new(
+            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\),\s*\{\s*stream:\s*true\s*\}\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+        let snapshot_write = regex::Regex::new(
+            r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function scheduleTerminalViewportRefresh(windowId)"),
+            "expected terminal viewport refresh scheduling helper",
+        );
+        assert!(
+            html.contains("viewportRefreshFrame"),
+            "expected terminal runtime to debounce viewport refreshes",
+        );
+        assert!(
+            streaming_write.is_match(html),
+            "expected streaming terminal output to refresh viewport after xterm parses it",
+        );
+        assert!(
+            snapshot_write.is_match(html),
+            "expected terminal snapshots to refresh viewport after xterm parses them",
+        );
+        assert!(
+            html.contains("cancelAnimationFrame(runtime.viewportRefreshFrame)"),
+            "expected pending terminal viewport refresh frames to be cancelled during cleanup",
+        );
+        assert!(
+            html.contains("if (runtime && runtime.viewportRefreshFrame !== null)"),
+            "expected terminal cleanup to guard non-terminal windows before cancelling refresh frames",
+        );
+        assert!(
+            html.contains("function canRefreshTerminalViewport(windowId)")
+                && html.contains("!workspaceWindowById(windowId)?.minimized"),
+            "expected terminal viewport refresh to skip minimized windows",
+        );
+    }
+
+    #[test]
     fn embedded_web_repo_browser_scroll_surfaces_block_canvas_pan_at_edges() {
         let html = index_html();
         let scroll_gate = regex::Regex::new(

@@ -1,10 +1,10 @@
-use gwt_agent::CustomCodingAgent;
+use gwt_agent::{CustomCodingAgent, PresetDefinition, PresetId};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
-    custom_agents_service::{ClaudeCodeOpenaiCompatInput, PresetDefinition},
     daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
@@ -138,12 +138,13 @@ pub enum FrontendEvent {
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
     ListCustomAgentPresets,
-    /// Settings > Custom Agents > Add > Claude Code (OpenAI-compat backend):
-    /// persist a new custom agent seeded from the preset payload. Response
-    /// is [`BackendEvent::CustomAgentSaved`] on success or
+    /// Settings > Custom Agents > Add from preset: persist a new custom agent
+    /// seeded from the selected preset payload. Response is
+    /// [`BackendEvent::CustomAgentSaved`] on success or
     /// [`BackendEvent::CustomAgentError`] on failure.
     AddCustomAgentFromPreset {
-        input: ClaudeCodeOpenaiCompatInput,
+        preset_id: PresetId,
+        payload: Value,
     },
     /// Settings > Custom Agents > Edit: replace an existing custom agent in
     /// place. The agent id must match an existing entry.
@@ -398,7 +399,7 @@ mod tests {
         ProfileEnvVarSource, ProfileEnvVarView, ProfileSnapshot, ProfileView,
     };
 
-    use super::{BackendEvent, BranchEntriesPhase};
+    use super::{BackendEvent, BranchEntriesPhase, FrontendEvent, PresetId};
 
     #[test]
     fn branch_entries_serializes_explicit_phase_contract() {
@@ -454,5 +455,32 @@ mod tests {
             value.pointer("/snapshot/profiles/0/disabled_env/0"),
             Some(&Value::String("SECRET".to_string()))
         );
+    }
+
+    #[test]
+    fn add_custom_agent_from_preset_deserializes_preset_id_and_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "add_custom_agent_from_preset",
+            "preset_id": "claude_code_openai_compat",
+            "payload": {
+                "id": "claude-code-openai",
+                "display_name": "Claude Code (OpenAI-compat)",
+                "base_url": "https://proxy.example.com",
+                "api_key": "sk-test-123",
+                "default_model": "openai/gpt-oss-20b"
+            }
+        }))
+        .expect("deserialize frontend event");
+
+        match event {
+            FrontendEvent::AddCustomAgentFromPreset { preset_id, payload } => {
+                assert_eq!(preset_id, PresetId::ClaudeCodeOpenaiCompat);
+                assert_eq!(
+                    payload.get("default_model"),
+                    Some(&Value::String("openai/gpt-oss-20b".to_string()))
+                );
+            }
+            other => panic!("expected AddCustomAgentFromPreset, got {other:?}"),
+        }
     }
 }
