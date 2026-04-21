@@ -107,6 +107,11 @@ mod tests {
             html.contains("if (runtime && runtime.viewportRefreshFrame !== null)"),
             "expected terminal cleanup to guard non-terminal windows before cancelling refresh frames",
         );
+        assert!(
+            html.contains("function canRefreshTerminalViewport(windowId)")
+                && html.contains("!workspaceWindowById(windowId)?.minimized"),
+            "expected terminal viewport refresh to skip minimized windows",
+        );
     }
 
     #[test]

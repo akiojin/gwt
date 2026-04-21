@@ -2481,10 +2481,14 @@
         });
       }
 
+      function canRefreshTerminalViewport(windowId) {
+        return !workspaceWindowById(windowId)?.minimized;
+      }
+
       function fitTerminal(windowId, persist = false) {
         const runtime = terminalMap.get(windowId);
         const element = windowMap.get(windowId);
-        if (!runtime || !element) {
+        if (!runtime || !element || !canRefreshTerminalViewport(windowId)) {
           return;
         }
         runtime.fitAddon.fit();
@@ -2496,11 +2500,18 @@
 
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
-        if (!runtime || runtime.viewportRefreshFrame !== null) {
+        if (
+          !runtime ||
+          runtime.viewportRefreshFrame !== null ||
+          !canRefreshTerminalViewport(windowId)
+        ) {
           return;
         }
         runtime.viewportRefreshFrame = requestAnimationFrame(() => {
           runtime.viewportRefreshFrame = null;
+          if (!canRefreshTerminalViewport(windowId)) {
+            return;
+          }
           fitTerminal(windowId, false);
         });
       }
