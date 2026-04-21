@@ -26,6 +26,7 @@ pub enum WindowSurface {
     Terminal,
     FileTree,
     Branches,
+    Profile,
     Mock,
 }
 
@@ -75,7 +76,7 @@ impl WindowPreset {
             Self::Branches => "Browse repository branches and launch agents",
             Self::Settings => "Placeholder settings surface",
             Self::Memo => "Placeholder notes surface",
-            Self::Profile => "Placeholder profile surface",
+            Self::Profile => "Manage environment profiles",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
             Self::Spec => "Placeholder SPEC surface",
@@ -108,9 +109,9 @@ impl WindowPreset {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::FileTree => WindowSurface::FileTree,
             Self::Branches => WindowSurface::Branches,
+            Self::Profile => WindowSurface::Profile,
             Self::Settings
             | Self::Memo
-            | Self::Profile
             | Self::Logs
             | Self::Issue
             | Self::Spec
@@ -128,6 +129,7 @@ impl WindowPreset {
             WindowSurface::Terminal => (720.0, 420.0),
             WindowSurface::FileTree => (420.0, 520.0),
             WindowSurface::Branches => (520.0, 420.0),
+            WindowSurface::Profile => (680.0, 520.0),
             WindowSurface::Mock => (420.0, 300.0),
         }
     }
@@ -388,7 +390,7 @@ mod tests {
         assert!(!WindowPreset::Issue.requires_process());
         assert_eq!(
             WindowPreset::Profile.subtitle(),
-            "Placeholder profile surface"
+            "Manage environment profiles"
         );
     }
 
@@ -471,9 +473,12 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::Branches);
                     assert!(!preset.requires_process());
                 }
+                WindowPreset::Profile => {
+                    assert_eq!(preset.surface(), WindowSurface::Profile);
+                    assert!(!preset.requires_process());
+                }
                 WindowPreset::Settings
                 | WindowPreset::Memo
-                | WindowPreset::Profile
                 | WindowPreset::Logs
                 | WindowPreset::Issue
                 | WindowPreset::Spec
