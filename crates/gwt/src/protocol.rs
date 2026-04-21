@@ -317,6 +317,11 @@ pub enum CustomAgentErrorCode {
 mod tests {
     use serde_json::Value;
 
+    use crate::branch_list::{
+        BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
+        BranchScope,
+    };
+
     use super::{BackendEvent, BranchEntriesPhase};
 
     #[test]
@@ -335,6 +340,48 @@ mod tests {
         assert_eq!(
             value.get("phase"),
             Some(&Value::String("inventory".to_string()))
+        );
+    }
+
+    #[test]
+    fn branch_entries_serializes_actual_merge_target_reference_contract() {
+        let event = BackendEvent::BranchEntries {
+            id: "branches-1".to_string(),
+            phase: BranchEntriesPhase::Hydrated,
+            entries: vec![BranchListEntry {
+                name: "feature/demo".to_string(),
+                scope: BranchScope::Local,
+                is_head: false,
+                upstream: Some("origin/feature/demo".to_string()),
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup_ready: true,
+                cleanup: BranchCleanupInfo {
+                    availability: BranchCleanupAvailability::Safe,
+                    execution_branch: Some("feature/demo".to_string()),
+                    merge_target: Some(gwt_git::MergeTargetRef {
+                        kind: gwt_git::MergeTarget::Develop,
+                        reference: "origin/develop".to_string(),
+                    }),
+                    upstream: Some("origin/feature/demo".to_string()),
+                    blocked_reason: None,
+                    risks: vec![BranchCleanupRisk::RemoteTracking],
+                },
+            }],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize branch entries");
+        let cleanup = &value["entries"][0]["cleanup"]["merge_target"];
+        assert_eq!(
+            cleanup["kind"],
+            Value::String("develop".to_string()),
+            "expected merge target kind to remain machine-readable",
+        );
+        assert_eq!(
+            cleanup["reference"],
+            Value::String("origin/develop".to_string()),
+            "expected branch entries payload to expose the actual merge target ref",
         );
     }
 

@@ -20,6 +20,7 @@ pub fn is_protected_branch(name: &str) -> bool {
 
 /// Where a cleanable branch was determined to be merged into (FR-018a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MergeTarget {
     /// Branch is merged into `main` / `master`.
     Main,
@@ -27,6 +28,21 @@ pub enum MergeTarget {
     Develop,
     /// Branch's upstream tracking ref is `[gone]`.
     Gone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeTargetRef {
+    pub kind: MergeTarget,
+    pub reference: String,
+}
+
+impl MergeTargetRef {
+    pub fn new(kind: MergeTarget, reference: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reference: reference.into(),
+        }
+    }
 }
 
 impl MergeTarget {
@@ -80,14 +96,14 @@ pub fn detect_cleanable_target(
     branch: &str,
     bases: &[(&str, MergeTarget)],
     gone_branches: &HashSet<String>,
-) -> Result<Option<MergeTarget>> {
+) -> Result<Option<MergeTargetRef>> {
     for (base, target) in bases {
         if is_branch_merged_into(repo_path, branch, base)? {
-            return Ok(Some(*target));
+            return Ok(Some(MergeTargetRef::new(*target, *base)));
         }
     }
     if gone_branches.contains(branch) {
-        return Ok(Some(MergeTarget::Gone));
+        return Ok(Some(MergeTargetRef::new(MergeTarget::Gone, "")));
     }
     Ok(None)
 }
@@ -580,7 +596,7 @@ mod tests {
         let gone = HashSet::new();
         assert_eq!(
             detect_cleanable_target(repo, "feature/d", &bases, &gone).unwrap(),
-            Some(MergeTarget::Develop)
+            Some(MergeTargetRef::new(MergeTarget::Develop, "develop"))
         );
     }
 
@@ -613,7 +629,7 @@ mod tests {
         gone.insert("feature/abandoned".to_string());
         assert_eq!(
             detect_cleanable_target(repo, "feature/abandoned", &bases, &gone).unwrap(),
-            Some(MergeTarget::Gone)
+            Some(MergeTargetRef::new(MergeTarget::Gone, ""))
         );
     }
 

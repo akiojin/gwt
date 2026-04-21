@@ -2601,16 +2601,13 @@
       }
 
       function cleanupMergeTargetText(target) {
-        switch (target) {
-          case "main":
-            return "merged to main";
-          case "develop":
-            return "merged to develop";
-          case "gone":
-            return "upstream is gone";
-          default:
-            return "";
+        if (!target) {
+          return "";
         }
+        if (target.kind === "gone") {
+            return "upstream is gone";
+        }
+        return target.reference ? `merged to ${target.reference}` : "";
       }
 
       function branchLoadingNoticeText(state) {

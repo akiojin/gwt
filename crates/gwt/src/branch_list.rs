@@ -36,7 +36,7 @@ pub enum BranchCleanupRisk {
 pub struct BranchCleanupInfo {
     pub availability: BranchCleanupAvailability,
     pub execution_branch: Option<String>,
-    pub merge_target: Option<gwt_git::MergeTarget>,
+    pub merge_target: Option<gwt_git::MergeTargetRef>,
     pub upstream: Option<String>,
     pub blocked_reason: Option<BranchCleanupBlockedReason>,
     pub risks: Vec<BranchCleanupRisk>,
@@ -113,17 +113,17 @@ fn build_cleanup_targets(
     repo_path: &Path,
     entries: &[BranchListEntry],
     gone_branches: &HashSet<String>,
-) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTarget>>> {
-    let cleanup_bases = [
-        ("main", gwt_git::MergeTarget::Main),
-        ("master", gwt_git::MergeTarget::Main),
-        ("develop", gwt_git::MergeTarget::Develop),
-    ];
+) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTargetRef>>> {
     let mut cleanup_targets = HashMap::new();
     for branch in entries
         .iter()
         .filter(|branch| branch.scope == BranchScope::Local)
     {
+        let cleanup_bases = cleanup_base_candidates(branch);
+        let cleanup_bases: Vec<(&str, gwt_git::MergeTarget)> = cleanup_bases
+            .iter()
+            .map(|(reference, target)| (reference.as_str(), *target))
+            .collect();
         let target = gwt_git::detect_cleanable_target(
             repo_path,
             &branch.name,
@@ -134,6 +134,65 @@ fn build_cleanup_targets(
         cleanup_targets.insert(branch.name.clone(), target);
     }
     Ok(cleanup_targets)
+}
+
+fn cleanup_base_candidates(branch: &BranchListEntry) -> Vec<(String, gwt_git::MergeTarget)> {
+    let Some(upstream) = branch.upstream.as_deref() else {
+        return Vec::new();
+    };
+    let Some((remote, _)) = upstream.split_once('/') else {
+        return Vec::new();
+    };
+
+    let mut bases = Vec::new();
+    push_cleanup_base(
+        &mut bases,
+        format!("{remote}/develop"),
+        gwt_git::MergeTarget::Develop,
+    );
+    push_cleanup_base(
+        &mut bases,
+        format!("{remote}/main"),
+        gwt_git::MergeTarget::Main,
+    );
+    push_cleanup_base(
+        &mut bases,
+        format!("{remote}/master"),
+        gwt_git::MergeTarget::Main,
+    );
+
+    if remote != "origin" {
+        push_cleanup_base(
+            &mut bases,
+            "origin/develop".to_string(),
+            gwt_git::MergeTarget::Develop,
+        );
+        push_cleanup_base(
+            &mut bases,
+            "origin/main".to_string(),
+            gwt_git::MergeTarget::Main,
+        );
+        push_cleanup_base(
+            &mut bases,
+            "origin/master".to_string(),
+            gwt_git::MergeTarget::Main,
+        );
+    }
+
+    bases
+}
+
+fn push_cleanup_base(
+    bases: &mut Vec<(String, gwt_git::MergeTarget)>,
+    reference: String,
+    target: gwt_git::MergeTarget,
+) {
+    if bases.iter().any(|(existing_reference, existing_target)| {
+        existing_reference == &reference && *existing_target == target
+    }) {
+        return;
+    }
+    bases.push((reference, target));
 }
 
 fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry> {
@@ -163,7 +222,7 @@ fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry
 fn hydrate_branch_entries(
     entries: Vec<BranchListEntry>,
     active_session_branches: &HashSet<String>,
-    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTarget>>,
+    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
 ) -> Vec<BranchListEntry> {
     let current_head_branch = entries
         .iter()
@@ -198,7 +257,7 @@ fn build_cleanup_info(
     local_upstreams: &HashMap<String, Option<String>>,
     current_head_branch: Option<&str>,
     active_session_branches: &HashSet<String>,
-    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTarget>>,
+    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
 ) -> BranchCleanupInfo {
     let execution_branch = cleanup_execution_branch(branch, local_upstreams);
     let Some(execution_branch_name) = execution_branch.as_deref() else {
@@ -408,7 +467,10 @@ mod tests {
         }];
         let cleanup_targets = HashMap::from([(
             String::from("feature/demo"),
-            Some(gwt_git::MergeTarget::Develop),
+            Some(gwt_git::MergeTargetRef::new(
+                gwt_git::MergeTarget::Develop,
+                "origin/develop",
+            )),
         )]);
 
         let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets);
@@ -417,6 +479,14 @@ mod tests {
         assert_eq!(
             hydrated[0].cleanup.availability,
             BranchCleanupAvailability::Safe
+        );
+        assert_eq!(
+            hydrated[0]
+                .cleanup
+                .merge_target
+                .as_ref()
+                .map(|target| target.reference.as_str()),
+            Some("origin/develop")
         );
     }
 }

@@ -403,6 +403,14 @@ mod tests {
             html.contains("branch_cleanup_result"),
             "expected branch cleanup result handler in embedded html",
         );
+        assert!(
+            html.contains("target.reference"),
+            "expected branch cleanup copy to render the actual merge target ref from the wire payload",
+        );
+        assert!(
+            !html.contains("merged to main") && !html.contains("merged to develop"),
+            "expected cleanup copy to stop collapsing merge targets into abstract labels",
+        );
     }
 
     #[test]
