@@ -2,10 +2,11 @@
 //! cross-agent Board read injection for SPEC-1974 Phase 8 (US-6 / US-7).
 //!
 //! SessionStart and UserPromptSubmit emit Claude Code / Codex
-//! `hookSpecificOutput.additionalContext`. Stop emits `systemMessage`
-//! because Claude Code rejects `hookSpecificOutput` on Stop.
-//! PreToolUse / PostToolUse remain silent: tool-level events are not
-//! intent boundaries.
+//! `hookSpecificOutput.additionalContext`, which is injected into the
+//! agent's context. `Stop` emits top-level `systemMessage` because
+//! Claude Code rejects `hookSpecificOutput` on Stop, so that reminder is
+//! user-facing rather than agent-injected. PreToolUse / PostToolUse
+//! remain silent: tool-level events are not intent boundaries.
 //!
 //! Event to envelope mapping:
 //!
@@ -69,18 +70,15 @@ const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
 (phase change, alternative chosen, concern raised) has emerged.\n";
 
-const STOP_REMINDER: &str = "# Board Post Reminder (Stop)\n\
-\n\
-You are about to stop or hand off. Before stopping, post to the shared Board:\n\
-- What you completed (reasoning-level summary, not a tool log).\n\
-- What phase comes next if work continues, or the handoff signal if you are done.\n\
-\n\
-Use: gwt board post --kind status --body '<summary>'\n";
+// Stop reminders are emitted as `systemMessage` (user-facing) because
+// Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
+// Phrasing is therefore user-oriented rather than agent-oriented.
+const STOP_REMINDER: &str = "Board Post Reminder (Stop): the agent is stopping. If you \
+expect a final handoff, prompt the agent to post what it completed to the shared Board \
+with `gwt board post --kind status` before handing off.";
 
-const STOP_REMINDER_SHORT: &str = "# Board Post Reminder (Stop)\n\
-\n\
-You posted to the Board recently. If the final status is unchanged, no additional \
-Board entry is required before stopping.\n";
+const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the agent posted to the \
+Board recently; no additional completed-status post is required before stopping.";
 
 const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
@@ -428,7 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_stop_contains_completed_label() {
+    fn plan_stop_reminder_is_user_facing() {
+        // Stop reminders surface to the user via `systemMessage` (see
+        // `emit_output`), so the text is phrased for the user, not the
+        // agent. Guard the key phrases that make the reminder actionable.
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::Stop,
             now: Utc::now(),
@@ -441,6 +442,8 @@ mod tests {
         let text = system_message(&plan.output);
         assert!(text.contains("Stop"));
         assert!(text.contains("completed"));
+        assert!(text.contains("Board"));
+        assert!(text.contains("gwt board post"));
     }
 
     #[test]

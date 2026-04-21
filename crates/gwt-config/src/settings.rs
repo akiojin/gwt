@@ -60,9 +60,14 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Build the global config file path for a known home directory.
+    pub fn global_config_path_for_home(home: &Path) -> PathBuf {
+        home.join(".gwt").join("config.toml")
+    }
+
     /// Return the global config file path: `~/.gwt/config.toml`.
     pub fn global_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| home.join(".gwt").join("config.toml"))
+        dirs::home_dir().map(|home| Self::global_config_path_for_home(&home))
     }
 
     /// Load settings from `~/.gwt/config.toml`, falling back to defaults.
@@ -139,6 +144,16 @@ mod tests {
         assert!(s.protected_branches.contains(&"main".to_string()));
         assert!(!s.debug);
         assert!(!s.profiling);
+    }
+
+    #[test]
+    fn global_config_path_for_home_uses_canonical_layout() {
+        let home = PathBuf::from("home-dir");
+
+        assert_eq!(
+            Settings::global_config_path_for_home(&home),
+            home.join(".gwt").join("config.toml")
+        );
     }
 
     #[test]

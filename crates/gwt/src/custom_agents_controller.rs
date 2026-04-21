@@ -15,11 +15,24 @@ impl CustomAgentsController {
         }
     }
 
+    pub(crate) fn supports(event: &FrontendEvent) -> bool {
+        matches!(
+            event,
+            FrontendEvent::ListCustomAgents
+                | FrontendEvent::ListCustomAgentPresets
+                | FrontendEvent::AddCustomAgentFromPreset { .. }
+                | FrontendEvent::UpdateCustomAgent { .. }
+                | FrontendEvent::DeleteCustomAgent { .. }
+                | FrontendEvent::TestBackendConnection { .. }
+        )
+    }
+
     pub(crate) fn handle_event(
         &self,
         client_id: ClientId,
         event: FrontendEvent,
     ) -> Vec<OutboundEvent> {
+        debug_assert!(Self::supports(&event));
         match event {
             FrontendEvent::ListCustomAgents => {
                 vec![self.reply(client_id, gwt::custom_agents_dispatch::list_event())]

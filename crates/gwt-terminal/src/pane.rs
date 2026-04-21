@@ -33,6 +33,10 @@ pub struct Pane {
     line_buf: String,
 }
 
+fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
+    parser.screen_mut().set_size(rows, cols);
+}
+
 impl Pane {
     /// Create a new pane by spawning a PTY process.
     pub fn new(
@@ -158,7 +162,7 @@ impl Pane {
     /// Resize the pane (PTY + vt100 parser).
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), TerminalError> {
         self.pty.resize(cols, rows)?;
-        self.parser.screen_mut().set_size(rows, cols);
+        resize_parser_preserving_state(&mut self.parser, rows, cols);
         Ok(())
     }
 
@@ -178,21 +182,28 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::test_util::{lock_pty_test, read_with_timeout};
+    use crate::test_util::{
+        answer_cursor_position_query, echo_command, lock_pty_test, read_until_contains,
+        read_with_timeout, sleep_command, stdin_echo_command, success_command, TestCommand,
+    };
 
-    #[test]
-    fn test_pane_creation() {
-        let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-1".to_string(),
-            "/bin/echo".to_string(),
-            vec!["hello".to_string()],
+    fn test_pane(id: &str, command: TestCommand) -> Pane {
+        Pane::new(
+            id.to_string(),
+            command.command,
+            command.args,
             80,
             24,
             HashMap::new(),
             None,
         )
-        .expect("Pane creation failed");
+        .expect("Pane creation failed")
+    }
+
+    #[test]
+    fn test_pane_creation() {
+        let _pty_guard = lock_pty_test();
+        let pane = test_pane("test-1", echo_command("hello"));
 
         assert_eq!(pane.id(), "test-1");
         assert_eq!(pane.status(), &PaneStatus::Running);
@@ -202,16 +213,7 @@ mod tests {
     #[test]
     fn test_process_bytes_updates_screen() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-2".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-2", sleep_command("60"));
 
         // Feed some bytes through the vt100 parser
         pane.process_bytes(b"hello world\r\n");
@@ -229,16 +231,8 @@ mod tests {
     #[test]
     fn test_pane_read_output_through_vt100() {
         let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-3".to_string(),
-            "/bin/echo".to_string(),
-            vec!["vt100-test".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let pane = test_pane("test-3", echo_command("vt100-test"));
+        answer_cursor_position_query(pane.pty());
 
         let reader = pane.reader().expect("reader failed");
         let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
@@ -252,20 +246,13 @@ mod tests {
     #[test]
     fn test_pane_write_input() {
         let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-4".to_string(),
-            "/bin/cat".to_string(),
-            vec![],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let pane = test_pane("test-4", stdin_echo_command());
+        answer_cursor_position_query(pane.pty());
 
         let reader = pane.reader().expect("reader failed");
         pane.write_input(b"pane-input\n").expect("write failed");
-        let output = read_with_timeout(reader, Duration::from_secs(5)).expect("read failed");
+        let output =
+            read_until_contains(reader, Duration::from_secs(5), "pane-input").expect("read failed");
         let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("pane-input"),
@@ -276,16 +263,7 @@ mod tests {
     #[test]
     fn test_pane_resize() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-5".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-5", sleep_command("60"));
 
         pane.resize(120, 48).expect("resize should succeed");
 
@@ -297,18 +275,124 @@ mod tests {
     }
 
     #[test]
+    fn test_resize_parser_handles_wide_char_shrink_without_followup_panic() {
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process("ab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 1, 3);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parser.process(b"\x1b[1;3H\x1b[K");
+            parser.screen().contents()
+        }));
+
+        assert!(
+            result.is_ok(),
+            "shrinking after a trailing wide glyph must not panic on follow-up erase"
+        );
+        assert_eq!(parser.screen().size(), (1, 3));
+    }
+
+    #[test]
+    fn test_resize_parser_drops_truncated_wide_glyph_from_snapshot() {
+        let mut parser = vt100::Parser::new(2, 4, 0);
+        parser.process("ab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 2, 3);
+
+        let snapshot = parser.screen().contents();
+        assert!(
+            snapshot.starts_with("ab"),
+            "snapshot should preserve visible prefix"
+        );
+        assert!(
+            !snapshot.contains('漢'),
+            "snapshot must drop a wide glyph that no longer fits in the narrower width"
+        );
+    }
+
+    #[test]
+    fn test_resize_parser_handles_release_panic_width_boundary() {
+        let mut parser = vt100::Parser::new(1, 83, 0);
+        let line = format!("{}漢", "a".repeat(81));
+        parser.process(line.as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 1, 82);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parser.process(b"\x1b[1;82H\x1b[K");
+            parser.screen().contents()
+        }));
+
+        assert!(
+            result.is_ok(),
+            "shrinking to 82 columns must not leave a wide glyph at index 81"
+        );
+        assert_eq!(parser.screen().size(), (1, 82));
+    }
+
+    #[test]
+    fn test_resize_parser_preserves_alternate_screen_restore_state() {
+        let mut parser = vt100::Parser::new(2, 4, 0);
+        parser.process(b"sh\r\n$ ");
+        assert_eq!(parser.screen().cursor_position(), (1, 2));
+
+        parser.process(b"\x1b[?1049h");
+        assert!(parser.screen().alternate_screen());
+        parser.process("ab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 2, 3);
+
+        assert!(
+            parser.screen().alternate_screen(),
+            "narrow resize must keep alternate-screen mode active until ?1049l"
+        );
+        parser.process(b"\x1b[?1049l");
+
+        assert!(
+            !parser.screen().alternate_screen(),
+            "alternate-screen mode must clear only after ?1049l"
+        );
+        assert!(
+            parser.screen().contents().contains("sh"),
+            "restored primary grid should still contain the shell buffer"
+        );
+        assert_eq!(
+            parser.screen().cursor_position(),
+            (1, 2),
+            "saved primary cursor must survive alternate-screen resize"
+        );
+    }
+
+    #[test]
+    fn test_resize_parser_preserves_row_attributes_when_truncating_wide_glyph() {
+        let mut parser = vt100::Parser::new(1, 4, 0);
+        parser.process("\x1b[31;44mab漢".as_bytes());
+
+        resize_parser_preserving_state(&mut parser, 1, 3);
+
+        let first = parser.screen().cell(0, 0).expect("cell 0");
+        let second = parser.screen().cell(0, 1).expect("cell 1");
+        let trailing = parser.screen().cell(0, 2).expect("cell 2");
+
+        assert_eq!(first.contents(), "a");
+        assert_eq!(second.contents(), "b");
+        assert!(
+            !trailing.has_contents(),
+            "truncated wide glyph must be cleared"
+        );
+
+        for cell in [first, second, trailing] {
+            assert_eq!(cell.fgcolor(), vt100::Color::Idx(1));
+            assert_eq!(cell.bgcolor(), vt100::Color::Idx(4));
+        }
+    }
+
+    #[test]
     fn test_pane_check_status_completed() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-6".to_string(),
-            "/usr/bin/true".to_string(),
-            vec![],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-6", success_command());
+        answer_cursor_position_query(pane.pty());
 
         assert_eq!(pane.status(), &PaneStatus::Running);
 
@@ -330,16 +414,7 @@ mod tests {
     #[test]
     fn test_pane_mark_error() {
         let _pty_guard = lock_pty_test();
-        let mut pane = Pane::new(
-            "test-7".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let mut pane = test_pane("test-7", sleep_command("60"));
 
         pane.mark_error("test error");
         assert_eq!(pane.status(), &PaneStatus::Error("test error".to_string()));
@@ -350,16 +425,7 @@ mod tests {
     #[test]
     fn test_pane_kill() {
         let _pty_guard = lock_pty_test();
-        let pane = Pane::new(
-            "test-8".to_string(),
-            "/bin/sleep".to_string(),
-            vec!["60".to_string()],
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("Pane creation failed");
+        let pane = test_pane("test-8", sleep_command("60"));
 
         pane.kill().expect("kill should succeed");
     }
