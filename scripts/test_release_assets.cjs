@@ -77,6 +77,8 @@ run("release workflow signs and notarizes macOS distribution assets", () => {
   assert.match(workflow, /APPLE_ID_PASSWORD/);
   assert.match(workflow, /APPLE_TEAM_ID/);
   assert.match(workflow, /security create-keychain/);
+  assert.doesNotMatch(workflow, /base64 --decode/);
+  assert.equal((workflow.match(/base64 -D/g) || []).length, 2);
   assert.match(workflow, /codesign --force --options runtime --timestamp --sign/);
   assert.match(workflow, /xcrun notarytool submit/);
   assert.match(workflow, /xcrun stapler staple/);

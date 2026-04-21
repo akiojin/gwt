@@ -145,7 +145,7 @@ jobs:
           CERT_PATH="${RUNNER_TEMP}/gwt-app-signing.p12"
           KEYCHAIN_PASSWORD="$(uuidgen)"
 
-          echo "$APPLE_CERT_APP_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$APPLE_CERT_APP_BASE64" | base64 -D > "$CERT_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -278,7 +278,7 @@ jobs:
           CERT_PATH="${RUNNER_TEMP}/gwt-dmg-signing.p12"
           KEYCHAIN_PASSWORD="$(uuidgen)"
 
-          echo "$APPLE_CERT_APP_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$APPLE_CERT_APP_BASE64" | base64 -D > "$CERT_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
