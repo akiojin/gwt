@@ -252,8 +252,17 @@
 
       .window-list-meta {
         margin-top: 4px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
         font-size: 12px;
         color: #64748b;
+      }
+
+      .window-list-geometry {
+        font-weight: 600;
+        color: #475569;
       }
 
       .window-list-empty {
@@ -411,7 +420,7 @@
         background: #22c55e;
       }
 
-      .status-chip.ready .status-dot {
+      .status-chip.waiting .status-dot {
         background: #3b82f6;
       }
 
@@ -419,7 +428,7 @@
         background: #ef4444;
       }
 
-      .status-chip.exited .status-dot {
+      .status-chip.stopped .status-dot {
         background: #94a3b8;
       }
 

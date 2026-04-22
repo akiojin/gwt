@@ -300,8 +300,10 @@ impl std::error::Error for CliParseError {}
 
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with
-/// `issue`, `pr`, `actions`, `board`, or `hook`. The GUI launcher keeps its
-/// legacy behaviour (positional repo path) for any other shape.
+/// a supported top-level CLI verb such as `issue`, `pr`, `actions`, `board`,
+/// `hook`, `discuss`, `plan`, `build`, `update`, or `__internal`. The GUI
+/// launcher keeps its legacy behaviour (positional repo path) for any other
+/// shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
     args.get(1)
         .map(|s| {
