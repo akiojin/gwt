@@ -108,6 +108,9 @@ pub enum FrontendEvent {
     LoadBoard {
         id: String,
     },
+    LoadProfile {
+        id: String,
+    },
     LoadMemo {
         id: String,
     },
@@ -154,6 +157,30 @@ pub enum FrontendEvent {
     DeleteMemoNote {
         id: String,
         note_id: String,
+    },
+    SelectProfile {
+        id: String,
+        profile_name: String,
+    },
+    CreateProfile {
+        id: String,
+        name: String,
+    },
+    SetActiveProfile {
+        id: String,
+        profile_name: String,
+    },
+    SaveProfile {
+        id: String,
+        current_name: String,
+        name: String,
+        description: String,
+        env_vars: Vec<ProfileEnvEntryView>,
+        disabled_env: Vec<String>,
+    },
+    DeleteProfile {
+        id: String,
+        profile_name: String,
     },
     OpenIssueLaunchWizard {
         id: String,
@@ -225,6 +252,30 @@ pub struct RecentProjectView {
     pub kind: ProjectKind,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileEnvEntryView {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileEntryView {
+    pub name: String,
+    pub description: String,
+    pub env_vars: Vec<ProfileEnvEntryView>,
+    pub disabled_env: Vec<String>,
+    pub is_default: bool,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileSnapshotView {
+    pub active_profile: String,
+    pub selected_profile: String,
+    pub profiles: Vec<ProfileEntryView>,
+    pub merged_preview: Vec<ProfileEnvEntryView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStateView {
     pub app_version: String,
@@ -274,6 +325,10 @@ pub enum BackendEvent {
         id: String,
         entries: Vec<BoardEntry>,
     },
+    ProfileSnapshot {
+        id: String,
+        snapshot: ProfileSnapshotView,
+    },
     MemoNotes {
         id: String,
         notes: Vec<MemoNote>,
@@ -308,6 +363,10 @@ pub enum BackendEvent {
         message: String,
     },
     BoardError {
+        id: String,
+        message: String,
+    },
+    ProfileError {
         id: String,
         message: String,
     },
@@ -394,7 +453,10 @@ mod tests {
         BranchScope,
     };
 
-    use super::{BackendEvent, BranchEntriesPhase};
+    use super::{
+        BackendEvent, BranchEntriesPhase, ProfileEntryView, ProfileEnvEntryView,
+        ProfileSnapshotView,
+    };
 
     #[test]
     fn branch_entries_serializes_explicit_phase_contract() {
@@ -509,6 +571,46 @@ mod tests {
             value["entries"][0]["related_topics"][0],
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
+        );
+    }
+
+    #[test]
+    fn profile_snapshot_serializes_explicit_kind_contract() {
+        let event = BackendEvent::ProfileSnapshot {
+            id: "profile-1".to_string(),
+            snapshot: ProfileSnapshotView {
+                active_profile: "default".to_string(),
+                selected_profile: "default".to_string(),
+                profiles: vec![ProfileEntryView {
+                    name: "default".to_string(),
+                    description: "Default profile".to_string(),
+                    env_vars: vec![ProfileEnvEntryView {
+                        key: "TERM".to_string(),
+                        value: "xterm-256color".to_string(),
+                    }],
+                    disabled_env: vec!["SECRET".to_string()],
+                    is_default: true,
+                    is_active: true,
+                }],
+                merged_preview: vec![ProfileEnvEntryView {
+                    key: "TERM".to_string(),
+                    value: "xterm-256color".to_string(),
+                }],
+            },
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize profile snapshot");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("profile_snapshot".to_string()))
+        );
+        assert_eq!(
+            value["snapshot"]["selected_profile"],
+            Value::String("default".to_string())
+        );
+        assert_eq!(
+            value["snapshot"]["profiles"][0]["env_vars"][0]["key"],
+            Value::String("TERM".to_string())
         );
     }
 

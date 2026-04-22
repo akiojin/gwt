@@ -134,6 +134,14 @@ impl OutboundEvent {
     }
 }
 
+struct ProfileSaveRequest {
+    current_name: String,
+    name: String,
+    description: String,
+    env_vars: Vec<gwt::ProfileEnvEntryView>,
+    disabled_env: Vec<String>,
+}
+
 pub(crate) fn build_frontend_sync_events(
     client_id: &str,
     workspace: gwt::AppStateView,
@@ -231,6 +239,8 @@ pub(crate) struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
     pub(crate) recent_projects: Vec<gwt::RecentProjectEntry>,
+    pub(crate) profile_selections: HashMap<String, String>,
+    pub(crate) profile_config_path: Option<PathBuf>,
     pub(crate) runtimes: HashMap<String, WindowRuntime>,
     pub(crate) window_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
@@ -297,6 +307,8 @@ impl AppRuntime {
             tabs,
             active_tab_id,
             recent_projects: dedupe_recent_projects(persisted.recent_projects),
+            profile_selections: HashMap::new(),
+            profile_config_path: None,
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
@@ -392,6 +404,7 @@ impl AppRuntime {
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
+            FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
             FrontendEvent::LoadMemo { id } => self.load_memo_events(&client_id, &id),
             FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
@@ -455,6 +468,36 @@ impl AppRuntime {
             } => self.update_memo_note_events(&client_id, &id, &note_id, title, body, pinned),
             FrontendEvent::DeleteMemoNote { id, note_id } => {
                 self.delete_memo_note_events(&client_id, &id, &note_id)
+            }
+            FrontendEvent::SelectProfile { id, profile_name } => {
+                self.select_profile_events(&client_id, &id, &profile_name)
+            }
+            FrontendEvent::CreateProfile { id, name } => {
+                self.create_profile_events(&client_id, &id, &name)
+            }
+            FrontendEvent::SetActiveProfile { id, profile_name } => {
+                self.set_active_profile_events(&client_id, &id, &profile_name)
+            }
+            FrontendEvent::SaveProfile {
+                id,
+                current_name,
+                name,
+                description,
+                env_vars,
+                disabled_env,
+            } => self.save_profile_events(
+                &client_id,
+                &id,
+                ProfileSaveRequest {
+                    current_name,
+                    name,
+                    description,
+                    env_vars,
+                    disabled_env,
+                },
+            ),
+            FrontendEvent::DeleteProfile { id, profile_name } => {
+                self.delete_profile_events(&client_id, &id, &profile_name)
             }
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
@@ -651,6 +694,7 @@ impl AppRuntime {
         for window_id in window_ids {
             self.stop_window_runtime(&window_id);
             self.window_lookup.remove(&window_id);
+            self.profile_selections.remove(&window_id);
         }
 
         self.tabs.remove(index);
@@ -864,6 +908,7 @@ impl AppRuntime {
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         self.stop_window_runtime(id);
+        self.profile_selections.remove(id);
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
@@ -1101,6 +1146,52 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn load_profile_events(&mut self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        if let Err(message) = self.resolve_profile_window_context(id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message,
+                },
+            )];
+        }
+
+        let selected_profile = self.profile_selections.get(id).cloned();
+        let config_path = match self.profile_config_path() {
+            Ok(path) => path,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+        match gwt::profile_dispatch::load_snapshot_at(&config_path, selected_profile.as_deref()) {
+            Ok(snapshot) => {
+                self.profile_selections
+                    .insert(id.to_string(), snapshot.selected_profile.clone());
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileSnapshot {
+                        id: id.to_string(),
+                        snapshot,
+                    },
+                )]
+            }
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
     pub(crate) fn load_memo_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
         let project_root = match self.resolve_memo_window_context(id) {
             Ok(context) => context,
@@ -1189,6 +1280,306 @@ impl AppRuntime {
                 },
             )],
         }
+    }
+
+    pub(crate) fn select_profile_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        profile_name: &str,
+    ) -> Vec<OutboundEvent> {
+        if let Err(message) = self.resolve_profile_window_context(id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message,
+                },
+            )];
+        }
+
+        self.profile_selections
+            .insert(id.to_string(), profile_name.to_string());
+        self.load_profile_events(client_id, id)
+    }
+
+    pub(crate) fn create_profile_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        name: &str,
+    ) -> Vec<OutboundEvent> {
+        let tab_id = match self.resolve_profile_window_context(id) {
+            Ok(tab_id) => tab_id,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        let selected_profile = name.trim().to_string();
+        let config_path = match self.profile_config_path() {
+            Ok(path) => path,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+        if let Err(error) =
+            gwt::profile_dispatch::create_profile_at(&config_path, &selected_profile)
+        {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )];
+        }
+
+        self.profile_selections
+            .insert(id.to_string(), selected_profile);
+        self.profile_snapshot_events(&tab_id, id, client_id)
+    }
+
+    pub(crate) fn set_active_profile_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        profile_name: &str,
+    ) -> Vec<OutboundEvent> {
+        let tab_id = match self.resolve_profile_window_context(id) {
+            Ok(tab_id) => tab_id,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        let config_path = match self.profile_config_path() {
+            Ok(path) => path,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+        if let Err(error) =
+            gwt::profile_dispatch::switch_active_profile_at(&config_path, profile_name)
+        {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )];
+        }
+
+        self.profile_selections
+            .insert(id.to_string(), profile_name.to_string());
+        self.profile_snapshot_events(&tab_id, id, client_id)
+    }
+
+    fn save_profile_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        request: ProfileSaveRequest,
+    ) -> Vec<OutboundEvent> {
+        let tab_id = match self.resolve_profile_window_context(id) {
+            Ok(tab_id) => tab_id,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        let config_path = match self.profile_config_path() {
+            Ok(path) => path,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+        if let Err(error) = gwt::profile_dispatch::save_profile_at(
+            &config_path,
+            &request.current_name,
+            &request.name,
+            &request.description,
+            &request.env_vars,
+            &request.disabled_env,
+        ) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )];
+        }
+
+        self.profile_selections
+            .insert(id.to_string(), request.name.trim().to_string());
+        self.profile_snapshot_events(&tab_id, id, client_id)
+    }
+
+    pub(crate) fn delete_profile_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        profile_name: &str,
+    ) -> Vec<OutboundEvent> {
+        let tab_id = match self.resolve_profile_window_context(id) {
+            Ok(tab_id) => tab_id,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        let config_path = match self.profile_config_path() {
+            Ok(path) => path,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::ProfileError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+        if let Err(error) = gwt::profile_dispatch::delete_profile_at(&config_path, profile_name) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::ProfileError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )];
+        }
+
+        self.profile_snapshot_events(&tab_id, id, client_id)
+    }
+
+    fn resolve_profile_window_context(&self, id: &str) -> std::result::Result<String, String> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return Err("Window not found".to_string());
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return Err("Project tab not found".to_string());
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return Err("Window not found".to_string());
+        };
+        if window.preset != WindowPreset::Profile {
+            return Err("Window is not a Profile surface".to_string());
+        }
+
+        Ok(address.tab_id.clone())
+    }
+
+    fn profile_window_ids_for_tab(&self, tab_id: &str) -> Vec<String> {
+        let Some(tab) = self.tab(tab_id) else {
+            return Vec::new();
+        };
+        tab.workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Profile)
+            .map(|window| combined_window_id(tab_id, &window.id))
+            .collect()
+    }
+
+    fn profile_config_path(&self) -> std::result::Result<PathBuf, String> {
+        if let Some(path) = &self.profile_config_path {
+            return Ok(path.clone());
+        }
+        gwt::profile_dispatch::config_path().map_err(|error| error.to_string())
+    }
+
+    fn profile_snapshot_events(
+        &mut self,
+        tab_id: &str,
+        selected_window_id: &str,
+        client_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let window_ids = self.profile_window_ids_for_tab(tab_id);
+        let mut events = Vec::new();
+
+        for window_id in window_ids {
+            let selected_profile = self.profile_selections.get(&window_id).cloned();
+            let config_path = match self.profile_config_path() {
+                Ok(path) => path,
+                Err(message) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::ProfileError {
+                            id: selected_window_id.to_string(),
+                            message,
+                        },
+                    )];
+                }
+            };
+            match gwt::profile_dispatch::load_snapshot_at(&config_path, selected_profile.as_deref())
+            {
+                Ok(snapshot) => {
+                    self.profile_selections
+                        .insert(window_id.clone(), snapshot.selected_profile.clone());
+                    events.push(OutboundEvent::broadcast(BackendEvent::ProfileSnapshot {
+                        id: window_id,
+                        snapshot,
+                    }));
+                }
+                Err(error) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::ProfileError {
+                            id: selected_window_id.to_string(),
+                            message: error.to_string(),
+                        },
+                    )];
+                }
+            }
+        }
+
+        events
     }
 
     pub(crate) fn create_memo_note_events(
@@ -3102,9 +3493,10 @@ mod tests {
     use gwt::{
         empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
         BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardContext,
-        LaunchWizardState, ProjectKind, WindowGeometry, WindowPreset, WindowProcessStatus,
-        WorkspaceState,
+        LaunchWizardState, ProfileEnvEntryView, ProjectKind, WindowGeometry, WindowPreset,
+        WindowProcessStatus, WorkspaceState,
     };
+    use gwt_config::{Profile, Settings};
     use gwt_core::{
         coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind},
         logging::{current_log_file, LogEvent, LogLevel},
@@ -3119,6 +3511,10 @@ mod tests {
         LaunchWizardSession, OutboundEvent, ProjectTabRuntime, WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
+
+    fn write_profile_config(path: &Path, settings: &Settings) {
+        settings.save(path).expect("write profile config");
+    }
 
     fn canvas_bounds() -> WindowGeometry {
         WindowGeometry {
@@ -3224,6 +3620,8 @@ mod tests {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
             recent_projects: Vec::new(),
+            profile_selections: HashMap::new(),
+            profile_config_path: Some(temp_root.join("profile-config.toml")),
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
@@ -3610,6 +4008,60 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_load_profile_replies_with_config_backed_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("profile-config.toml");
+        let mut settings = Settings::default();
+        settings
+            .profiles
+            .add(Profile::new("dev"))
+            .expect("add profile");
+        settings.profiles.switch("dev").expect("switch active");
+        settings
+            .profiles
+            .set_env_var("dev", "API_KEY", "override")
+            .expect("set env var");
+        write_profile_config(&config_path, &settings);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "profile-1",
+            repo,
+            WindowPreset::Profile,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "profile-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadProfile {
+                id: window_id.clone(),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::ProfileSnapshot { id, snapshot },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && snapshot.active_profile == "dev"
+                && snapshot.selected_profile == "dev"
+                && snapshot.profiles.iter().any(|profile|
+                    profile.name == "dev"
+                        && profile.is_active
+                        && profile.env_vars.iter().any(|entry|
+                            entry.key == "API_KEY" && entry.value == "override"
+                        )
+                )
+        ));
+    }
+
+    #[test]
     fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -3651,6 +4103,108 @@ mod tests {
                 && notes[0].title == "Pinned note"
                 && selected_note_id.is_none()
         ));
+    }
+
+    #[test]
+    fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("profile-config.toml");
+        let mut settings = Settings::default();
+        settings
+            .profiles
+            .add(Profile::new("dev"))
+            .expect("add profile");
+        write_profile_config(&config_path, &settings);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut persisted = empty_workspace_state();
+        persisted.windows.push(sample_window(
+            "profile-1",
+            WindowPreset::Profile,
+            WindowProcessStatus::Ready,
+        ));
+        persisted.windows.push(sample_window(
+            "profile-2",
+            WindowPreset::Profile,
+            WindowProcessStatus::Ready,
+        ));
+        persisted.next_z_index = 3;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo,
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let current_window_id = combined_window_id("tab-1", "profile-1");
+        let sibling_window_id = combined_window_id("tab-1", "profile-2");
+
+        let select_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SelectProfile {
+                id: current_window_id.clone(),
+                profile_name: "dev".to_string(),
+            },
+        );
+        assert!(matches!(
+            &select_events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::ProfileSnapshot { id, snapshot },
+            }] if client_id == "client-1"
+                && id == &current_window_id
+                && snapshot.selected_profile == "dev"
+        ));
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SaveProfile {
+                id: current_window_id.clone(),
+                current_name: "dev".to_string(),
+                name: "review".to_string(),
+                description: "Review profile".to_string(),
+                env_vars: vec![ProfileEnvEntryView {
+                    key: "API_KEY".to_string(),
+                    value: "override".to_string(),
+                }],
+                disabled_env: vec!["SECRET".to_string()],
+            },
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ProfileSnapshot { id, snapshot },
+            } if id == &current_window_id
+                && snapshot.selected_profile == "review"
+                && snapshot.active_profile == "default"
+                && snapshot.profiles.iter().any(|profile|
+                    profile.name == "review"
+                        && profile.env_vars.iter().any(|entry|
+                            entry.key == "API_KEY" && entry.value == "override"
+                        )
+                )
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ProfileSnapshot { id, snapshot },
+            } if id == &sibling_window_id
+                && snapshot.selected_profile == "default"
+                && snapshot.profiles.iter().any(|profile| profile.name == "review")
+        )));
+
+        let saved = Settings::load_from_path(&config_path).expect("load saved config");
+        assert!(saved
+            .profiles
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "review" && profile.description == "Review profile"));
     }
 
     #[test]

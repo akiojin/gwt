@@ -637,6 +637,8 @@ mod tests {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
             recent_projects: Vec::new(),
+            profile_selections: HashMap::new(),
+            profile_config_path: Some(temp_root.join("profile-config.toml")),
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),

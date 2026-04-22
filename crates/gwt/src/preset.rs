@@ -73,9 +73,9 @@ impl WindowPreset {
             Self::Agent => "Start a wizard-launched agent terminal",
             Self::FileTree => "Browse repository files in a read-only tree",
             Self::Branches => "Browse repository branches and launch agents",
-            Self::Settings => "Placeholder settings surface",
+            Self::Settings => "Manage custom agents and launch presets",
             Self::Memo => "Capture repo-scoped notes and pinned follow-ups",
-            Self::Profile => "Placeholder profile surface",
+            Self::Profile => "Manage env profiles, overrides, and merged preview",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
             Self::Spec => "Placeholder SPEC surface",
@@ -388,7 +388,7 @@ mod tests {
         assert!(!WindowPreset::Issue.requires_process());
         assert_eq!(
             WindowPreset::Profile.subtitle(),
-            "Placeholder profile surface"
+            "Manage env profiles, overrides, and merged preview"
         );
     }
 

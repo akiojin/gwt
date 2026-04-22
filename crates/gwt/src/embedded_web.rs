@@ -522,6 +522,34 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_profile_surface_uses_config_backed_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("profile-root"),
+            "expected Profile root scaffold in embedded html",
+        );
+        assert!(
+            html.contains("load_profile"),
+            "expected Profile load event in embedded html",
+        );
+        assert!(
+            html.contains("select_profile")
+                && html.contains("create_profile")
+                && html.contains("set_active_profile")
+                && html.contains("save_profile")
+                && html.contains("delete_profile"),
+            "expected Profile surface to expose selection, CRUD, active-switch, and save events",
+        );
+        assert!(
+            html.contains("Merged preview")
+                && html
+                    .contains("The backend computes this preview from the current OS environment",),
+            "expected Profile surface to render the backend-owned merged preview contract",
+        );
+    }
+
+    #[test]
     fn embedded_web_logs_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 
@@ -638,10 +666,11 @@ mod tests {
                 && html.contains("launchWizardSurface,")
                 && html.contains("branchesFileTreeSurface,")
                 && html.contains("memoSurface,")
+                && html.contains("profileSurface,")
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Memo, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Memo, Profile, Board, Logs, and knowledge/settings surfaces",
         );
         assert!(
             !html.contains("window.__POC__"),
@@ -660,6 +689,10 @@ mod tests {
             r#"case\s*"terminal_output":\s*frontendUnits\.terminalHost\.writeOutput\(event\.id,\s*event\.data_base64\);\s*break;\s*case\s*"terminal_snapshot":\s*frontendUnits\.terminalHost\.replaceTerminalSnapshot\(event\.id,\s*event\.data_base64\);\s*break;"#,
         )
         .expect("valid regex");
+        let profile_event = regex::Regex::new(
+            r#"case\s*"profile_snapshot":\s*\{\s*const state = frontendUnits\.profileSurface\.ensureProfileState\(event\.id\);[\s\S]*?frontendUnits\.profileSurface\.renderProfile\(event\.id\);\s*break;\s*\}"#,
+        )
+        .expect("valid regex");
         let wizard_event = regex::Regex::new(
             r#"case\s*"launch_wizard_state":\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
         )
@@ -676,6 +709,10 @@ mod tests {
         assert!(
             terminal_event.is_match(html),
             "expected terminal output and snapshot events to flow through the terminal host unit",
+        );
+        assert!(
+            profile_event.is_match(html),
+            "expected profile snapshot events to flow through the dedicated profile surface unit",
         );
         assert!(
             wizard_event.is_match(html),

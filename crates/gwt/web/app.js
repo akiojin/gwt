@@ -51,6 +51,7 @@
       const windowMap = new Map();
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
+      const profileStateMap = new Map();
       const memoStateMap = new Map();
       const boardStateMap = new Map();
       const logStateMap = new Map();
@@ -90,6 +91,17 @@
           mutatedBy: Object.freeze([
             "ensureBranchListState",
             "renderBranches",
+          ]),
+        }),
+        profileStateMap: Object.freeze({
+          owner: "profile-surface",
+          mutatedBy: Object.freeze([
+            "ensureProfileState",
+            "requestProfile",
+            "renderProfile",
+            "createProfile",
+            "flushProfileSave",
+            "deleteProfile",
           ]),
         }),
         memoStateMap: Object.freeze({
@@ -248,6 +260,9 @@
         }
         if (preset === "memo") {
           return "memo";
+        }
+        if (preset === "profile") {
+          return "profile";
         }
         if (preset === "board") {
           return "board";
@@ -1299,6 +1314,21 @@
         return memoStateMap.get(windowId);
       }
 
+      function ensureProfileState(windowId) {
+        if (!profileStateMap.has(windowId)) {
+          profileStateMap.set(windowId, {
+            snapshot: null,
+            loading: false,
+            saving: false,
+            error: "",
+            selectedProfile: null,
+            draft: null,
+            saveTimer: null,
+          });
+        }
+        return profileStateMap.get(windowId);
+      }
+
       function ensureKnowledgeBridgeState(windowId, knowledgeKind) {
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
@@ -1425,6 +1455,19 @@
         state.error = "";
         send({
           kind: "load_memo",
+          id: windowId,
+        });
+      }
+
+      function requestProfile(windowId) {
+        const state = ensureProfileState(windowId);
+        if (state.loading) {
+          return;
+        }
+        state.loading = true;
+        state.error = "";
+        send({
+          kind: "load_profile",
           id: windowId,
         });
       }
@@ -2092,6 +2135,489 @@
         editor.appendChild(bodyInput);
 
         updateMemoStatus(windowId);
+      }
+
+      function clearProfileSaveTimer(state) {
+        if (state.saveTimer !== null) {
+          clearTimeout(state.saveTimer);
+          state.saveTimer = null;
+        }
+      }
+
+      function profileDraftFromEntry(profile) {
+        if (!profile) {
+          return null;
+        }
+        return {
+          currentName: profile.name,
+          name: profile.name,
+          description: profile.description || "",
+          envVars: (profile.env_vars || []).map((entry) => ({
+            key: entry.key || "",
+            value: entry.value || "",
+          })),
+          disabledEnv: (profile.disabled_env || []).map((entry) => entry || ""),
+        };
+      }
+
+      function selectedProfileEntry(state) {
+        const profiles = state.snapshot?.profiles || [];
+        if (!state.selectedProfile) {
+          return null;
+        }
+        return profiles.find((profile) => profile.name === state.selectedProfile) || null;
+      }
+
+      function syncProfileDraftFromSelection(state) {
+        const selected = selectedProfileEntry(state);
+        state.draft = profileDraftFromEntry(selected);
+      }
+
+      function profileDraftSignature(draft) {
+        if (!draft) {
+          return "";
+        }
+        return JSON.stringify({
+          currentName: draft.currentName,
+          name: draft.name,
+          description: draft.description,
+          envVars: draft.envVars.map((entry) => ({
+            key: entry.key,
+            value: entry.value,
+          })),
+          disabledEnv: draft.disabledEnv.slice(),
+        });
+      }
+
+      function profileDraftIsDirty(state) {
+        const selected = selectedProfileEntry(state);
+        return profileDraftSignature(state.draft) !== profileDraftSignature(profileDraftFromEntry(selected));
+      }
+
+      function updateProfileStatus(windowId) {
+        const element = windowMap.get(windowId);
+        const status = element?.querySelector(".profile-status");
+        if (!status) {
+          return;
+        }
+        const state = ensureProfileState(windowId);
+        const profileCount = state.snapshot?.profiles?.length || 0;
+        const activeProfile = state.snapshot?.active_profile || "default";
+        status.textContent = state.error
+          ? state.error
+          : state.loading
+            ? state.saving
+              ? "Saving profile..."
+              : "Loading profiles..."
+            : state.saving
+              ? "Saving profile..."
+              : `Active ${activeProfile} · ${profileCount} profile${profileCount === 1 ? "" : "s"}`;
+        status.className = "profile-status";
+        if (state.error) {
+          status.classList.add("error");
+        } else if (state.loading || state.saving) {
+          status.classList.add("info");
+        }
+      }
+
+      function flushProfileSave(windowId) {
+        const state = ensureProfileState(windowId);
+        clearProfileSaveTimer(state);
+        if (!state.draft) {
+          state.saving = false;
+          updateProfileStatus(windowId);
+          return;
+        }
+        if (!profileDraftIsDirty(state)) {
+          state.saving = false;
+          updateProfileStatus(windowId);
+          return;
+        }
+        state.loading = true;
+        state.saving = true;
+        state.error = "";
+        updateProfileStatus(windowId);
+        send({
+          kind: "save_profile",
+          id: windowId,
+          current_name: state.draft.currentName,
+          name: state.draft.name,
+          description: state.draft.description,
+          env_vars: state.draft.envVars.filter((entry) => entry.key.trim() || entry.value),
+          disabled_env: state.draft.disabledEnv.filter((entry) => entry.trim()),
+        });
+      }
+
+      function scheduleProfileSave(windowId) {
+        const state = ensureProfileState(windowId);
+        clearProfileSaveTimer(state);
+        state.saving = true;
+        updateProfileStatus(windowId);
+        state.saveTimer = setTimeout(() => {
+          state.saveTimer = null;
+          flushProfileSave(windowId);
+        }, 250);
+      }
+
+      function selectProfile(windowId, profileName) {
+        const state = ensureProfileState(windowId);
+        if (state.selectedProfile === profileName) {
+          return;
+        }
+        if (profileDraftIsDirty(state)) {
+          flushProfileSave(windowId);
+        } else {
+          clearProfileSaveTimer(state);
+        }
+        state.loading = true;
+        state.error = "";
+        updateProfileStatus(windowId);
+        send({
+          kind: "select_profile",
+          id: windowId,
+          profile_name: profileName,
+        });
+      }
+
+      function createProfile(windowId) {
+        const state = ensureProfileState(windowId);
+        if (profileDraftIsDirty(state)) {
+          flushProfileSave(windowId);
+        } else {
+          clearProfileSaveTimer(state);
+        }
+        const name = window.prompt("Profile name", "review");
+        if (!name) {
+          return;
+        }
+        state.loading = true;
+        state.error = "";
+        updateProfileStatus(windowId);
+        send({
+          kind: "create_profile",
+          id: windowId,
+          name,
+        });
+      }
+
+      function setActiveProfile(windowId) {
+        const state = ensureProfileState(windowId);
+        if (!state.selectedProfile) {
+          return;
+        }
+        state.loading = true;
+        state.error = "";
+        updateProfileStatus(windowId);
+        send({
+          kind: "set_active_profile",
+          id: windowId,
+          profile_name: state.selectedProfile,
+        });
+      }
+
+      function deleteProfile(windowId) {
+        const state = ensureProfileState(windowId);
+        if (!state.selectedProfile) {
+          return;
+        }
+        if (!window.confirm(`Delete profile "${state.selectedProfile}"?`)) {
+          return;
+        }
+        clearProfileSaveTimer(state);
+        state.loading = true;
+        state.saving = false;
+        state.error = "";
+        updateProfileStatus(windowId);
+        send({
+          kind: "delete_profile",
+          id: windowId,
+          profile_name: state.selectedProfile,
+        });
+      }
+
+      function renderProfile(windowId, preserveDraft = false) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const body = element.querySelector(".window-body");
+        if (!body) {
+          return;
+        }
+        const state = ensureProfileState(windowId);
+        const snapshot = state.snapshot || {
+          active_profile: "default",
+          selected_profile: "default",
+          profiles: [],
+          merged_preview: [],
+        };
+        const profiles = snapshot.profiles || [];
+        const status = body.querySelector(".profile-status");
+        const list = body.querySelector(".profile-list");
+        const editor = body.querySelector(".profile-editor-pane");
+        if (!status || !list || !editor) {
+          return;
+        }
+
+        if (
+          state.selectedProfile &&
+          !profiles.some((profile) => profile.name === state.selectedProfile)
+        ) {
+          state.selectedProfile = null;
+        }
+        if (!state.selectedProfile) {
+          state.selectedProfile =
+            snapshot.selected_profile || snapshot.active_profile || (profiles[0] ? profiles[0].name : null);
+          preserveDraft = false;
+        }
+
+        if (!preserveDraft || !state.draft || state.draft.currentName !== state.selectedProfile) {
+          syncProfileDraftFromSelection(state);
+        }
+
+        updateProfileStatus(windowId);
+        list.innerHTML = "";
+        if (!state.loading && profiles.length === 0) {
+          const empty = createNode("div", "profile-empty");
+          empty.appendChild(createNode("div", "mock-label", "No profiles yet"));
+          empty.appendChild(
+            createNode(
+              "div",
+              "profile-empty-copy",
+              "Create a profile to track env overrides, disabled OS variables, and merged preview output.",
+            ),
+          );
+          const button = createNode("button", "wizard-button primary", "New profile");
+          button.type = "button";
+          button.addEventListener("click", () => createProfile(windowId));
+          empty.appendChild(button);
+          list.appendChild(empty);
+        }
+
+        for (const profile of profiles) {
+          const row = createNode("button", "profile-row");
+          row.type = "button";
+          if (profile.name === state.selectedProfile) {
+            row.classList.add("selected");
+          }
+          row.addEventListener("click", () => selectProfile(windowId, profile.name));
+          const header = createNode("div", "profile-row-header");
+          header.appendChild(createNode("div", "profile-row-title", profile.name));
+          const chips = createNode("div", "profile-row-chips");
+          if (profile.is_active) {
+            chips.appendChild(createNode("span", "profile-chip active", "Active"));
+          }
+          if (profile.is_default) {
+            chips.appendChild(createNode("span", "profile-chip", "Default"));
+          }
+          header.appendChild(chips);
+          row.appendChild(header);
+          row.appendChild(
+            createNode(
+              "div",
+              "profile-row-copy",
+              profile.description || "No description yet",
+            ),
+          );
+          const meta = createNode(
+            "div",
+            "profile-row-meta",
+            `${profile.env_vars.length} env override${profile.env_vars.length === 1 ? "" : "s"} · ${profile.disabled_env.length} disabled variable${profile.disabled_env.length === 1 ? "" : "s"}`,
+          );
+          row.appendChild(meta);
+          list.appendChild(row);
+        }
+
+        editor.innerHTML = "";
+        const selected = selectedProfileEntry(state);
+        if (!selected || !state.draft) {
+          const empty = createNode("div", "profile-empty");
+          empty.appendChild(createNode("div", "mock-label", "Select a profile"));
+          empty.appendChild(
+            createNode(
+              "div",
+              "profile-empty-copy",
+              "Each profile keeps its own env overrides and merged preview output.",
+            ),
+          );
+          editor.appendChild(empty);
+          updateProfileStatus(windowId);
+          return;
+        }
+
+        const actions = createNode("div", "profile-inline-actions");
+        const activeButton = createNode("button", "wizard-button", "Set active");
+        activeButton.type = "button";
+        activeButton.disabled = selected.is_active || state.loading;
+        activeButton.addEventListener("click", () => setActiveProfile(windowId));
+        actions.appendChild(activeButton);
+
+        const saveButton = createNode("button", "wizard-button", "Save now");
+        saveButton.type = "button";
+        saveButton.disabled = !profileDraftIsDirty(state) || state.loading;
+        saveButton.addEventListener("click", () => flushProfileSave(windowId));
+        actions.appendChild(saveButton);
+
+        const deleteButton = createNode("button", "wizard-button", "Delete");
+        deleteButton.type = "button";
+        deleteButton.disabled = selected.is_default || state.loading;
+        deleteButton.addEventListener("click", () => deleteProfile(windowId));
+        actions.appendChild(deleteButton);
+        editor.appendChild(actions);
+
+        const metadata = createNode("div", "profile-section");
+        metadata.appendChild(createNode("div", "mock-label", "Profile metadata"));
+        const nameField = createNode("label", "profile-field");
+        nameField.appendChild(createNode("span", "", "Name"));
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.value = state.draft.name;
+        nameInput.addEventListener("input", () => {
+          state.draft.name = nameInput.value;
+          scheduleProfileSave(windowId);
+        });
+        nameInput.addEventListener("blur", () => flushProfileSave(windowId));
+        nameField.appendChild(nameInput);
+        metadata.appendChild(nameField);
+
+        const descriptionField = createNode("label", "profile-field");
+        descriptionField.appendChild(createNode("span", "", "Description"));
+        const descriptionInput = document.createElement("textarea");
+        descriptionInput.className = "profile-textarea";
+        descriptionInput.value = state.draft.description;
+        descriptionInput.addEventListener("input", () => {
+          state.draft.description = descriptionInput.value;
+          scheduleProfileSave(windowId);
+        });
+        descriptionInput.addEventListener("blur", () => flushProfileSave(windowId));
+        descriptionField.appendChild(descriptionInput);
+        metadata.appendChild(descriptionField);
+        editor.appendChild(metadata);
+
+        const envSection = createNode("div", "profile-section");
+        const envHeader = createNode("div", "profile-row-header");
+        envHeader.appendChild(createNode("div", "mock-label", "Profile variables"));
+        const addEnvButton = createNode("button", "wizard-button", "Add variable");
+        addEnvButton.type = "button";
+        addEnvButton.addEventListener("click", () => {
+          state.draft.envVars.push({ key: "", value: "" });
+          renderProfile(windowId, true);
+        });
+        envHeader.appendChild(addEnvButton);
+        envSection.appendChild(envHeader);
+        const envTable = createNode("div", "profile-table");
+        if (state.draft.envVars.length === 0) {
+          envTable.appendChild(
+            createNode("div", "profile-empty-copy", "No env overrides for this profile."),
+          );
+        }
+        state.draft.envVars.forEach((entry, index) => {
+          const row = createNode("div", "profile-table-row");
+          const keyInput = document.createElement("input");
+          keyInput.type = "text";
+          keyInput.placeholder = "KEY";
+          keyInput.value = entry.key;
+          keyInput.addEventListener("input", () => {
+            state.draft.envVars[index].key = keyInput.value;
+            scheduleProfileSave(windowId);
+          });
+          keyInput.addEventListener("blur", () => flushProfileSave(windowId));
+          row.appendChild(keyInput);
+
+          const valueInput = document.createElement("input");
+          valueInput.type = "text";
+          valueInput.placeholder = "Value";
+          valueInput.value = entry.value;
+          valueInput.addEventListener("input", () => {
+            state.draft.envVars[index].value = valueInput.value;
+            scheduleProfileSave(windowId);
+          });
+          valueInput.addEventListener("blur", () => flushProfileSave(windowId));
+          row.appendChild(valueInput);
+
+          const removeButton = createNode("button", "icon-button", "×");
+          removeButton.type = "button";
+          removeButton.setAttribute("aria-label", "Delete env var");
+          removeButton.addEventListener("click", () => {
+            state.draft.envVars.splice(index, 1);
+            renderProfile(windowId, true);
+            scheduleProfileSave(windowId);
+          });
+          row.appendChild(removeButton);
+          envTable.appendChild(row);
+        });
+        envSection.appendChild(envTable);
+        editor.appendChild(envSection);
+
+        const disabledSection = createNode("div", "profile-section");
+        const disabledHeader = createNode("div", "profile-row-header");
+        disabledHeader.appendChild(createNode("div", "mock-label", "Disabled OS variables"));
+        const addDisabledButton = createNode("button", "wizard-button", "Add disabled key");
+        addDisabledButton.type = "button";
+        addDisabledButton.addEventListener("click", () => {
+          state.draft.disabledEnv.push("");
+          renderProfile(windowId, true);
+        });
+        disabledHeader.appendChild(addDisabledButton);
+        disabledSection.appendChild(disabledHeader);
+        const disabledTable = createNode("div", "profile-table");
+        if (state.draft.disabledEnv.length === 0) {
+          disabledTable.appendChild(
+            createNode("div", "profile-empty-copy", "No disabled OS variables for this profile."),
+          );
+        }
+        state.draft.disabledEnv.forEach((entry, index) => {
+          const row = createNode("div", "profile-table-row profile-disabled-row");
+          const keyInput = document.createElement("input");
+          keyInput.type = "text";
+          keyInput.placeholder = "SECRET_KEY";
+          keyInput.value = entry;
+          keyInput.addEventListener("input", () => {
+            state.draft.disabledEnv[index] = keyInput.value;
+            scheduleProfileSave(windowId);
+          });
+          keyInput.addEventListener("blur", () => flushProfileSave(windowId));
+          row.appendChild(keyInput);
+
+          const removeButton = createNode("button", "icon-button", "×");
+          removeButton.type = "button";
+          removeButton.setAttribute("aria-label", "Delete disabled env key");
+          removeButton.addEventListener("click", () => {
+            state.draft.disabledEnv.splice(index, 1);
+            renderProfile(windowId, true);
+            scheduleProfileSave(windowId);
+          });
+          row.appendChild(removeButton);
+          disabledTable.appendChild(row);
+        });
+        disabledSection.appendChild(disabledTable);
+        editor.appendChild(disabledSection);
+
+        const previewSection = createNode("div", "profile-section");
+        previewSection.appendChild(createNode("div", "mock-label", "Merged preview"));
+        previewSection.appendChild(
+          createNode(
+            "div",
+            "profile-empty-copy",
+            "The backend computes this preview from the current OS environment, disabled keys, and profile overrides.",
+          ),
+        );
+        const preview = createNode("div", "profile-preview");
+        if ((snapshot.merged_preview || []).length === 0) {
+          preview.appendChild(
+            createNode("div", "profile-empty-copy", "No merged entries to preview yet."),
+          );
+        }
+        for (const entry of snapshot.merged_preview || []) {
+          const row = createNode("div", "profile-preview-row");
+          row.appendChild(createNode("div", "profile-preview-key", entry.key));
+          row.appendChild(createNode("div", "profile-preview-value", entry.value));
+          preview.appendChild(row);
+        }
+        previewSection.appendChild(preview);
+        editor.appendChild(previewSection);
+
+        updateProfileStatus(windowId);
       }
 
       function submitBoardEntry(windowId) {
@@ -4112,6 +4638,54 @@
           return;
         }
 
+        if (surface === "profile") {
+          body.innerHTML = `
+            <div class="profile-root">
+              <div class="knowledge-toolbar">
+                <div class="knowledge-toolbar-main">
+                  <div class="knowledge-heading">Profiles</div>
+                  <div class="profile-status"></div>
+                </div>
+                <div class="knowledge-toolbar-actions">
+                  <button class="wizard-button" type="button" data-action="new-profile">New profile</button>
+                  <button class="icon-button" data-action="refresh-profile" aria-label="Refresh profiles">↻</button>
+                </div>
+              </div>
+              <div class="profile-layout">
+                <div class="profile-list-pane">
+                  <div class="profile-list"></div>
+                </div>
+                <div class="profile-editor-pane"></div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='refresh-profile']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.profileSurface.ensureProfileState(windowData.id);
+              state.error = "";
+              frontendUnits.profileSurface.requestProfile(windowData.id);
+              frontendUnits.profileSurface.renderProfile(windowData.id, true);
+            });
+          body
+            .querySelector("[data-action='new-profile']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              frontendUnits.profileSurface.createProfile(windowData.id);
+            });
+          const state = frontendUnits.profileSurface.ensureProfileState(windowData.id);
+          if (!state.snapshot && !state.loading && !state.error) {
+            frontendUnits.profileSurface.requestProfile(windowData.id);
+          }
+          frontendUnits.profileSurface.renderProfile(windowData.id);
+          return;
+        }
+
         if (surface === "board") {
           body.innerHTML = `
             <div class="board-root">
@@ -4671,8 +5245,13 @@
           detailMap.delete(windowId);
           pendingOutputMap.delete(windowId);
           pendingSnapshotMap.delete(windowId);
+          const profileState = profileStateMap.get(windowId);
+          if (profileState) {
+            clearProfileSaveTimer(profileState);
+          }
           fileTreeStateMap.delete(windowId);
           branchListStateMap.delete(windowId);
+          profileStateMap.delete(windowId);
           boardStateMap.delete(windowId);
           logStateMap.delete(windowId);
           knowledgeBridgeStateMap.delete(windowId);
@@ -4775,6 +5354,17 @@
         syncDraftFromSelection: syncMemoDraftFromSelection,
       });
 
+      const profileSurface = Object.freeze({
+        ensureProfileState,
+        requestProfile,
+        renderProfile,
+        createProfile,
+        setActiveProfile,
+        flushProfileSave,
+        deleteProfile,
+        syncDraftFromSelection: syncProfileDraftFromSelection,
+      });
+
       const boardSurface = Object.freeze({
         ensureBoardState,
         requestBoard,
@@ -4810,6 +5400,7 @@
         launchWizardSurface,
         branchesFileTreeSurface,
         memoSurface,
+        profileSurface,
         boardSurface,
         logsSurface,
         knowledgeSettingsSurface,
@@ -4908,6 +5499,16 @@
             frontendUnits.memoSurface.renderMemo(event.id, true);
             break;
           }
+          case "profile_snapshot": {
+            const state = frontendUnits.profileSurface.ensureProfileState(event.id);
+            state.snapshot = event.snapshot || null;
+            state.loading = false;
+            state.saving = Boolean(state.saveTimer);
+            state.error = "";
+            state.selectedProfile = event.snapshot?.selected_profile || null;
+            frontendUnits.profileSurface.renderProfile(event.id);
+            break;
+          }
           case "board_entries": {
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
             state.entries = event.entries || [];
@@ -5004,6 +5605,14 @@
             state.saving = Boolean(state.saveTimer);
             state.error = event.message;
             frontendUnits.memoSurface.renderMemo(event.id, true);
+            break;
+          }
+          case "profile_error": {
+            const state = frontendUnits.profileSurface.ensureProfileState(event.id);
+            state.loading = false;
+            state.saving = Boolean(state.saveTimer);
+            state.error = event.message;
+            frontendUnits.profileSurface.renderProfile(event.id, true);
             break;
           }
           case "board_error": {

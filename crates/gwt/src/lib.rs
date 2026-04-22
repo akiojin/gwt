@@ -14,6 +14,7 @@ pub mod managed_assets;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
+pub mod profile_dispatch;
 pub mod protocol;
 pub mod workspace;
 
@@ -67,6 +68,7 @@ pub use preset::{
 };
 pub use protocol::{
     AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FocusCycleDirection, FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
+    FocusCycleDirection, FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;
