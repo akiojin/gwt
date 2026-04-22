@@ -3533,7 +3533,7 @@ fn main() -> wry::Result<()> {
 
     let mut server = EmbeddedServer::start(
         &runtime,
-        proxy.clone(),
+        AppEventProxy::new(proxy.clone()),
         clients.clone(),
         pty_writers.clone(),
     )

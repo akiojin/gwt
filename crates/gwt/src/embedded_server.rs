@@ -20,7 +20,6 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use gwt::{BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent};
 use gwt_terminal::PtyHandle;
-use tao::event_loop::EventLoopProxy;
 use tokio::{
     net::TcpListener,
     runtime::Runtime,
@@ -100,7 +99,7 @@ pub(super) struct EmbeddedServer {
 impl EmbeddedServer {
     pub(super) fn start(
         runtime: &Runtime,
-        proxy: EventLoopProxy<UserEvent>,
+        proxy: AppEventProxy,
         clients: ClientHub,
         pty_writers: PtyWriterRegistry,
     ) -> std::io::Result<Self> {
@@ -116,7 +115,7 @@ impl EmbeddedServer {
             .route("/internal/hook-live", post(hook_live_handler))
             .route("/ws", get(websocket_handler))
             .with_state(ServerState {
-                proxy: AppEventProxy::new(proxy),
+                proxy,
                 clients,
                 hook_forward_token: hook_forward_token.clone(),
                 pty_writers,
@@ -387,11 +386,6 @@ mod tests {
     };
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
-    use tao::event_loop::EventLoopBuilder;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    use tao::platform::unix::EventLoopBuilderExtUnix;
-    #[cfg(target_os = "windows")]
-    use tao::platform::windows::EventLoopBuilderExtWindows;
     use tokio::runtime::Runtime;
 
     use crate::{AppEventProxy, OutboundEvent, UserEvent};
@@ -498,13 +492,7 @@ mod tests {
     #[test]
     fn embedded_server_exposes_health_and_authenticated_hook_live_routes() {
         let runtime = Runtime::new().expect("tokio runtime");
-        let mut event_loop_builder = EventLoopBuilder::<UserEvent>::with_user_event();
-        #[cfg(target_os = "windows")]
-        event_loop_builder.with_any_thread(true);
-        #[cfg(all(unix, not(target_os = "macos")))]
-        event_loop_builder.with_any_thread(true);
-        let event_loop = event_loop_builder.build();
-        let proxy = event_loop.create_proxy();
+        let (proxy, _events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(&runtime, proxy, clients.clone(), pty_writers)
