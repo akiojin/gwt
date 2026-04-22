@@ -9,10 +9,13 @@ pub mod daemon;
 pub mod error;
 pub mod index;
 pub mod logging;
+pub mod notes;
 pub mod paths;
 pub mod process;
 pub mod repo_hash;
 pub mod runtime;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod update;
 pub mod worktree_hash;
 

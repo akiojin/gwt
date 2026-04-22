@@ -863,6 +863,141 @@
         overflow-wrap: anywhere;
       }
 
+      .memo-layout {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.1fr);
+      }
+
+      .memo-note-list,
+      .memo-editor-pane {
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .memo-note-list {
+        overflow: auto;
+        padding: 8px 0;
+        border-right: 1px solid rgba(148, 163, 184, 0.18);
+      }
+
+      .memo-editor-pane {
+        overflow: auto;
+        padding: 12px;
+        display: grid;
+        align-content: start;
+        gap: 10px;
+      }
+
+      .memo-status {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .memo-status.info {
+        color: #1d4ed8;
+      }
+
+      .memo-status.error {
+        color: #b91c1c;
+      }
+
+      .memo-note-row {
+        display: grid;
+        gap: 6px;
+        width: 100%;
+        padding: 12px;
+        border: none;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        background: transparent;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .memo-note-row:hover {
+        background: rgba(59, 130, 246, 0.06);
+      }
+
+      .memo-note-row.selected {
+        background: rgba(59, 130, 246, 0.12);
+      }
+
+      .memo-note-header,
+      .memo-editor-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .memo-note-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        font-weight: 600;
+        color: #0f172a;
+      }
+
+      .memo-note-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(245, 158, 11, 0.14);
+        color: #b45309;
+        font-size: 11px;
+      }
+
+      .memo-note-time,
+      .memo-note-preview,
+      .memo-empty-copy,
+      .memo-editor-meta,
+      .memo-pin-toggle {
+        font-size: 12px;
+        color: #475569;
+      }
+
+      .memo-note-preview {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .memo-empty {
+        display: grid;
+        gap: 10px;
+        padding: 16px 12px;
+      }
+
+      .memo-pin-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .memo-title-input,
+      .memo-body-input {
+        width: 100%;
+        padding: 10px;
+        border-radius: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: #ffffff;
+        font: inherit;
+        color: #0f172a;
+      }
+
+      .memo-title-input {
+        min-height: 36px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .memo-body-input {
+        min-height: 220px;
+        resize: vertical;
+        line-height: 1.5;
+      }
+
       .board-layout {
         flex: 1;
         min-height: 0;

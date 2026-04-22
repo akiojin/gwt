@@ -498,6 +498,30 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_memo_surface_uses_repo_scoped_notes_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("memo-root"),
+            "expected Memo root scaffold in embedded html",
+        );
+        assert!(
+            html.contains("load_memo"),
+            "expected Memo load event in embedded html",
+        );
+        assert!(
+            html.contains("create_memo_note")
+                && html.contains("update_memo_note")
+                && html.contains("delete_memo_note"),
+            "expected Memo surface to expose create/update/delete note events",
+        );
+        assert!(
+            html.contains("Pinned notes stay at the top of the repo-scoped list."),
+            "expected Memo surface to explain the repo-scoped pin ordering contract",
+        );
+    }
+
+    #[test]
     fn embedded_web_logs_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 
@@ -613,10 +637,11 @@ mod tests {
                 && html.contains("terminalHost,")
                 && html.contains("launchWizardSurface,")
                 && html.contains("branchesFileTreeSurface,")
+                && html.contains("memoSurface,")
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Memo, Board, Logs, and knowledge/settings surfaces",
         );
         assert!(
             !html.contains("window.__POC__"),

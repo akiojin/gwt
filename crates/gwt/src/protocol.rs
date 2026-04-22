@@ -2,6 +2,7 @@ use gwt_agent::CustomCodingAgent;
 use gwt_core::{
     coordination::{BoardEntry, BoardEntryKind},
     logging::LogEvent,
+    notes::MemoNote,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +108,9 @@ pub enum FrontendEvent {
     LoadBoard {
         id: String,
     },
+    LoadMemo {
+        id: String,
+    },
     LoadLogs {
         id: String,
     },
@@ -133,6 +137,23 @@ pub enum FrontendEvent {
         parent_id: Option<String>,
         topics: Vec<String>,
         owners: Vec<String>,
+    },
+    CreateMemoNote {
+        id: String,
+        title: String,
+        body: String,
+        pinned: bool,
+    },
+    UpdateMemoNote {
+        id: String,
+        note_id: String,
+        title: String,
+        body: String,
+        pinned: bool,
+    },
+    DeleteMemoNote {
+        id: String,
+        note_id: String,
     },
     OpenIssueLaunchWizard {
         id: String,
@@ -253,6 +274,11 @@ pub enum BackendEvent {
         id: String,
         entries: Vec<BoardEntry>,
     },
+    MemoNotes {
+        id: String,
+        notes: Vec<MemoNote>,
+        selected_note_id: Option<String>,
+    },
     LogEntries {
         id: String,
         entries: Vec<LogEvent>,
@@ -282,6 +308,10 @@ pub enum BackendEvent {
         message: String,
     },
     BoardError {
+        id: String,
+        message: String,
+    },
+    MemoError {
         id: String,
         message: String,
     },
@@ -355,6 +385,7 @@ mod tests {
     use gwt_core::{
         coordination::{AuthorKind, BoardEntry, BoardEntryKind},
         logging::{LogEvent, LogLevel},
+        notes::MemoNote,
     };
     use serde_json::Value;
 
@@ -478,6 +509,39 @@ mod tests {
             value["entries"][0]["related_topics"][0],
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
+        );
+    }
+
+    #[test]
+    fn memo_notes_serializes_snapshot_contract() {
+        let event = BackendEvent::MemoNotes {
+            id: "memo-1".to_string(),
+            notes: vec![MemoNote {
+                id: "note-1".to_string(),
+                title: "Pinned note".to_string(),
+                body: "Remember to verify the cache contract".to_string(),
+                pinned: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }],
+            selected_note_id: Some("note-1".to_string()),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize memo notes");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("memo_notes".to_string()))
+        );
+        assert_eq!(value.get("id"), Some(&Value::String("memo-1".to_string())));
+        assert_eq!(
+            value["notes"][0]["pinned"],
+            Value::Bool(true),
+            "expected memo snapshot payload to keep pin ordering data on the wire",
+        );
+        assert_eq!(
+            value["selected_note_id"],
+            Value::String("note-1".to_string()),
+            "expected memo snapshot payload to carry the preferred editor selection",
         );
     }
 

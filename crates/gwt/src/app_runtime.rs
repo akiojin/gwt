@@ -392,6 +392,7 @@ impl AppRuntime {
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
+            FrontendEvent::LoadMemo { id } => self.load_memo_events(&client_id, &id),
             FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
@@ -439,6 +440,22 @@ impl AppRuntime {
                     owners,
                 },
             ),
+            FrontendEvent::CreateMemoNote {
+                id,
+                title,
+                body,
+                pinned,
+            } => self.create_memo_note_events(&client_id, &id, title, body, pinned),
+            FrontendEvent::UpdateMemoNote {
+                id,
+                note_id,
+                title,
+                body,
+                pinned,
+            } => self.update_memo_note_events(&client_id, &id, &note_id, title, body, pinned),
+            FrontendEvent::DeleteMemoNote { id, note_id } => {
+                self.delete_memo_note_events(&client_id, &id, &note_id)
+            }
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
@@ -1084,6 +1101,40 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn load_memo_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        let project_root = match self.resolve_memo_window_context(id) {
+            Ok(context) => context,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        }
+        .1;
+
+        match gwt_core::notes::load_snapshot(&project_root) {
+            Ok(snapshot) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::MemoNotes {
+                    id: id.to_string(),
+                    notes: snapshot.notes,
+                    selected_note_id: None,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::MemoError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
     pub(crate) fn load_logs_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -1138,6 +1189,203 @@ impl AppRuntime {
                 },
             )],
         }
+    }
+
+    pub(crate) fn create_memo_note_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        title: String,
+        body: String,
+        pinned: bool,
+    ) -> Vec<OutboundEvent> {
+        let (tab_id, project_root) = match self.resolve_memo_window_context(id) {
+            Ok(context) => context,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        let created = match gwt_core::notes::create_note(
+            &project_root,
+            gwt_core::notes::MemoNoteDraft::new(title, body, pinned),
+        ) {
+            Ok(note) => note,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+
+        self.memo_snapshot_events(&tab_id, id, Some(created.id), &project_root, client_id)
+    }
+
+    pub(crate) fn update_memo_note_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        note_id: &str,
+        title: String,
+        body: String,
+        pinned: bool,
+    ) -> Vec<OutboundEvent> {
+        let (tab_id, project_root) = match self.resolve_memo_window_context(id) {
+            Ok(context) => context,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        let updated = match gwt_core::notes::update_note(
+            &project_root,
+            note_id,
+            gwt_core::notes::MemoNoteDraft::new(title, body, pinned),
+        ) {
+            Ok(note) => note,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+
+        self.memo_snapshot_events(&tab_id, id, Some(updated.id), &project_root, client_id)
+    }
+
+    pub(crate) fn delete_memo_note_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        note_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let (tab_id, project_root) = match self.resolve_memo_window_context(id) {
+            Ok(context) => context,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message,
+                    },
+                )];
+            }
+        };
+
+        if let Err(error) = gwt_core::notes::delete_note(&project_root, note_id) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::MemoError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )];
+        }
+
+        let selected_note_id = match gwt_core::notes::load_snapshot(&project_root) {
+            Ok(snapshot) => snapshot.notes.first().map(|note| note.id.clone()),
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: id.to_string(),
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+
+        self.memo_snapshot_events(&tab_id, id, selected_note_id, &project_root, client_id)
+    }
+
+    fn resolve_memo_window_context(
+        &self,
+        id: &str,
+    ) -> std::result::Result<(String, PathBuf), String> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return Err("Window not found".to_string());
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return Err("Project tab not found".to_string());
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return Err("Window not found".to_string());
+        };
+        if window.preset != WindowPreset::Memo {
+            return Err("Window is not a Memo surface".to_string());
+        }
+
+        Ok((address.tab_id.clone(), tab.project_root.clone()))
+    }
+
+    fn memo_window_ids_for_tab(&self, tab_id: &str) -> Vec<String> {
+        let Some(tab) = self.tab(tab_id) else {
+            return Vec::new();
+        };
+        tab.workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Memo)
+            .map(|window| combined_window_id(tab_id, &window.id))
+            .collect()
+    }
+
+    fn memo_snapshot_events(
+        &self,
+        tab_id: &str,
+        selected_window_id: &str,
+        selected_note_id: Option<String>,
+        project_root: &Path,
+        client_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let snapshot = match gwt_core::notes::load_snapshot(project_root) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::MemoError {
+                        id: selected_window_id.to_string(),
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+
+        self.memo_window_ids_for_tab(tab_id)
+            .into_iter()
+            .map(|window_id| {
+                OutboundEvent::broadcast(BackendEvent::MemoNotes {
+                    id: window_id.clone(),
+                    notes: snapshot.notes.clone(),
+                    selected_note_id: if window_id == selected_window_id {
+                        selected_note_id.clone()
+                    } else {
+                        None
+                    },
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn post_board_entry_events(
@@ -2860,6 +3108,9 @@ mod tests {
     use gwt_core::{
         coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind},
         logging::{current_log_file, LogEvent, LogLevel},
+        notes::{
+            create_note as create_memo_note, load_snapshot as load_memo_snapshot, MemoNoteDraft,
+        },
     };
     use gwt_terminal::Pane;
 
@@ -3359,6 +3610,50 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        create_memo_note(
+            &repo,
+            MemoNoteDraft::new("Pinned note", "Verify repo-scoped storage", true),
+        )
+        .expect("seed memo snapshot");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "memo-1",
+            repo,
+            WindowPreset::Memo,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "memo-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadMemo {
+                id: window_id.clone(),
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::MemoNotes {
+                    id,
+                    notes,
+                    selected_note_id,
+                },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && notes.len() == 1
+                && notes[0].title == "Pinned note"
+                && selected_note_id.is_none()
+        ));
+    }
+
+    #[test]
     fn app_runtime_load_logs_replies_with_current_log_snapshot() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -3402,6 +3697,128 @@ mod tests {
                 && entries[0].message == "runtime stalled"
                 && matches!(entries[0].severity, LogLevel::Warn)
         ));
+    }
+
+    #[test]
+    fn app_runtime_create_memo_note_broadcasts_repo_scoped_snapshot_to_memo_windows() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut persisted = empty_workspace_state();
+        persisted.windows.push(sample_window(
+            "memo-1",
+            WindowPreset::Memo,
+            WindowProcessStatus::Ready,
+        ));
+        persisted.windows.push(sample_window(
+            "memo-2",
+            WindowPreset::Memo,
+            WindowProcessStatus::Ready,
+        ));
+        persisted.next_z_index = 3;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let current_window_id = combined_window_id("tab-1", "memo-1");
+        let sibling_window_id = combined_window_id("tab-1", "memo-2");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::CreateMemoNote {
+                id: current_window_id.clone(),
+                title: "".to_string(),
+                body: "".to_string(),
+                pinned: false,
+            },
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MemoNotes {
+                    id,
+                    notes,
+                    selected_note_id: Some(selected_note_id),
+                },
+            } if id == &current_window_id
+                && notes.len() == 1
+                && selected_note_id == &notes[0].id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MemoNotes {
+                    id,
+                    notes,
+                    selected_note_id: None,
+                },
+            } if id == &sibling_window_id && notes.len() == 1
+        )));
+
+        let snapshot = load_memo_snapshot(&repo).expect("load memo snapshot");
+        assert_eq!(snapshot.notes.len(), 1);
+    }
+
+    #[test]
+    fn app_runtime_update_memo_note_persists_repo_scoped_edits() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let created = create_memo_note(&repo, MemoNoteDraft::new("Draft", "Initial note", false))
+            .expect("seed memo snapshot");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "memo-1",
+            repo.clone(),
+            WindowPreset::Memo,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "memo-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::UpdateMemoNote {
+                id: window_id.clone(),
+                note_id: created.id.clone(),
+                title: "Pinned note".to_string(),
+                body: "Updated note".to_string(),
+                pinned: true,
+            },
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MemoNotes {
+                    id,
+                    notes,
+                    selected_note_id: Some(selected_note_id),
+                },
+            } if id == &window_id
+                && selected_note_id == &created.id
+                && notes.iter().any(|note|
+                    note.id == created.id
+                        && note.title == "Pinned note"
+                        && note.body == "Updated note"
+                        && note.pinned
+                )
+        )));
+
+        let snapshot = load_memo_snapshot(&repo).expect("load memo snapshot");
+        assert!(snapshot.notes.iter().any(|note| note.id == created.id
+            && note.title == "Pinned note"
+            && note.body == "Updated note"
+            && note.pinned));
     }
 
     #[test]

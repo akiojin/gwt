@@ -1,5 +1,31 @@
 # Lessons Learned
 
+## 2026-04-22 — test: `HOME` / `USERPROFILE` を触る gwt-core test は crate-wide lock を共有する
+
+### 事象
+
+`crates/gwt-core/src/notes.rs` の repo-scoped notes test を追加した後、
+`cargo test -p gwt-core -p gwt` で既存の
+`coordination::tests::git_repo_without_origin_uses_project_scoped_coordination_dir`
+が intermittent に `指定されたパスが見つかりません` で落ちた。
+
+### 原因
+
+- `notes` test と `coordination` test の両方が `HOME` / `USERPROFILE` を
+  temp dir に差し替えていた。
+- それぞれが module-local な mutex を持っていたため、crate 全体では排他になっておらず、
+  並列 test 実行時に環境変数が競合した。
+- path helper は global env を直接読むので、別 module の test でも影響を受けた。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `RUST_LOG` など process-global env を触る test helper は
+   crate-wide shared module (`test_support`) に置いて共通 lock を使う。
+2. 新しい env-mutation test を追加するときは、既存 module に local lock がないかを
+   先に確認し、別 lock を増やさない。
+3. `cargo test -p gwt-core -p gwt` の full run を、env を触る test 追加直後の
+   fail-fast check に含める。
+
 ## 2026-04-21 — spec: `gwt issue spec --edit` を短時間に連続実行したら readback を即確認する
 
 ### 事象

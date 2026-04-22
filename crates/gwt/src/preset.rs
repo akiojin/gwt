@@ -74,7 +74,7 @@ impl WindowPreset {
             Self::FileTree => "Browse repository files in a read-only tree",
             Self::Branches => "Browse repository branches and launch agents",
             Self::Settings => "Placeholder settings surface",
-            Self::Memo => "Placeholder notes surface",
+            Self::Memo => "Capture repo-scoped notes and pinned follow-ups",
             Self::Profile => "Placeholder profile surface",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
