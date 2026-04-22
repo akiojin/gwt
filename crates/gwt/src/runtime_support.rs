@@ -381,7 +381,7 @@ pub(crate) fn front_door_route(argv: &[String]) -> FrontDoorRoute {
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
             debug_assert!(matches!(
                 top_verb,
-                "board" | "hook" | "update" | "__internal"
+                "board" | "hook" | "discuss" | "plan" | "build" | "update" | "__internal"
             ));
             FrontDoorRoute::DetachedCli
         }
@@ -492,10 +492,13 @@ mod tests {
     }
 
     #[test]
-    fn front_door_route_keeps_board_hook_update_and_internal_commands_on_cli_path() {
+    fn front_door_route_keeps_detached_helper_commands_on_cli_path() {
         for args in [
             argv(&["gwt", "board", "show", "--json"]),
             argv(&["gwt", "hook", "runtime-state", "PreToolUse"]),
+            argv(&["gwt", "discuss", "resolve", "--proposal", "Resume"]),
+            argv(&["gwt", "plan", "start", "--spec", "1935"]),
+            argv(&["gwt", "build", "complete", "--spec", "1935"]),
             argv(&["gwt", "update", "--check"]),
             argv(&["gwt", "__internal", "daemon-hook", "forward"]),
         ] {

@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-22 — verify: Windows GUI smoke は `browser URL` 出力だけで成功扱いしない
+
+### 事象
+
+`target/debug/gwt.exe` を起動すると `gwt browser URL: http://127.0.0.1:<port>/`
+までは出たが、その直後に index runner が
+`'cp932' codec can't decode byte 0x94 ... illegal multibyte sequence`
+で `RUNTIME_ERROR` を返し、native GUI の手動確認を最後まで進められなかった。
+
+### 原因
+
+- `browser URL` の出力は front-door server 起動成功しか保証せず、indexing/runtime の
+  後続失敗は別で起こりうる。
+- この環境では Windows ユーザープロファイル配下の Unicode path と index runner の
+  文字コード処理が衝突し、GUI 操作前に runtime error になった。
+
+### 再発防止策
+
+1. Windows GUI smoke では `browser URL` 出力後に `~/.gwt/logs/index/*.log` か
+   stderr を必ず確認し、index/runtime error がないことまで見て成功判定する。
+2. front-door HTML が `127.0.0.1` で取れても、native GUI 操作まで届かなければ
+   manual E2E 完了扱いにしない。
+3. Unicode path 由来の index runner failure が出た場合は、当該手動確認タスクを
+   block として記録し、別 issue/scope に切り出して扱う。
+
 ## 2026-04-22 — test: `HOME` / `USERPROFILE` を触る gwt-core test は crate-wide lock を共有する
 
 ### 事象
