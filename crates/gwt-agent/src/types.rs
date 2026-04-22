@@ -291,7 +291,14 @@ mod tests {
 
     #[test]
     fn resolve_agent_id_does_not_infer_known_agents_from_custom_names() {
-        let custom_inputs = ["my-claude-wrapper", "codex-wrapper", "opencode-mentor"];
+        let custom_inputs = [
+            "my-claude-wrapper",
+            "codex-wrapper",
+            "gemini-helper",
+            "opencode-mentor",
+            "copilot-mentor",
+            "github-copilot-wrapper",
+        ];
         for raw in custom_inputs {
             assert_eq!(
                 resolve_agent_id(raw),
