@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use super::{HookError, HookEvent};
 use crate::discussion_resume::load_pending_resume;
+use crate::window_state::window_state_for_hook_event;
 
 /// The JSON shape the Branches tab polls from `$GWT_SESSION_RUNTIME_PATH`.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -35,10 +36,11 @@ pub struct RuntimeState {
 /// forward to this handler. Callers translate `None` into a
 /// [`HookError::InvalidEvent`].
 pub fn status_for_event(event: &str) -> Option<&'static str> {
-    match event {
-        "SessionStart" | "Stop" => Some("WaitingInput"),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some("Running"),
-        _ => None,
+    match window_state_for_hook_event(event)? {
+        crate::persistence::WindowState::Running => Some("Running"),
+        crate::persistence::WindowState::Waiting => Some("Waiting"),
+        crate::persistence::WindowState::Stopped => Some("Stopped"),
+        crate::persistence::WindowState::Error => Some("Error"),
     }
 }
 
@@ -212,7 +214,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(&path).unwrap();
         let state: RuntimeState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(state.status, "WaitingInput");
+        assert_eq!(state.status, "Waiting");
         assert_eq!(state.source_event, "Stop");
         assert_eq!(
             state.pending_discussion,
@@ -222,6 +224,15 @@ mod tests {
                 next_question: Some("Should SessionStart surface the proposal?".to_string()),
             })
         );
+    }
+
+    #[test]
+    fn status_for_event_maps_stop_to_waiting_and_runtime_events_to_running() {
+        assert_eq!(status_for_event("SessionStart"), Some("Running"));
+        assert_eq!(status_for_event("UserPromptSubmit"), Some("Running"));
+        assert_eq!(status_for_event("PreToolUse"), Some("Running"));
+        assert_eq!(status_for_event("PostToolUse"), Some("Running"));
+        assert_eq!(status_for_event("Stop"), Some("Waiting"));
     }
 
     #[test]

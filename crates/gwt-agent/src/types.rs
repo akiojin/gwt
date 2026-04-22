@@ -140,8 +140,11 @@ pub enum AgentColor {
 pub enum AgentStatus {
     #[default]
     Unknown,
+    #[serde(alias = "running", alias = "Running")]
     Running,
+    #[serde(alias = "waiting", alias = "Waiting", alias = "waiting_input")]
     WaitingInput,
+    #[serde(alias = "stopped", alias = "Stopped")]
     Stopped,
 }
 

@@ -515,18 +515,21 @@
         background: #f59e0b;
       }
 
-      .status-chip.running .status-dot {
+      .status-chip.running .status-dot,
+      .status-chip.ready .status-dot,
+      .status-chip.starting .status-dot {
         background: #22c55e;
       }
 
-      .status-chip.ready .status-dot {
-        background: #3b82f6;
+      .status-chip.waiting .status-dot {
+        background: #f59e0b;
       }
 
       .status-chip.error .status-dot {
         background: #ef4444;
       }
 
+      .status-chip.stopped .status-dot,
       .status-chip.exited .status-dot {
         background: #94a3b8;
       }
@@ -2941,7 +2944,7 @@
       function applyStatus(windowId, status, detail) {
         if (detail) {
           detailMap.set(windowId, detail);
-        } else if (status === "running" || status === "ready") {
+        } else if (status === "running" || status === "waiting" || status === "ready") {
           detailMap.delete(windowId);
         }
         const element = windowMap.get(windowId);
@@ -2951,7 +2954,15 @@
         const chip = element.querySelector(".status-chip");
         const label = element.querySelector(".status-label");
         const overlay = element.querySelector(".terminal-overlay");
-        chip.classList.remove("starting", "running", "ready", "exited", "error");
+        chip.classList.remove(
+          "starting",
+          "running",
+          "ready",
+          "waiting",
+          "stopped",
+          "exited",
+          "error",
+        );
         chip.classList.add(status);
         label.textContent = status;
         const effectiveDetail = detailMap.get(windowId);
@@ -2964,9 +2975,13 @@
           }
           overlay.classList.toggle(
             "visible",
-            status === "starting" || status === "error" || status === "exited",
+            status === "starting" ||
+              status === "error" ||
+              status === "stopped" ||
+              status === "exited" ||
+              (status === "running" && Boolean(effectiveDetail)),
           );
-          if (status === "starting") {
+          if (status === "starting" || (status === "running" && Boolean(effectiveDetail))) {
             startSpinnerAnimation(overlay);
           }
         }
@@ -6480,6 +6495,9 @@
             break;
           case "terminal_status":
             applyStatus(event.id, event.status, event.detail);
+            break;
+          case "window_state":
+            applyStatus(event.window_id, event.state, detailMap.get(event.window_id));
             break;
           case "launch_progress": {
             const element = windowMap.get(event.id);

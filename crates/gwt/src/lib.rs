@@ -17,6 +17,7 @@ pub mod preset;
 pub mod profiles_dispatch;
 pub mod profiles_service;
 pub mod protocol;
+pub mod window_state;
 pub mod workspace;
 
 pub use branch_cleanup::{
@@ -62,6 +63,7 @@ pub use persistence::{
     project_title_from_path, save_session_state, save_workspace_state, workspace_state_path,
     CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowState,
     PersistedWorkspaceState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowProcessStatus,
+    WindowState,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,

@@ -173,11 +173,7 @@ impl WorkspaceState {
                 height,
             },
             z_index: self.persisted.next_z_index,
-            status: if preset.requires_process() {
-                WindowProcessStatus::Starting
-            } else {
-                WindowProcessStatus::Ready
-            },
+            status: WindowProcessStatus::Running,
             minimized: false,
             maximized: false,
             pre_maximize_geometry: None,
@@ -425,7 +421,7 @@ mod tests {
         assert_eq!(window.z_index, 3);
         assert_eq!(workspace.persisted().windows.len(), 3);
         assert_eq!(workspace.persisted().next_z_index, 4);
-        assert_eq!(window.status, WindowProcessStatus::Starting);
+        assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
     #[test]
@@ -434,7 +430,7 @@ mod tests {
         let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         assert_eq!(window.title, "File Tree");
         assert_eq!(window.preset, WindowPreset::FileTree);
-        assert_eq!(window.status, WindowProcessStatus::Ready);
+        assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
     #[test]
@@ -443,7 +439,7 @@ mod tests {
         let window = workspace.add_window(WindowPreset::Branches, arrange_bounds());
         assert_eq!(window.title, "Branches");
         assert_eq!(window.preset, WindowPreset::Branches);
-        assert_eq!(window.status, WindowProcessStatus::Ready);
+        assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
     #[test]

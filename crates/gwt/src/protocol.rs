@@ -11,9 +11,7 @@ use crate::{
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
-    persistence::{
-        CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
-    },
+    persistence::{CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowState},
     preset::WindowPreset,
     profiles_service::ProfileSnapshot,
 };
@@ -299,8 +297,12 @@ pub enum BackendEvent {
     },
     TerminalStatus {
         id: String,
-        status: WindowProcessStatus,
+        status: WindowState,
         detail: Option<String>,
+    },
+    WindowState {
+        window_id: String,
+        state: WindowState,
     },
     FileTreeEntries {
         id: String,
