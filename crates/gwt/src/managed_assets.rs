@@ -65,11 +65,19 @@ fn should_prefer_path_gwt(current_exe: &Path) -> bool {
     is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
 }
 
+fn strip_windows_exe_suffix(value: &str) -> &str {
+    value
+        .rsplit_once('.')
+        .filter(|(_, ext)| ext.eq_ignore_ascii_case("exe"))
+        .map(|(stem, _)| stem)
+        .unwrap_or(value)
+}
+
 fn is_named_gwt_binary(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
         .next_back()
-        .map(|value| value.trim_end_matches(".exe").to_string())
+        .map(|value| strip_windows_exe_suffix(&value).to_string())
         .is_some_and(|value| value.eq_ignore_ascii_case(GUI_FRONT_DOOR_BINARY_NAME))
 }
 
@@ -77,7 +85,7 @@ fn is_named_gwtd_binary(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
         .next_back()
-        .map(|value| value.trim_end_matches(".exe").to_string())
+        .map(|value| strip_windows_exe_suffix(&value).to_string())
         .is_some_and(|value| value.eq_ignore_ascii_case(INTERNAL_DAEMON_BINARY_NAME))
 }
 
@@ -160,8 +168,9 @@ mod tests {
     };
 
     use super::{
-        is_bunx_temp_executable, is_named_gwt_binary, normalized_path_segments,
-        resolve_public_gwt_bin_with_lookup, same_path, should_prefer_path_gwt, EnvVarGuard,
+        is_bunx_temp_executable, is_named_gwt_binary, is_named_gwtd_binary,
+        normalized_path_segments, resolve_public_gwt_bin_with_lookup, same_path,
+        should_prefer_path_gwt, EnvVarGuard,
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -220,12 +229,16 @@ mod tests {
     #[test]
     fn path_helpers_identify_named_binaries_and_temp_layouts() {
         let stable = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
+        let stable_upper = Path::new(r"C:\Users\Example\.bun\bin\gwt.EXE");
+        let daemon_upper = Path::new(r"C:\Program Files\GWT\GWTD.EXE");
         let bunx = Path::new(
             r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
         );
         let other = Path::new(r"C:\Users\Example\.bun\bin\other.exe");
 
         assert!(is_named_gwt_binary(stable));
+        assert!(is_named_gwt_binary(stable_upper));
+        assert!(is_named_gwtd_binary(daemon_upper));
         assert!(!is_named_gwt_binary(other));
         assert!(is_bunx_temp_executable(bunx));
         assert!(!is_bunx_temp_executable(stable));

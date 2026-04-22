@@ -62,34 +62,39 @@ pub(crate) fn resolve_launch_worktree_request(
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
     let remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
+    let has_local_branch = local_branch_exists(&main_repo_path, &branch_name)?;
 
-    manager
-        .fetch_origin()
-        .map_err(|err| format!("failed to fetch origin: {err}"))?;
-
-    if !manager
-        .remote_branch_exists(&remote_base_ref)
-        .map_err(|err| format!("failed to verify remote base branch {remote_base_ref}: {err}"))?
-    {
-        return Err(format!(
-            "remote base branch does not exist: {remote_base_ref}"
-        ));
-    }
-
-    if !manager
-        .remote_branch_exists(&remote_branch_ref)
-        .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
-    {
-        manager
-            .create_remote_branch_from_base(&remote_base_ref, &branch_name)
-            .map_err(|err| {
-                format!(
-                    "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
-                )
-            })?;
+    if !has_local_branch {
         manager
             .fetch_origin()
-            .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
+            .map_err(|err| format!("failed to fetch origin: {err}"))?;
+
+        if !manager
+            .remote_branch_exists(&remote_base_ref)
+            .map_err(|err| {
+                format!("failed to verify remote base branch {remote_base_ref}: {err}")
+            })?
+        {
+            return Err(format!(
+                "remote base branch does not exist: {remote_base_ref}"
+            ));
+        }
+
+        if !manager
+            .remote_branch_exists(&remote_branch_ref)
+            .map_err(|err| format!("failed to verify remote branch {remote_branch_ref}: {err}"))?
+        {
+            manager
+                .create_remote_branch_from_base(&remote_base_ref, &branch_name)
+                .map_err(|err| {
+                    format!(
+                        "failed to create remote branch {remote_branch_ref} from {remote_base_ref}: {err}"
+                    )
+                })?;
+            manager
+                .fetch_origin()
+                .map_err(|err| format!("failed to refresh origin refs after push: {err}"))?;
+        }
     }
 
     let preferred_worktree_path =
@@ -98,7 +103,7 @@ pub(crate) fn resolve_launch_worktree_request(
         .ok_or_else(|| {
             format!("failed to resolve available worktree path for branch {branch_name}")
         })?;
-    if local_branch_exists(&main_repo_path, &branch_name)? {
+    if has_local_branch {
         manager
             .create(&branch_name, &worktree_path)
             .map_err(|err| err.to_string())?;
@@ -257,6 +262,24 @@ fn probe_host_package_runner(
     env_vars: &HashMap<String, String>,
     cwd: Option<PathBuf>,
 ) -> bool {
+    probe_host_package_runner_with_timeout(
+        command,
+        args,
+        env_vars,
+        cwd,
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+    )
+}
+
+pub(crate) fn probe_host_package_runner_with_timeout(
+    command: &str,
+    args: Vec<String>,
+    env_vars: &HashMap<String, String>,
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> bool {
     let mut process = Command::new(command);
     process
         .args(args)
@@ -267,7 +290,28 @@ fn probe_host_package_runner(
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
-    process.status().is_ok_and(|status| status.success())
+    let Ok(mut child) = process.spawn() else {
+        return false;
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 pub(crate) fn command_matches_runner(command: &str, runner: &str) -> bool {

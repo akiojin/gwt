@@ -71,7 +71,8 @@ pub(crate) use launch_runtime::{
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
-    install_launch_gwt_bin_env_with_lookup, resolve_launch_worktree_request,
+    install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
+    resolve_launch_worktree_request,
 };
 pub(crate) use runtime_support::{
     app_state_view_from_parts, close_window_from_workspace, combined_window_id, current_git_branch,
@@ -195,7 +196,7 @@ mod tests {
         path::{Path, PathBuf},
         process::Command,
         sync::{Arc, Mutex, RwLock},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
@@ -2365,6 +2366,33 @@ mod tests {
     }
 
     #[test]
+    fn probe_host_package_runner_times_out_and_returns_false() {
+        #[cfg(target_os = "windows")]
+        let (command, args) = (
+            "cmd",
+            vec!["/C".to_string(), "ping -n 6 127.0.0.1 >NUL".to_string()],
+        );
+        #[cfg(not(target_os = "windows"))]
+        let (command, args) = ("sh", vec!["-c".to_string(), "sleep 5".to_string()]);
+
+        let start = Instant::now();
+        let ok = crate::probe_host_package_runner_with_timeout(
+            command,
+            args,
+            &HashMap::new(),
+            None,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        );
+
+        assert!(!ok, "hanging package-runner probe should fail closed");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "probe timeout should return quickly"
+        );
+    }
+
+    #[test]
     fn build_shell_process_launch_for_host_uses_worktree_env() {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo-feature");
@@ -3033,6 +3061,46 @@ mod tests {
             String::from_utf8_lossy(&output.stdout).trim(),
             "feature/created"
         );
+
+        let local_only_branch = Command::new("git")
+            .args(["branch", "feature/local-only"])
+            .current_dir(&repo)
+            .status()
+            .expect("create local-only branch");
+        assert!(
+            local_only_branch.success(),
+            "create local-only branch failed"
+        );
+
+        let mut local_only_dir = None;
+        let mut local_only_env = HashMap::new();
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/local-only"),
+            Some("develop"),
+            &mut local_only_dir,
+            &mut local_only_env,
+        )
+        .expect("local-only worktree");
+        let local_only_dir = local_only_dir.expect("local-only worktree dir");
+        let local_remote = Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/feature/local-only",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("check local-only remote ref");
+        assert_eq!(
+            local_remote.code(),
+            Some(1),
+            "local-only branch should not publish origin/feature/local-only from base branch"
+        );
+        assert!(local_only_env
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &local_only_dir)));
 
         let mut launch_config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .branch("feature/existing")
