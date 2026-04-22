@@ -280,7 +280,7 @@ where
     let merged_preview = selected
         .merged_env_pairs(base_env)
         .into_iter()
-        .map(|(key, value)| ProfileEnvEntryView { key, value })
+        .map(mask_preview_entry)
         .collect();
 
     Ok(ProfileSnapshotView {
@@ -307,6 +307,33 @@ fn sorted_disabled_env(disabled_env: &[String]) -> Vec<String> {
     let mut values = disabled_env.to_vec();
     values.sort();
     values
+}
+
+fn mask_preview_entry((key, value): (String, String)) -> ProfileEnvEntryView {
+    let value = if is_sensitive_env_key(&key) {
+        "<redacted>".to_string()
+    } else {
+        value
+    };
+    ProfileEnvEntryView { key, value }
+}
+
+fn is_sensitive_env_key(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.starts_with("AWS_")
+        || [
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "PASS",
+            "API_KEY",
+            "APIKEY",
+            "CREDENTIAL",
+            "PRIVATE_KEY",
+            "ACCESS_KEY",
+        ]
+        .iter()
+        .any(|marker| key.contains(marker))
 }
 
 #[cfg(test)]
@@ -389,11 +416,15 @@ mod tests {
         assert!(snapshot
             .merged_preview
             .iter()
-            .any(|entry| { entry.key == "API_KEY" && entry.value == "override" }));
+            .any(|entry| entry.key == "API_KEY" && entry.value == "<redacted>"));
         assert!(!snapshot
             .merged_preview
             .iter()
             .any(|entry| entry.key == "SECRET"));
+        assert!(snapshot
+            .merged_preview
+            .iter()
+            .any(|entry| entry.key == "PATH" && entry.value == "/bin"));
     }
 
     #[test]
@@ -461,5 +492,36 @@ mod tests {
             .profiles
             .iter()
             .any(|profile| profile.name == "review" && profile.is_active));
+    }
+
+    #[test]
+    fn snapshot_from_settings_masks_sensitive_merged_preview_values() {
+        let mut settings = Settings::default();
+        let snapshot = snapshot_from_settings(
+            &mut settings,
+            Some("default"),
+            [
+                ("GITHUB_TOKEN".to_string(), "ghp_secret".to_string()),
+                (
+                    "AWS_SECRET_ACCESS_KEY".to_string(),
+                    "aws-secret".to_string(),
+                ),
+                ("PATH".to_string(), "/usr/bin".to_string()),
+            ],
+        )
+        .expect("snapshot");
+
+        assert!(snapshot
+            .merged_preview
+            .iter()
+            .any(|entry| entry.key == "GITHUB_TOKEN" && entry.value == "<redacted>"));
+        assert!(snapshot
+            .merged_preview
+            .iter()
+            .any(|entry| entry.key == "AWS_SECRET_ACCESS_KEY" && entry.value == "<redacted>"));
+        assert!(snapshot
+            .merged_preview
+            .iter()
+            .any(|entry| entry.key == "PATH" && entry.value == "/usr/bin"));
     }
 }

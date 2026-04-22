@@ -426,9 +426,7 @@ mod tests {
         );
     }
 
-    fn drain_client_payloads(
-        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    ) -> Vec<String> {
+    fn drain_client_payloads(receiver: &mut tokio::sync::mpsc::Receiver<String>) -> Vec<String> {
         let mut payloads = Vec::new();
         while let Ok(payload) = receiver.try_recv() {
             payloads.push(payload);
@@ -2267,6 +2265,16 @@ mod tests {
             dunce::canonicalize(&repo).expect("canonical repo root"),
         );
     }
+
+    #[test]
+    fn local_branch_exists_surfaces_git_errors_for_invalid_repo() {
+        let temp = tempdir().expect("tempdir");
+        let err = super::local_branch_exists(temp.path(), "feature/missing")
+            .expect_err("non-repo path should surface git failure");
+
+        assert!(err.contains("git show-ref --verify refs/heads/feature/missing"));
+        assert!(err.contains(&temp.path().display().to_string()));
+    }
     fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
@@ -2706,6 +2714,7 @@ mod tests {
                 .expect("compose file from defaults"),
             &compose_file,
         ));
+        assert_eq!(defaults.compose_files, vec![compose_file.clone()]);
         assert!(super::same_worktree_path(
             super::docker_compose_file_for_launch(&project_root, &files)
                 .unwrap()
@@ -2736,6 +2745,42 @@ mod tests {
             &project_root.display().to_string(),
             &project_root,
         ));
+    }
+
+    #[test]
+    fn docker_launch_plan_merges_devcontainer_compose_files_and_rebases_relative_mounts() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let devcontainer_dir = project.join(".devcontainer");
+        fs::create_dir_all(&devcontainer_dir).expect("create devcontainer dir");
+        let base = devcontainer_dir.join("base.yml");
+        let override_file = devcontainer_dir.join("override.yml");
+        fs::write(
+            &base,
+            "services:\n  app:\n    image: alpine:3.19\n    volumes:\n      - ../:/workspace/base\n",
+        )
+        .expect("write base compose");
+        fs::write(
+            &override_file,
+            "services:\n  app:\n    volumes:\n      - ../:/workspace/override\n",
+        )
+        .expect("write override compose");
+        fs::write(
+            devcontainer_dir.join("devcontainer.json"),
+            r#"{
+  "dockerComposeFile": ["base.yml", "override.yml"],
+  "service": "app"
+}"#,
+        )
+        .expect("write devcontainer");
+
+        let plan = super::resolve_docker_launch_plan(&project, None).expect("launch plan");
+        assert_eq!(
+            plan.compose_files,
+            vec![base.clone(), override_file.clone()]
+        );
+        assert_eq!(plan.compose_file, base);
+        assert_eq!(plan.container_cwd, "/workspace/override");
     }
 
     #[test]
@@ -2867,6 +2912,30 @@ mod tests {
         )
         .expect("non repo short circuit");
         assert!(working_dir.is_none());
+
+        let detach = Command::new("git")
+            .args(["checkout", "--detach", "HEAD"])
+            .current_dir(&repo)
+            .status()
+            .expect("detach head");
+        assert!(detach.success(), "git checkout --detach failed");
+
+        let err = super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature/detached"),
+            None,
+            &mut None,
+            &mut HashMap::new(),
+        )
+        .expect_err("repo branch resolution failure should not silently skip");
+        assert!(err.contains("git branch --show-current"));
+
+        let attach = Command::new("git")
+            .args(["checkout", "develop"])
+            .current_dir(&repo)
+            .status()
+            .expect("reattach head");
+        assert!(attach.success(), "git checkout develop failed");
 
         let mut current_dir = None;
         let mut current_env = HashMap::new();
@@ -3161,6 +3230,46 @@ mod tests {
                 "bunx".to_string(),
                 "@anthropic-ai/claude-code@latest".to_string(),
                 "--print".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn finalize_docker_agent_launch_config_includes_override_file_when_present() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("create project");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
+        )
+        .expect("write compose file");
+        fs::write(
+            project.join("docker-compose.override.yml"),
+            "services:\n  app:\n    environment:\n      EXTRA: 1\n",
+        )
+        .expect("write override file");
+
+        let mut config = sample_versioned_launch_config();
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.working_dir = Some(project.clone());
+        config.docker_service = Some("app".to_string());
+
+        super::finalize_docker_agent_launch_config(&project, &mut config)
+            .expect("finalize docker launch");
+
+        assert_eq!(
+            config.args[..6],
+            [
+                "compose".to_string(),
+                "-f".to_string(),
+                project.join("docker-compose.yml").display().to_string(),
+                "-f".to_string(),
+                project
+                    .join("docker-compose.override.yml")
+                    .display()
+                    .to_string(),
+                "exec".to_string(),
             ]
         );
     }

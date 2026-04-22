@@ -1,10 +1,11 @@
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -48,49 +49,55 @@ pub fn load_snapshot(repo_path: &Path) -> Result<MemoSnapshot> {
 }
 
 pub fn create_note(repo_path: &Path, draft: MemoNoteDraft) -> Result<MemoNote> {
-    let now = Utc::now();
-    let note = MemoNote {
-        id: Uuid::new_v4().to_string(),
-        title: draft.title,
-        body: draft.body,
-        pinned: draft.pinned,
-        created_at: now,
-        updated_at: now,
-    };
-    let mut snapshot = load_snapshot(repo_path)?;
-    snapshot.notes.push(note.clone());
-    sort_notes(&mut snapshot.notes);
-    write_atomic_json(&notes_path(repo_path), &snapshot)?;
-    Ok(note)
+    with_notes_store_lock(repo_path, || {
+        let now = Utc::now();
+        let note = MemoNote {
+            id: Uuid::new_v4().to_string(),
+            title: draft.title,
+            body: draft.body,
+            pinned: draft.pinned,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut snapshot = load_snapshot(repo_path)?;
+        snapshot.notes.push(note.clone());
+        sort_notes(&mut snapshot.notes);
+        write_atomic_json(&notes_path(repo_path), &snapshot)?;
+        Ok(note)
+    })
 }
 
 pub fn update_note(repo_path: &Path, note_id: &str, draft: MemoNoteDraft) -> Result<MemoNote> {
-    let mut snapshot = load_snapshot(repo_path)?;
-    let note = snapshot
-        .notes
-        .iter_mut()
-        .find(|note| note.id == note_id)
-        .ok_or_else(|| GwtError::Other(format!("Memo note not found: {note_id}")))?;
-    note.title = draft.title;
-    note.body = draft.body;
-    note.pinned = draft.pinned;
-    note.updated_at = Utc::now();
-    let updated = note.clone();
-    sort_notes(&mut snapshot.notes);
-    write_atomic_json(&notes_path(repo_path), &snapshot)?;
-    Ok(updated)
+    with_notes_store_lock(repo_path, || {
+        let mut snapshot = load_snapshot(repo_path)?;
+        let note = snapshot
+            .notes
+            .iter_mut()
+            .find(|note| note.id == note_id)
+            .ok_or_else(|| GwtError::Other(format!("Memo note not found: {note_id}")))?;
+        note.title = draft.title;
+        note.body = draft.body;
+        note.pinned = draft.pinned;
+        note.updated_at = Utc::now();
+        let updated = note.clone();
+        sort_notes(&mut snapshot.notes);
+        write_atomic_json(&notes_path(repo_path), &snapshot)?;
+        Ok(updated)
+    })
 }
 
 pub fn delete_note(repo_path: &Path, note_id: &str) -> Result<()> {
-    let mut snapshot = load_snapshot(repo_path)?;
-    let original_len = snapshot.notes.len();
-    snapshot.notes.retain(|note| note.id != note_id);
-    if snapshot.notes.len() == original_len {
-        return Err(GwtError::Other(format!("Memo note not found: {note_id}")));
-    }
-    sort_notes(&mut snapshot.notes);
-    write_atomic_json(&notes_path(repo_path), &snapshot)?;
-    Ok(())
+    with_notes_store_lock(repo_path, || {
+        let mut snapshot = load_snapshot(repo_path)?;
+        let original_len = snapshot.notes.len();
+        snapshot.notes.retain(|note| note.id != note_id);
+        if snapshot.notes.len() == original_len {
+            return Err(GwtError::Other(format!("Memo note not found: {note_id}")));
+        }
+        sort_notes(&mut snapshot.notes);
+        write_atomic_json(&notes_path(repo_path), &snapshot)?;
+        Ok(())
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -120,6 +127,41 @@ fn json_error(err: serde_json::Error) -> GwtError {
 
 fn notes_path(repo_path: &Path) -> PathBuf {
     gwt_notes_state_path_for_repo_path(repo_path)
+}
+
+fn notes_lock_path(repo_path: &Path) -> PathBuf {
+    let path = notes_path(repo_path);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("notes.json");
+    path.with_file_name(format!("{file_name}.lock"))
+}
+
+fn open_notes_store_lock(repo_path: &Path) -> Result<File> {
+    let lock_path = notes_lock_path(repo_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(Into::into)
+}
+
+fn with_notes_store_lock<T>(repo_path: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
+    let lock = open_notes_store_lock(repo_path)?;
+    lock.lock_exclusive()?;
+    let result = action();
+    let unlock_result = lock.unlock();
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
 }
 
 fn load_snapshot_from_path(path: &Path) -> Result<MemoSnapshot> {
@@ -255,9 +297,10 @@ fn try_replace_path_with_temp(path: &Path, tmp_path: &Path) -> std::io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::mpsc, time::Duration};
 
     use chrono::TimeZone;
+    use fs2::FileExt;
 
     use super::*;
     use crate::test_support::{env_lock, ScopedEnvVar};
@@ -528,5 +571,39 @@ mod tests {
         );
 
         assert_eq!(note_path_for(&repo), note_path_for(&worktree));
+    }
+
+    #[test]
+    fn create_note_waits_for_repo_scoped_lock_release() {
+        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = tempfile::tempdir().unwrap();
+        let lock = open_notes_store_lock(repo.path()).expect("open notes lock");
+        lock.lock_exclusive().expect("lock notes store");
+
+        let repo_path = repo.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = create_note(
+                &repo_path,
+                MemoNoteDraft::new("Locked note", "blocked until unlock", false),
+            );
+            tx.send(result.map(|note| note.title))
+                .expect("send worker result");
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "create_note should block while the repo-scoped lock is held"
+        );
+
+        lock.unlock().expect("unlock notes store");
+        let result = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should finish after unlock");
+        assert_eq!(result.expect("note creation should succeed"), "Locked note");
+        worker.join().expect("join worker");
     }
 }

@@ -15,8 +15,18 @@ pub(crate) fn resolve_launch_worktree_request(
     }
 
     let current_branch = current_git_branch(repo_path);
-    if current_branch.is_err() && base_branch.is_none() {
-        return Ok(());
+    if let Err(error) = &current_branch {
+        if base_branch.is_none()
+            && matches!(
+                gwt_git::detect_repo_type(repo_path),
+                gwt_git::RepoType::NonRepo
+            )
+        {
+            return Ok(());
+        }
+        if base_branch.is_none() {
+            return Err(error.clone());
+        }
     }
     if current_branch
         .as_ref()
@@ -159,8 +169,8 @@ pub(crate) fn build_shell_process_launch(
 
     let launch = resolve_docker_launch_plan(&worktree, config.docker_service.as_deref())?;
     ensure_docker_launch_runtime_ready()?;
+    ensure_docker_gwt_binary_setup(&launch)?;
     ensure_docker_launch_service_ready(&launch, config.docker_lifecycle_intent)?;
-    ensure_docker_gwt_binary_setup(&worktree, &launch.service)?;
     let shell_command = resolve_docker_shell_command(&launch)?;
     env.insert("GWT_PROJECT_ROOT".to_string(), launch.container_cwd.clone());
     install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Docker)?;

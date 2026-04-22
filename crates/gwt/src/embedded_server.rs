@@ -9,7 +9,10 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, HOST, ORIGIN},
+        HeaderMap, StatusCode,
+    },
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -28,15 +31,16 @@ use uuid::Uuid;
 use crate::{embedded_web, AppEventProxy, DispatchTarget, OutboundEvent, UserEvent};
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
+const CLIENT_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Default)]
 pub(super) struct ClientHub {
-    clients: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
+    clients: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
 }
 
 impl ClientHub {
-    pub(super) fn register(&self, client_id: String) -> mpsc::UnboundedReceiver<String> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub(super) fn register(&self, client_id: String) -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         self.clients
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -52,21 +56,29 @@ impl ClientHub {
     }
 
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
+        let mut clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stale_clients = Vec::new();
         for outbound in events {
             let payload = serde_json::to_string(&outbound.event).expect("backend event json");
             match outbound.target {
                 DispatchTarget::Broadcast => {
-                    for sender in clients.values() {
-                        let _ = sender.send(payload.clone());
+                    for (client_id, sender) in clients.iter() {
+                        if sender.try_send(payload.clone()).is_err() {
+                            stale_clients.push(client_id.clone());
+                        }
                     }
                 }
                 DispatchTarget::Client(client_id) => {
                     if let Some(sender) = clients.get(&client_id) {
-                        let _ = sender.send(payload);
+                        if sender.try_send(payload).is_err() {
+                            stale_clients.push(client_id);
+                        }
                     }
                 }
             }
+        }
+        for client_id in stale_clients {
+            clients.remove(&client_id);
         }
     }
 }
@@ -149,9 +161,13 @@ pub(super) async fn health_handler() -> &'static str {
 }
 
 async fn websocket_handler(
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
 ) -> impl IntoResponse {
+    if !websocket_origin_authorized(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     ws.on_upgrade(move |socket| client_session(socket, state))
 }
 
@@ -333,6 +349,24 @@ pub(super) fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str)
         .is_some_and(|token| token == expected_token)
 }
 
+pub(super) fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return true;
+    };
+    let Some(host) = headers.get(HOST) else {
+        return false;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+
+    let origin = origin.trim_end_matches('/');
+    origin == format!("http://{host}") || origin == format!("https://{host}")
+}
+
 pub(super) fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
     clients.dispatch(vec![OutboundEvent::broadcast(
         BackendEvent::RuntimeHookEvent { event },
@@ -347,7 +381,11 @@ mod tests {
         time::Duration,
     };
 
-    use gwt::{FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
+    use axum::http::{
+        header::{HOST, ORIGIN},
+        HeaderMap,
+    };
+    use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
     use tao::event_loop::EventLoopBuilder;
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -356,9 +394,12 @@ mod tests {
     use tao::platform::windows::EventLoopBuilderExtWindows;
     use tokio::runtime::Runtime;
 
-    use crate::{AppEventProxy, UserEvent};
+    use crate::{AppEventProxy, OutboundEvent, UserEvent};
 
-    use super::{handle_frontend_message, ClientHub, EmbeddedServer, ServerState};
+    use super::{
+        handle_frontend_message, websocket_origin_authorized, ClientHub, EmbeddedServer,
+        ServerState, CLIENT_QUEUE_CAPACITY,
+    };
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
         let (proxy, events) = AppEventProxy::stub();
@@ -416,6 +457,42 @@ mod tests {
                     && id == "tab-1::shell-1"
                     && data == "ls\n"
         ));
+    }
+
+    #[test]
+    fn client_hub_drops_lagging_client_when_bounded_queue_is_full() {
+        let hub = ClientHub::default();
+        let _receiver = hub.register("slow-client".to_string());
+
+        for index in 0..=CLIENT_QUEUE_CAPACITY {
+            hub.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::ProjectOpenError {
+                    message: format!("message-{index}"),
+                },
+            )]);
+        }
+
+        let clients = hub.clients.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            !clients.contains_key("slow-client"),
+            "lagging websocket client should be unregistered once its queue is full"
+        );
+    }
+
+    #[test]
+    fn websocket_origin_authorized_requires_same_host_when_origin_is_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "127.0.0.1:3000".parse().expect("host header"));
+        assert!(websocket_origin_authorized(&headers));
+
+        headers.insert(ORIGIN, "http://127.0.0.1:3000".parse().expect("origin"));
+        assert!(websocket_origin_authorized(&headers));
+
+        headers.insert(ORIGIN, "https://127.0.0.1:3000".parse().expect("origin"));
+        assert!(websocket_origin_authorized(&headers));
+
+        headers.insert(ORIGIN, "http://evil.example:3000".parse().expect("origin"));
+        assert!(!websocket_origin_authorized(&headers));
     }
 
     #[test]

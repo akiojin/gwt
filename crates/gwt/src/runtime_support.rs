@@ -339,7 +339,16 @@ pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result
         .current_dir(repo_path)
         .output()
         .map_err(|err| format!("git show-ref --verify refs/heads/{branch_name}: {err}"))?;
-    Ok(output.status.success())
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "git show-ref --verify refs/heads/{branch_name} in {} failed with status {}: {}",
+            repo_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
 }
 
 pub(crate) fn resolve_launch_spec_with_fallback(
