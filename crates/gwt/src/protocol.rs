@@ -432,6 +432,7 @@ pub enum ProfileErrorCode {
 mod tests {
     use serde_json::Value;
 
+    use crate::persistence::WindowState;
     use crate::profiles_service::{
         ProfileEnvVarSource, ProfileEnvVarView, ProfileSnapshot, ProfileView,
     };
@@ -491,6 +492,28 @@ mod tests {
         assert_eq!(
             value.pointer("/snapshot/profiles/0/disabled_env/0"),
             Some(&Value::String("SECRET".to_string()))
+        );
+    }
+
+    #[test]
+    fn window_state_serializes_explicit_contract() {
+        let event = BackendEvent::WindowState {
+            window_id: "window-1".to_string(),
+            state: WindowState::Waiting,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize window state");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("window_state".to_string()))
+        );
+        assert_eq!(
+            value.get("window_id"),
+            Some(&Value::String("window-1".to_string()))
+        );
+        assert_eq!(
+            value.get("state"),
+            Some(&Value::String("waiting".to_string()))
         );
     }
 

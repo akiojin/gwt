@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_file_tree_window_marks_it_ready_without_process() {
+    fn adding_file_tree_window_marks_it_running_without_process() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         assert_eq!(window.title, "File Tree");
@@ -434,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_branches_window_marks_it_ready_without_process() {
+    fn adding_branches_window_marks_it_running_without_process() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::Branches, arrange_bounds());
         assert_eq!(window.title, "Branches");

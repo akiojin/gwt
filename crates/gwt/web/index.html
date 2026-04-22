@@ -2983,29 +2983,41 @@
           );
           if (status === "starting" || (status === "running" && Boolean(effectiveDetail))) {
             startSpinnerAnimation(overlay);
+          } else {
+            stopSpinnerAnimation(overlay);
           }
+        }
+      }
+
+      function stopSpinnerAnimation(overlay) {
+        if (overlay.__spinnerIntervalId) {
+          clearInterval(overlay.__spinnerIntervalId);
+          overlay.__spinnerIntervalId = null;
+        }
+        if (overlay.__spinnerObserver) {
+          overlay.__spinnerObserver.disconnect();
+          overlay.__spinnerObserver = null;
         }
       }
 
       function startSpinnerAnimation(overlay) {
         const spinner = overlay.querySelector(".overlay-spinner");
         if (!spinner) return;
+        if (overlay.__spinnerIntervalId) return;
         const chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
         let index = 0;
-        const interval = setInterval(() => {
+        spinner.textContent = chars[0];
+        overlay.__spinnerIntervalId = setInterval(() => {
           spinner.textContent = chars[index % chars.length];
           index++;
         }, 100);
-        const cleanup = () => {
-          clearInterval(interval);
-          overlay.removeEventListener("visibilitychange", cleanup);
-        };
         const observer = new MutationObserver(() => {
           if (!overlay.classList.contains("visible")) {
-            cleanup();
+            stopSpinnerAnimation(overlay);
           }
         });
         observer.observe(overlay, { attributes: true });
+        overlay.__spinnerObserver = observer;
       }
 
       function focusWindowLocally(windowId) {
@@ -6497,7 +6509,7 @@
             applyStatus(event.id, event.status, event.detail);
             break;
           case "window_state":
-            applyStatus(event.window_id, event.state, detailMap.get(event.window_id));
+            applyStatus(event.window_id, event.state);
             break;
           case "launch_progress": {
             const element = windowMap.get(event.id);

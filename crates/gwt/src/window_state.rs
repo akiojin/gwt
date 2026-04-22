@@ -37,7 +37,7 @@ pub fn runtime_hook_window_state(event: &RuntimeHookEvent) -> Option<WindowState
 
 pub fn window_state_from_pane_status(status: &PaneStatus) -> WindowState {
     match status {
-        PaneStatus::Running => WindowState::Stopped,
+        PaneStatus::Running => WindowState::Running,
         PaneStatus::Completed(0) => WindowState::Stopped,
         PaneStatus::Completed(_) | PaneStatus::Error(_) => WindowState::Error,
     }
@@ -72,12 +72,13 @@ fn parse_runtime_status(status: &str) -> Option<WindowState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_window_state, runtime_hook_window_state};
+    use super::{compose_window_state, runtime_hook_window_state, window_state_from_pane_status};
     use crate::{
         daemon_runtime::{RuntimeHookEvent, RuntimeHookEventKind},
         persistence::WindowState,
         preset::WindowPreset,
     };
+    use gwt_terminal::PaneStatus;
 
     fn runtime_event(status: Option<&str>, source_event: Option<&str>) -> RuntimeHookEvent {
         RuntimeHookEvent {
@@ -163,5 +164,25 @@ mod tests {
         let mut event = runtime_event(Some("Running"), Some("PreToolUse"));
         event.kind = RuntimeHookEventKind::Forward;
         assert_eq!(runtime_hook_window_state(&event), None);
+    }
+
+    #[test]
+    fn pane_status_running_maps_to_running_window_state() {
+        assert_eq!(
+            window_state_from_pane_status(&PaneStatus::Running),
+            WindowState::Running
+        );
+        assert_eq!(
+            window_state_from_pane_status(&PaneStatus::Completed(0)),
+            WindowState::Stopped
+        );
+        assert_eq!(
+            window_state_from_pane_status(&PaneStatus::Completed(1)),
+            WindowState::Error
+        );
+        assert_eq!(
+            window_state_from_pane_status(&PaneStatus::Error("boom".to_string())),
+            WindowState::Error
+        );
     }
 }
