@@ -14,8 +14,7 @@ pub mod managed_assets;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
-pub mod profiles_dispatch;
-pub mod profiles_service;
+pub mod profile_dispatch;
 pub mod protocol;
 pub mod window_state;
 pub mod workspace;
@@ -48,13 +47,13 @@ pub use launch_wizard::{
     LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
-#[cfg(target_os = "windows")]
-pub use native_app::windows_app_icon;
 #[cfg(target_os = "macos")]
 pub use native_app::MacosNativeMenu;
 pub use native_app::{
-    macos_bundle_identifier, macos_native_menu_titles, native_menu_command_for_id,
-    NativeMenuCommand, APP_NAME, MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
+    macos_bundle_identifier, macos_native_menu_titles, native_launch_surface,
+    native_menu_command_for_id, NativeLaunchSurface, NativeMenuCommand, APP_NAME,
+    GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME, MACOS_APP_BUNDLE_NAME,
+    MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 pub use persistence::{
     default_session_state, default_workspace_state, empty_workspace_state,
@@ -69,15 +68,9 @@ pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
     WindowPreset, WindowSurface,
 };
-pub use profiles_service::{
-    add_disabled_env, add_profile, delete_disabled_env, delete_env_var, delete_profile,
-    load_profile_snapshot, set_env_var, switch_profile, update_disabled_env, update_env_var,
-    update_profile, ProfileEnvVarSource, ProfileEnvVarView, ProfileServiceError, ProfileSnapshot,
-    ProfileView,
-};
 pub use protocol::{
-    AppStateView, ArrangeMode, BackendEvent, BoardEntryView, BranchEntriesPhase,
-    CustomAgentErrorCode, FocusCycleDirection, FrontendEvent, ProfileErrorCode, ProjectTabView,
-    RecentProjectView, WorkspaceView,
+    AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
+    FocusCycleDirection, FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

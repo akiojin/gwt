@@ -41,6 +41,15 @@ pub enum WindowState {
 
 pub type WindowProcessStatus = WindowState;
 
+impl WindowState {
+    #[allow(non_upper_case_globals)]
+    pub const Starting: Self = Self::Running;
+    #[allow(non_upper_case_globals)]
+    pub const Ready: Self = Self::Running;
+    #[allow(non_upper_case_globals)]
+    pub const Exited: Self = Self::Stopped;
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedWindowState {
     pub id: String,

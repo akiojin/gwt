@@ -6,11 +6,13 @@ gwt は Git worktree の管理と、`Claude Code` / `Codex` / `Gemini` /
 ## インストール
 
 [GitHub Releases](https://github.com/akiojin/gwt/releases) からお使いの
-プラットフォーム向けインストーラーまたは portable archive を取得します。
+プラットフォーム向け release asset を取得してください。
 
 ### macOS
 
-macOS リリースには署名・notarization 済みの `gwt-macos-universal.dmg` が含まれます。
+- GUI 向けの主配布物: `gwt-macos-universal.dmg`
+- マウントした DMG から `GWT.app` を開くとネイティブ GUI をそのまま起動できます
+- `PATH` に `gwt` を入れたい場合は install script を使います
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -19,22 +21,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 特定バージョンを指定する場合:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version <version>
 ```
 
 ### Windows
 
-GitHub Releases から `gwt-windows-x86_64.msi` をダウンロードして実行します。
-インストーラーはユーザー `PATH` への `gwt` 追加と Start Menu エントリ作成を行います。
-
-古い per-machine 版 GWT が `Program Files` 配下にある場合、手動で MSI を起動した
-ときは side-by-side install を避けるため block されます。既存の `Program Files`
-install を新しい per-user MSI 系列へ移行する場合は、`gwt update` またはアプリ内
-updater を使ってください。
+- GUI 向けの主配布物: `gwt-windows-x86_64.msi`
+- portable bundle: `gwt-windows-x86_64.zip`
+- public front door は `gwt.exe` で、`gwtd.exe` は内部 runtime 用の companion binary です
 
 ### Linux
 
-GitHub Releases からバイナリを取得して `PATH` に配置します。
+- portable bundle:
+  - `gwt-linux-x86_64.tar.gz`
+  - `gwt-linux-aarch64.tar.gz`
+- 展開した `gwt` / `gwtd` を `PATH` 上のディレクトリへ配置します
 
 ### アンインストール（macOS）
 
@@ -152,13 +153,13 @@ gwt issue spec <number> --section spec|plan|tasks
 ### ビルド
 
 ```bash
-cargo build -p gwt
+cargo build -p gwt --bin gwt --bin gwtd
 ```
 
 ### 実行
 
 ```bash
-cargo run -p gwt
+cargo run -p gwt --bin gwt
 ```
 
 ### macOS 向け `.app` bundle
@@ -172,6 +173,24 @@ cargo bundle -p gwt --format osx
 
 ```bash
 cargo test -p gwt-core -p gwt --all-features
+```
+
+### Release Asset Contract
+
+```bash
+npm run test:release-assets
+```
+
+### Frontend Bundle Contract
+
+```bash
+npm run test:frontend-bundle
+```
+
+### Release Flow Checks
+
+```bash
+npm run test:release-flow
 ```
 
 ### Lint

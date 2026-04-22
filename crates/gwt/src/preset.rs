@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use gwt_agent::AgentId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,7 +26,6 @@ pub enum WindowSurface {
     Terminal,
     FileTree,
     Branches,
-    Profile,
     Mock,
 }
 
@@ -75,9 +73,9 @@ impl WindowPreset {
             Self::Agent => "Start a wizard-launched agent terminal",
             Self::FileTree => "Browse repository files in a read-only tree",
             Self::Branches => "Browse repository branches and launch agents",
-            Self::Settings => "Placeholder settings surface",
-            Self::Memo => "Placeholder notes surface",
-            Self::Profile => "Manage environment profiles",
+            Self::Settings => "Manage custom agents and launch presets",
+            Self::Memo => "Capture repo-scoped notes and pinned follow-ups",
+            Self::Profile => "Manage env profiles, overrides, and merged preview",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
             Self::Spec => "Placeholder SPEC surface",
@@ -110,9 +108,9 @@ impl WindowPreset {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::FileTree => WindowSurface::FileTree,
             Self::Branches => WindowSurface::Branches,
-            Self::Profile => WindowSurface::Profile,
             Self::Settings
             | Self::Memo
+            | Self::Profile
             | Self::Logs
             | Self::Issue
             | Self::Spec
@@ -130,7 +128,6 @@ impl WindowPreset {
             WindowSurface::Terminal => (720.0, 420.0),
             WindowSurface::FileTree => (420.0, 520.0),
             WindowSurface::Branches => (520.0, 420.0),
-            WindowSurface::Profile => (680.0, 520.0),
             WindowSurface::Mock => (420.0, 300.0),
         }
     }
@@ -142,31 +139,6 @@ impl WindowPreset {
             Self::Codex => Some("codex"),
             Self::Agent => None,
             Self::FileTree
-            | Self::Branches
-            | Self::Settings
-            | Self::Memo
-            | Self::Profile
-            | Self::Logs
-            | Self::Issue
-            | Self::Spec
-            | Self::Board
-            | Self::Pr => None,
-        }
-    }
-
-    /// Fixed mapping from preset to [`AgentId`] for presets that always
-    /// represent a specific agent. `Claude` / `Codex` are固定; `Agent`
-    /// is wizard-driven and has no deterministic mapping (返り値は None)。
-    ///
-    /// SPEC #2133 FR-011: `agent_id` 未設定の window でも
-    /// preset から色のフォールバックを得るため使用する。
-    pub fn resolved_agent_id(self) -> Option<AgentId> {
-        match self {
-            Self::Claude => Some(AgentId::ClaudeCode),
-            Self::Codex => Some(AgentId::Codex),
-            Self::Shell
-            | Self::Agent
-            | Self::FileTree
             | Self::Branches
             | Self::Settings
             | Self::Memo
@@ -338,39 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn resolved_agent_id_is_fixed_for_claude_and_codex_only() {
-        assert_eq!(
-            WindowPreset::Claude.resolved_agent_id(),
-            Some(AgentId::ClaudeCode)
-        );
-        assert_eq!(
-            WindowPreset::Codex.resolved_agent_id(),
-            Some(AgentId::Codex)
-        );
-        // 他 preset はすべて None
-        for preset in [
-            WindowPreset::Shell,
-            WindowPreset::Agent,
-            WindowPreset::FileTree,
-            WindowPreset::Branches,
-            WindowPreset::Settings,
-            WindowPreset::Memo,
-            WindowPreset::Profile,
-            WindowPreset::Logs,
-            WindowPreset::Issue,
-            WindowPreset::Spec,
-            WindowPreset::Board,
-            WindowPreset::Pr,
-        ] {
-            assert_eq!(
-                preset.resolved_agent_id(),
-                None,
-                "{preset:?} should not resolve to an AgentId"
-            );
-        }
-    }
-
-    #[test]
     fn resolve_shell_preset_uses_supplied_shell_program() {
         let shell = ShellProgram {
             command: "/bin/zsh".to_string(),
@@ -449,7 +388,7 @@ mod tests {
         assert!(!WindowPreset::Issue.requires_process());
         assert_eq!(
             WindowPreset::Profile.subtitle(),
-            "Manage environment profiles"
+            "Manage env profiles, overrides, and merged preview"
         );
     }
 
@@ -532,12 +471,9 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::Branches);
                     assert!(!preset.requires_process());
                 }
-                WindowPreset::Profile => {
-                    assert_eq!(preset.surface(), WindowSurface::Profile);
-                    assert!(!preset.requires_process());
-                }
                 WindowPreset::Settings
                 | WindowPreset::Memo
+                | WindowPreset::Profile
                 | WindowPreset::Logs
                 | WindowPreset::Issue
                 | WindowPreset::Spec

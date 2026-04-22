@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
 };
@@ -47,31 +48,64 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
-    gwt_agent::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
+    if should_prefer_path_gwt(current_exe) {
+        if let Some(candidate) = lookup("gwt").filter(|candidate| {
+            !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
+        }) {
+            return candidate;
+        }
+        if let Some(candidate) = sibling_front_door_binary(current_exe) {
+            return candidate;
+        }
+    }
+    current_exe.to_path_buf()
 }
 
-#[cfg(test)]
 fn should_prefer_path_gwt(current_exe: &Path) -> bool {
     is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
 }
 
-#[cfg(test)]
+fn strip_windows_exe_suffix(value: &str) -> &str {
+    value
+        .rsplit_once('.')
+        .filter(|(_, ext)| ext.eq_ignore_ascii_case("exe"))
+        .map(|(stem, _)| stem)
+        .unwrap_or(value)
+}
+
 fn is_named_gwt_binary(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
         .next_back()
-        .map(|value| value.trim_end_matches(".exe").to_string())
-        .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
+        .map(|value| strip_windows_exe_suffix(&value).to_string())
+        .is_some_and(|value| value.eq_ignore_ascii_case(GUI_FRONT_DOOR_BINARY_NAME))
 }
 
-#[cfg(test)]
+fn is_named_gwtd_binary(path: &Path) -> bool {
+    normalized_path_segments(path)
+        .into_iter()
+        .next_back()
+        .map(|value| strip_windows_exe_suffix(&value).to_string())
+        .is_some_and(|value| value.eq_ignore_ascii_case(INTERNAL_DAEMON_BINARY_NAME))
+}
+
 fn is_bunx_temp_executable(path: &Path) -> bool {
     normalized_path_segments(path)
         .into_iter()
         .any(|segment| segment.starts_with("bunx-"))
 }
 
-#[cfg(test)]
+fn sibling_front_door_binary(path: &Path) -> Option<PathBuf> {
+    if !is_named_gwtd_binary(path) {
+        return None;
+    }
+    let sibling_name = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("exe") => format!("{GUI_FRONT_DOOR_BINARY_NAME}.exe"),
+        _ => GUI_FRONT_DOOR_BINARY_NAME.to_string(),
+    };
+    Some(path.with_file_name(sibling_name))
+}
+
 fn normalized_path_segments(path: &Path) -> Vec<String> {
     let normalized = path.to_string_lossy().replace('\\', "/");
     normalized
@@ -81,7 +115,6 @@ fn normalized_path_segments(path: &Path) -> Vec<String> {
         .collect()
 }
 
-#[cfg(test)]
 fn same_path(left: &Path, right: &Path) -> bool {
     let left = dunce::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = dunce::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
@@ -135,8 +168,9 @@ mod tests {
     };
 
     use super::{
-        is_bunx_temp_executable, is_named_gwt_binary, normalized_path_segments,
-        resolve_public_gwt_bin_with_lookup, same_path, should_prefer_path_gwt, EnvVarGuard,
+        is_bunx_temp_executable, is_named_gwt_binary, is_named_gwtd_binary,
+        normalized_path_segments, resolve_public_gwt_bin_with_lookup, same_path,
+        should_prefer_path_gwt, EnvVarGuard,
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -184,14 +218,27 @@ mod tests {
     }
 
     #[test]
+    fn gwtd_current_exe_prefers_gui_front_door_sibling_when_path_lookup_is_missing() {
+        let current_exe = Path::new(r"C:\Program Files\GWT\gwtd.exe");
+
+        let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| None);
+
+        assert_eq!(resolved, current_exe.with_file_name("gwt.exe"));
+    }
+
+    #[test]
     fn path_helpers_identify_named_binaries_and_temp_layouts() {
         let stable = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
+        let stable_upper = Path::new(r"C:\Users\Example\.bun\bin\gwt.EXE");
+        let daemon_upper = Path::new(r"C:\Program Files\GWT\GWTD.EXE");
         let bunx = Path::new(
             r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
         );
         let other = Path::new(r"C:\Users\Example\.bun\bin\other.exe");
 
         assert!(is_named_gwt_binary(stable));
+        assert!(is_named_gwt_binary(stable_upper));
+        assert!(is_named_gwtd_binary(daemon_upper));
         assert!(!is_named_gwt_binary(other));
         assert!(is_bunx_temp_executable(bunx));
         assert!(!is_bunx_temp_executable(stable));

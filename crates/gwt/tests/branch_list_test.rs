@@ -83,6 +83,124 @@ fn list_branch_entries_marks_unmerged_local_branch_as_risky_cleanup_candidate() 
 }
 
 #[test]
+fn list_branch_entries_prefers_canonical_remote_merge_target_ref() {
+    let temp = tempdir().expect("tempdir");
+    let origin = temp.path().join("origin.git");
+    let repo = temp.path().join("repo");
+    let integrator = temp.path().join("integrator");
+
+    run_git(
+        temp.path(),
+        &["init", "--bare", origin.to_str().expect("origin path")],
+    );
+    run_git(
+        temp.path(),
+        &["init", "-q", repo.to_str().expect("repo path")],
+    );
+    init_repo(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path"),
+        ],
+    );
+    run_git(&repo, &["push", "-u", "origin", "main"]);
+    run_git(&repo, &["checkout", "-qb", "develop"]);
+    run_git(&repo, &["push", "-u", "origin", "develop"]);
+    run_git(&repo, &["checkout", "-qb", "feature/alpha"]);
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").expect("write alpha");
+    run_git(&repo, &["add", "alpha.txt"]);
+    run_git(&repo, &["commit", "-qm", "alpha"]);
+    run_git(&repo, &["push", "-u", "origin", "feature/alpha"]);
+    run_git(&repo, &["checkout", "main"]);
+
+    run_git(
+        temp.path(),
+        &[
+            "clone",
+            origin.to_str().expect("origin path"),
+            integrator.to_str().expect("integrator path"),
+        ],
+    );
+    run_git(&integrator, &["config", "user.name", "PoC Tester"]);
+    run_git(&integrator, &["config", "user.email", "poc@example.com"]);
+    run_git(
+        &integrator,
+        &["checkout", "-b", "develop", "origin/develop"],
+    );
+    run_git(
+        &integrator,
+        &[
+            "merge",
+            "--no-ff",
+            "-m",
+            "merge alpha",
+            "origin/feature/alpha",
+        ],
+    );
+    run_git(&integrator, &["push", "origin", "develop"]);
+
+    run_git(&repo, &["fetch", "origin", "--prune"]);
+
+    let branches =
+        list_branch_entries_with_active_sessions(&repo, &HashSet::new()).expect("entries");
+    let feature = branches
+        .iter()
+        .find(|branch| branch.name == "feature/alpha")
+        .expect("feature branch");
+
+    assert_eq!(feature.scope, BranchScope::Local);
+    assert_eq!(
+        feature.cleanup.availability,
+        BranchCleanupAvailability::Safe
+    );
+    let merge_target = feature
+        .cleanup
+        .merge_target
+        .as_ref()
+        .expect("canonical merge target");
+    assert_eq!(merge_target.kind, gwt_git::MergeTarget::Develop);
+    assert_eq!(merge_target.reference, "origin/develop");
+}
+
+#[test]
+fn list_branch_entries_keeps_no_upstream_branch_risky_even_if_local_base_contains_it() {
+    let dir = tempdir().expect("tempdir");
+
+    run_git(dir.path(), &["init", "-q"]);
+    init_repo(dir.path());
+    run_git(dir.path(), &["checkout", "-qb", "develop"]);
+    run_git(dir.path(), &["checkout", "-qb", "feature/merged"]);
+    std::fs::write(dir.path().join("merged.txt"), "merged\n").expect("write merged");
+    run_git(dir.path(), &["add", "merged.txt"]);
+    run_git(dir.path(), &["commit", "-qm", "merged"]);
+    run_git(dir.path(), &["checkout", "develop"]);
+    run_git(
+        dir.path(),
+        &["merge", "--no-ff", "-m", "merge feature", "feature/merged"],
+    );
+    run_git(dir.path(), &["checkout", "main"]);
+
+    let branches =
+        list_branch_entries_with_active_sessions(dir.path(), &HashSet::new()).expect("entries");
+    let feature = branches
+        .iter()
+        .find(|branch| branch.name == "feature/merged")
+        .expect("feature branch");
+
+    assert_eq!(feature.scope, BranchScope::Local);
+    assert_eq!(
+        feature.cleanup.availability,
+        BranchCleanupAvailability::Risky
+    );
+    assert_eq!(feature.cleanup.merge_target, None);
+    assert!(feature.cleanup.risks.contains(&BranchCleanupRisk::Unmerged));
+}
+
+#[test]
 fn list_branch_entries_marks_remote_tracking_row_with_local_counterpart_as_risky() {
     let temp = tempdir().expect("tempdir");
     let remote = temp.path().join("origin.git");
@@ -198,7 +316,7 @@ fn list_branch_entries_marks_local_and_remote_rows_safe_when_upstream_remote_bas
             .cleanup
             .merge_target
             .as_ref()
-            .map(|target| target.as_str()),
+            .map(|target| target.reference.as_str()),
         Some("origin/develop")
     );
     assert!(local_entry.cleanup.risks.is_empty());
@@ -217,7 +335,7 @@ fn list_branch_entries_marks_local_and_remote_rows_safe_when_upstream_remote_bas
             .cleanup
             .merge_target
             .as_ref()
-            .map(|target| target.as_str()),
+            .map(|target| target.reference.as_str()),
         Some("origin/develop")
     );
     assert!(remote_entry.cleanup.risks.is_empty());
@@ -305,7 +423,7 @@ fn list_branch_entries_keeps_remote_row_risky_when_local_branch_is_behind_upstre
             .cleanup
             .merge_target
             .as_ref()
-            .map(|target| target.as_str()),
+            .map(|target| target.reference.as_str()),
         Some("origin/develop")
     );
 
@@ -323,7 +441,7 @@ fn list_branch_entries_keeps_remote_row_risky_when_local_branch_is_behind_upstre
             .cleanup
             .merge_target
             .as_ref()
-            .map(|target| target.as_str()),
+            .map(|target| target.reference.as_str()),
         Some("origin/develop")
     );
     assert!(remote_entry
@@ -545,7 +663,7 @@ fn list_branch_entries_prefers_execution_upstream_remote_base_over_origin() {
             .cleanup
             .merge_target
             .as_ref()
-            .map(|target| target.as_str()),
+            .map(|target| target.reference.as_str()),
         Some("upstream/develop")
     );
     assert_eq!(
@@ -557,7 +675,7 @@ fn list_branch_entries_prefers_execution_upstream_remote_base_over_origin() {
             .cleanup
             .merge_target
             .as_ref()
-            .map(|target| target.as_str()),
+            .map(|target| target.reference.as_str()),
         Some("upstream/develop")
     );
 }
@@ -628,11 +746,7 @@ fn list_branch_entries_marks_manual_local_branch_without_upstream_as_risky() {
         BranchCleanupAvailability::Risky
     );
     assert_eq!(feature.cleanup.merge_target, None);
-    assert!(feature
-        .cleanup
-        .risks
-        .contains(&BranchCleanupRisk::NoUpstream));
-    assert!(!feature.cleanup.risks.contains(&BranchCleanupRisk::Unmerged));
+    assert!(feature.cleanup.risks.contains(&BranchCleanupRisk::Unmerged));
 }
 
 fn init_repo(repo: &std::path::Path) {
