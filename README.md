@@ -7,12 +7,14 @@ such as `Claude Code`, `Codex`, `Gemini`, and `OpenCode`.
 
 ## Install
 
-Download the installer or portable archive for your platform from
+Download the release asset for your platform from
 [GitHub Releases](https://github.com/akiojin/gwt/releases).
 
 ### macOS
 
-macOS releases include a signed and notarized `gwt-macos-universal.dmg`.
+- GUI-first installer: `gwt-macos-universal.dmg`
+- Open `GWT.app` from the mounted DMG for the native desktop launch surface
+- Use the install script when you want the `gwt` CLI front door in your `PATH`
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -21,22 +23,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version <version>
 ```
 
 ### Windows
 
-Download `gwt-windows-x86_64.msi` from GitHub Releases and run it. The
-installer adds `gwt` to your user `PATH` and creates a Start Menu entry.
-
-If an older per-machine GWT install exists under `Program Files`, a manual MSI
-launch is blocked to avoid side-by-side installs. Existing `Program Files`
-installs can migrate onto the per-user MSI line through `gwt update` or the
-in-app updater.
+- GUI-first installer: `gwt-windows-x86_64.msi`
+- Portable bundle: `gwt-windows-x86_64.zip`
+- The public front door is `gwt.exe`; `gwtd.exe` is bundled for internal runtime use
 
 ### Linux
 
-Download the binary from GitHub Releases and add it to your `PATH`.
+- Portable bundles:
+  - `gwt-linux-x86_64.tar.gz`
+  - `gwt-linux-aarch64.tar.gz`
+- Extract `gwt` and `gwtd` into a directory on your `PATH`
 
 ### Uninstall (macOS)
 
@@ -155,13 +156,13 @@ gwt issue spec <number> --section spec|plan|tasks
 ### Build
 
 ```bash
-cargo build -p gwt
+cargo build -p gwt --bin gwt --bin gwtd
 ```
 
 ### Run
 
 ```bash
-cargo run -p gwt
+cargo run -p gwt --bin gwt
 ```
 
 ### Build a macOS app bundle
@@ -175,6 +176,24 @@ cargo bundle -p gwt --format osx
 
 ```bash
 cargo test -p gwt-core -p gwt --all-features
+```
+
+### Release Asset Contract
+
+```bash
+npm run test:release-assets
+```
+
+### Frontend Bundle Contract
+
+```bash
+npm run test:frontend-bundle
+```
+
+### Release Flow Checks
+
+```bash
+npm run test:release-flow
 ```
 
 ### Lint

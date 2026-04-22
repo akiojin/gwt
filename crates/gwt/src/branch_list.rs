@@ -30,14 +30,13 @@ pub enum BranchCleanupBlockedReason {
 pub enum BranchCleanupRisk {
     Unmerged,
     RemoteTracking,
-    NoUpstream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchCleanupInfo {
     pub availability: BranchCleanupAvailability,
     pub execution_branch: Option<String>,
-    pub merge_target: Option<gwt_git::MergeTarget>,
+    pub merge_target: Option<gwt_git::MergeTargetRef>,
     pub upstream: Option<String>,
     pub blocked_reason: Option<BranchCleanupBlockedReason>,
     pub risks: Vec<BranchCleanupRisk>,
@@ -114,7 +113,7 @@ fn build_cleanup_targets(
     repo_path: &Path,
     entries: &[BranchListEntry],
     gone_branches: &HashSet<String>,
-) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTarget>>> {
+) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTargetRef>>> {
     let mut cleanup_targets = HashMap::new();
     for branch in entries
         .iter()
@@ -159,7 +158,7 @@ fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry
 fn hydrate_branch_entries(
     entries: Vec<BranchListEntry>,
     active_session_branches: &HashSet<String>,
-    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTarget>>,
+    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
 ) -> Vec<BranchListEntry> {
     let current_head_branch = entries
         .iter()
@@ -170,10 +169,10 @@ fn hydrate_branch_entries(
         .filter(|branch| branch.scope == BranchScope::Local)
         .map(|branch| (branch.name.clone(), branch.upstream.clone()))
         .collect();
-    let local_behind_counts: HashMap<String, u32> = entries
+    let local_divergence: HashMap<String, (u32, u32)> = entries
         .iter()
         .filter(|branch| branch.scope == BranchScope::Local)
-        .map(|branch| (branch.name.clone(), branch.behind))
+        .map(|branch| (branch.name.clone(), (branch.ahead, branch.behind)))
         .collect();
     let mut entries: Vec<BranchListEntry> = entries
         .into_iter()
@@ -181,7 +180,7 @@ fn hydrate_branch_entries(
             branch.cleanup = build_cleanup_info(
                 &branch,
                 &local_upstreams,
-                &local_behind_counts,
+                &local_divergence,
                 current_head_branch.as_deref(),
                 active_session_branches,
                 cleanup_targets,
@@ -198,10 +197,10 @@ fn hydrate_branch_entries(
 fn build_cleanup_info(
     branch: &BranchListEntry,
     local_upstreams: &HashMap<String, Option<String>>,
-    local_behind_counts: &HashMap<String, u32>,
+    local_divergence: &HashMap<String, (u32, u32)>,
     current_head_branch: Option<&str>,
     active_session_branches: &HashSet<String>,
-    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTarget>>,
+    cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
 ) -> BranchCleanupInfo {
     let execution_branch = cleanup_execution_branch(branch, local_upstreams);
     let Some(execution_branch_name) = execution_branch.as_deref() else {
@@ -245,20 +244,17 @@ fn build_cleanup_info(
         .get(execution_branch_name)
         .cloned()
         .flatten();
-    let execution_branch_behind = local_behind_counts
+    let mut risks = Vec::new();
+    let execution_divergence = local_divergence
         .get(execution_branch_name)
         .copied()
-        .unwrap_or_default();
-    let mut risks = Vec::new();
-    if upstream.is_none() {
-        risks.push(BranchCleanupRisk::NoUpstream);
-    }
+        .unwrap_or((0, 0));
     if branch.scope == BranchScope::Remote
-        && (merge_target.is_none() || execution_branch_behind > 0)
+        && (merge_target.is_none() || execution_divergence.0 > 0 || execution_divergence.1 > 0)
     {
         risks.push(BranchCleanupRisk::RemoteTracking);
     }
-    if merge_target.is_none() && upstream.is_some() {
+    if merge_target.is_none() {
         risks.push(BranchCleanupRisk::Unmerged);
     }
 
@@ -311,26 +307,7 @@ fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
     name.split_once('/').map(|(_, branch_name)| branch_name)
 }
 
-fn canonical_local_rank(entry: &BranchListEntry) -> Option<u8> {
-    if entry.scope != BranchScope::Local {
-        return None;
-    }
-    match entry.name.as_str() {
-        "main" => Some(0),
-        "master" => Some(1),
-        "develop" => Some(2),
-        _ => None,
-    }
-}
-
 fn compare_branch_entries(left: &BranchListEntry, right: &BranchListEntry) -> Ordering {
-    match (canonical_local_rank(left), canonical_local_rank(right)) {
-        (Some(l), Some(r)) => return l.cmp(&r),
-        (Some(_), None) => return Ordering::Less,
-        (None, Some(_)) => return Ordering::Greater,
-        (None, None) => {}
-    }
-
     compare_branch_commit_dates(&left.last_commit_date, &right.last_commit_date)
         .then_with(|| right.is_head.cmp(&left.is_head))
         .then_with(|| match (left.scope, right.scope) {
@@ -368,46 +345,49 @@ fn parse_branch_commit_date(value: &str) -> Option<DateTime<FixedOffset>> {
 mod tests {
     use super::*;
 
-    fn make_branch(
-        name: &str,
-        is_local: bool,
-        is_head: bool,
-        last_commit_date: Option<&str>,
-    ) -> gwt_git::Branch {
-        gwt_git::Branch {
-            name: name.to_string(),
-            is_local,
-            is_remote: !is_local,
-            is_head,
-            upstream: None,
-            ahead: 0,
-            behind: 0,
-            last_commit_date: last_commit_date.map(|value| value.to_string()),
-        }
-    }
-
     #[test]
-    fn adapt_branches_sorts_canonical_first_then_newest_head_local() {
+    fn adapt_branches_sorts_newest_first_then_head_local_then_remote() {
         let branches = vec![
-            make_branch(
-                "origin/main",
-                false,
-                false,
-                Some("2026-04-19 12:00:00 +0000"),
-            ),
-            make_branch(
-                "feature/zeta",
-                true,
-                false,
-                Some("2026-04-20 08:30:00 +0000"),
-            ),
-            make_branch("main", true, true, Some("2026-04-20 08:30:00 +0000")),
-            make_branch(
-                "feature/alpha",
-                true,
-                false,
-                Some("2026-04-18 09:00:00 +0000"),
-            ),
+            gwt_git::Branch {
+                name: "origin/main".to_string(),
+                is_local: false,
+                is_remote: true,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: Some("2026-04-19 12:00:00 +0000".to_string()),
+            },
+            gwt_git::Branch {
+                name: "feature/zeta".to_string(),
+                is_local: true,
+                is_remote: false,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
+            },
+            gwt_git::Branch {
+                name: "main".to_string(),
+                is_local: true,
+                is_remote: false,
+                is_head: true,
+                upstream: Some("origin/main".to_string()),
+                ahead: 0,
+                behind: 0,
+                last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
+            },
+            gwt_git::Branch {
+                name: "feature/alpha".to_string(),
+                is_local: true,
+                is_remote: false,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: Some("2026-04-18 09:00:00 +0000".to_string()),
+            },
         ];
 
         let entries = adapt_branch_inventory(branches);
@@ -422,72 +402,12 @@ mod tests {
     }
 
     #[test]
-    fn canonical_local_branches_pin_to_top_in_main_master_develop_order() {
-        let branches = vec![
-            make_branch(
-                "feature/current",
-                true,
-                true,
-                Some("2026-04-21 10:00:00 +0000"),
-            ),
-            make_branch("develop", true, false, Some("2026-04-10 09:00:00 +0000")),
-            make_branch(
-                "origin/main",
-                false,
-                false,
-                Some("2026-04-21 09:00:00 +0000"),
-            ),
-            make_branch("master", true, false, Some("2026-04-05 09:00:00 +0000")),
-            make_branch("main", true, false, Some("2026-04-15 09:00:00 +0000")),
-            make_branch(
-                "feature/legacy",
-                true,
-                false,
-                Some("2026-03-01 09:00:00 +0000"),
-            ),
-        ];
-
-        let entries = adapt_branch_inventory(branches);
-        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-
-        assert_eq!(
-            &names[..3],
-            &["main", "master", "develop"],
-            "canonical local branches must pin to the top in main/master/develop order"
-        );
-        assert!(
-            names.iter().position(|name| *name == "feature/current")
-                > names.iter().position(|name| *name == "develop"),
-            "HEAD on a non-canonical branch must not override canonical pinning"
-        );
-        assert!(
-            names.iter().position(|name| *name == "origin/main")
-                > names.iter().position(|name| *name == "develop"),
-            "remote origin/main must remain below canonical local branches"
-        );
-    }
-
-    #[test]
-    fn canonical_sorting_handles_partial_canonical_set() {
-        let branches = vec![
-            make_branch("feature/x", true, false, Some("2026-04-20 08:30:00 +0000")),
-            make_branch("develop", true, false, Some("2026-04-01 08:30:00 +0000")),
-            make_branch("feature/y", true, true, Some("2026-04-21 08:30:00 +0000")),
-        ];
-
-        let entries = adapt_branch_inventory(branches);
-        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-
-        assert_eq!(names, vec!["develop", "feature/y", "feature/x"]);
-    }
-
-    #[test]
     fn hydrated_entries_mark_cleanup_ready() {
         let entries = vec![BranchListEntry {
             name: "feature/demo".to_string(),
             scope: BranchScope::Local,
             is_head: false,
-            upstream: Some("origin/feature/demo".to_string()),
+            upstream: None,
             ahead: 0,
             behind: 0,
             last_commit_date: Some("2026-04-20 08:30:00 +0000".to_string()),
@@ -496,7 +416,10 @@ mod tests {
         }];
         let cleanup_targets = HashMap::from([(
             String::from("feature/demo"),
-            Some(gwt_git::MergeTarget::from_ref("origin/develop")),
+            Some(gwt_git::MergeTargetRef::new(
+                gwt_git::MergeTarget::Develop,
+                "origin/develop",
+            )),
         )]);
 
         let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &cleanup_targets);
@@ -505,6 +428,14 @@ mod tests {
         assert_eq!(
             hydrated[0].cleanup.availability,
             BranchCleanupAvailability::Safe
+        );
+        assert_eq!(
+            hydrated[0]
+                .cleanup
+                .merge_target
+                .as_ref()
+                .map(|target| target.reference.as_str()),
+            Some("origin/develop")
         );
     }
 }

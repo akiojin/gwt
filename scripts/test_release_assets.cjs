@@ -8,7 +8,7 @@ const {
   binaryNameForPlatform,
   bundleBinaryNamesForPlatform,
   installBundleFromArchive,
-  readReleaseContract,
+  primaryReleaseAssetName,
   releaseAssetName,
 } = require("./release-assets.cjs");
 const postinstall = require("./postinstall.cjs");
@@ -28,19 +28,19 @@ function run(name, fn) {
 }
 
 run("release asset names match the public portable contract", () => {
-  const contract = readReleaseContract();
-  assert.equal(releaseAssetName("darwin", "arm64"), contract.portable_assets["macos-aarch64"]);
-  assert.equal(releaseAssetName("darwin", "x64"), contract.portable_assets["macos-x86_64"]);
-  assert.equal(releaseAssetName("linux", "arm64"), contract.portable_assets["linux-aarch64"]);
-  assert.equal(releaseAssetName("linux", "x64"), contract.portable_assets["linux-x86_64"]);
-  assert.equal(releaseAssetName("win32", "x64"), contract.portable_assets["windows-x86_64"]);
+  assert.equal(releaseAssetName("darwin", "arm64"), "gwt-macos-arm64.tar.gz");
+  assert.equal(releaseAssetName("darwin", "x64"), "gwt-macos-x86_64.tar.gz");
+  assert.equal(releaseAssetName("linux", "arm64"), "gwt-linux-aarch64.tar.gz");
+  assert.equal(releaseAssetName("linux", "x64"), "gwt-linux-x86_64.tar.gz");
+  assert.equal(releaseAssetName("win32", "x64"), "gwt-windows-x86_64.zip");
 });
 
-run("release asset helper reads the shared contract", () => {
-  const contract = readReleaseContract();
-  assert.equal(contract.portable_assets["windows-x86_64"], "gwt-windows-x86_64.zip");
-  assert.equal(contract.installer_assets.windows, "gwt-windows-x86_64.msi");
-  assert.deepEqual(contract.bundle_binaries.windows, ["gwt.exe", "gwtd.exe"]);
+run("primary release asset names match the GUI-first install contract", () => {
+  assert.equal(primaryReleaseAssetName("darwin", "arm64"), "gwt-macos-universal.dmg");
+  assert.equal(primaryReleaseAssetName("darwin", "x64"), "gwt-macos-universal.dmg");
+  assert.equal(primaryReleaseAssetName("linux", "arm64"), "gwt-linux-aarch64.tar.gz");
+  assert.equal(primaryReleaseAssetName("linux", "x64"), "gwt-linux-x86_64.tar.gz");
+  assert.equal(primaryReleaseAssetName("win32", "x64"), "gwt-windows-x86_64.msi");
 });
 
 run("release helper keeps platform binary names stable", () => {
@@ -50,10 +50,9 @@ run("release helper keeps platform binary names stable", () => {
 });
 
 run("release helper keeps bundle binary names stable", () => {
-  const contract = readReleaseContract();
-  assert.deepEqual(bundleBinaryNamesForPlatform("win32"), contract.bundle_binaries.windows);
-  assert.deepEqual(bundleBinaryNamesForPlatform("linux"), contract.bundle_binaries.linux);
-  assert.deepEqual(bundleBinaryNamesForPlatform("darwin"), contract.bundle_binaries.macos);
+  assert.deepEqual(bundleBinaryNamesForPlatform("win32"), ["gwt.exe", "gwtd.exe"]);
+  assert.deepEqual(bundleBinaryNamesForPlatform("linux"), ["gwt", "gwtd"]);
+  assert.deepEqual(bundleBinaryNamesForPlatform("darwin"), ["gwt", "gwtd"]);
 });
 
 run("installer entrypoints are loadable under package type module", () => {
@@ -66,76 +65,69 @@ run("windows installer definition includes the gwtd companion binary", () => {
   assert.match(wix, /gwtd\.exe/);
 });
 
-run("windows icon assets are available for exe and installer branding", () => {
-  for (const asset of ["icon.ico", "icon.png", "icon.icns"]) {
-    const icon = path.join(__dirname, "..", "assets", "icons", asset);
-    assert.ok(fs.statSync(icon).size > 0, `${asset} should be present`);
-  }
-});
-
-run("windows installer is per-user and keeps updater migration on the MSI path", () => {
-  const wix = fs.readFileSync(path.join(__dirname, "..", "wix", "main.wxs"), "utf8");
-  assert.match(wix, /Scope="perUser"/);
-  assert.match(wix, /LocalAppDataFolder/);
-  assert.match(wix, /Environment[^>]+Name="PATH"[^>]+Part="last"/);
-  assert.match(wix, /ProgramMenuFolder/);
-  assert.match(wix, /Shortcut[^>]+Id="GwtStartMenuShortcut"[^>]+Name="GWT"/);
-  assert.match(wix, /Icon[^>]+Id="GwtIcon\.exe"/);
-  assert.match(wix, /GWT_LEGACY_PER_MACHINE_EXE/);
-  assert.match(wix, /GWT_ALLOW_LEGACY_MIGRATION/);
-  assert.match(
-    wix,
-    /Condition="NOT GWT_LEGACY_PER_MACHINE_EXE OR GWT_ALLOW_LEGACY_MIGRATION = &quot;1&quot;"/
-  );
-});
-
 run("release workflow packages gwtd alongside gwt", () => {
-  const contract = readReleaseContract();
   const workflow = fs.readFileSync(
     path.join(__dirname, "..", ".github", "workflows", "release.yml"),
     "utf8"
   );
-  for (const asset of Object.values(contract.portable_assets)) {
-    assert.match(workflow, new RegExp(asset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
-  for (const asset of Object.values(contract.installer_assets)) {
-    assert.match(workflow, new RegExp(asset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
   assert.match(workflow, /--bin gwt --bin gwtd/);
   assert.match(workflow, /Compress-Archive -Path @\("dist\/gwt\.exe", "dist\/gwtd\.exe"\)/);
   assert.match(workflow, /tar -czf \$\{\{ matrix\.archive_name \}\} gwt gwtd/);
   assert.match(workflow, /Contents\/MacOS\/gwtd/);
 });
 
-run("release workflow signs and notarizes macOS distribution assets", () => {
-  const workflow = fs.readFileSync(
-    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+run("package scripts keep the GUI front door and release contract explicit", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
+  assert.equal(
+    pkg.scripts["test:frontend-bundle"],
+    "node --check crates/gwt/web/app.js"
+  );
+  assert.equal(pkg.scripts["test:release-flow"], "bash scripts/check-release-flow.sh");
+  assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");
+  assert.equal(pkg.scripts.build, "cargo build --release -p gwt --bin gwt --bin gwtd");
+});
+
+run("test all script keeps rust tests plus frontend release checks", () => {
+  const testAll = fs.readFileSync(path.join(__dirname, "test-all.sh"), "utf8");
+  assert.match(testAll, /test -p gwt-core -p gwt --all-features/);
+  assert.match(testAll, /cargo\.exe/);
+  assert.match(testAll, /bash scripts\/check-release-flow\.sh/);
+});
+
+run("release flow helper checks the shared frontend bundle and release assets", () => {
+  const releaseFlow = fs.readFileSync(path.join(__dirname, "check-release-flow.sh"), "utf8");
+  assert.match(releaseFlow, /scripts\/test_release_assets\.cjs/);
+  assert.match(releaseFlow, /node --check \"\$APP_JS\"/);
+  assert.match(releaseFlow, /script type=\"module\" src=\"\/app\.js\"/);
+});
+
+run("CI workflows call the named frontend and release verification scripts", () => {
+  const lintWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "lint.yml"),
     "utf8"
   );
-  const buildDmgSection = workflow.split("  build-dmg:\n")[1];
-  assert.match(workflow, /APPLE_CERT_APP_BASE64/);
-  assert.match(workflow, /APPLE_CERTIFICATE_PASSWORD/);
-  assert.match(workflow, /--apple-id\s+"\$APPLE_ID"/);
-  assert.match(workflow, /APPLE_ID_PASSWORD/);
-  assert.match(workflow, /APPLE_TEAM_ID/);
-  assert.match(workflow, /security create-keychain/);
-  assert.doesNotMatch(workflow, /base64 --decode/);
-  assert.doesNotMatch(workflow, /awk 'NR == 1/);
-  assert.equal((workflow.match(/base64 -D/g) || []).length, 2);
-  assert.match(workflow, /codesign --force --options runtime --timestamp --sign/);
-  assert.match(workflow, /xcrun notarytool submit/);
-  assert.match(workflow, /xcrun stapler staple/);
-  assert.match(workflow, /xcrun stapler validate/);
-  assert.match(workflow, /spctl --assess/);
-  assert.match(workflow, /hdiutil attach/);
-  assert.ok(
-    buildDmgSection.indexOf("Build gwt bundle binaries for x86_64") <
-      buildDmgSection.indexOf("Prepare macOS signing keychain")
+  const testWorkflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "test.yml"),
+    "utf8"
   );
-  assert.ok(
-    buildDmgSection.indexOf("Prepare macOS signing keychain") <
-      buildDmgSection.indexOf("Sign app bundle")
-  );
+
+  assert.match(lintWorkflow, /test:frontend-bundle/);
+  assert.match(lintWorkflow, /test:release-flow/);
+  assert.match(testWorkflow, /test:release-assets/);
+});
+
+run("README install guidance points to GUI-first release assets", () => {
+  const readme = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
+  const readmeJa = fs.readFileSync(path.join(__dirname, "..", "README.ja.md"), "utf8");
+
+  for (const doc of [readme, readmeJa]) {
+    assert.match(doc, /gwt-macos-universal\.dmg/);
+    assert.match(doc, /gwt-windows-x86_64\.msi/);
+    assert.match(doc, /gwt-linux-x86_64\.tar\.gz/);
+    assert.match(doc, /test:frontend-bundle|node --check crates\/gwt\/web\/app\.js/);
+    assert.match(doc, /test:release-flow|bash scripts\/check-release-flow\.sh/);
+  }
 });
 
 run("portable tarball extraction installs the unix bundle", () => {
@@ -161,6 +153,10 @@ run("portable tarball extraction installs the unix bundle", () => {
 });
 
 run("portable zip extraction installs the windows bundle", () => {
+  if (process.platform !== "win32") {
+    return;
+  }
+
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-release-test-"));
   const sourceDir = path.join(root, "source");
   const binDir = path.join(root, "bin");

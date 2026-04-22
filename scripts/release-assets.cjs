@@ -4,59 +4,46 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const RELEASE_CONTRACT_PATH = path.join(__dirname, "..", "assets", "release-assets.json");
-let releaseContractCache = null;
-
-function readReleaseContract() {
-  if (!releaseContractCache) {
-    releaseContractCache = JSON.parse(fs.readFileSync(RELEASE_CONTRACT_PATH, "utf8"));
-  }
-  return releaseContractCache;
-}
-
-function normalizeContractPlatform(platform = os.platform()) {
-  if (platform === "darwin") {
-    return "macos";
-  }
-  if (platform === "win32") {
-    return "windows";
-  }
-  return platform;
-}
-
-function normalizeContractArch(arch = os.arch()) {
-  if (arch === "arm64") {
-    return "aarch64";
-  }
-  if (arch === "x64") {
-    return "x86_64";
-  }
-  return arch;
-}
-
 function binaryNameForPlatform(platform = os.platform()) {
-  return bundleBinaryNamesForPlatform(platform)[0];
+  return platform === "win32" ? "gwt.exe" : "gwt";
 }
 
 function daemonBinaryNameForPlatform(platform = os.platform()) {
-  return bundleBinaryNamesForPlatform(platform)[1];
+  return platform === "win32" ? "gwtd.exe" : "gwtd";
 }
 
 function bundleBinaryNamesForPlatform(platform = os.platform()) {
-  const binaries = readReleaseContract().bundle_binaries[normalizeContractPlatform(platform)];
-  if (!Array.isArray(binaries) || binaries.length === 0) {
-    throw new Error(`Unsupported platform: ${platform}`);
-  }
-  return binaries;
+  return [binaryNameForPlatform(platform), daemonBinaryNameForPlatform(platform)];
 }
 
 function releaseAssetName(platform = os.platform(), arch = os.arch()) {
-  const key = `${normalizeContractPlatform(platform)}-${normalizeContractArch(arch)}`;
-  const asset = readReleaseContract().portable_assets[key];
-  if (!asset) {
-    throw new Error(`Unsupported platform: ${platform}-${arch}`);
+  if (platform === "darwin" && arch === "arm64") {
+    return "gwt-macos-arm64.tar.gz";
   }
-  return asset;
+  if (platform === "darwin" && arch === "x64") {
+    return "gwt-macos-x86_64.tar.gz";
+  }
+  if (platform === "linux" && arch === "x64") {
+    return "gwt-linux-x86_64.tar.gz";
+  }
+  if (platform === "linux" && arch === "arm64") {
+    return "gwt-linux-aarch64.tar.gz";
+  }
+  if (platform === "win32" && arch === "x64") {
+    return "gwt-windows-x86_64.zip";
+  }
+
+  throw new Error(`Unsupported platform: ${platform}-${arch}`);
+}
+
+function primaryReleaseAssetName(platform = os.platform(), arch = os.arch()) {
+  if (platform === "darwin" && (arch === "arm64" || arch === "x64")) {
+    return "gwt-macos-universal.dmg";
+  }
+  if (platform === "win32" && arch === "x64") {
+    return "gwt-windows-x86_64.msi";
+  }
+  return releaseAssetName(platform, arch);
 }
 
 function releaseAssetUrl(repo, version, platform = os.platform(), arch = os.arch()) {
@@ -220,7 +207,7 @@ module.exports = {
   installBinaryFromArchive: installBundleFromArchive,
   installBundleFromArchive,
   installReleaseBinary,
-  readReleaseContract,
+  primaryReleaseAssetName,
   releaseAssetName,
   releaseAssetUrl,
 };

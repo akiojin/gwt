@@ -1,8 +1,10 @@
-use chrono::{DateTime, Utc};
-use gwt_agent::{AgentColor, CustomCodingAgent, PresetDefinition, PresetId};
-use gwt_core::coordination::{AuthorKind, BoardEntryKind};
+use gwt_agent::{ClaudeCodeOpenaiCompatInput, CustomCodingAgent, PresetDefinition};
+use gwt_core::{
+    coordination::{BoardEntry, BoardEntryKind},
+    logging::LogEvent,
+    notes::MemoNote,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
@@ -15,7 +17,6 @@ use crate::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
     },
     preset::WindowPreset,
-    profiles_service::ProfileSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,15 @@ pub enum FrontendEvent {
     LoadBoard {
         id: String,
     },
+    LoadProfile {
+        id: String,
+    },
+    LoadMemo {
+        id: String,
+    },
+    LoadLogs {
+        id: String,
+    },
     LoadKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -121,6 +131,55 @@ pub enum FrontendEvent {
         id: String,
         branches: Vec<String>,
         delete_remote: bool,
+    },
+    PostBoardEntry {
+        id: String,
+        entry_kind: BoardEntryKind,
+        body: String,
+        parent_id: Option<String>,
+        topics: Vec<String>,
+        owners: Vec<String>,
+    },
+    CreateMemoNote {
+        id: String,
+        title: String,
+        body: String,
+        pinned: bool,
+    },
+    UpdateMemoNote {
+        id: String,
+        note_id: String,
+        title: String,
+        body: String,
+        pinned: bool,
+    },
+    DeleteMemoNote {
+        id: String,
+        note_id: String,
+    },
+    SelectProfile {
+        id: String,
+        profile_name: String,
+    },
+    CreateProfile {
+        id: String,
+        name: String,
+    },
+    SetActiveProfile {
+        id: String,
+        profile_name: String,
+    },
+    SaveProfile {
+        id: String,
+        current_name: String,
+        name: String,
+        description: String,
+        env_vars: Vec<ProfileEnvEntryView>,
+        disabled_env: Vec<String>,
+    },
+    DeleteProfile {
+        id: String,
+        profile_name: String,
     },
     OpenIssueLaunchWizard {
         id: String,
@@ -143,13 +202,12 @@ pub enum FrontendEvent {
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
     ListCustomAgentPresets,
-    /// Settings > Custom Agents > Add from preset: persist a new custom agent
-    /// seeded from the selected preset payload. Response is
-    /// [`BackendEvent::CustomAgentSaved`] on success or
+    /// Settings > Custom Agents > Add > Claude Code (OpenAI-compat backend):
+    /// persist a new custom agent seeded from the preset payload. Response
+    /// is [`BackendEvent::CustomAgentSaved`] on success or
     /// [`BackendEvent::CustomAgentError`] on failure.
     AddCustomAgentFromPreset {
-        preset_id: PresetId,
-        payload: Value,
+        input: ClaudeCodeOpenaiCompatInput,
     },
     /// Settings > Custom Agents > Edit: replace an existing custom agent in
     /// place. The agent id must match an existing entry.
@@ -169,91 +227,12 @@ pub enum FrontendEvent {
         base_url: String,
         api_key: String,
     },
-    ListProfiles {
-        id: String,
-        selected_profile: Option<String>,
-    },
-    SwitchProfile {
-        id: String,
-        profile_name: String,
-    },
-    AddProfile {
-        id: String,
-        name: String,
-        description: String,
-    },
-    UpdateProfile {
-        id: String,
-        current_name: String,
-        name: String,
-        description: String,
-    },
-    DeleteProfile {
-        id: String,
-        profile_name: String,
-    },
-    SetProfileEnvVar {
-        id: String,
-        profile_name: String,
-        key: String,
-        value: String,
-    },
-    UpdateProfileEnvVar {
-        id: String,
-        profile_name: String,
-        current_key: String,
-        key: String,
-        value: String,
-    },
-    DeleteProfileEnvVar {
-        id: String,
-        profile_name: String,
-        key: String,
-    },
-    AddDisabledEnv {
-        id: String,
-        profile_name: String,
-        key: String,
-    },
-    UpdateDisabledEnv {
-        id: String,
-        profile_name: String,
-        current_key: String,
-        key: String,
-    },
-    DeleteDisabledEnv {
-        id: String,
-        profile_name: String,
-        key: String,
-    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
-}
-
-/// Frontend-facing projection of a [`gwt_core::coordination::BoardEntry`].
-///
-/// 付加した `agent_color` は wire-only。`origin_agent_id` を既知の
-/// [`gwt_agent::AgentId`] に正規化し、`default_color()` をここで
-/// 計算してフロントに渡す (SPEC #2133 FR-006 / FR-012)。
-#[derive(Debug, Clone, Serialize)]
-pub struct BoardEntryView {
-    pub id: String,
-    pub author_kind: AuthorKind,
-    pub author: String,
-    pub kind: BoardEntryKind,
-    pub body: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub origin_branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub origin_agent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_color: Option<AgentColor>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +249,30 @@ pub struct RecentProjectView {
     pub path: String,
     pub title: String,
     pub kind: ProjectKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileEnvEntryView {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileEntryView {
+    pub name: String,
+    pub description: String,
+    pub env_vars: Vec<ProfileEnvEntryView>,
+    pub disabled_env: Vec<String>,
+    pub is_default: bool,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileSnapshotView {
+    pub active_profile: String,
+    pub selected_profile: String,
+    pub profiles: Vec<ProfileEntryView>,
+    pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -317,6 +320,26 @@ pub enum BackendEvent {
         phase: BranchEntriesPhase,
         entries: Vec<BranchListEntry>,
     },
+    BoardEntries {
+        id: String,
+        entries: Vec<BoardEntry>,
+    },
+    ProfileSnapshot {
+        id: String,
+        snapshot: ProfileSnapshotView,
+    },
+    MemoNotes {
+        id: String,
+        notes: Vec<MemoNote>,
+        selected_note_id: Option<String>,
+    },
+    LogEntries {
+        id: String,
+        entries: Vec<LogEvent>,
+    },
+    LogEntryAppended {
+        entry: LogEvent,
+    },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -338,11 +361,19 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
-    BoardSnapshot {
-        id: String,
-        entries: Vec<BoardEntryView>,
-    },
     BoardError {
+        id: String,
+        message: String,
+    },
+    ProfileError {
+        id: String,
+        message: String,
+    },
+    MemoError {
+        id: String,
+        message: String,
+    },
+    LogError {
         id: String,
         message: String,
     },
@@ -392,15 +423,6 @@ pub enum BackendEvent {
         code: CustomAgentErrorCode,
         message: String,
     },
-    ProfileSnapshot {
-        id: String,
-        snapshot: ProfileSnapshot,
-    },
-    ProfileError {
-        id: String,
-        code: ProfileErrorCode,
-        message: String,
-    },
 }
 
 /// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
@@ -416,25 +438,24 @@ pub enum CustomAgentErrorCode {
     Probe,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProfileErrorCode {
-    Storage,
-    Duplicate,
-    InvalidInput,
-    NotFound,
-    Protected,
-}
-
 #[cfg(test)]
 mod tests {
+    use gwt_core::{
+        coordination::{AuthorKind, BoardEntry, BoardEntryKind},
+        logging::{LogEvent, LogLevel},
+        notes::MemoNote,
+    };
     use serde_json::Value;
 
-    use crate::profiles_service::{
-        ProfileEnvVarSource, ProfileEnvVarView, ProfileSnapshot, ProfileView,
+    use crate::branch_list::{
+        BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
+        BranchScope,
     };
 
-    use super::{BackendEvent, BranchEntriesPhase, FrontendEvent, PresetId};
+    use super::{
+        BackendEvent, BranchEntriesPhase, ProfileEntryView, ProfileEnvEntryView,
+        ProfileSnapshotView,
+    };
 
     #[test]
     fn branch_entries_serializes_explicit_phase_contract() {
@@ -456,23 +477,123 @@ mod tests {
     }
 
     #[test]
-    fn profile_snapshot_serializes_explicit_contract() {
+    fn branch_entries_serializes_actual_merge_target_reference_contract() {
+        let event = BackendEvent::BranchEntries {
+            id: "branches-1".to_string(),
+            phase: BranchEntriesPhase::Hydrated,
+            entries: vec![BranchListEntry {
+                name: "feature/demo".to_string(),
+                scope: BranchScope::Local,
+                is_head: false,
+                upstream: Some("origin/feature/demo".to_string()),
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup_ready: true,
+                cleanup: BranchCleanupInfo {
+                    availability: BranchCleanupAvailability::Safe,
+                    execution_branch: Some("feature/demo".to_string()),
+                    merge_target: Some(gwt_git::MergeTargetRef {
+                        kind: gwt_git::MergeTarget::Develop,
+                        reference: "origin/develop".to_string(),
+                    }),
+                    upstream: Some("origin/feature/demo".to_string()),
+                    blocked_reason: None,
+                    risks: vec![BranchCleanupRisk::RemoteTracking],
+                },
+            }],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize branch entries");
+        let cleanup = &value["entries"][0]["cleanup"]["merge_target"];
+        assert_eq!(
+            cleanup["kind"],
+            Value::String("develop".to_string()),
+            "expected merge target kind to remain machine-readable",
+        );
+        assert_eq!(
+            cleanup["reference"],
+            Value::String("origin/develop".to_string()),
+            "expected branch entries payload to expose the actual merge target ref",
+        );
+    }
+
+    #[test]
+    fn terminal_snapshot_serializes_explicit_kind_contract() {
+        let event = BackendEvent::TerminalSnapshot {
+            id: "tab-1::shell-1".to_string(),
+            data_base64: "aGVsbG8=".to_string(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize terminal snapshot");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("terminal_snapshot".to_string()))
+        );
+        assert_eq!(
+            value.get("id"),
+            Some(&Value::String("tab-1::shell-1".to_string()))
+        );
+        assert_eq!(
+            value.get("data_base64"),
+            Some(&Value::String("aGVsbG8=".to_string()))
+        );
+    }
+
+    #[test]
+    fn board_entries_serializes_snapshot_contract() {
+        let event = BackendEvent::BoardEntries {
+            id: "board-1".to_string(),
+            entries: vec![BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Waiting for next task",
+                Some("ready".to_string()),
+                None,
+                vec!["coordination".to_string()],
+                vec!["2018".to_string()],
+            )],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize board entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("board_entries".to_string()))
+        );
+        assert_eq!(
+            value["entries"][0]["kind"],
+            Value::String("status".to_string()),
+            "expected board entry kind to remain machine-readable on the wire",
+        );
+        assert_eq!(
+            value["entries"][0]["related_topics"][0],
+            Value::String("coordination".to_string()),
+            "expected board snapshot payload to keep related topics on the wire",
+        );
+    }
+
+    #[test]
+    fn profile_snapshot_serializes_explicit_kind_contract() {
         let event = BackendEvent::ProfileSnapshot {
             id: "profile-1".to_string(),
-            snapshot: ProfileSnapshot {
-                active: "default".to_string(),
-                selected: "default".to_string(),
-                profiles: vec![ProfileView {
+            snapshot: ProfileSnapshotView {
+                active_profile: "default".to_string(),
+                selected_profile: "default".to_string(),
+                profiles: vec![ProfileEntryView {
                     name: "default".to_string(),
                     description: "Default profile".to_string(),
-                    active: true,
-                    env_vars: vec![ProfileEnvVarView {
-                        key: "API_URL".to_string(),
-                        value: "https://example.test".to_string(),
-                        source: ProfileEnvVarSource::Profile,
+                    env_vars: vec![ProfileEnvEntryView {
+                        key: "TERM".to_string(),
+                        value: "xterm-256color".to_string(),
                     }],
                     disabled_env: vec!["SECRET".to_string()],
-                    merged_env: Vec::new(),
+                    is_default: true,
+                    is_active: true,
+                }],
+                merged_preview: vec![ProfileEnvEntryView {
+                    key: "TERM".to_string(),
+                    value: "xterm-256color".to_string(),
                 }],
             },
         };
@@ -483,39 +604,112 @@ mod tests {
             Some(&Value::String("profile_snapshot".to_string()))
         );
         assert_eq!(
-            value.pointer("/snapshot/profiles/0/env_vars/0/source"),
-            Some(&Value::String("profile".to_string()))
+            value["snapshot"]["selected_profile"],
+            Value::String("default".to_string())
         );
         assert_eq!(
-            value.pointer("/snapshot/profiles/0/disabled_env/0"),
-            Some(&Value::String("SECRET".to_string()))
+            value["snapshot"]["profiles"][0]["env_vars"][0]["key"],
+            Value::String("TERM".to_string())
         );
     }
 
     #[test]
-    fn add_custom_agent_from_preset_deserializes_preset_id_and_payload() {
-        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-            "kind": "add_custom_agent_from_preset",
-            "preset_id": "claude_code_openai_compat",
-            "payload": {
-                "id": "claude-code-openai",
-                "display_name": "Claude Code (OpenAI-compat)",
-                "base_url": "https://proxy.example.com",
-                "api_key": "sk-test-123",
-                "default_model": "openai/gpt-oss-20b"
-            }
-        }))
-        .expect("deserialize frontend event");
+    fn memo_notes_serializes_snapshot_contract() {
+        let event = BackendEvent::MemoNotes {
+            id: "memo-1".to_string(),
+            notes: vec![MemoNote {
+                id: "note-1".to_string(),
+                title: "Pinned note".to_string(),
+                body: "Remember to verify the cache contract".to_string(),
+                pinned: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }],
+            selected_note_id: Some("note-1".to_string()),
+        };
 
-        match event {
-            FrontendEvent::AddCustomAgentFromPreset { preset_id, payload } => {
-                assert_eq!(preset_id, PresetId::ClaudeCodeOpenaiCompat);
-                assert_eq!(
-                    payload.get("default_model"),
-                    Some(&Value::String("openai/gpt-oss-20b".to_string()))
-                );
-            }
-            other => panic!("expected AddCustomAgentFromPreset, got {other:?}"),
-        }
+        let value = serde_json::to_value(&event).expect("serialize memo notes");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("memo_notes".to_string()))
+        );
+        assert_eq!(value.get("id"), Some(&Value::String("memo-1".to_string())));
+        assert_eq!(
+            value["notes"][0]["pinned"],
+            Value::Bool(true),
+            "expected memo snapshot payload to keep pin ordering data on the wire",
+        );
+        assert_eq!(
+            value["selected_note_id"],
+            Value::String("note-1".to_string()),
+            "expected memo snapshot payload to carry the preferred editor selection",
+        );
+    }
+
+    #[test]
+    fn log_entries_serializes_snapshot_contract() {
+        let event = BackendEvent::LogEntries {
+            id: "logs-1".to_string(),
+            entries: vec![
+                LogEvent::new(LogLevel::Warn, "gwt", "watcher stalled").with_detail("tail retry")
+            ],
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize log entries");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("log_entries".to_string()))
+        );
+        assert_eq!(value.get("id"), Some(&Value::String("logs-1".to_string())));
+        assert_eq!(
+            value["entries"][0]["severity"],
+            Value::String("Warn".to_string())
+        );
+        assert_eq!(
+            value["entries"][0]["source"],
+            Value::String("gwt".to_string())
+        );
+        assert_eq!(
+            value["entries"][0]["message"],
+            Value::String("watcher stalled".to_string())
+        );
+        assert_eq!(
+            value["entries"][0]["detail"],
+            Value::String("tail retry".to_string())
+        );
+    }
+
+    #[test]
+    fn protocol_source_layout_keeps_wire_schema_separate_from_transport_and_frontend_logic() {
+        let source = include_str!("protocol.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("protocol.rs should contain production source before tests");
+
+        assert!(
+            production_source.contains("pub enum FrontendEvent"),
+            "expected protocol owner to define frontend wire events in protocol.rs",
+        );
+        assert!(
+            production_source.contains("pub enum BackendEvent"),
+            "expected protocol owner to define backend wire events in protocol.rs",
+        );
+        assert!(
+            production_source.contains("#[serde(tag = \"kind\", rename_all = \"snake_case\")]"),
+            "expected protocol owner to keep the stable tagged-union contract local to protocol.rs",
+        );
+        assert!(
+            !production_source.contains("handle_frontend_message")
+                && !production_source.contains("websocket_handler")
+                && !production_source.contains("ClientHub"),
+            "expected transport/runtime dispatch to stay out of protocol.rs",
+        );
+        assert!(
+            !production_source.contains("document.addEventListener")
+                && !production_source.contains("handleCanvasWheelEvent")
+                && !production_source.contains("navigator.clipboard"),
+            "expected frontend behavior details to stay out of protocol.rs",
+        );
     }
 }
