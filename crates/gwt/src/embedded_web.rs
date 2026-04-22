@@ -473,6 +473,22 @@ mod tests {
             html.contains("open_issue_launch_wizard"),
             "expected issue launch wizard event in embedded html",
         );
+        assert!(
+            html.contains("Refresh cached knowledge"),
+            "expected knowledge bridge refresh affordance to describe cache-backed reloads",
+        );
+        assert!(
+            html.contains("Loading cache-backed data"),
+            "expected knowledge bridge loading copy to describe cache-backed reads",
+        );
+        assert!(
+            html.contains("No cached items"),
+            "expected knowledge bridge empty copy to stay cache-backed",
+        );
+        assert!(
+            !html.contains("gh issue") && !html.contains("gh pr"),
+            "expected knowledge bridge guidance to avoid direct gh issue/pr commands",
+        );
     }
 
     #[test]

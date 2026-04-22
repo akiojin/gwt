@@ -3503,6 +3503,11 @@ mod tests {
         notes::{
             create_note as create_memo_note, load_snapshot as load_memo_snapshot, MemoNoteDraft,
         },
+        paths::gwt_cache_dir,
+        repo_hash::detect_repo_hash,
+    };
+    use gwt_github::{
+        Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
     };
     use gwt_terminal::Pane;
 
@@ -3514,6 +3519,78 @@ mod tests {
 
     fn write_profile_config(path: &Path, settings: &Settings) {
         settings.save(path).expect("write profile config");
+    }
+
+    fn sample_issue_snapshot(
+        number: u64,
+        title: &str,
+        labels: &[&str],
+        body: &str,
+        updated_at: &str,
+    ) -> IssueSnapshot {
+        IssueSnapshot {
+            number: IssueNumber(number),
+            title: title.to_string(),
+            body: body.to_string(),
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            state: IssueState::Open,
+            updated_at: UpdatedAt::new(updated_at),
+            comments: vec![CommentSnapshot {
+                id: CommentId(number * 10),
+                body: format!("Comment for #{number}"),
+                updated_at: UpdatedAt::new(updated_at),
+            }],
+        }
+    }
+
+    fn init_repo(repo_path: &Path) {
+        let remote = format!(
+            "https://github.com/example/repo-{:x}.git",
+            remote_suffix(repo_path)
+        );
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["remote", "add", "origin", remote.as_str()].as_slice(),
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn remote_suffix(repo_path: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        repo_path.display().to_string().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn issue_cache_root(repo_path: &Path) -> PathBuf {
+        let repo_hash = detect_repo_hash(repo_path).expect("repo hash");
+        gwt_cache_dir().join("issues").join(repo_hash.as_str())
+    }
+
+    fn write_issue_link_store(repo_path: &Path, branches: HashMap<String, u64>) {
+        let repo_hash = detect_repo_hash(repo_path).expect("repo hash");
+        let path = gwt_cache_dir()
+            .join("issue-links")
+            .join(format!("{}.json", repo_hash.as_str()));
+        fs::create_dir_all(path.parent().expect("parent")).expect("create link dir");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({ "branches": branches }))
+                .expect("serialize store"),
+        )
+        .expect("write link store");
     }
 
     fn canvas_bounds() -> WindowGeometry {
@@ -4004,6 +4081,178 @@ mod tests {
                 && id == &window_id
                 && entries.len() == 1
                 && entries[0].body == "Need review"
+        ));
+    }
+
+    #[test]
+    fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_views() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+
+        let cache = Cache::new(issue_cache_root(&repo));
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                42,
+                "Issue bridge",
+                &["bug"],
+                "Issue body",
+                "2026-04-20T10:00:00Z",
+            ))
+            .expect("write issue snapshot");
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                1930,
+                "SPEC-1930: Cache-backed SPEC bridge",
+                &["gwt-spec", "phase/implementation"],
+                concat!(
+                    "<!-- gwt-spec id=1930 version=1 -->\n",
+                    "<!-- sections:\n",
+                    "spec=body\n",
+                    "tasks=body\n",
+                    "-->\n\n",
+                    "<!-- artifact:spec BEGIN -->\n",
+                    "# SPEC bridge\n",
+                    "## Summary\n",
+                    "Cache-backed issue view\n",
+                    "<!-- artifact:spec END -->\n\n",
+                    "<!-- artifact:tasks BEGIN -->\n",
+                    "- [x] T-001\n",
+                    "<!-- artifact:tasks END -->\n"
+                ),
+                "2026-04-20T09:00:00Z",
+            ))
+            .expect("write spec snapshot");
+        write_issue_link_store(
+            &repo,
+            HashMap::from([("feature/issue-bridge".to_string(), 42)]),
+        );
+
+        let mut persisted = empty_workspace_state();
+        persisted.windows.push(sample_window(
+            "issue-1",
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        ));
+        persisted.windows.push(sample_window(
+            "spec-1",
+            WindowPreset::Spec,
+            WindowProcessStatus::Ready,
+        ));
+        persisted.next_z_index = 3;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo,
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+        };
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let issue_events = runtime.load_knowledge_bridge_events(
+            "client-1",
+            &combined_window_id("tab-1", "issue-1"),
+            gwt::KnowledgeKind::Issue,
+            Some(42),
+            false,
+        );
+        assert_eq!(issue_events.len(), 2);
+        assert!(matches!(
+            &issue_events[0].event,
+            BackendEvent::KnowledgeEntries {
+                knowledge_kind,
+                entries,
+                selected_number,
+                refresh_enabled,
+                ..
+            } if *knowledge_kind == gwt::KnowledgeKind::Issue
+                && entries.len() == 1
+                && entries[0].number == 42
+                && entries[0].linked_branch_count == 1
+                && *selected_number == Some(42)
+                && *refresh_enabled
+        ));
+        assert!(matches!(
+            &issue_events[1].event,
+            BackendEvent::KnowledgeDetail { detail, .. }
+                if detail.launch_issue_number == Some(42)
+                    && detail.sections.iter().any(|section| section.title == "Linked branches"
+                        && section.body.contains("feature/issue-bridge"))
+        ));
+
+        let spec_events = runtime.load_knowledge_bridge_events(
+            "client-1",
+            &combined_window_id("tab-1", "spec-1"),
+            gwt::KnowledgeKind::Spec,
+            Some(1930),
+            false,
+        );
+        assert_eq!(spec_events.len(), 2);
+        assert!(matches!(
+            &spec_events[0].event,
+            BackendEvent::KnowledgeEntries {
+                knowledge_kind,
+                entries,
+                selected_number,
+                refresh_enabled,
+                ..
+            } if *knowledge_kind == gwt::KnowledgeKind::Spec
+                && entries.len() == 1
+                && entries[0].number == 1930
+                && *selected_number == Some(1930)
+                && *refresh_enabled
+        ));
+        assert!(matches!(
+            &spec_events[1].event,
+            BackendEvent::KnowledgeDetail { detail, .. }
+                if detail.sections.iter().any(|section| section.title == "spec"
+                    && section.body.contains("Cache-backed issue view"))
+        ));
+    }
+
+    #[test]
+    fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_support_exists() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "pr-1",
+            repo,
+            WindowPreset::Pr,
+            WindowProcessStatus::Ready,
+        );
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.load_knowledge_bridge_events(
+            "client-1",
+            &combined_window_id("tab-1", "pr-1"),
+            gwt::KnowledgeKind::Pr,
+            None,
+            false,
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].event,
+            BackendEvent::KnowledgeEntries {
+                knowledge_kind,
+                entries,
+                refresh_enabled,
+                empty_message,
+                ..
+            } if *knowledge_kind == gwt::KnowledgeKind::Pr
+                && entries.is_empty()
+                && !*refresh_enabled
+                && empty_message.as_deref().is_some_and(|message| message.contains("cache-backed PR list support"))
+        ));
+        assert!(matches!(
+            &events[1].event,
+            BackendEvent::KnowledgeDetail { detail, .. }
+                if detail.sections.iter().any(|section| section.body.contains("cache-backed PR list support"))
         ));
     }
 
