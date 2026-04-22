@@ -524,7 +524,11 @@ impl AppRuntime {
             )],
             FrontendEvent::AddCustomAgentFromPreset { input } => vec![OutboundEvent::reply(
                 client_id,
-                gwt::custom_agents_dispatch::add_from_preset_event(input),
+                gwt::custom_agents_dispatch::add_from_preset_event(
+                    gwt::PresetId::ClaudeCodeOpenaiCompat,
+                    serde_json::to_value(input)
+                        .expect("custom agent preset payload should serialize"),
+                ),
             )],
             FrontendEvent::UpdateCustomAgent { agent } => vec![OutboundEvent::reply(
                 client_id,
@@ -3623,6 +3627,8 @@ mod tests {
             maximized: false,
             pre_maximize_geometry: None,
             persist: true,
+            agent_id: None,
+            agent_color: None,
         }
     }
 

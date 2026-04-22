@@ -56,6 +56,111 @@ pub fn park_pending_resume(worktree: &Path, pending: &PendingDiscussionResume) -
     Ok(true)
 }
 
+/// Set a proposal's status label (e.g. `[active]` → `[chosen]`) by its
+/// label (e.g. `Proposal A`). Returns `Ok(true)` when the proposal was
+/// found in an `[active]` state and rewritten; `Ok(false)` otherwise.
+///
+/// Used by the `gwt discuss resolve|park|reject` CLI to let the LLM
+/// explicitly exit the `gwt-discussion` skill so the Stop-block handler
+/// (SPEC-1935 FR-014p) stays silent.
+pub fn set_proposal_status_by_label(
+    worktree: &Path,
+    label: &str,
+    new_status: &str,
+) -> io::Result<bool> {
+    let discussion_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if !discussion_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&discussion_path)?;
+    let proposals = parse_proposals(&content);
+    let Some(target) = proposals
+        .into_iter()
+        .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
+    else {
+        return Ok(false);
+    };
+
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    if let Some(line) = lines.get_mut(target.header_line_index) {
+        if let Some(rewritten) = replace_trailing_status_tag(line, new_status) {
+            *line = rewritten;
+        }
+    }
+    let rewritten = lines.join("\n");
+    let final_content = if content.ends_with('\n') {
+        format!("{rewritten}\n")
+    } else {
+        rewritten
+    };
+    std::fs::write(discussion_path, final_content)?;
+    Ok(true)
+}
+
+/// Rewrite only the terminal `[status]` tag on a `### Proposal ...` header
+/// line. Mirrors the `rsplit_once('[')` parse contract used by
+/// [`parse_proposals`] so titles that happen to contain a literal
+/// `"[active]"` substring do not fool the replacement.
+fn replace_trailing_status_tag(line: &str, new_status: &str) -> Option<String> {
+    // Find the rightmost `[` and its matching `]` on the same line,
+    // ignoring anything that appears before them (including a proposal
+    // title that spuriously contains `[active]`).
+    let trimmed_end = line.trim_end();
+    if !trimmed_end.ends_with(']') {
+        return None;
+    }
+    let last_open = trimmed_end.rfind('[')?;
+    let trailing_whitespace_len = line.len() - trimmed_end.len();
+    let prefix = &line[..last_open];
+    let trailing = &line[line.len() - trailing_whitespace_len..];
+    Some(format!("{prefix}[{new_status}]{trailing}"))
+}
+
+/// Clear the `Next Question:` line of the named `[active]` proposal.
+/// Returns `Ok(true)` when the proposal was found and modified.
+pub fn clear_proposal_next_question(worktree: &Path, label: &str) -> io::Result<bool> {
+    let discussion_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if !discussion_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&discussion_path)?;
+    let proposals = parse_proposals(&content);
+    let Some(target) = proposals
+        .into_iter()
+        .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
+    else {
+        return Ok(false);
+    };
+
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let start = target.header_line_index + 1;
+    let mut modified = false;
+    for line in lines.iter_mut().skip(start) {
+        if line.trim_start().starts_with("### Proposal ") {
+            break;
+        }
+        let leading_trim = line.trim_start();
+        if leading_trim.starts_with("- Next Question:") {
+            let indent_len = line.len() - leading_trim.len();
+            let indent: String = line.chars().take(indent_len).collect();
+            *line = format!("{indent}- Next Question:");
+            modified = true;
+            break;
+        }
+    }
+    if !modified {
+        return Ok(false);
+    }
+    let rewritten = lines.join("\n");
+    let final_content = if content.ends_with('\n') {
+        format!("{rewritten}\n")
+    } else {
+        rewritten
+    };
+    std::fs::write(discussion_path, final_content)?;
+    Ok(true)
+}
+
 pub fn build_resume_prompt(pending: &PendingDiscussionResume) -> String {
     let next_question = pending
         .next_question
@@ -70,7 +175,7 @@ pub fn build_resume_prompt(pending: &PendingDiscussionResume) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProposalStatus {
+pub(crate) enum ProposalStatus {
     Active,
     Parked,
     Rejected,
@@ -79,15 +184,15 @@ enum ProposalStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedProposal {
-    header_line_index: usize,
-    label: String,
-    title: String,
-    status: ProposalStatus,
-    next_question: Option<String>,
+pub(crate) struct ParsedProposal {
+    pub(crate) header_line_index: usize,
+    pub(crate) label: String,
+    pub(crate) title: String,
+    pub(crate) status: ProposalStatus,
+    pub(crate) next_question: Option<String>,
 }
 
-fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
+pub(crate) fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
     let mut proposals: Vec<ParsedProposal> = Vec::new();
 
     for (index, raw_line) in content.lines().enumerate() {
@@ -275,6 +380,87 @@ mod tests {
             next_question: None,
         });
         assert!(!prompt_without_question.contains("Next question:"));
+    }
+
+    #[test]
+    fn set_proposal_status_updates_active_to_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(&discussion_path, sample_discussion()).unwrap();
+
+        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        assert!(changed);
+        let updated = std::fs::read_to_string(&discussion_path).unwrap();
+        assert!(updated.contains("### Proposal A - Hook-driven resume [chosen]"));
+        assert!(!updated.contains("### Proposal A - Hook-driven resume [active]"));
+        // Other proposals remain untouched
+        assert!(updated.contains("### Proposal B - Manual follow-up only [parked]"));
+    }
+
+    #[test]
+    fn set_proposal_status_rewrites_only_trailing_status_tag_even_with_active_in_title() {
+        // Regression: a proposal title that literally contains "[active]"
+        // must NOT trick the setter into replacing the substring inside
+        // the title. Only the terminal `[status]` tag should change.
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "### Proposal A - Toggle [active] state review [active]\n\
+             - Next Question: is this safe?\n",
+        )
+        .unwrap();
+
+        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+        assert!(changed);
+        let updated = std::fs::read_to_string(&discussion_path).unwrap();
+        // Trailing tag flipped to [chosen]; the title substring untouched.
+        assert!(
+            updated.contains("### Proposal A - Toggle [active] state review [chosen]"),
+            "trailing tag must be rewritten, title substring preserved; got: {updated}"
+        );
+        // And no stray "[active] state review [active]" remains.
+        assert!(
+            !updated.contains("[active] state review [active]"),
+            "trailing [active] must be replaced: {updated}"
+        );
+    }
+
+    #[test]
+    fn set_proposal_status_returns_false_for_non_active_or_missing_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(&discussion_path, sample_discussion()).unwrap();
+
+        // Already parked
+        assert!(!set_proposal_status_by_label(dir.path(), "Proposal B", "chosen").unwrap());
+        // Unknown label
+        assert!(!set_proposal_status_by_label(dir.path(), "Proposal Z", "chosen").unwrap());
+    }
+
+    #[test]
+    fn set_proposal_status_returns_false_when_discussion_md_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap());
+    }
+
+    #[test]
+    fn clear_proposal_next_question_blanks_line_for_active_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(&discussion_path, sample_discussion()).unwrap();
+
+        let changed = clear_proposal_next_question(dir.path(), "Proposal A").unwrap();
+        assert!(changed);
+        let updated = std::fs::read_to_string(&discussion_path).unwrap();
+        assert!(updated.contains("- Next Question:\n"));
+        assert!(!updated.contains(
+            "- Next Question: Should SessionStart or UserPromptSubmit surface the resume proposal?"
+        ));
     }
 
     #[test]

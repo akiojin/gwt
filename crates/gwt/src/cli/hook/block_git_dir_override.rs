@@ -8,11 +8,11 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::{BlockDecision, HookError, HookEvent};
+use super::{HookError, HookEvent, HookOutput};
 
-pub fn evaluate_bash_command(command: &str) -> Option<BlockDecision> {
+pub fn evaluate_bash_command(command: &str) -> Option<HookOutput> {
     if re_git_dir().is_match(command) {
-        return Some(BlockDecision::new(
+        return Some(HookOutput::pre_tool_use_permission(
             "\u{1F6AB} GIT_DIR environment variable override is not allowed",
             format!(
                 "Modifying GIT_DIR in a worktree environment can cause unintended repository \
@@ -24,7 +24,7 @@ pub fn evaluate_bash_command(command: &str) -> Option<BlockDecision> {
         ));
     }
     if re_git_work_tree().is_match(command) {
-        return Some(BlockDecision::new(
+        return Some(HookOutput::pre_tool_use_permission(
             "\u{1F6AB} GIT_WORK_TREE environment variable override is not allowed",
             format!(
                 "Modifying GIT_WORK_TREE in a worktree environment can cause unintended \
@@ -37,19 +37,19 @@ pub fn evaluate_bash_command(command: &str) -> Option<BlockDecision> {
     None
 }
 
-pub fn evaluate(event: &HookEvent) -> Result<Option<BlockDecision>, HookError> {
+pub fn evaluate(event: &HookEvent) -> Result<HookOutput, HookError> {
     if event.tool_name.as_deref() != Some("Bash") {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
-    Ok(evaluate_bash_command(command))
+    Ok(evaluate_bash_command(command).unwrap_or(HookOutput::Silent))
 }
 
-pub fn handle() -> Result<Option<BlockDecision>, HookError> {
+pub fn handle() -> Result<HookOutput, HookError> {
     let Some(event) = HookEvent::read_from_stdin()? else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
     evaluate(&event)
 }

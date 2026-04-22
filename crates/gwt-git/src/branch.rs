@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// Mirrors the protected list from the current Branch Cleanup contract.
 const PROTECTED_BRANCHES: &[&str] = &["main", "master", "develop"];
+const CANONICAL_BASE_BRANCHES: &[(&str, MergeTarget)] = &[
+    ("develop", MergeTarget::Develop),
+    ("main", MergeTarget::Main),
+    ("master", MergeTarget::Main),
+];
 
 /// Returns true when `name` matches one of the hard-coded protected branches
 /// (FR-018b). Comparisons strip a leading `origin/` so a remote tracking ref
@@ -86,26 +91,68 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
     Ok(parse_cherry_output(&stdout))
 }
 
-/// Walks `bases` in order and returns the first base that already contains
-/// every commit on `branch` (FR-018a). When `gone_branches` reports `branch`
-/// as having a `[gone]` upstream and no positive merge match was found, the
-/// function returns `Some(MergeTarget::Gone)` so callers can still treat the
-/// branch as cleanable.
+/// Resolves the canonical cleanup target for `branch`.
+///
+/// Canonical base selection follows the cleanup contract:
+/// 1. prefer the execution branch's upstream remote (`<remote>/develop|main|master`)
+/// 2. if that remote has no canonical base refs at all and is not `origin`,
+///    fall back to `origin/develop|main|master`
+/// 3. if the branch's upstream is `[gone]`, treat it as cleanable via `gone`
+///
+/// Branches without an upstream do not get a canonical remote fallback and
+/// remain unresolved here.
 pub fn detect_cleanable_target(
     repo_path: &Path,
     branch: &str,
-    bases: &[(&str, MergeTarget)],
+    upstream: Option<&str>,
     gone_branches: &HashSet<String>,
 ) -> Result<Option<MergeTargetRef>> {
-    for (base, target) in bases {
-        if is_branch_merged_into(repo_path, branch, base)? {
-            return Ok(Some(MergeTargetRef::new(*target, *base)));
+    let Some(primary_remote) = upstream.and_then(remote_name_from_tracking_ref) else {
+        if gone_branches.contains(branch) {
+            return Ok(Some(MergeTargetRef::new(MergeTarget::Gone, "")));
+        }
+        return Ok(None);
+    };
+
+    let (primary_has_bases, primary_target) =
+        detect_cleanable_target_for_remote(repo_path, branch, primary_remote)?;
+    if let Some(target) = primary_target {
+        return Ok(Some(target));
+    }
+
+    if !primary_has_bases && primary_remote != "origin" {
+        let (_, fallback_target) = detect_cleanable_target_for_remote(repo_path, branch, "origin")?;
+        if let Some(target) = fallback_target {
+            return Ok(Some(target));
         }
     }
     if gone_branches.contains(branch) {
         return Ok(Some(MergeTargetRef::new(MergeTarget::Gone, "")));
     }
     Ok(None)
+}
+
+fn detect_cleanable_target_for_remote(
+    repo_path: &Path,
+    branch: &str,
+    remote: &str,
+) -> Result<(bool, Option<MergeTargetRef>)> {
+    let mut has_canonical_base = false;
+    for (base, target) in CANONICAL_BASE_BRANCHES {
+        let refname = format!("{remote}/{base}");
+        if !ref_exists(repo_path, &refname)? {
+            continue;
+        }
+        has_canonical_base = true;
+        if is_branch_merged_into(repo_path, branch, &refname)? {
+            return Ok((true, Some(MergeTargetRef::new(*target, refname))));
+        }
+    }
+    Ok((has_canonical_base, None))
+}
+
+fn remote_name_from_tracking_ref(reference: &str) -> Option<&str> {
+    reference.split_once('/').map(|(remote, _)| remote)
 }
 
 /// Returns the set of local branch names whose upstream tracking ref is

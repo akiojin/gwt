@@ -19,6 +19,25 @@ behind the visible `gwt-plan-spec` entrypoint.
   current working context (no spec.md required, skip traceability checks)
 - **Standalone:** works independently of the visible SPEC flow owner
 
+## Exit CLI (Stop-block contract)
+
+SPEC-1935 FR-014q routes Stop through `skill-plan-spec-stop-check`, which reads
+`.gwt/skill-state/plan-spec.json` and blocks Stop while the skill is active.
+Register the skill lifecycle explicitly with the exit CLI:
+
+- `gwt plan start --spec <n>` at the beginning of the skill invocation
+- `gwt plan phase --spec <n> --label <plan-draft|tasks-draft|quality-gate>`
+  at each internal milestone (logging only; does not affect blocking)
+- `gwt plan complete --spec <n>` once the quality gate verdict is `CLEAR`
+  and planning artifacts are written
+- `gwt plan abort --spec <n> --reason '<text>'` when planning cannot
+  proceed (e.g. spec gap discovered mid-planning)
+
+The Stop-block handler honours Claude Code / Codex's built-in
+`stop_hook_active` flag, so forced continuation is capped at one per Stop
+cycle and the skill will never infinitely loop even if the exit CLI is
+skipped.
+
 ## Prerequisites
 
 - If `spec.md` has critical `[NEEDS CLARIFICATION]` markers, use `gwt-discussion` first.

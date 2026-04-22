@@ -1,4 +1,4 @@
-use gwt_agent::CustomCodingAgent;
+use gwt_agent::{ClaudeCodeOpenaiCompatInput, CustomCodingAgent, PresetDefinition};
 use gwt_core::{
     coordination::{BoardEntry, BoardEntryKind},
     logging::LogEvent,
@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     branch_cleanup::BranchCleanupResultEntry,
     branch_list::BranchListEntry,
-    custom_agents_service::{ClaudeCodeOpenaiCompatInput, PresetDefinition},
     daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},

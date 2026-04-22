@@ -147,11 +147,7 @@ fn sessions_dir_for_current_runtime() -> PathBuf {
         return gwt_core::paths::gwt_sessions_dir();
     };
     let runtime_path = PathBuf::from(runtime_path);
-    runtime_path
-        .parent()
-        .and_then(|path| path.parent())
-        .and_then(|path| path.parent())
-        .map(|path| path.to_path_buf())
+    gwt_agent::sessions_dir_from_runtime_path(&runtime_path)
         .unwrap_or_else(gwt_core::paths::gwt_sessions_dir)
 }
 

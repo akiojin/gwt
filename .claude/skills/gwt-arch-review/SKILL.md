@@ -29,11 +29,18 @@ gwt-discussion → gwt-plan-spec → gwt-build-spec → gwt-arch-review
 
 ## Scope control
 
-Before starting, determine the review scope with the user:
+Before starting, determine the review scope with the caller:
 
-- **Full repository** (default): all production source code
-- **Crate/package subset**: specific crates, packages, or modules
-- **Changed-files only**: files changed since a base branch (`git diff --name-only <base>..HEAD`)
+- **`--scope repo`**: review all production source code in the repository
+- **`--scope changed --base <ref>`**: review the files changed since the selected base ref (`git diff --name-only <ref>..HEAD`)
+
+If the caller omits scope arguments, prompt first:
+
+- **Full repository**
+- **Changed files since a base ref**
+
+If the caller selects `changed` interactively, prompt for the base ref next.
+Non-interactive runs must pass `--base` when using `--scope changed`.
 
 Exclude from analysis: test fixtures, generated code, vendored dependencies, build artifacts.
 
@@ -179,7 +186,7 @@ Reference: `references/report-format.md`
 # Architecture Review Report
 
 **Repository**: <name>
-**Scope**: <full | subset description>
+**Scope**: <full repository | changed files since <base>>
 **Date**: <date>
 **Reviewed by**: gwt-arch-review
 

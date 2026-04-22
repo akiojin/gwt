@@ -344,6 +344,8 @@ mod tests {
             maximized: false,
             pre_maximize_geometry: None,
             persist: true,
+            agent_id: None,
+            agent_color: None,
         }
     }
 
@@ -2715,6 +2717,7 @@ mod tests {
         let service = gwt_docker::ComposeService {
             name: "app".to_string(),
             image: Some("alpine:3.20".to_string()),
+            platform: None,
             ports: Vec::new(),
             depends_on: Vec::new(),
             working_dir: None,
@@ -3221,6 +3224,7 @@ mod tests {
         let service = gwt_docker::ComposeService {
             name: "app".to_string(),
             image: Some("alpine:3.19".to_string()),
+            platform: None,
             ports: Vec::new(),
             depends_on: Vec::new(),
             working_dir: Some("/workspace".to_string()),

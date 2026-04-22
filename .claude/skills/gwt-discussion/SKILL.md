@@ -77,6 +77,25 @@ high-impact unknown behind it has been resolved.
   and `Action Bundle`, or a decision-complete `<proposed_plan>` when the
   discussion ends in a plan handoff) is ready.
 
+## Exit CLI (Stop-block contract)
+
+SPEC-1935 FR-014p routes Stop events through `skill-discussion-stop-check`,
+which inspects `.gwt/discussion.md` and blocks Stop (with
+`{"decision":"block","reason":"..."}`) while any proposal is still `[active]`
+with a non-empty `Next Question:`. To let Stop succeed, mark each proposal
+explicitly using the exit CLI:
+
+- `gwt discuss resolve --proposal "Proposal A"` — active → chosen
+- `gwt discuss park --proposal "Proposal A"` — active → parked (resume later)
+- `gwt discuss reject --proposal "Proposal A"` — active → rejected
+- `gwt discuss clear-next-question --proposal "Proposal A"` — keep the
+  proposal active but pause Stop-block (exceptional; only when waiting on a
+  user answer the skill truly cannot resolve alone)
+
+When the `Action Bundle` is produced, call the matching exit command for each
+proposal before stopping. Claude Code's built-in `stop_hook_active` flag keeps
+the handler fail-safe: at most one forced continuation per Stop cycle.
+
 ## Resume hooks
 
 Managed hook settings in `.claude/settings.local.json` and `.codex/hooks.json`

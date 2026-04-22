@@ -1,0 +1,18 @@
+{
+  "bundle_binaries": {
+    "linux": ["gwt", "gwtd"],
+    "macos": ["gwt", "gwtd"],
+    "windows": ["gwt.exe", "gwtd.exe"]
+  },
+  "portable_assets": {
+    "linux-x86_64": "gwt-linux-x86_64.tar.gz",
+    "linux-aarch64": "gwt-linux-aarch64.tar.gz",
+    "macos-x86_64": "gwt-macos-x86_64.tar.gz",
+    "macos-aarch64": "gwt-macos-arm64.tar.gz",
+    "windows-x86_64": "gwt-windows-x86_64.zip"
+  },
+  "installer_assets": {
+    "macos": "gwt-macos-universal.dmg",
+    "windows": "gwt-windows-x86_64.msi"
+  }
+}

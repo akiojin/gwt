@@ -5,7 +5,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use gwt::cli::hook::{workflow_policy, HookEvent};
+use gwt::cli::hook::{workflow_policy, HookEvent, HookOutput};
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
 use gwt_core::{paths::gwt_sessions_dir, repo_hash::compute_repo_hash};
 use gwt_github::{
@@ -39,12 +39,13 @@ fn event(tool_name: &str, tool_input: serde_json::Value) -> HookEvent {
     .expect("valid hook event")
 }
 
-fn evaluate(
-    event: &HookEvent,
-    context: workflow_policy::WorkflowContext,
-) -> Option<gwt::cli::hook::BlockDecision> {
-    workflow_policy::evaluate_with_context(event, Path::new(&root()), &context)
+fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Option<HookOutput> {
+    match workflow_policy::evaluate_with_context(event, Path::new(&root()), &context)
         .expect("evaluation should succeed")
+    {
+        HookOutput::Silent => None,
+        other => Some(other),
+    }
 }
 
 fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
@@ -441,7 +442,7 @@ fn evaluate_resolves_spec_owner_from_session_cache() {
         let decision =
             workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
         assert!(
-            decision.is_none(),
+            matches!(decision, HookOutput::Silent),
             "git push is transport and must not be gated by plan/tasks"
         );
     });
@@ -463,7 +464,7 @@ fn evaluate_falls_back_to_issue_linkage_store_for_plain_issue_owner() {
         let decision =
             workflow_policy::evaluate(&event, &repo_path).expect("workflow evaluation succeeds");
         assert!(
-            decision.is_none(),
+            matches!(decision, HookOutput::Silent),
             "plain issue owner from linkage store should allow implementation"
         );
     });

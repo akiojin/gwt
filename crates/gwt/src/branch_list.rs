@@ -119,80 +119,16 @@ fn build_cleanup_targets(
         .iter()
         .filter(|branch| branch.scope == BranchScope::Local)
     {
-        let cleanup_bases = cleanup_base_candidates(branch);
-        let cleanup_bases: Vec<(&str, gwt_git::MergeTarget)> = cleanup_bases
-            .iter()
-            .map(|(reference, target)| (reference.as_str(), *target))
-            .collect();
         let target = gwt_git::detect_cleanable_target(
             repo_path,
             &branch.name,
-            &cleanup_bases,
+            branch.upstream.as_deref(),
             gone_branches,
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
         cleanup_targets.insert(branch.name.clone(), target);
     }
     Ok(cleanup_targets)
-}
-
-fn cleanup_base_candidates(branch: &BranchListEntry) -> Vec<(String, gwt_git::MergeTarget)> {
-    let Some(upstream) = branch.upstream.as_deref() else {
-        return Vec::new();
-    };
-    let Some((remote, _)) = upstream.split_once('/') else {
-        return Vec::new();
-    };
-
-    let mut bases = Vec::new();
-    push_cleanup_base(
-        &mut bases,
-        format!("{remote}/develop"),
-        gwt_git::MergeTarget::Develop,
-    );
-    push_cleanup_base(
-        &mut bases,
-        format!("{remote}/main"),
-        gwt_git::MergeTarget::Main,
-    );
-    push_cleanup_base(
-        &mut bases,
-        format!("{remote}/master"),
-        gwt_git::MergeTarget::Main,
-    );
-
-    if remote != "origin" {
-        push_cleanup_base(
-            &mut bases,
-            "origin/develop".to_string(),
-            gwt_git::MergeTarget::Develop,
-        );
-        push_cleanup_base(
-            &mut bases,
-            "origin/main".to_string(),
-            gwt_git::MergeTarget::Main,
-        );
-        push_cleanup_base(
-            &mut bases,
-            "origin/master".to_string(),
-            gwt_git::MergeTarget::Main,
-        );
-    }
-
-    bases
-}
-
-fn push_cleanup_base(
-    bases: &mut Vec<(String, gwt_git::MergeTarget)>,
-    reference: String,
-    target: gwt_git::MergeTarget,
-) {
-    if bases.iter().any(|(existing_reference, existing_target)| {
-        existing_reference == &reference && *existing_target == target
-    }) {
-        return;
-    }
-    bases.push((reference, target));
 }
 
 fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry> {
@@ -233,12 +169,18 @@ fn hydrate_branch_entries(
         .filter(|branch| branch.scope == BranchScope::Local)
         .map(|branch| (branch.name.clone(), branch.upstream.clone()))
         .collect();
+    let local_divergence: HashMap<String, (u32, u32)> = entries
+        .iter()
+        .filter(|branch| branch.scope == BranchScope::Local)
+        .map(|branch| (branch.name.clone(), (branch.ahead, branch.behind)))
+        .collect();
     let mut entries: Vec<BranchListEntry> = entries
         .into_iter()
         .map(|mut branch| {
             branch.cleanup = build_cleanup_info(
                 &branch,
                 &local_upstreams,
+                &local_divergence,
                 current_head_branch.as_deref(),
                 active_session_branches,
                 cleanup_targets,
@@ -255,6 +197,7 @@ fn hydrate_branch_entries(
 fn build_cleanup_info(
     branch: &BranchListEntry,
     local_upstreams: &HashMap<String, Option<String>>,
+    local_divergence: &HashMap<String, (u32, u32)>,
     current_head_branch: Option<&str>,
     active_session_branches: &HashSet<String>,
     cleanup_targets: &HashMap<String, Option<gwt_git::MergeTargetRef>>,
@@ -302,7 +245,13 @@ fn build_cleanup_info(
         .cloned()
         .flatten();
     let mut risks = Vec::new();
-    if branch.scope == BranchScope::Remote {
+    let execution_divergence = local_divergence
+        .get(execution_branch_name)
+        .copied()
+        .unwrap_or((0, 0));
+    if branch.scope == BranchScope::Remote
+        && (merge_target.is_none() || execution_divergence.0 > 0 || execution_divergence.1 > 0)
+    {
         risks.push(BranchCleanupRisk::RemoteTracking);
     }
     if merge_target.is_none() {
