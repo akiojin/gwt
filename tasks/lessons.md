@@ -30,7 +30,7 @@
 
 ### 事象
 
-#1784 の `data-model` / `quickstart` を `gwt issue spec 1784 --edit ...` で追加した直後、
+`#1784` の `data-model` / `quickstart` を `gwt issue spec 1784 --edit ...` で追加した直後、
 comment 自体は作成されていたが Issue body の `<!-- sections: -->` index から抜け落ち、
 `gwt issue spec 1784 --section data-model` と `--section quickstart` が
 `section not found` になった。

@@ -214,7 +214,7 @@ mod tests {
 
         let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| None);
 
-        assert_eq!(resolved, PathBuf::from(r"C:\Program Files\GWT\gwt.exe"));
+        assert_eq!(resolved, current_exe.with_file_name("gwt.exe"));
     }
 
     #[test]
