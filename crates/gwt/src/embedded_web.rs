@@ -235,6 +235,102 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_window_status_chip_uses_running_waiting_stopped_error_variants() {
+        let html = index_html();
+
+        assert!(
+            html.contains(".status-chip.waiting .status-dot"),
+            "expected embedded html to define a waiting variant for window status chips",
+        );
+        assert!(
+            html.contains(".status-chip.stopped .status-dot"),
+            "expected embedded html to define a stopped variant for window status chips",
+        );
+        assert!(
+            !html.contains(".status-chip.ready .status-dot")
+                && !html.contains(".status-chip.exited .status-dot"),
+            "expected embedded html to stop styling legacy ready/exited status chip variants",
+        );
+    }
+
+    #[test]
+    fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
+        let js = app_js();
+
+        assert!(
+            js.contains("function normalizeWindowRuntimeState(status, preset)"),
+            "expected embedded js to expose a runtime-state normalization helper",
+        );
+        assert!(
+            js.contains("function windowGeometryLabel(windowData)"),
+            "expected embedded js to expose a dedicated geometry label helper",
+        );
+        assert!(
+            js.contains("function windowRuntimeLabel(status)"),
+            "expected embedded js to expose a dedicated runtime label helper",
+        );
+        assert!(
+            js.contains("const geometryLabel = windowGeometryLabel(entry);")
+                && js.contains("const runtimeState = runtimeStateForWindow(entry);")
+                && js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
+            "expected window list rendering to derive geometry and runtime labels through separate helpers",
+        );
+        assert!(
+            !js.contains("function windowStateLabel(windowData)"),
+            "expected embedded js to stop reusing one helper for both geometry and runtime labels",
+        );
+    }
+
+    #[test]
+    fn embedded_web_shell_windows_do_not_render_waiting_status() {
+        let js = app_js();
+
+        assert!(
+            js.contains("function presetSupportsWaitingStatus(preset)"),
+            "expected embedded js to isolate the waiting-capable preset contract",
+        );
+        assert!(
+            js.contains(
+                "if (!presetSupportsWaitingStatus(preset) && normalizedState === \"waiting\")"
+            ) && js.contains("return \"running\";"),
+            "expected embedded js to downgrade waiting to running for shell-like presets",
+        );
+    }
+
+    #[test]
+    fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
+        let js = app_js();
+        let apply_status = regex::Regex::new(
+            r#"(?s)function applyStatus\(windowId,\s*status,\s*detail\)\s*\{.*?const runtimeState = normalizeWindowRuntimeState\(status,\s*windowData\?\.preset\);.*?windowRuntimeStateMap\.set\(windowId,\s*runtimeState\);.*?label\.textContent = windowRuntimeLabel\(runtimeState\);.*?renderWindowList\(\);"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            js.contains("const windowRuntimeStateMap = new Map();"),
+            "expected embedded js to keep a shared runtime-state map for badges and the window list",
+        );
+        assert!(
+            apply_status.is_match(js),
+            "expected applyStatus to normalize runtime state once, update the shared map, and re-render the window list",
+        );
+    }
+
+    #[test]
+    fn embedded_web_window_list_selection_keeps_focus_center_and_restore_contract() {
+        let js = app_js();
+
+        assert!(
+            js.contains("focusWindowRemotely(entry.id, { center: true });"),
+            "expected window list selection to keep centering the chosen window",
+        );
+        assert!(
+            js.contains("if (entry.minimized) {")
+                && js.contains("send({ kind: \"restore_window\", id: entry.id });"),
+            "expected window list selection to keep restoring minimized windows after focus",
+        );
+    }
+
+    #[test]
     fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         let html = frontend_bundle_source();
 

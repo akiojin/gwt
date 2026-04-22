@@ -47,6 +47,7 @@
       const pendingOutputMap = new Map();
       const pendingSnapshotMap = new Map();
       const detailMap = new Map();
+      const windowRuntimeStateMap = new Map();
       const terminalMap = new Map();
       const windowMap = new Map();
       const fileTreeStateMap = new Map();
@@ -402,7 +403,36 @@
           .join(" ");
       }
 
-      function windowStateLabel(windowData) {
+      const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
+        running: "Running",
+        waiting: "Waiting",
+        stopped: "Stopped",
+        error: "Error",
+      });
+
+      const LEGACY_WINDOW_RUNTIME_STATE_ALIASES = Object.freeze({
+        starting: "running",
+        ready: "waiting",
+        exited: "stopped",
+      });
+
+      function presetSupportsWaitingStatus(preset) {
+        return preset === "agent" || preset === "claude" || preset === "codex";
+      }
+
+      function normalizeWindowRuntimeState(status, preset) {
+        const rawState = String(status || "running").toLowerCase();
+        const normalizedState = LEGACY_WINDOW_RUNTIME_STATE_ALIASES[rawState] || rawState;
+        if (!presetSupportsWaitingStatus(preset) && normalizedState === "waiting") {
+          return "running";
+        }
+        if (!WINDOW_RUNTIME_STATE_LABELS[normalizedState]) {
+          return "running";
+        }
+        return normalizedState;
+      }
+
+      function windowGeometryLabel(windowData) {
         if (windowData.minimized) {
           return "Minimized";
         }
@@ -410,6 +440,18 @@
           return "Maximized";
         }
         return "Normal";
+      }
+
+      function windowRuntimeLabel(status) {
+        return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
+      }
+
+      function runtimeStateForWindow(windowData) {
+        const cachedState = windowRuntimeStateMap.get(windowData.id);
+        if (cachedState) {
+          return cachedState;
+        }
+        return normalizeWindowRuntimeState(windowData.status, windowData.preset);
       }
 
       function requestWindowList() {
@@ -425,8 +467,16 @@
         if (!windowListOpen) {
           return;
         }
+        const workspaceWindows = activeWorkspace().windows || [];
+        const workspaceWindowMap = new Map(
+          workspaceWindows.map((windowData) => [windowData.id, windowData]),
+        );
         const entries =
-          windowListEntries.length > 0 ? windowListEntries : activeWorkspace().windows || [];
+          windowListEntries.length > 0
+            ? windowListEntries
+                .map((entry) => workspaceWindowMap.get(entry.id) || entry)
+                .filter((entry) => workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id))
+            : workspaceWindows;
         windowListPanel.innerHTML = "";
         if (entries.length === 0) {
           const empty = document.createElement("div");
@@ -439,14 +489,20 @@
           const row = document.createElement("button");
           row.type = "button";
           row.className = "window-list-row";
+          const geometryLabel = windowGeometryLabel(entry);
+          const runtimeState = runtimeStateForWindow(entry);
+          const runtimeLabel = windowRuntimeLabel(runtimeState);
           row.innerHTML = `
             <div class="window-list-copy">
               <div class="window-list-title">${entry.title}</div>
-              <div class="window-list-meta">${presetLabel(entry.preset)} · ${windowStateLabel(entry)}</div>
+              <div class="window-list-meta">
+                <span class="window-list-preset">${presetLabel(entry.preset)}</span>
+                <span class="window-list-geometry">${geometryLabel}</span>
+              </div>
             </div>
-            <span class="status-chip ${entry.status}">
+            <span class="status-chip ${runtimeState}">
               <span class="status-dot"></span>
-              <span class="status-label">${windowStateLabel(entry)}</span>
+              <span class="status-label">${runtimeLabel}</span>
             </span>
           `;
           row.addEventListener("click", () => {
@@ -798,13 +854,17 @@
       }
 
       function applyStatus(windowId, status, detail) {
+        const windowData = workspaceWindowById(windowId);
+        const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
+        windowRuntimeStateMap.set(windowId, runtimeState);
         if (detail) {
           detailMap.set(windowId, detail);
-        } else if (status === "running" || status === "waiting" || status === "ready") {
+        } else if (runtimeState === "running" || runtimeState === "waiting") {
           detailMap.delete(windowId);
         }
         const element = windowMap.get(windowId);
         if (!element) {
+          renderWindowList();
           return;
         }
         const chip = element.querySelector(".status-chip");
@@ -819,8 +879,8 @@
           "exited",
           "error",
         );
-        chip.classList.add(status);
-        label.textContent = status;
+        chip.classList.add(runtimeState);
+        label.textContent = windowRuntimeLabel(runtimeState);
         const effectiveDetail = detailMap.get(windowId);
         if (overlay) {
           const messageEl = overlay.querySelector(".overlay-message");
@@ -831,18 +891,17 @@
           }
           overlay.classList.toggle(
             "visible",
-            status === "starting" ||
-              status === "error" ||
-              status === "stopped" ||
-              status === "exited" ||
-              (status === "running" && Boolean(effectiveDetail)),
+            runtimeState === "error" ||
+              runtimeState === "stopped" ||
+              (runtimeState === "running" && Boolean(effectiveDetail)),
           );
-          if (status === "starting" || (status === "running" && Boolean(effectiveDetail))) {
+          if (runtimeState === "running" && Boolean(effectiveDetail)) {
             startSpinnerAnimation(overlay);
           } else {
             stopSpinnerAnimation(overlay);
           }
         }
+        renderWindowList();
       }
 
       function stopSpinnerAnimation(overlay) {
@@ -5149,9 +5208,9 @@
             <div class="titlebar">
               <div class="title">
                 <span class="title-text"></span>
-                <span class="status-chip starting">
+                <span class="status-chip running">
                   <span class="status-dot"></span>
-                  <span class="status-label">starting</span>
+                  <span class="status-label">Running</span>
                 </span>
               </div>
               <div class="window-actions">
@@ -5267,6 +5326,7 @@
           terminalMap.delete(windowId);
           decoderMap.delete(windowId);
           detailMap.delete(windowId);
+          windowRuntimeStateMap.delete(windowId);
           pendingOutputMap.delete(windowId);
           pendingSnapshotMap.delete(windowId);
           const profileState = profileStateMap.get(windowId);
