@@ -140,8 +140,17 @@ pub enum AgentColor {
 pub enum AgentStatus {
     #[default]
     Unknown,
+    #[serde(alias = "running", alias = "Running")]
     Running,
+    #[serde(
+        rename = "Waiting",
+        alias = "waiting",
+        alias = "Waiting",
+        alias = "waiting_input",
+        alias = "WaitingInput"
+    )]
     WaitingInput,
+    #[serde(alias = "stopped", alias = "Stopped")]
     Stopped,
 }
 
@@ -234,6 +243,22 @@ mod tests {
     #[test]
     fn agent_status_default_is_unknown() {
         assert_eq!(AgentStatus::default(), AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn agent_status_waiting_preserves_wire_contract_and_legacy_aliases() {
+        let json = serde_json::to_string(&AgentStatus::WaitingInput).unwrap();
+        assert_eq!(json, "\"Waiting\"");
+
+        for raw in [
+            "\"Waiting\"",
+            "\"waiting\"",
+            "\"waiting_input\"",
+            "\"WaitingInput\"",
+        ] {
+            let parsed: AgentStatus = serde_json::from_str(raw).unwrap();
+            assert_eq!(parsed, AgentStatus::WaitingInput, "{raw}");
+        }
     }
 
     #[test]

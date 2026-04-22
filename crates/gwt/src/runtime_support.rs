@@ -9,7 +9,7 @@ pub(crate) fn should_auto_close_agent_window(
     window_id: &str,
     status: &WindowProcessStatus,
 ) -> bool {
-    matches!(status, WindowProcessStatus::Exited) && active_agent_sessions.contains_key(window_id)
+    matches!(status, WindowProcessStatus::Stopped) && active_agent_sessions.contains_key(window_id)
 }
 
 pub(crate) fn close_window_from_workspace(
@@ -33,11 +33,7 @@ pub(crate) fn close_window_from_workspace(
 }
 
 pub(crate) fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
-    window.preset.requires_process()
-        && matches!(
-            window.status,
-            WindowProcessStatus::Starting | WindowProcessStatus::Running
-        )
+    window.preset.requires_process() && window.status == WindowProcessStatus::Running
 }
 
 pub(crate) fn current_app_version() -> &'static str {

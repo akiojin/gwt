@@ -28,14 +28,26 @@ pub fn default_canvas_viewport() -> CanvasViewport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WindowProcessStatus {
-    Starting,
+pub enum WindowState {
+    #[serde(alias = "starting", alias = "ready")]
     Running,
-    Ready,
-    Exited,
+    Waiting,
+    #[serde(alias = "exited")]
+    Stopped,
     Error,
+}
+
+pub type WindowProcessStatus = WindowState;
+
+impl WindowState {
+    #[allow(non_upper_case_globals)]
+    pub const Starting: Self = Self::Running;
+    #[allow(non_upper_case_globals)]
+    pub const Ready: Self = Self::Running;
+    #[allow(non_upper_case_globals)]
+    pub const Exited: Self = Self::Stopped;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,7 +57,7 @@ pub struct PersistedWindowState {
     pub preset: WindowPreset,
     pub geometry: WindowGeometry,
     pub z_index: u32,
-    pub status: WindowProcessStatus,
+    pub status: WindowState,
     #[serde(default)]
     pub minimized: bool,
     #[serde(default)]
@@ -148,7 +160,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     height: 420.0,
                 },
                 z_index: 1,
-                status: WindowProcessStatus::Starting,
+                status: WindowState::Running,
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
@@ -167,7 +179,7 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     height: 420.0,
                 },
                 z_index: 2,
-                status: WindowProcessStatus::Starting,
+                status: WindowState::Running,
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
@@ -191,7 +203,7 @@ pub fn default_session_state() -> PersistedSessionState {
 pub fn pause_process_windows_for_restore(state: &mut PersistedWorkspaceState) {
     for window in &mut state.windows {
         if window.preset.requires_process() {
-            window.status = WindowProcessStatus::Exited;
+            window.status = WindowState::Stopped;
         }
     }
 }
@@ -476,7 +488,7 @@ mod tests {
                         height: 360.0,
                     },
                     z_index: 5,
-                    status: WindowProcessStatus::Ready,
+                    status: WindowState::Running,
                     minimized: true,
                     maximized: false,
                     pre_maximize_geometry: None,
@@ -645,7 +657,7 @@ mod tests {
                         height: 500.0,
                     },
                     z_index: 2,
-                    status: WindowProcessStatus::Ready,
+                    status: WindowState::Running,
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
@@ -659,8 +671,8 @@ mod tests {
         save_workspace_state(&workspace_state_path(&project_root), &state).expect("save");
 
         let restored = load_restored_workspace_state(&project_root).expect("restore");
-        assert_eq!(restored.windows[0].status, WindowProcessStatus::Exited);
-        assert_eq!(restored.windows[1].status, WindowProcessStatus::Ready);
+        assert_eq!(restored.windows[0].status, WindowState::Stopped);
+        assert_eq!(restored.windows[1].status, WindowState::Running);
     }
 
     #[test]
@@ -859,7 +871,7 @@ mod tests {
                         height: 420.0,
                     },
                     z_index: 2,
-                    status: WindowProcessStatus::Ready,
+                    status: WindowState::Running,
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
@@ -873,7 +885,34 @@ mod tests {
 
         pause_process_windows_for_restore(&mut state);
 
-        assert_eq!(state.windows[0].status, WindowProcessStatus::Exited);
-        assert_eq!(state.windows[1].status, WindowProcessStatus::Ready);
+        assert_eq!(state.windows[0].status, WindowState::Stopped);
+        assert_eq!(state.windows[1].status, WindowState::Running);
+    }
+
+    #[test]
+    fn window_state_round_trips_modern_variants_and_accepts_legacy_status_names() {
+        let waiting = serde_json::from_str::<WindowState>(r#""waiting""#).expect("waiting");
+        let running = serde_json::from_str::<WindowState>(r#""running""#).expect("running");
+        let stopped = serde_json::from_str::<WindowState>(r#""stopped""#).expect("stopped");
+        let error = serde_json::from_str::<WindowState>(r#""error""#).expect("error");
+
+        assert_eq!(waiting, WindowState::Waiting);
+        assert_eq!(running, WindowState::Running);
+        assert_eq!(stopped, WindowState::Stopped);
+        assert_eq!(error, WindowState::Error);
+
+        let legacy_starting =
+            serde_json::from_str::<WindowState>(r#""starting""#).expect("legacy starting");
+        let legacy_ready = serde_json::from_str::<WindowState>(r#""ready""#).expect("legacy ready");
+        let legacy_exited =
+            serde_json::from_str::<WindowState>(r#""exited""#).expect("legacy exited");
+
+        assert_eq!(legacy_starting, WindowState::Running);
+        assert_eq!(legacy_ready, WindowState::Running);
+        assert_eq!(legacy_exited, WindowState::Stopped);
+        assert_eq!(
+            serde_json::to_string(&WindowState::Waiting).expect("serialize"),
+            r#""waiting""#
+        );
     }
 }

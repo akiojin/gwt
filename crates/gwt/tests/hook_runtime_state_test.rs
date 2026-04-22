@@ -4,8 +4,8 @@
 //! JSON file at `$GWT_SESSION_RUNTIME_PATH` that the Branches tab polls to
 //! render per-session status badges. This test pins:
 //!
-//! - the event → status mapping (`SessionStart`/`Stop` → `WaitingInput`,
-//!   `PreToolUse` → `Running`),
+//! - the event → status mapping (`SessionStart`/`PreToolUse` → `Running`,
+//!   `Stop` → `Waiting`),
 //! - that writes are crash-safe (no `.tmp-*` residue after success),
 //! - that the active-file is rewritten, not appended, on repeat calls,
 //! - that unknown events surface as `HookError::InvalidEvent`,
@@ -38,7 +38,7 @@ fn write_for_event_pretooluse_maps_to_running() {
 }
 
 #[test]
-fn write_for_event_stop_maps_to_waiting_input() {
+fn write_for_event_stop_maps_to_waiting() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("runtime-state.json");
 
@@ -46,12 +46,12 @@ fn write_for_event_stop_maps_to_waiting_input() {
 
     let raw = fs::read_to_string(&path).unwrap();
     let state: RuntimeState = serde_json::from_str(&raw).unwrap();
-    assert_eq!(state.status, "WaitingInput");
+    assert_eq!(state.status, "Waiting");
     assert_eq!(state.source_event, "Stop");
 }
 
 #[test]
-fn write_for_event_session_start_maps_to_waiting_input() {
+fn write_for_event_session_start_maps_to_running() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("runtime-state.json");
 
@@ -59,7 +59,7 @@ fn write_for_event_session_start_maps_to_waiting_input() {
 
     let raw = fs::read_to_string(&path).unwrap();
     let state: RuntimeState = serde_json::from_str(&raw).unwrap();
-    assert_eq!(state.status, "WaitingInput");
+    assert_eq!(state.status, "Running");
     assert_eq!(state.source_event, "SessionStart");
 }
 

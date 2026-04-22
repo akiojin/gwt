@@ -43,9 +43,9 @@ mod update_front_door;
 #[cfg(test)]
 pub(crate) use app_runtime::{build_frontend_sync_events, LaunchWizardSession};
 pub(crate) use app_runtime::{
-    ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-    IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
-    WindowAddress,
+    ActiveAgentSession, AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner,
+    DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
+    ProjectTabRuntime, WindowAddress,
 };
 pub(crate) use docker_launch::{
     apply_docker_runtime_to_launch_config, detect_wizard_docker_context_and_status,
@@ -154,23 +154,14 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    RuntimeHook(gwt::RuntimeHookEvent),
     LaunchProgress {
         window_id: String,
         message: String,
     },
     LaunchComplete {
         window_id: String,
-        result: Result<
-            (
-                ProcessLaunch,
-                String,
-                String,
-                String,
-                PathBuf,
-                gwt_agent::AgentId,
-            ),
-            String,
-        >,
+        result: AgentLaunchResult,
     },
     ShellLaunchComplete {
         window_id: String,
@@ -650,11 +641,15 @@ mod tests {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            window_pty_statuses: HashMap::new(),
+            window_hook_states: HashMap::new(),
             hook_forward_target: None,
+            issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
         };
         runtime.rebuild_window_lookup();
+        runtime.seed_window_pty_statuses();
         (runtime, events)
     }
 
@@ -983,13 +978,13 @@ mod tests {
             runtime
                 .create_window_events(WindowPreset::Branches, bounds.clone())
                 .len(),
-            1
+            3
         );
         assert_eq!(
             runtime
                 .create_window_events(WindowPreset::FileTree, bounds.clone())
                 .len(),
-            1
+            3
         );
 
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
@@ -1003,7 +998,7 @@ mod tests {
 
         assert_eq!(
             runtime.window_status(&branches_id),
-            Some(WindowProcessStatus::Ready)
+            Some(WindowProcessStatus::Running)
         );
         assert_eq!(
             runtime
@@ -1284,7 +1279,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 2);
+        assert_eq!(error_events.len(), 3);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
         assert_eq!(
             runtime
@@ -1295,6 +1290,11 @@ mod tests {
         );
         assert!(matches!(
             error_events[1].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &claude_one_id && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            error_events[2].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
@@ -1315,6 +1315,11 @@ mod tests {
         );
         assert!(matches!(
             failed_launch[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == "tab-1::missing" && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            failed_launch[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("launch failed")
         ));
@@ -1333,10 +1338,16 @@ mod tests {
                 "Codex".to_string(),
                 repo.clone(),
                 AgentId::Codex,
+                None,
             )),
         );
         assert!(matches!(
             missing_window_launch[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == "tab-1::missing" && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            missing_window_launch[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Window not found")
         ));
@@ -1352,6 +1363,11 @@ mod tests {
         );
         assert!(matches!(
             shell_launch[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == "tab-1::missing" && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            shell_launch[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Window not found")
         ));
@@ -1554,7 +1570,7 @@ mod tests {
                     },
                 )
                 .len(),
-            1
+            3
         );
         let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
 
@@ -2032,10 +2048,15 @@ mod tests {
 
         let status_events =
             runtime.handle_runtime_status(shell_id.clone(), WindowProcessStatus::Error, None);
-        assert_eq!(status_events.len(), 2);
+        assert_eq!(status_events.len(), 3);
         assert!(!runtime.window_details.contains_key(&shell_id));
         assert!(matches!(
             status_events[1].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &shell_id && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            status_events[2].event,
             BackendEvent::TerminalStatus { ref detail, .. } if detail.is_none()
         ));
 
@@ -2061,10 +2082,16 @@ mod tests {
                 "Codex".to_string(),
                 repo.clone(),
                 AgentId::Codex,
+                None,
             )),
         );
         assert!(matches!(
             project_missing[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &project_missing_id && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            project_missing[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Project tab not found")
         ));
@@ -2091,16 +2118,22 @@ mod tests {
                 "Codex".to_string(),
                 repo.clone(),
                 AgentId::Codex,
+                None,
             )),
         );
         assert!(matches!(
             raw_missing[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &raw_missing_id && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            raw_missing[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Window not found")
         ));
 
         let shell_project_missing = runtime.handle_shell_launch_complete(
-            project_missing_id,
+            project_missing_id.clone(),
             Ok(ProcessLaunch {
                 command: "echo".to_string(),
                 args: Vec::new(),
@@ -2110,12 +2143,17 @@ mod tests {
         );
         assert!(matches!(
             shell_project_missing[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &project_missing_id && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            shell_project_missing[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Project tab not found")
         ));
 
         let shell_raw_missing = runtime.handle_shell_launch_complete(
-            raw_missing_id,
+            raw_missing_id.clone(),
             Ok(ProcessLaunch {
                 command: "echo".to_string(),
                 args: Vec::new(),
@@ -2125,6 +2163,11 @@ mod tests {
         );
         assert!(matches!(
             shell_raw_missing[0].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &raw_missing_id && state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(
+            shell_raw_missing[1].event,
             BackendEvent::TerminalStatus { ref detail, .. }
                 if detail.as_deref() == Some("Window not found")
         ));
@@ -3678,6 +3721,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RuntimeHook(event)) => {
+                let events = app.handle_runtime_hook_event(event);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {

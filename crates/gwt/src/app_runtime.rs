@@ -85,6 +85,18 @@ pub(crate) struct ProcessLaunch {
     pub(crate) cwd: Option<PathBuf>,
 }
 
+pub(crate) type AgentLaunchCompletion = (
+    ProcessLaunch,
+    String,
+    String,
+    String,
+    PathBuf,
+    gwt_agent::AgentId,
+    Option<u64>,
+);
+
+pub(crate) type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct BoardPostRequest {
     pub(crate) id: String,
@@ -104,6 +116,12 @@ pub(crate) struct ActiveAgentSession {
     pub(crate) display_name: String,
     pub(crate) worktree_path: PathBuf,
     pub(crate) tab_id: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct IssueBranchLinkStore {
+    #[serde(default)]
+    branches: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -251,7 +269,10 @@ pub(crate) struct AppRuntime {
     pub(crate) sessions_dir: PathBuf,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
+    pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
+    pub(crate) issue_link_cache_dir: PathBuf,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
     /// Shared PTY writer registry published to the WebSocket fast-path.
@@ -319,11 +340,15 @@ impl AppRuntime {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
+            window_pty_statuses: HashMap::new(),
+            window_hook_states: HashMap::new(),
             hook_forward_target: None,
+            issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
             pty_writers,
         };
         app.rebuild_window_lookup();
+        app.seed_window_pty_statuses();
         app.seed_restored_window_details();
         Ok(app)
     }
@@ -697,6 +722,7 @@ impl AppRuntime {
             .unwrap_or_default();
         for window_id in window_ids {
             self.stop_window_runtime(&window_id);
+            self.remove_window_state_tracking(&window_id);
             self.window_lookup.remove(&window_id);
             self.profile_selections.remove(&window_id);
         }
@@ -740,12 +766,10 @@ impl AppRuntime {
             tab.workspace.add_window(preset, bounds)
         };
         self.register_window(&tab_id, &window.id);
-        let runtime_event = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
+        let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
-        if let Some(event) = runtime_event {
-            events.push(OutboundEvent::broadcast(event));
-        }
+        events.extend(runtime_events);
         events
     }
 
@@ -912,6 +936,7 @@ impl AppRuntime {
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
         self.stop_window_runtime(id);
+        self.remove_window_state_tracking(id);
         self.profile_selections.remove(id);
         if !close_window_from_workspace(
             &mut self.tabs,
@@ -2531,18 +2556,18 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let should_auto_close =
-            should_auto_close_agent_window(&self.active_agent_sessions, &id, &status);
-        let Some(address) = self.window_lookup.get(&id).cloned() else {
+        let Some(_address) = self.window_lookup.get(&id).cloned() else {
+            self.remove_window_state_tracking(&id);
             self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
             return Vec::new();
         };
 
-        if let Some(tab) = self.tab_mut(&address.tab_id) {
-            let _ = tab.workspace.set_status(&address.raw_id, status.clone());
-        }
+        self.window_pty_statuses.insert(id.clone(), status);
+        let composed_status = self.recompute_window_state(&id).unwrap_or(status);
+        let should_auto_close =
+            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
@@ -2553,6 +2578,7 @@ impl AppRuntime {
         }
         if should_auto_close {
             self.stop_window_runtime(&id);
+            self.remove_window_state_tracking(&id);
             if !close_window_from_workspace(
                 &mut self.tabs,
                 &mut self.window_lookup,
@@ -2566,33 +2592,48 @@ impl AppRuntime {
         }
         if matches!(
             status,
-            WindowProcessStatus::Error | WindowProcessStatus::Exited
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) {
             self.runtimes.remove(&id);
+            self.remove_window_state_tracking(&id);
             self.mark_agent_session_stopped(&id);
         }
         let _ = self.persist();
 
-        vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(BackendEvent::TerminalStatus { id, status, detail }),
-        ]
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(Self::status_events(id, composed_status, detail));
+        events
+    }
+
+    pub(crate) fn handle_runtime_hook_event(
+        &mut self,
+        event: gwt::RuntimeHookEvent,
+    ) -> Vec<OutboundEvent> {
+        let mut events = vec![OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
+            event: event.clone(),
+        })];
+        let Some(window_id) = self.active_window_for_runtime_event(&event) else {
+            return events;
+        };
+        let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
+            return events;
+        };
+        self.window_hook_states
+            .insert(window_id.clone(), hook_state);
+        let Some(composed_state) = self.recompute_window_state(&window_id) else {
+            return events;
+        };
+        let detail = self.window_details.get(&window_id).cloned();
+        let _ = self.persist();
+        events.push(self.workspace_state_broadcast());
+        events.extend(Self::status_events(window_id, composed_state, detail));
+        events
     }
 
     pub(crate) fn handle_launch_complete(
         &mut self,
         window_id: String,
-        result: Result<
-            (
-                ProcessLaunch,
-                String,
-                String,
-                String,
-                PathBuf,
-                gwt_agent::AgentId,
-            ),
-            String,
-        >,
+        result: AgentLaunchResult,
     ) -> Vec<OutboundEvent> {
         match result {
             Ok((
@@ -2602,27 +2643,17 @@ impl AppRuntime {
                 display_name,
                 worktree_path,
                 agent_id,
+                linked_issue_number,
             )) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some("Window not found".to_string()),
-                    })];
+                    return self.launch_error_events(window_id, "Window not found".to_string());
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
-                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some("Project tab not found".to_string()),
-                    })];
+                    return self
+                        .launch_error_events(window_id, "Project tab not found".to_string());
                 };
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
-                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some("Window not found".to_string()),
-                    })];
+                    return self.launch_error_events(window_id, "Window not found".to_string());
                 };
                 let geometry = window.geometry.clone();
 
@@ -2634,30 +2665,48 @@ impl AppRuntime {
                         agent_id: agent_id.to_string(),
                         branch_name,
                         display_name,
-                        worktree_path,
+                        worktree_path: worktree_path.clone(),
                         tab_id: address.tab_id,
                     },
                 );
 
-                let _ = self.persist();
-
                 match self.spawn_process_window(&window_id, geometry, process_launch) {
-                    Ok(event) => vec![
-                        self.workspace_state_broadcast(),
-                        OutboundEvent::broadcast(event),
-                    ],
-                    Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some(error),
-                    })],
+                    Ok(()) => {
+                        let linkage_result = match linked_issue_number {
+                            Some(issue_number) => record_issue_branch_link_with_cache_dir(
+                                &worktree_path,
+                                &self.active_agent_sessions[&window_id].branch_name,
+                                issue_number,
+                                &self.issue_link_cache_dir,
+                            ),
+                            None => clear_issue_branch_link_with_cache_dir(
+                                &worktree_path,
+                                &self.active_agent_sessions[&window_id].branch_name,
+                                &self.issue_link_cache_dir,
+                            ),
+                        };
+                        if let Err(error) = linkage_result {
+                            tracing::warn!(
+                                worktree = %worktree_path.display(),
+                                branch = %self.active_agent_sessions[&window_id].branch_name,
+                                ?linked_issue_number,
+                                error = %error,
+                                "issue branch linkage update skipped after agent launch"
+                            );
+                        }
+                        let _ = self.persist();
+                        let mut events = vec![self.workspace_state_broadcast()];
+                        events.extend(Self::status_events(
+                            window_id,
+                            WindowProcessStatus::Running,
+                            None,
+                        ));
+                        events
+                    }
+                    Err(error) => self.launch_error_events(window_id, error),
                 }
             }
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                id: window_id,
-                status: WindowProcessStatus::Error,
-                detail: Some(error),
-            })],
+            Err(error) => self.launch_error_events(window_id, error),
         }
     }
 
@@ -2669,45 +2718,31 @@ impl AppRuntime {
         match result {
             Ok(process_launch) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some("Window not found".to_string()),
-                    })];
+                    return self.launch_error_events(window_id, "Window not found".to_string());
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
-                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some("Project tab not found".to_string()),
-                    })];
+                    return self
+                        .launch_error_events(window_id, "Project tab not found".to_string());
                 };
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
-                    return vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some("Window not found".to_string()),
-                    })];
+                    return self.launch_error_events(window_id, "Window not found".to_string());
                 };
                 let geometry = window.geometry.clone();
 
                 match self.spawn_process_window(&window_id, geometry, process_launch) {
-                    Ok(event) => vec![
-                        self.workspace_state_broadcast(),
-                        OutboundEvent::broadcast(event),
-                    ],
-                    Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                        id: window_id,
-                        status: WindowProcessStatus::Error,
-                        detail: Some(error),
-                    })],
+                    Ok(()) => {
+                        let mut events = vec![self.workspace_state_broadcast()];
+                        events.extend(Self::status_events(
+                            window_id,
+                            WindowProcessStatus::Running,
+                            None,
+                        ));
+                        events
+                    }
+                    Err(error) => self.launch_error_events(window_id, error),
                 }
             }
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                id: window_id,
-                status: WindowProcessStatus::Error,
-                detail: Some(error),
-            })],
+            Err(error) => self.launch_error_events(window_id, error),
         }
     }
 
@@ -2717,12 +2752,12 @@ impl AppRuntime {
         raw_id: &str,
         preset: WindowPreset,
         geometry: WindowGeometry,
-    ) -> Option<BackendEvent> {
+    ) -> Vec<OutboundEvent> {
         self.register_window(tab_id, raw_id);
         let window_id = combined_window_id(tab_id, raw_id);
         if !preset.requires_process() {
-            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Ready);
-            return None;
+            self.set_window_status(tab_id, raw_id, WindowProcessStatus::Running);
+            return Self::status_events(window_id, WindowProcessStatus::Running, None);
         }
 
         let project_root = self
@@ -2733,28 +2768,22 @@ impl AppRuntime {
         let shell = match detect_shell_program() {
             Ok(shell) => shell,
             Err(error) => {
+                let detail = error.to_string();
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
-                    .insert(window_id.clone(), error.to_string());
-                return Some(BackendEvent::TerminalStatus {
-                    id: window_id,
-                    status: WindowProcessStatus::Error,
-                    detail: Some(error.to_string()),
-                });
+                    .insert(window_id.clone(), detail.clone());
+                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
         };
 
         let launch = match resolve_launch_spec_with_fallback(preset, &shell) {
             Ok(launch) => launch,
             Err(error) => {
+                let detail = error.to_string();
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
-                    .insert(window_id.clone(), error.to_string());
-                return Some(BackendEvent::TerminalStatus {
-                    id: window_id,
-                    status: WindowProcessStatus::Error,
-                    detail: Some(error.to_string()),
-                });
+                    .insert(window_id.clone(), detail.clone());
+                return Self::status_events(window_id, WindowProcessStatus::Error, Some(detail));
             }
         };
 
@@ -2768,15 +2797,11 @@ impl AppRuntime {
                 cwd: Some(project_root),
             },
         ) {
-            Ok(event) => Some(event),
+            Ok(()) => Self::status_events(window_id, WindowProcessStatus::Running, None),
             Err(error) => {
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details.insert(window_id.clone(), error.clone());
-                Some(BackendEvent::TerminalStatus {
-                    id: window_id,
-                    status: WindowProcessStatus::Error,
-                    detail: Some(error),
-                })
+                Self::status_events(window_id, WindowProcessStatus::Error, Some(error))
             }
         }
     }
@@ -2786,7 +2811,7 @@ impl AppRuntime {
         id: &str,
         geometry: WindowGeometry,
         launch: ProcessLaunch,
-    ) -> Result<BackendEvent, String> {
+    ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
         let pane = Pane::new(
             id.to_string(),
@@ -2802,6 +2827,9 @@ impl AppRuntime {
 
         let output_thread = self.spawn_output_thread(id.to_string(), pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
+            self.window_pty_statuses
+                .insert(id.to_string(), WindowProcessStatus::Running);
+            self.window_hook_states.remove(id);
             self.set_window_status(
                 &address.tab_id,
                 &address.raw_id,
@@ -2822,11 +2850,7 @@ impl AppRuntime {
                 output_thread: Some(output_thread),
             },
         );
-        Ok(BackendEvent::TerminalStatus {
-            id: id.to_string(),
-            status: WindowProcessStatus::Running,
-            detail: None,
-        })
+        Ok(())
     }
 
     pub(crate) fn spawn_agent_window(
@@ -2859,14 +2883,16 @@ impl AppRuntime {
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
-        let events = vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                id: window_id.clone(),
-                status: WindowProcessStatus::Starting,
-                detail: None,
-            }),
-        ];
+        self.window_pty_statuses
+            .insert(window_id.clone(), WindowProcessStatus::Running);
+        self.window_hook_states.remove(&window_id);
+
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(Self::status_events(
+            window_id.clone(),
+            WindowProcessStatus::Running,
+            Some("Launching...".to_string()),
+        ));
 
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
@@ -2916,14 +2942,16 @@ impl AppRuntime {
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
-        let events = vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
-                id: window_id.clone(),
-                status: WindowProcessStatus::Starting,
-                detail: None,
-            }),
-        ];
+        self.window_pty_statuses
+            .insert(window_id.clone(), WindowProcessStatus::Running);
+        self.window_hook_states.remove(&window_id);
+
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(Self::status_events(
+            window_id.clone(),
+            WindowProcessStatus::Running,
+            Some("Launching...".to_string()),
+        ));
 
         let proxy = self.proxy.clone();
         thread::spawn(move || {
@@ -3051,6 +3079,7 @@ impl AppRuntime {
                 config.display_name,
                 worktree_path,
                 agent_id,
+                config.linked_issue_number,
             ))
         })();
 
@@ -3062,6 +3091,7 @@ impl AppRuntime {
                 display_name,
                 worktree_path,
                 agent_id,
+                linked_issue_number,
             )) => {
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
@@ -3072,6 +3102,7 @@ impl AppRuntime {
                         display_name,
                         worktree_path,
                         agent_id,
+                        linked_issue_number,
                     )),
                 });
             }
@@ -3168,6 +3199,7 @@ impl AppRuntime {
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
         self.mark_agent_session_stopped(window_id);
+        self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
             if let Ok(pane) = runtime.pane.lock() {
@@ -3276,24 +3308,39 @@ impl AppRuntime {
                 });
 
             match status {
-                Ok(PaneStatus::Running) | Ok(PaneStatus::Completed(0)) => {
+                Ok(PaneStatus::Running) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
-                        status: WindowProcessStatus::Exited,
+                        status: gwt::window_state::window_state_from_pane_status(
+                            &PaneStatus::Running,
+                        ),
+                        detail: None,
+                    });
+                }
+                Ok(PaneStatus::Completed(0)) => {
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id,
+                        status: gwt::window_state::window_state_from_pane_status(
+                            &PaneStatus::Completed(0),
+                        ),
                         detail: Some("Process exited".to_string()),
                     });
                 }
                 Ok(PaneStatus::Completed(code)) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
-                        status: WindowProcessStatus::Error,
+                        status: gwt::window_state::window_state_from_pane_status(
+                            &PaneStatus::Completed(code),
+                        ),
                         detail: Some(format!("Process exited with status {code}")),
                     });
                 }
                 Ok(PaneStatus::Error(message)) => {
                     proxy.send(UserEvent::RuntimeStatus {
                         id,
-                        status: WindowProcessStatus::Error,
+                        status: gwt::window_state::window_state_from_pane_status(
+                            &PaneStatus::Error(message.clone()),
+                        ),
                         detail: Some(message),
                     });
                 }
@@ -3341,10 +3388,21 @@ impl AppRuntime {
     }
 
     pub(crate) fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
-        let address = self.window_lookup.get(window_id)?;
-        let tab = self.tab(&address.tab_id)?;
-        let window = tab.workspace.window(&address.raw_id)?;
-        Some(window.status.clone())
+        let pty_state = self
+            .window_pty_statuses
+            .get(window_id)
+            .copied()
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                let tab = self.tab(&address.tab_id)?;
+                let window = tab.workspace.window(&address.raw_id)?;
+                Some(window.status)
+            })?;
+        let hook_state = self.window_hook_states.get(window_id).copied();
+        let preset = self.window_preset(window_id)?;
+        Some(gwt::window_state::compose_window_state(
+            pty_state, preset, hook_state,
+        ))
     }
 
     pub(crate) fn register_window(&mut self, tab_id: &str, raw_id: &str) {
@@ -3365,6 +3423,14 @@ impl AppRuntime {
     ) {
         if let Some(tab) = self.tab_mut(tab_id) {
             let _ = tab.workspace.set_status(raw_id, status);
+            if let Some(window) = tab.workspace.window(raw_id) {
+                let window_id = combined_window_id(tab_id, raw_id);
+                if window.preset.requires_process() {
+                    self.window_pty_statuses.insert(window_id, status);
+                } else {
+                    self.window_pty_statuses.remove(&window_id);
+                }
+            }
         }
     }
 
@@ -3437,10 +3503,95 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn seed_restored_window_details(&mut self) {
+    fn window_preset(&self, window_id: &str) -> Option<WindowPreset> {
+        let address = self.window_lookup.get(window_id)?;
+        let tab = self.tab(&address.tab_id)?;
+        let window = tab.workspace.window(&address.raw_id)?;
+        Some(window.preset)
+    }
+
+    pub(crate) fn seed_window_pty_statuses(&mut self) {
+        self.window_pty_statuses.clear();
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
-                if window.preset.requires_process() && window.status == WindowProcessStatus::Exited
+                if window.preset.requires_process() {
+                    self.window_pty_statuses
+                        .insert(combined_window_id(&tab.id, &window.id), window.status);
+                }
+            }
+        }
+        self.window_hook_states.clear();
+    }
+
+    fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
+        let session_id = event.agent_session_id.as_deref()?;
+        self.active_agent_sessions
+            .iter()
+            .find(|(_, session)| session.session_id == session_id)
+            .map(|(window_id, _)| window_id.clone())
+    }
+
+    fn recompute_window_state(&mut self, window_id: &str) -> Option<WindowProcessStatus> {
+        let pty_state = self
+            .window_pty_statuses
+            .get(window_id)
+            .copied()
+            .or_else(|| self.window_status(window_id))?;
+        let hook_state = self.window_hook_states.get(window_id).copied();
+        let preset = self.window_preset(window_id)?;
+        let composed = gwt::window_state::compose_window_state(pty_state, preset, hook_state);
+        let address = self.window_lookup.get(window_id)?.clone();
+        if let Some(tab) = self.tab_mut(&address.tab_id) {
+            let _ = tab.workspace.set_status(&address.raw_id, composed);
+        }
+        Some(composed)
+    }
+
+    fn remove_window_state_tracking(&mut self, window_id: &str) {
+        self.window_pty_statuses.remove(window_id);
+        self.window_hook_states.remove(window_id);
+    }
+
+    fn tracked_window_exists(&self, window_id: &str) -> bool {
+        let Some(address) = self.window_lookup.get(window_id) else {
+            return false;
+        };
+        self.tab(&address.tab_id)
+            .and_then(|tab| tab.workspace.window(&address.raw_id))
+            .is_some()
+    }
+
+    fn launch_error_events(&mut self, window_id: String, detail: String) -> Vec<OutboundEvent> {
+        if self.tracked_window_exists(&window_id) {
+            return self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
+        }
+        Self::status_events(window_id, WindowProcessStatus::Error, Some(detail))
+    }
+
+    fn status_events(
+        window_id: impl Into<String>,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let window_id = window_id.into();
+        vec![
+            OutboundEvent::broadcast(BackendEvent::WindowState {
+                window_id: window_id.clone(),
+                state: status,
+            }),
+            OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+                id: window_id,
+                status,
+                detail,
+            }),
+        ]
+    }
+
+    pub(crate) fn seed_restored_window_details(&mut self) {
+        self.window_details.clear();
+        for tab in &self.tabs {
+            for window in &tab.workspace.persisted().windows {
+                if window.preset.requires_process() && window.status == WindowProcessStatus::Stopped
                 {
                     self.window_details.insert(
                         combined_window_id(&tab.id, &window.id),
@@ -3480,6 +3631,66 @@ impl AppRuntime {
 
         Ok(())
     }
+}
+
+fn record_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: u64,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    update_issue_branch_link_with_cache_dir(repo_path, branch_name, Some(issue_number), cache_dir)
+}
+
+fn clear_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    update_issue_branch_link_with_cache_dir(repo_path, branch_name, None, cache_dir)
+}
+
+fn update_issue_branch_link_with_cache_dir(
+    repo_path: &Path,
+    branch_name: &str,
+    issue_number: Option<u64>,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Ok(());
+    }
+    let Some(repo_hash) = gwt::index_worker::detect_repo_hash(repo_path) else {
+        return Err("repository hash is unavailable for issue linkage".to_string());
+    };
+    let path = cache_dir
+        .join("issue-links")
+        .join(format!("{}.json", repo_hash.as_str()));
+
+    let mut store = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<IssueBranchLinkStore>(&bytes)
+            .map_err(|error| format!("failed to parse issue linkage store: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            IssueBranchLinkStore::default()
+        }
+        Err(error) => return Err(format!("failed to read issue linkage store: {error}")),
+    };
+
+    match issue_number {
+        Some(issue_number) => {
+            store.branches.insert(branch_name.to_string(), issue_number);
+        }
+        None => {
+            if store.branches.remove(branch_name).is_none() {
+                return Ok(());
+            }
+        }
+    }
+
+    let bytes = serde_json::to_vec_pretty(&store)
+        .map_err(|error| format!("failed to serialize issue linkage store: {error}"))?;
+    gwt_github::cache::write_atomic(&path, &bytes)
+        .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
 
 #[cfg(test)]
@@ -3715,11 +3926,15 @@ mod tests {
             sessions_dir,
             launch_wizard: None,
             active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
+            window_pty_statuses: HashMap::new(),
+            window_hook_states: HashMap::new(),
             hook_forward_target: None,
+            issue_link_cache_dir: gwt_cache_dir(),
             pending_update: None,
             pty_writers,
         };
         runtime.rebuild_window_lookup();
+        runtime.seed_window_pty_statuses();
         runtime
     }
 
@@ -3921,7 +4136,7 @@ mod tests {
             Some("boom".to_string()),
         );
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(matches!(events[0].target, DispatchTarget::Broadcast));
         assert!(matches!(
             events[0].event,
@@ -3930,6 +4145,12 @@ mod tests {
         assert!(matches!(events[1].target, DispatchTarget::Broadcast));
         assert!(matches!(
             &events[1].event,
+            BackendEvent::WindowState { window_id: id, state }
+                if id == &window_id && *state == WindowProcessStatus::Error
+        ));
+        assert!(matches!(events[2].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            &events[2].event,
             BackendEvent::TerminalStatus { id, status, detail }
                 if id == &window_id
                     && *status == WindowProcessStatus::Error
@@ -3953,18 +4174,22 @@ mod tests {
         let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
         let window_id = combined_window_id("tab-1", &window.id);
 
-        let event = runtime
-            .start_window("tab-1", &window.id, window.preset, window.geometry.clone())
-            .expect("process launch event");
+        let events =
+            runtime.start_window("tab-1", &window.id, window.preset, window.geometry.clone());
 
-        assert!(matches!(
-            event,
-            BackendEvent::TerminalStatus {
-                ref id,
-                status: WindowProcessStatus::Running,
-                detail: None,
-            } if id == &window_id
-        ));
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::WindowState { window_id: id, state }
+                if id == &window_id && *state == WindowProcessStatus::Running
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id
+                    && *status == WindowProcessStatus::Running
+                    && detail.is_none()
+        )));
         assert_eq!(
             runtime.window_status(&window_id),
             Some(WindowProcessStatus::Running)

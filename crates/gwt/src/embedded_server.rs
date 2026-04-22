@@ -18,7 +18,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use gwt::{BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent};
+use gwt::{FrontendEvent, HookForwardTarget, RuntimeHookEvent};
 use gwt_terminal::PtyHandle;
 use tokio::{
     net::TcpListener,
@@ -179,7 +179,7 @@ async fn hook_live_handler(
         return StatusCode::UNAUTHORIZED;
     }
 
-    broadcast_runtime_hook_event(&state.clients, event);
+    state.proxy.send(UserEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
 }
 
@@ -366,9 +366,10 @@ pub(super) fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     origin == format!("http://{host}") || origin == format!("https://{host}")
 }
 
+#[cfg(test)]
 pub(super) fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
     clients.dispatch(vec![OutboundEvent::broadcast(
-        BackendEvent::RuntimeHookEvent { event },
+        gwt::BackendEvent::RuntimeHookEvent { event },
     )]);
 }
 
@@ -377,7 +378,6 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
-        time::Duration,
     };
 
     use axum::http::{
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn embedded_server_exposes_health_and_authenticated_hook_live_routes() {
         let runtime = Runtime::new().expect("tokio runtime");
-        let (proxy, _events) = AppEventProxy::stub();
+        let (proxy, events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
         let mut server = EmbeddedServer::start(&runtime, proxy, clients.clone(), pty_writers)
@@ -556,7 +556,6 @@ mod tests {
             .expect("wrong token hook request");
         assert_eq!(wrong_token.status(), HttpStatusCode::UNAUTHORIZED);
 
-        let mut browser = clients.register("browser".to_string());
         let accepted = client
             .post(&hook.url)
             .bearer_auth(&hook.token)
@@ -565,14 +564,16 @@ mod tests {
             .expect("authorized hook request");
         assert_eq!(accepted.status(), HttpStatusCode::NO_CONTENT);
 
-        let payload = runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(1), browser.recv())
-                .await
-                .expect("runtime hook broadcast timeout")
-                .expect("runtime hook payload")
-        });
-        assert!(payload.contains("\"kind\":\"runtime_hook_event\""));
-        assert!(payload.contains("\"source_event\":\"PreToolUse\""));
+        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(recorded.iter().any(|user_event| {
+            matches!(
+                user_event,
+                UserEvent::RuntimeHook(recorded_event)
+                    if recorded_event.kind == RuntimeHookEventKind::RuntimeState
+                        && recorded_event.source_event.as_deref() == Some("PreToolUse")
+                        && recorded_event.agent_session_id.as_deref() == Some("agent-1")
+            )
+        }));
 
         server.shutdown();
     }

@@ -800,7 +800,7 @@
       function applyStatus(windowId, status, detail) {
         if (detail) {
           detailMap.set(windowId, detail);
-        } else if (status === "running" || status === "ready") {
+        } else if (status === "running" || status === "waiting" || status === "ready") {
           detailMap.delete(windowId);
         }
         const element = windowMap.get(windowId);
@@ -810,7 +810,15 @@
         const chip = element.querySelector(".status-chip");
         const label = element.querySelector(".status-label");
         const overlay = element.querySelector(".terminal-overlay");
-        chip.classList.remove("starting", "running", "ready", "exited", "error");
+        chip.classList.remove(
+          "starting",
+          "running",
+          "ready",
+          "waiting",
+          "stopped",
+          "exited",
+          "error",
+        );
         chip.classList.add(status);
         label.textContent = status;
         const effectiveDetail = detailMap.get(windowId);
@@ -823,33 +831,49 @@
           }
           overlay.classList.toggle(
             "visible",
-            status === "starting" || status === "error" || status === "exited",
+            status === "starting" ||
+              status === "error" ||
+              status === "stopped" ||
+              status === "exited" ||
+              (status === "running" && Boolean(effectiveDetail)),
           );
-          if (status === "starting") {
+          if (status === "starting" || (status === "running" && Boolean(effectiveDetail))) {
             startSpinnerAnimation(overlay);
+          } else {
+            stopSpinnerAnimation(overlay);
           }
+        }
+      }
+
+      function stopSpinnerAnimation(overlay) {
+        if (overlay.__spinnerIntervalId) {
+          clearInterval(overlay.__spinnerIntervalId);
+          overlay.__spinnerIntervalId = null;
+        }
+        if (overlay.__spinnerObserver) {
+          overlay.__spinnerObserver.disconnect();
+          overlay.__spinnerObserver = null;
         }
       }
 
       function startSpinnerAnimation(overlay) {
         const spinner = overlay.querySelector(".overlay-spinner");
         if (!spinner) return;
+        if (overlay.__spinnerIntervalId) return;
         const chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
         let index = 0;
-        const interval = setInterval(() => {
+        spinner.textContent = chars[0];
+        overlay.__spinnerIntervalId = setInterval(() => {
           spinner.textContent = chars[index % chars.length];
           index++;
         }, 100);
-        const cleanup = () => {
-          clearInterval(interval);
-          overlay.removeEventListener("visibilitychange", cleanup);
-        };
         const observer = new MutationObserver(() => {
           if (!overlay.classList.contains("visible")) {
-            cleanup();
+            stopSpinnerAnimation(overlay);
           }
         });
         observer.observe(overlay, { attributes: true });
+        overlay.__spinnerObserver = observer;
       }
 
       function focusWindowLocally(windowId) {
@@ -5428,6 +5452,9 @@
               event.status,
               event.detail,
             );
+            break;
+          case "window_state":
+            frontendUnits.terminalHost.applyStatus(event.window_id, event.state);
             break;
           case "launch_progress": {
             const element = windowMap.get(event.id);

@@ -305,6 +305,10 @@ pub enum BackendEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    WindowState {
+        window_id: String,
+        state: WindowProcessStatus,
+    },
     FileTreeEntries {
         id: String,
         path: String,
@@ -447,9 +451,12 @@ mod tests {
     };
     use serde_json::Value;
 
-    use crate::branch_list::{
-        BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
-        BranchScope,
+    use crate::{
+        branch_list::{
+            BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
+            BranchScope,
+        },
+        persistence::WindowState,
     };
 
     use super::{
@@ -643,6 +650,28 @@ mod tests {
             value["selected_note_id"],
             Value::String("note-1".to_string()),
             "expected memo snapshot payload to carry the preferred editor selection",
+        );
+    }
+
+    #[test]
+    fn window_state_serializes_explicit_contract() {
+        let event = BackendEvent::WindowState {
+            window_id: "window-1".to_string(),
+            state: WindowState::Waiting,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize window state");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("window_state".to_string()))
+        );
+        assert_eq!(
+            value.get("window_id"),
+            Some(&Value::String("window-1".to_string()))
+        );
+        assert_eq!(
+            value.get("state"),
+            Some(&Value::String("waiting".to_string()))
         );
     }
 
