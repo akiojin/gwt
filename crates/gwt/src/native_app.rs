@@ -1,7 +1,21 @@
 pub const APP_NAME: &str = "GWT";
 pub const MACOS_BUNDLE_IDENTIFIER: &str = "io.github.akiojin.gwt";
+pub const MACOS_APP_BUNDLE_NAME: &str = "GWT.app";
+pub const GUI_FRONT_DOOR_BINARY_NAME: &str = "gwt";
+pub const INTERNAL_DAEMON_BINARY_NAME: &str = "gwtd";
 pub const OPEN_PROJECT_MENU_ID: &str = "file.open_project";
 pub const RELOAD_MENU_ID: &str = "view.reload";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeLaunchSurface {
+    pub app_name: &'static str,
+    pub bundle_identifier: &'static str,
+    pub bundle_name: &'static str,
+    pub front_door_binary: &'static str,
+    pub daemon_binary: &'static str,
+    pub menu_titles: &'static [&'static str],
+    pub command_ids: &'static [&'static str],
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeMenuCommand {
@@ -17,12 +31,32 @@ pub fn macos_native_menu_titles() -> &'static [&'static str] {
     &[APP_NAME, "File", "View", "Window"]
 }
 
+pub fn native_launch_surface() -> NativeLaunchSurface {
+    NativeLaunchSurface {
+        app_name: APP_NAME,
+        bundle_identifier: macos_bundle_identifier(),
+        bundle_name: MACOS_APP_BUNDLE_NAME,
+        front_door_binary: GUI_FRONT_DOOR_BINARY_NAME,
+        daemon_binary: INTERNAL_DAEMON_BINARY_NAME,
+        menu_titles: macos_native_menu_titles(),
+        command_ids: &[OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID],
+    }
+}
+
 pub fn native_menu_command_for_id(menu_id: &str) -> Option<NativeMenuCommand> {
     match menu_id {
         OPEN_PROJECT_MENU_ID => Some(NativeMenuCommand::OpenProject),
         RELOAD_MENU_ID => Some(NativeMenuCommand::ReloadWebView),
         _ => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn windows_app_icon() -> Option<tao::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../../../assets/icons/icon.png")).ok()?;
+    let image = image.into_rgba8();
+    let (width, height) = image.dimensions();
+    tao::window::Icon::from_rgba(image.into_raw(), width, height).ok()
 }
 
 #[cfg(target_os = "macos")]

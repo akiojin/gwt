@@ -8,6 +8,7 @@ PLANS.md
 .gwt/index.crashed-*/
 .gwt/discussion.md
 .gwt/draft/
+.gwt/skill-state/
 
 # Serena MCP tool cache directory
 .serena/

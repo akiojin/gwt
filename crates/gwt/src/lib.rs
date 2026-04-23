@@ -14,7 +14,9 @@ pub mod managed_assets;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
+pub mod profile_dispatch;
 pub mod protocol;
+pub mod window_state;
 pub mod workspace;
 
 pub use branch_cleanup::{
@@ -26,12 +28,12 @@ pub use branch_list::{
 };
 pub use branch_list::{list_branch_entries, list_branch_inventory, BranchListEntry, BranchScope};
 pub use custom_agents_service::{
-    add_from_claude_code_openai_compat_preset, delete_custom_agent, list_custom_agents,
-    list_presets, probe_backend, update_custom_agent, ClaudeCodeOpenaiCompatInput,
-    CustomAgentsServiceError, PresetDefinition, PresetId,
+    add_from_preset, delete_custom_agent, list_custom_agents, list_presets, probe_backend,
+    update_custom_agent, CustomAgentsServiceError,
 };
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
+pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use knowledge_bridge::{
     load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
     KnowledgeKind, KnowledgeListItem,
@@ -48,8 +50,10 @@ pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]
 pub use native_app::MacosNativeMenu;
 pub use native_app::{
-    macos_bundle_identifier, macos_native_menu_titles, native_menu_command_for_id,
-    NativeMenuCommand, APP_NAME, MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
+    macos_bundle_identifier, macos_native_menu_titles, native_launch_surface,
+    native_menu_command_for_id, NativeLaunchSurface, NativeMenuCommand, APP_NAME,
+    GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME, MACOS_APP_BUNDLE_NAME,
+    MACOS_BUNDLE_IDENTIFIER, OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID,
 };
 pub use persistence::{
     default_session_state, default_workspace_state, empty_workspace_state,
@@ -58,6 +62,7 @@ pub use persistence::{
     project_title_from_path, save_session_state, save_workspace_state, workspace_state_path,
     CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowState,
     PersistedWorkspaceState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowProcessStatus,
+    WindowState,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -65,6 +70,7 @@ pub use preset::{
 };
 pub use protocol::{
     AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FocusCycleDirection, FrontendEvent, ProjectTabView, RecentProjectView, WorkspaceView,
+    FocusCycleDirection, FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+    ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

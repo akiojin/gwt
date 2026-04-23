@@ -32,10 +32,23 @@ pub struct PrStatus {
     pub url: String,
     /// Overall CI status: "SUCCESS", "FAILURE", "PENDING", or "UNKNOWN".
     pub ci_status: String,
-    /// Whether the PR can be merged: "MERGEABLE", "CONFLICTING", "UNKNOWN".
+    /// Raw `mergeable` field from GitHub: "MERGEABLE", "CONFLICTING", "UNKNOWN".
     pub mergeable: String,
+    /// Raw `mergeStateStatus` field from GitHub: "CLEAN", "BEHIND", "UNKNOWN", etc.
+    pub merge_state_status: String,
     /// Review verdict: "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or "UNKNOWN".
     pub review_status: String,
+}
+
+impl PrStatus {
+    /// Return the merge state label that CLI summaries should display.
+    pub fn effective_merge_status(&self) -> &str {
+        effective_merge_status_label(&self.mergeable, &self.merge_state_status)
+    }
+
+    pub fn requires_update_branch(&self) -> bool {
+        self.merge_state_status == "BEHIND"
+    }
 }
 
 /// Fetch the status of a PR by number using `gh pr view --json`.
@@ -50,7 +63,7 @@ pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
             "--repo",
             repo_slug,
             "--json",
-            "number,title,state,url,mergeable,statusCheckRollup,reviewDecision",
+            "number,title,state,url,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
         ])
         .output()
         .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
@@ -79,6 +92,10 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
     };
     let url = v["url"].as_str().unwrap_or("").to_string();
     let mergeable = v["mergeable"].as_str().unwrap_or("UNKNOWN").to_string();
+    let merge_state_status = v["mergeStateStatus"]
+        .as_str()
+        .unwrap_or("UNKNOWN")
+        .to_string();
 
     // Determine CI status from statusCheckRollup
     let ci_status = v["statusCheckRollup"]
@@ -118,8 +135,24 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
         url,
         ci_status,
         mergeable,
+        merge_state_status,
         review_status,
     })
+}
+
+fn effective_merge_status_label<'a>(mergeable: &'a str, merge_state_status: &'a str) -> &'a str {
+    match merge_state_status {
+        "BEHIND" => "BEHIND",
+        "" | "UNKNOWN" => {
+            if mergeable.is_empty() {
+                "UNKNOWN"
+            } else {
+                mergeable
+            }
+        }
+        _ if mergeable.is_empty() || mergeable == "UNKNOWN" => merge_state_status,
+        _ => mergeable,
+    }
 }
 
 /// Fetch a list of open PRs for the repository at `repo_path`.
@@ -161,7 +194,7 @@ where
             "pr",
             "list",
             "--json",
-            "number,title,state,url,statusCheckRollup,mergeable,reviewDecision",
+            "number,title,state,url,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
             "--limit",
             "20",
         ],
@@ -230,6 +263,7 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
                     .to_string(),
                 ci_status: "UNKNOWN".to_string(),
                 mergeable: "UNKNOWN".to_string(),
+                merge_state_status: "UNKNOWN".to_string(),
                 review_status: "UNKNOWN".to_string(),
             }
         })
@@ -251,6 +285,7 @@ pub enum CiStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeStatus {
     Ready,
+    Behind,
     Blocked,
     Conflicts,
     Unknown,
@@ -284,7 +319,7 @@ pub fn pr_check_report(repo_path: &Path) -> Result<PrCheckReport> {
             "pr",
             "view",
             "--json",
-            "statusCheckRollup,mergeable,reviewDecision,state,title",
+            "statusCheckRollup,mergeable,mergeStateStatus,reviewDecision,state,title",
         ])
         .current_dir(repo_path)
         .output()
@@ -334,11 +369,20 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
         _ => CiStatus::Unknown,
     };
 
-    let merge = match json.get("mergeable").and_then(|v| v.as_str()) {
-        Some("MERGEABLE") => MergeStatus::Ready,
-        Some("CONFLICTING") => MergeStatus::Conflicts,
-        Some(_) => MergeStatus::Blocked,
-        None => MergeStatus::Unknown,
+    let mergeable = json
+        .get("mergeable")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN");
+    let merge_state_status = json
+        .get("mergeStateStatus")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN");
+    let merge = match effective_merge_status_label(mergeable, merge_state_status) {
+        "MERGEABLE" => MergeStatus::Ready,
+        "BEHIND" => MergeStatus::Behind,
+        "CONFLICTING" | "DIRTY" => MergeStatus::Conflicts,
+        "UNKNOWN" => MergeStatus::Unknown,
+        _ => MergeStatus::Blocked,
     };
 
     let review = match json.get("reviewDecision").and_then(|v| v.as_str()) {
@@ -378,6 +422,7 @@ mod tests {
             "state": "OPEN",
             "url": "https://github.com/owner/repo/pull/123",
             "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
             ],
@@ -390,6 +435,8 @@ mod tests {
         assert_eq!(pr.state, PrState::Open);
         assert_eq!(pr.ci_status, "SUCCESS");
         assert_eq!(pr.mergeable, "MERGEABLE");
+        assert_eq!(pr.merge_state_status, "CLEAN");
+        assert_eq!(pr.effective_merge_status(), "MERGEABLE");
         assert_eq!(pr.review_status, "APPROVED");
     }
 
@@ -401,6 +448,7 @@ mod tests {
             "state": "MERGED",
             "url": "https://github.com/owner/repo/pull/456",
             "mergeable": "UNKNOWN",
+            "mergeStateStatus": "UNKNOWN",
             "statusCheckRollup": [],
             "reviewDecision": "APPROVED"
         }"#;
@@ -418,6 +466,7 @@ mod tests {
             "state": "OPEN",
             "url": "",
             "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
                 {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"}
@@ -432,6 +481,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_pr_status_branch_behind_prefers_merge_state_status_for_cli() {
+        let json = r#"{
+            "number": 102,
+            "title": "Update branch required",
+            "state": "OPEN",
+            "url": "",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "statusCheckRollup": [],
+            "reviewDecision": "REVIEW_REQUIRED"
+        }"#;
+
+        let pr = parse_pr_status_json(json).unwrap();
+        assert_eq!(pr.mergeable, "MERGEABLE");
+        assert_eq!(pr.merge_state_status, "BEHIND");
+        assert_eq!(pr.effective_merge_status(), "BEHIND");
+        assert!(pr.requires_update_branch());
+    }
+
+    #[test]
     fn parse_pr_status_ci_pending() {
         let json = r#"{
             "number": 101,
@@ -439,6 +508,7 @@ mod tests {
             "state": "OPEN",
             "url": "",
             "mergeable": "UNKNOWN",
+            "mergeStateStatus": "UNKNOWN",
             "statusCheckRollup": [
                 {"name": "ci", "status": "IN_PROGRESS", "conclusion": null}
             ],
@@ -460,6 +530,7 @@ mod tests {
         let json = r#"{
             "title": "Add feature",
             "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
             "reviewDecision": "APPROVED",
             "statusCheckRollup": [
                 {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
@@ -479,10 +550,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_pr_check_report_branch_behind_uses_merge_state_status() {
+        let json = r#"{
+            "title": "Update branch required",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BEHIND",
+            "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": []
+        }"#;
+
+        let report = parse_pr_check_report_json(json).unwrap();
+
+        assert_eq!(report.ci, CiStatus::Pending);
+        assert_eq!(report.merge, MergeStatus::Behind);
+        assert_eq!(report.review, ReviewStatus::Pending);
+        assert_eq!(
+            report.summary,
+            "PR: Update branch required | CI: Pending | Merge: Behind | Review: Pending"
+        );
+    }
+
+    #[test]
     fn parse_pr_check_report_empty_checks() {
         let json = r#"{
             "title": "Waiting on CI",
             "mergeable": "CONFLICTING",
+            "mergeStateStatus": "DIRTY",
             "reviewDecision": "REVIEW_REQUIRED",
             "statusCheckRollup": []
         }"#;
@@ -513,6 +606,7 @@ mod tests {
                 "state": "OPEN",
                 "url": "https://github.com/o/r/pull/1",
                 "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "statusCheckRollup": [],
                 "reviewDecision": "APPROVED"
             },
@@ -522,6 +616,7 @@ mod tests {
                 "state": "OPEN",
                 "url": "https://github.com/o/r/pull/2",
                 "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
                 "statusCheckRollup": [
                     {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}
                 ],
@@ -535,6 +630,8 @@ mod tests {
         assert_eq!(prs[0].title, "First PR");
         assert_eq!(prs[1].number, 2);
         assert_eq!(prs[1].ci_status, "FAILURE");
+        assert_eq!(prs[0].merge_state_status, "CLEAN");
+        assert_eq!(prs[1].merge_state_status, "DIRTY");
     }
 
     #[test]
@@ -561,6 +658,7 @@ mod tests {
         assert_eq!(prs[0].url, "https://github.com/o/r/pull/11");
         assert_eq!(prs[0].ci_status, "UNKNOWN");
         assert_eq!(prs[0].mergeable, "UNKNOWN");
+        assert_eq!(prs[0].merge_state_status, "UNKNOWN");
         assert_eq!(prs[0].review_status, "UNKNOWN");
     }
 
@@ -582,6 +680,7 @@ mod tests {
                             "state": "OPEN",
                             "url": "https://github.com/o/r/pull/7",
                             "mergeable": "MERGEABLE",
+                            "mergeStateStatus": "CLEAN",
                             "statusCheckRollup": [],
                             "reviewDecision": "APPROVED"
                         }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    launch::normalize_launch_args,
+    launch::{normalize_launch_args, LaunchConfig},
     types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass},
 };
 
@@ -98,7 +98,7 @@ impl Session {
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
-    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
     /// Create a new session with a generated UUID.
     pub fn new(
@@ -133,6 +133,33 @@ impl Session {
             last_activity_at: now,
             display_name,
         }
+    }
+
+    /// Create a persisted session snapshot from a prepared launch config.
+    ///
+    /// The launch command/args are captured before any outer runtime wrapper
+    /// (for example `docker compose exec`) is applied so resume/quick-start
+    /// metadata preserves the logical agent command.
+    pub fn from_launch_config(
+        worktree_path: impl Into<PathBuf>,
+        branch: impl Into<String>,
+        config: &LaunchConfig,
+    ) -> Self {
+        let mut session = Self::new(worktree_path, branch, config.agent_id.clone());
+        session.display_name = config.display_name.clone();
+        session.tool_version = config.tool_version.clone();
+        session.model = config.model.clone();
+        session.reasoning_level = config.reasoning_level.clone();
+        session.skip_permissions = config.skip_permissions;
+        session.codex_fast_mode = config.codex_fast_mode;
+        session.runtime_target = config.runtime_target;
+        session.docker_service = config.docker_service.clone();
+        session.docker_lifecycle_intent = config.docker_lifecycle_intent;
+        session.linked_issue_number = config.linked_issue_number;
+        session.launch_command = config.command.clone();
+        session.launch_args = config.args.clone();
+        session.update_status(AgentStatus::Running);
+        session
     }
 
     /// Update the session status and touch timestamps.
@@ -191,15 +218,49 @@ impl Session {
     /// [`Session::CURRENT_SCHEMA_VERSION`], injecting any missing canonical
     /// launch args (such as Codex's `--no-alt-screen`) along the way.
     pub fn migrate_legacy_launch_args(&mut self) {
-        if self.schema_version >= Self::CURRENT_SCHEMA_VERSION {
-            return;
+        if self.schema_version < 1 {
+            // Schema 0 -> 1: apply canonical default args at the correct
+            // runner prefix position so legacy sessions written before
+            // SPEC-1921 FR-064 pick up agent-neutral defaults (Issue #2091).
+            normalize_launch_args(&self.agent_id, &self.launch_command, &mut self.launch_args);
+            self.schema_version = 1;
         }
-        // Schema 0 -> 1: apply canonical default args at the correct runner
-        // prefix position so legacy sessions written before SPEC-1921 FR-064
-        // pick up agent-neutral defaults (Issue #2091).
-        normalize_launch_args(&self.agent_id, &self.launch_command, &mut self.launch_args);
-        self.schema_version = Self::CURRENT_SCHEMA_VERSION;
+
+        if self.schema_version < 2 {
+            scrub_legacy_codex_hooks_enablement(&self.agent_id, &mut self.launch_args);
+            self.schema_version = 2;
+        }
     }
+}
+
+fn scrub_legacy_codex_hooks_enablement(agent_id: &AgentId, args: &mut Vec<String>) {
+    if !matches!(agent_id, AgentId::Codex) {
+        return;
+    }
+
+    let mut cleaned = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if let Some(next) = args.get(index + 1) {
+            if should_strip_codex_hooks_enablement(&args[index], next) {
+                index += 2;
+                continue;
+            }
+        }
+        cleaned.push(args[index].clone());
+        index += 1;
+    }
+
+    *args = cleaned;
+}
+
+fn should_strip_codex_hooks_enablement(flag: &str, value: &str) -> bool {
+    (flag == "--enable" && value == "codex_hooks")
+        || (flag == "-c" && normalize_config_override(value) == "features.codex_hooks=true")
+}
+
+fn normalize_config_override(value: &str) -> String {
+    value.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 impl SessionRuntimeState {
@@ -277,6 +338,16 @@ pub fn runtime_state_path_for_pid(sessions_dir: &Path, pid: u32, session_id: &st
     runtime_state_dir_for_pid(sessions_dir, pid).join(format!("{session_id}.json"))
 }
 
+/// Recover the sessions directory from a runtime sidecar path like
+/// `~/.gwt/sessions/runtime/<pid>/<session>.json`.
+pub fn sessions_dir_from_runtime_path(runtime_path: &Path) -> Option<PathBuf> {
+    runtime_path
+        .parent()?
+        .parent()?
+        .parent()
+        .map(|path| path.to_path_buf())
+}
+
 /// Reset the runtime namespace for the current gwt process.
 pub fn reset_runtime_state_dir(sessions_dir: &Path) -> std::io::Result<()> {
     reset_runtime_state_dir_for_pid(sessions_dir, std::process::id())
@@ -330,8 +401,10 @@ pub fn persist_agent_session_id(
 
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
     match event {
-        "SessionStart" | "Stop" => Some(AgentStatus::WaitingInput),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentStatus::Running),
+        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
+            Some(AgentStatus::Running)
+        }
+        "Stop" => Some(AgentStatus::WaitingInput),
         _ => None,
     }
 }
@@ -618,6 +691,80 @@ mod tests {
     }
 
     #[test]
+    fn migrate_legacy_launch_args_removes_codex_hooks_enable_flag() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = 1;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "resume".to_string(),
+            "sess-legacy".to_string(),
+            "--enable".to_string(),
+            "codex_hooks".to_string(),
+            "--enable".to_string(),
+            "web_search".to_string(),
+        ];
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            session.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+                "--enable".to_string(),
+                "web_search".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_removes_codex_hooks_config_override() {
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        session.schema_version = 1;
+        session.launch_command = "codex".into();
+        session.launch_args = vec![
+            "--no-alt-screen".to_string(),
+            "-c".to_string(),
+            "features.codex_hooks = true".to_string(),
+            "--sandbox".to_string(),
+            "workspace-write".to_string(),
+        ];
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            session.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_launch_args_leaves_non_codex_sessions_unchanged() {
+        let original = vec![
+            "--dangerously-skip-permissions".to_string(),
+            "--enable".to_string(),
+            "codex_hooks".to_string(),
+        ];
+        let mut session = Session::new("/tmp/wt", "feature/x", AgentId::ClaudeCode);
+        session.schema_version = 1;
+        session.launch_command = "claude".into();
+        session.launch_args = original.clone();
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(session.launch_args, original);
+    }
+
+    #[test]
     fn migrate_legacy_launch_args_skips_already_current_schema() {
         let mut session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
         session.schema_version = Session::CURRENT_SCHEMA_VERSION;
@@ -667,8 +814,53 @@ mod tests {
         assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
     }
 
+    #[test]
+    fn load_and_migrate_schema_one_codex_toml_removes_codex_hooks_enable_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-codex-schema-one.toml");
+        write_session_file_with_schema_version(
+            &path,
+            AgentId::Codex,
+            "codex",
+            &[
+                "--no-alt-screen".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+                "--enable".to_string(),
+                "codex_hooks".to_string(),
+                "--enable".to_string(),
+                "web_search".to_string(),
+            ],
+            1,
+        );
+
+        let loaded = Session::load_and_migrate(&path).unwrap();
+
+        assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            loaded.launch_args,
+            vec![
+                "--no-alt-screen".to_string(),
+                "resume".to_string(),
+                "sess-legacy".to_string(),
+                "--enable".to_string(),
+                "web_search".to_string(),
+            ]
+        );
+    }
+
     fn write_legacy_codex_session_file(path: &Path, launch_args: &[String]) {
-        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        write_session_file_with_schema_version(path, AgentId::Codex, "codex", launch_args, 0);
+    }
+
+    fn write_session_file_with_schema_version(
+        path: &Path,
+        agent_id: AgentId,
+        launch_command: &str,
+        launch_args: &[String],
+        schema_version: u32,
+    ) {
+        let session = Session::new("/tmp/wt", "feature/x", agent_id.clone());
         let mut legacy = toml::map::Map::new();
         legacy.insert("id".into(), toml::Value::String(session.id.clone()));
         legacy.insert(
@@ -676,17 +868,14 @@ mod tests {
             toml::Value::String(session.worktree_path.display().to_string()),
         );
         legacy.insert("branch".into(), toml::Value::String(session.branch.clone()));
-        legacy.insert(
-            "agent_id".into(),
-            toml::Value::try_from(session.agent_id.clone()).unwrap(),
-        );
+        legacy.insert("agent_id".into(), toml::Value::try_from(agent_id).unwrap());
         legacy.insert(
             "status".into(),
             toml::Value::try_from(session.status).unwrap(),
         );
         legacy.insert(
             "launch_command".into(),
-            toml::Value::String("codex".to_string()),
+            toml::Value::String(launch_command.to_string()),
         );
         legacy.insert(
             "launch_args".into(),
@@ -697,6 +886,12 @@ mod tests {
                     .collect(),
             ),
         );
+        if schema_version > 0 {
+            legacy.insert(
+                "schema_version".into(),
+                toml::Value::Integer(i64::from(schema_version)),
+            );
+        }
         legacy.insert(
             "created_at".into(),
             toml::Value::try_from(session.created_at).unwrap(),
@@ -742,7 +937,7 @@ mod tests {
 
         let session_start =
             SessionRuntimeState::from_hook_event("SessionStart").expect("session start event");
-        assert_eq!(session_start.status, AgentStatus::WaitingInput);
+        assert_eq!(session_start.status, AgentStatus::Running);
         assert_eq!(session_start.source_event.as_deref(), Some("SessionStart"));
 
         let waiting = SessionRuntimeState::from_hook_event("Stop").expect("waiting event");
@@ -778,6 +973,69 @@ mod tests {
                 .join(std::process::id().to_string())
                 .join("session-123.json")
         );
+    }
+
+    #[test]
+    fn sessions_dir_from_runtime_path_recovers_sessions_root() {
+        let sessions_dir = PathBuf::from("/tmp/.gwt/sessions");
+        let runtime_path = sessions_dir
+            .join("runtime")
+            .join("4242")
+            .join("session-123.json");
+
+        assert_eq!(
+            sessions_dir_from_runtime_path(&runtime_path).as_deref(),
+            Some(sessions_dir.as_path())
+        );
+    }
+
+    #[test]
+    fn session_from_launch_config_captures_launch_metadata() {
+        let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir("/tmp/worktree")
+            .branch("feature/demo")
+            .version("0.122.0")
+            .build();
+        config.command = "npx".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@openai/codex@0.122.0".to_string(),
+            "--no-alt-screen".to_string(),
+        ];
+        config.model = Some("gpt-5.4".to_string());
+        config.reasoning_level = Some("high".to_string());
+        config.skip_permissions = true;
+        config.codex_fast_mode = true;
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
+        config.linked_issue_number = Some(1921);
+
+        let session = Session::from_launch_config("/tmp/worktree", "feature/demo", &config);
+
+        assert_eq!(session.branch, "feature/demo");
+        assert_eq!(session.agent_id, AgentId::Codex);
+        assert_eq!(session.launch_command, "npx");
+        assert_eq!(
+            session.launch_args,
+            vec![
+                "--yes".to_string(),
+                "@openai/codex@0.122.0".to_string(),
+                "--no-alt-screen".to_string(),
+            ]
+        );
+        assert_eq!(session.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(session.reasoning_level.as_deref(), Some("high"));
+        assert!(session.skip_permissions);
+        assert!(session.codex_fast_mode);
+        assert_eq!(session.runtime_target, LaunchRuntimeTarget::Docker);
+        assert_eq!(session.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            session.docker_lifecycle_intent,
+            DockerLifecycleIntent::Restart
+        );
+        assert_eq!(session.linked_issue_number, Some(1921));
+        assert_eq!(session.status, AgentStatus::Running);
     }
 
     #[test]

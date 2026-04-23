@@ -70,6 +70,31 @@ impl std::fmt::Display for AgentId {
     }
 }
 
+/// Normalize a raw agent identifier string (command name, display name, or
+/// persisted `agent_id`) back into an [`AgentId`].
+///
+/// 既知のエージェントは表記揺れを吸収して確定する (`"claude"`,
+/// `"ClaudeCode"`, `"claude-code"` → `ClaudeCode`)。空文字または
+/// 空白のみの入力は `None`。それ以外の未知文字列は `Custom(trimmed)`。
+///
+/// SPEC #2133 FR-012 / gwt-core::BoardEntry::origin_agent_id の
+/// 正規化で使用される。
+pub fn resolve_agent_id(raw: &str) -> Option<AgentId> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "claude" | "claudecode" | "claude-code" | "claude code" => Some(AgentId::ClaudeCode),
+        "codex" => Some(AgentId::Codex),
+        "gemini" | "gemini cli" | "gemini-cli" => Some(AgentId::Gemini),
+        "opencode" | "open-code" => Some(AgentId::OpenCode),
+        "gh" | "copilot" | "github copilot" | "github-copilot" => Some(AgentId::Copilot),
+        _ => Some(AgentId::Custom(trimmed.to_string())),
+    }
+}
+
 /// Static information about an agent, combining identity with presentation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfo {
@@ -94,7 +119,13 @@ impl AgentInfo {
 }
 
 /// UI color for agent display.
+///
+/// Wire 表現は snake_case 小文字固定 (`"yellow"` / `"cyan"` など)。
+/// フロント側の CSS 変数名 (`--agent-*`) と 1 対 1 対応させ、色値の
+/// ハードコードを `crates/gwt/web/index.html` に持ち込まないための
+/// 制約。See SPEC #2133 FR-001 / FR-002.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentColor {
     Green,
     Blue,
@@ -109,8 +140,17 @@ pub enum AgentColor {
 pub enum AgentStatus {
     #[default]
     Unknown,
+    #[serde(alias = "running", alias = "Running")]
     Running,
+    #[serde(
+        rename = "Waiting",
+        alias = "waiting",
+        alias = "Waiting",
+        alias = "waiting_input",
+        alias = "WaitingInput"
+    )]
     WaitingInput,
+    #[serde(alias = "stopped", alias = "Stopped")]
     Stopped,
 }
 
@@ -206,6 +246,22 @@ mod tests {
     }
 
     #[test]
+    fn agent_status_waiting_preserves_wire_contract_and_legacy_aliases() {
+        let json = serde_json::to_string(&AgentStatus::WaitingInput).unwrap();
+        assert_eq!(json, "\"Waiting\"");
+
+        for raw in [
+            "\"Waiting\"",
+            "\"waiting\"",
+            "\"waiting_input\"",
+            "\"WaitingInput\"",
+        ] {
+            let parsed: AgentStatus = serde_json::from_str(raw).unwrap();
+            assert_eq!(parsed, AgentStatus::WaitingInput, "{raw}");
+        }
+    }
+
+    #[test]
     fn session_mode_default_is_normal() {
         assert_eq!(SessionMode::default(), SessionMode::Normal);
     }
@@ -214,6 +270,86 @@ mod tests {
     fn agent_id_display_trait() {
         assert_eq!(format!("{}", AgentId::ClaudeCode), "Claude Code");
         assert_eq!(format!("{}", AgentId::Custom("aider".into())), "aider");
+    }
+
+    #[test]
+    fn resolve_agent_id_maps_known_identifiers() {
+        let claude_inputs = ["claude", "ClaudeCode", "Claude Code", "claude-code"];
+        for raw in claude_inputs {
+            assert_eq!(resolve_agent_id(raw), Some(AgentId::ClaudeCode), "{raw}");
+        }
+        assert_eq!(resolve_agent_id("codex"), Some(AgentId::Codex));
+        assert_eq!(resolve_agent_id("Codex"), Some(AgentId::Codex));
+        assert_eq!(resolve_agent_id("gemini"), Some(AgentId::Gemini));
+        assert_eq!(resolve_agent_id("Gemini CLI"), Some(AgentId::Gemini));
+        assert_eq!(resolve_agent_id("opencode"), Some(AgentId::OpenCode));
+        assert_eq!(resolve_agent_id("OpenCode"), Some(AgentId::OpenCode));
+        assert_eq!(resolve_agent_id("open-code"), Some(AgentId::OpenCode));
+        assert_eq!(resolve_agent_id("gh"), Some(AgentId::Copilot));
+        assert_eq!(resolve_agent_id("copilot"), Some(AgentId::Copilot));
+        assert_eq!(resolve_agent_id("GitHub Copilot"), Some(AgentId::Copilot));
+    }
+
+    #[test]
+    fn resolve_agent_id_returns_none_for_empty() {
+        assert_eq!(resolve_agent_id(""), None);
+        assert_eq!(resolve_agent_id("   "), None);
+        assert_eq!(resolve_agent_id("\t\n"), None);
+    }
+
+    #[test]
+    fn resolve_agent_id_falls_back_to_custom() {
+        assert_eq!(
+            resolve_agent_id("my-aider"),
+            Some(AgentId::Custom("my-aider".into()))
+        );
+        assert_eq!(
+            resolve_agent_id("  aider  "),
+            Some(AgentId::Custom("aider".into())),
+            "trims whitespace"
+        );
+        assert_eq!(
+            resolve_agent_id("unknown-cli"),
+            Some(AgentId::Custom("unknown-cli".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_agent_id_does_not_infer_known_agents_from_custom_names() {
+        let custom_inputs = [
+            "my-claude-wrapper",
+            "codex-wrapper",
+            "gemini-helper",
+            "opencode-mentor",
+            "copilot-mentor",
+            "github-copilot-wrapper",
+        ];
+        for raw in custom_inputs {
+            assert_eq!(
+                resolve_agent_id(raw),
+                Some(AgentId::Custom(raw.into())),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_agent_id_feeds_default_color() {
+        // FR-012 → resolve_agent_id → default_color 連携の確認
+        let cases = [
+            ("claude", AgentColor::Yellow),
+            ("codex", AgentColor::Cyan),
+            ("gemini", AgentColor::Magenta),
+            ("opencode", AgentColor::Green),
+            ("gh", AgentColor::Blue),
+            ("my-custom", AgentColor::Gray),
+        ];
+        for (raw, expected) in cases {
+            let color = resolve_agent_id(raw)
+                .map(|id| id.default_color())
+                .expect("non-empty input");
+            assert_eq!(color, expected, "{raw}");
+        }
     }
 
     #[test]
@@ -236,6 +372,26 @@ mod tests {
         let json = serde_json::to_string(&color).unwrap();
         let parsed: AgentColor = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, color);
+    }
+
+    #[test]
+    fn agent_color_serializes_as_snake_case() {
+        // CSS variable names (--agent-claude など) と 1 対 1 対応させるため、
+        // wire 表現は snake_case 小文字固定。
+        let pairs = [
+            (AgentColor::Yellow, "\"yellow\""),
+            (AgentColor::Cyan, "\"cyan\""),
+            (AgentColor::Magenta, "\"magenta\""),
+            (AgentColor::Green, "\"green\""),
+            (AgentColor::Blue, "\"blue\""),
+            (AgentColor::Gray, "\"gray\""),
+        ];
+        for (color, expected) in pairs {
+            let json = serde_json::to_string(&color).unwrap();
+            assert_eq!(json, expected, "serialize form for {color:?}");
+            let parsed: AgentColor = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, color);
+        }
     }
 
     #[test]

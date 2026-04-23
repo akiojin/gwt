@@ -36,6 +36,16 @@ function releaseAssetName(platform = os.platform(), arch = os.arch()) {
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
+function primaryReleaseAssetName(platform = os.platform(), arch = os.arch()) {
+  if (platform === "darwin" && (arch === "arm64" || arch === "x64")) {
+    return "gwt-macos-universal.dmg";
+  }
+  if (platform === "win32" && arch === "x64") {
+    return "gwt-windows-x86_64.msi";
+  }
+  return releaseAssetName(platform, arch);
+}
+
 function releaseAssetUrl(repo, version, platform = os.platform(), arch = os.arch()) {
   const asset = releaseAssetName(platform, arch);
   const tag = `v${version}`;
@@ -197,6 +207,7 @@ module.exports = {
   installBinaryFromArchive: installBundleFromArchive,
   installBundleFromArchive,
   installReleaseBinary,
+  primaryReleaseAssetName,
   releaseAssetName,
   releaseAssetUrl,
 };

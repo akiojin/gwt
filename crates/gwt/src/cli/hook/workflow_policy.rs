@@ -3,10 +3,11 @@
 //! v1 keeps the policy deliberately narrow:
 //!
 //! - reuse the existing consolidated Bash safety policy first
-//! - block mutating tool calls when no owner Issue/SPEC is linked
-//! - if the owner is a `gwt-spec` Issue, require non-empty `plan` and `tasks`
-//!   sections before code implementation proceeds
-//! - allow read-only investigation and docs/chore-style edits
+//! - apply only safety guardrails that are independent of Issue/SPEC ownership
+//! - block worktree escape, branch-switching, and direct GitHub workflow CLI
+//!   commands before they reach the tool runtime
+//! - allow transport operations such as `git push` and worktree-internal edits
+//!   without an owner gate
 
 use std::{collections::HashMap, io::Read, path::Path};
 
@@ -18,7 +19,7 @@ use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
-use super::{block_bash_policy, BlockDecision, HookError, HookEvent};
+use super::{block_bash_policy, HookError, HookEvent, HookOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowOwner {
@@ -82,29 +83,26 @@ pub fn evaluate_with_context(
     event: &HookEvent,
     worktree_root: &Path,
     _context: &WorkflowContext,
-) -> Result<Option<BlockDecision>, HookError> {
+) -> Result<HookOutput, HookError> {
     // Safety guardrails only: branch switching, worktree escape, direct gh CLI.
     // No owner gate — git push/commit and worktree-internal edits are always allowed.
     block_bash_policy::evaluate(event, worktree_root)
 }
 
-pub fn evaluate(
-    event: &HookEvent,
-    worktree_root: &Path,
-) -> Result<Option<BlockDecision>, HookError> {
+pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     let context = resolve_workflow_context(worktree_root);
     evaluate_with_context(event, worktree_root, &context)
 }
 
-pub fn handle() -> Result<Option<BlockDecision>, HookError> {
+pub fn handle() -> Result<HookOutput, HookError> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     handle_with_input(&input)
 }
 
-pub fn handle_with_input(input: &str) -> Result<Option<BlockDecision>, HookError> {
+pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
     let Some(event) = HookEvent::read_from_str(input)? else {
-        return Ok(None);
+        return Ok(HookOutput::Silent);
     };
     let root = crate::cli::hook::worktree::detect_worktree_root();
     evaluate(&event, &root)
@@ -313,7 +311,10 @@ Coverage requirements.
 
     #[test]
     fn handle_with_input_ignores_empty_and_rejects_invalid_json() {
-        assert!(handle_with_input("").expect("empty input").is_none());
+        assert_eq!(
+            handle_with_input("").expect("empty input"),
+            HookOutput::Silent
+        );
         assert!(matches!(
             handle_with_input("{not-json"),
             Err(HookError::Json(_))

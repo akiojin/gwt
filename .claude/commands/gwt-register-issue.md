@@ -21,7 +21,8 @@ Steps
 
 1. Load `.claude/skills/gwt-register-issue/SKILL.md` and follow the workflow.
 2. Search for duplicates before creating anything.
-3. Create a plain Issue when the work is narrow, or route to SPEC design when behavior needs definition.
+3. Decide `Spec Status` (`ALIGNED`, `IMPLEMENTATION-GAP`, `SPEC-GAP`, `SPEC-AMBIGUOUS`) before choosing the owner.
+4. Create a plain Issue only for narrow `ALIGNED` or `IMPLEMENTATION-GAP` work, and route `SPEC-GAP` / `SPEC-AMBIGUOUS` to SPEC discussion instead.
 
 Examples
 --------

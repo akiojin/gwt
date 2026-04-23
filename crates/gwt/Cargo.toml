@@ -51,6 +51,12 @@ reqwest.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.17"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+image.workspace = true
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

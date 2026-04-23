@@ -52,6 +52,21 @@ impl WorkspaceState {
         true
     }
 
+    /// Record the AgentId command name on the given window so later snapshots
+    /// can populate `agent_color` correctly. SPEC #2133 FR-007 / シナリオ 1.
+    pub fn set_agent_id(&mut self, id: &str, agent_id: impl Into<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.agent_id = Some(agent_id.into());
+        true
+    }
+
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
     }
@@ -158,15 +173,13 @@ impl WorkspaceState {
                 height,
             },
             z_index: self.persisted.next_z_index,
-            status: if preset.requires_process() {
-                WindowProcessStatus::Starting
-            } else {
-                WindowProcessStatus::Ready
-            },
+            status: WindowProcessStatus::Running,
             minimized: false,
             maximized: false,
             pre_maximize_geometry: None,
             persist,
+            agent_id: None,
+            agent_color: None,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -408,25 +421,25 @@ mod tests {
         assert_eq!(window.z_index, 3);
         assert_eq!(workspace.persisted().windows.len(), 3);
         assert_eq!(workspace.persisted().next_z_index, 4);
-        assert_eq!(window.status, WindowProcessStatus::Starting);
+        assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
     #[test]
-    fn adding_file_tree_window_marks_it_ready_without_process() {
+    fn adding_file_tree_window_marks_it_running_without_process() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         assert_eq!(window.title, "File Tree");
         assert_eq!(window.preset, WindowPreset::FileTree);
-        assert_eq!(window.status, WindowProcessStatus::Ready);
+        assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
     #[test]
-    fn adding_branches_window_marks_it_ready_without_process() {
+    fn adding_branches_window_marks_it_running_without_process() {
         let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::Branches, arrange_bounds());
         assert_eq!(window.title, "Branches");
         assert_eq!(window.preset, WindowPreset::Branches);
-        assert_eq!(window.status, WindowProcessStatus::Ready);
+        assert_eq!(window.status, WindowProcessStatus::Running);
     }
 
     #[test]
@@ -449,6 +462,8 @@ mod tests {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: false,
+                agent_id: None,
+                agent_color: None,
             }],
             next_z_index: 2,
         });

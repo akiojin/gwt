@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.7.0"
+version = "9.8.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -96,6 +96,12 @@ libc = "0.2"
 # HTTP client (blocking)
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
+# Image decoding for native shell assets
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Windows executable resources
+winresource = "0.1.31"
+
 # WebSocket
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
@@ -145,3 +151,6 @@ debug = true
 [profile.bench]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }

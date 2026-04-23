@@ -4,6 +4,20 @@ use std::{collections::HashMap, path::PathBuf};
 
 use crate::{pane::Pane, TerminalError};
 
+fn default_shell_command() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("ComSpec")
+            .or_else(|_| std::env::var("COMSPEC"))
+            .unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
+}
+
 /// Configuration for launching an agent pane.
 pub struct LaunchConfig {
     /// Command to execute.
@@ -51,7 +65,7 @@ impl PaneManager {
         env: HashMap<String, String>,
     ) -> Result<String, TerminalError> {
         let id = self.next_pane_id();
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let shell = default_shell_command();
         let pane = Pane::new(
             id.clone(),
             shell,
@@ -136,7 +150,7 @@ impl PaneManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::lock_pty_test;
+    use crate::test_util::{echo_command, lock_pty_test};
 
     #[test]
     fn test_new_manager_is_empty() {
@@ -164,9 +178,10 @@ mod tests {
     fn test_launch_agent() {
         let _pty_guard = lock_pty_test();
         let mut mgr = PaneManager::new(80, 24);
+        let command = echo_command("agent-test");
         let config = LaunchConfig {
-            command: "/bin/echo".to_string(),
-            args: vec!["agent-test".to_string()],
+            command: command.command,
+            args: command.args,
             env: HashMap::new(),
             cwd: None,
         };
@@ -256,9 +271,10 @@ mod tests {
         let mut mgr = PaneManager::new(80, 24);
         let mut ids = Vec::new();
         for _ in 0..5 {
+            let command = echo_command("test");
             let config = LaunchConfig {
-                command: "/bin/echo".to_string(),
-                args: vec!["test".to_string()],
+                command: command.command,
+                args: command.args,
                 env: HashMap::new(),
                 cwd: None,
             };

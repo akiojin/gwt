@@ -492,6 +492,9 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
         "hook" => parse_hook_args(&rest),
+        "discuss" => super::parse_discuss_args(&rest),
+        "plan" => super::parse_plan_args(&rest),
+        "build" => super::parse_build_args(&rest),
         "update" => Ok(super::CliCommand::Update {
             check_only: rest.iter().any(|a| a == "--check"),
         }),
@@ -826,6 +829,7 @@ mod tests {
             url: "https://github.com/akiojin/gwt/pull/128".to_string(),
             ci_status: "SUCCESS".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         }
     }
@@ -852,7 +856,7 @@ use std::{env, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
     format!(
-        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
     )
 }
 

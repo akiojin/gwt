@@ -1,5 +1,81 @@
 # Lessons Learned
 
+## 2026-04-22 — verify: Windows GUI smoke は `browser URL` 出力だけで成功扱いしない
+
+### 事象
+
+`target/debug/gwt.exe` を起動すると `gwt browser URL: http://127.0.0.1:<port>/`
+までは出たが、その直後に index runner が
+`'cp932' codec can't decode byte 0x94 ... illegal multibyte sequence`
+で `RUNTIME_ERROR` を返し、native GUI の手動確認を最後まで進められなかった。
+
+### 原因
+
+- `browser URL` の出力は front-door server 起動成功しか保証せず、indexing/runtime の
+  後続失敗は別で起こりうる。
+- この環境では Windows ユーザープロファイル配下の Unicode path と index runner の
+  文字コード処理が衝突し、GUI 操作前に runtime error になった。
+
+### 再発防止策
+
+1. Windows GUI smoke では `browser URL` 出力後に `~/.gwt/logs/index/*.log` か
+   stderr を必ず確認し、index/runtime error がないことまで見て成功判定する。
+2. front-door HTML が `127.0.0.1` で取れても、native GUI 操作まで届かなければ
+   manual E2E 完了扱いにしない。
+3. Unicode path 由来の index runner failure が出た場合は、当該手動確認タスクを
+   block として記録し、別 issue/scope に切り出して扱う。
+
+## 2026-04-22 — test: `HOME` / `USERPROFILE` を触る gwt-core test は crate-wide lock を共有する
+
+### 事象
+
+`crates/gwt-core/src/notes.rs` の repo-scoped notes test を追加した後、
+`cargo test -p gwt-core -p gwt` で既存の
+`coordination::tests::git_repo_without_origin_uses_project_scoped_coordination_dir`
+が intermittent に `指定されたパスが見つかりません` で落ちた。
+
+### 原因
+
+- `notes` test と `coordination` test の両方が `HOME` / `USERPROFILE` を
+  temp dir に差し替えていた。
+- それぞれが module-local な mutex を持っていたため、crate 全体では排他になっておらず、
+  並列 test 実行時に環境変数が競合した。
+- path helper は global env を直接読むので、別 module の test でも影響を受けた。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `RUST_LOG` など process-global env を触る test helper は
+   crate-wide shared module (`test_support`) に置いて共通 lock を使う。
+2. 新しい env-mutation test を追加するときは、既存 module に local lock がないかを
+   先に確認し、別 lock を増やさない。
+3. `cargo test -p gwt-core -p gwt` の full run を、env を触る test 追加直後の
+   fail-fast check に含める。
+
+## 2026-04-21 — spec: `gwt issue spec --edit` を短時間に連続実行したら readback を即確認する
+
+### 事象
+
+`#1784` の `data-model` / `quickstart` を `gwt issue spec 1784 --edit ...` で追加した直後、
+comment 自体は作成されていたが Issue body の `<!-- sections: -->` index から抜け落ち、
+`gwt issue spec 1784 --section data-model` と `--section quickstart` が
+`section not found` になった。
+
+### 原因
+
+- 連続した section write の途中で stale cache を起点に後続 write が走り、
+  body index を再計算した際に直前に追加した section を落として上書きした。
+- `comment があるか` だけを見て完了扱いし、`--section <name>` の readback を
+  各 write 後に即確認しなかった。
+
+### 再発防止策
+
+1. `gwt issue spec --edit` で新しい section を追加したら、毎回すぐ
+   `gwt issue spec <n> --section <name>` で readback を確認する。
+2. 複数 section を短時間に連続更新するときは、途中で `gwt issue view <n> --refresh`
+   で cache を強制更新してから次の write に進む。
+3. `comment は存在するが section not found` になったら、Issue body の
+   `<!-- sections: -->` index 欠落を疑って GitHub 側の body と comment ids を直接確認する。
+
 ## 2026-04-21 — fix(ci): WiX Component に複数 File を入れるときは未バージョン化 keypath で auto GUID を破綻させない
 
 ### 事象

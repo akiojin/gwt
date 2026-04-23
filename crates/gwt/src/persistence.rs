@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use gwt_agent::AgentColor;
 use serde::{Deserialize, Serialize};
 
 use crate::preset::WindowPreset;
@@ -27,14 +28,26 @@ pub fn default_canvas_viewport() -> CanvasViewport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WindowProcessStatus {
-    Starting,
+pub enum WindowState {
+    #[serde(alias = "starting", alias = "ready")]
     Running,
-    Ready,
-    Exited,
+    Waiting,
+    #[serde(alias = "exited")]
+    Stopped,
     Error,
+}
+
+pub type WindowProcessStatus = WindowState;
+
+impl WindowState {
+    #[allow(non_upper_case_globals)]
+    pub const Starting: Self = Self::Running;
+    #[allow(non_upper_case_globals)]
+    pub const Ready: Self = Self::Running;
+    #[allow(non_upper_case_globals)]
+    pub const Exited: Self = Self::Stopped;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,7 +57,7 @@ pub struct PersistedWindowState {
     pub preset: WindowPreset,
     pub geometry: WindowGeometry,
     pub z_index: u32,
-    pub status: WindowProcessStatus,
+    pub status: WindowState,
     #[serde(default)]
     pub minimized: bool,
     #[serde(default)]
@@ -53,6 +66,17 @@ pub struct PersistedWindowState {
     pub pre_maximize_geometry: Option<WindowGeometry>,
     #[serde(default = "default_persist_window")]
     pub persist: bool,
+    /// Identifier of the agent occupying this window. Persisted across
+    /// restarts so SPEC #2133 の色付けが復元される。`preset.Agent` の
+    /// window では launch wizard 起動時に設定される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Wire-only color hint sent to the WebView. 送信直前に backend が
+    /// [`agent_id`] (または `preset` のフォールバック) から計算する。
+    /// disk には書かない (`skip_deserializing` + skip_serializing_if で
+    /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub agent_color: Option<AgentColor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,11 +160,13 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     height: 420.0,
                 },
                 z_index: 1,
-                status: WindowProcessStatus::Starting,
+                status: WindowState::Running,
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: true,
+                agent_id: None,
+                agent_color: None,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -153,11 +179,13 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                     height: 420.0,
                 },
                 z_index: 2,
-                status: WindowProcessStatus::Starting,
+                status: WindowState::Running,
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: true,
+                agent_id: None,
+                agent_color: None,
             },
         ],
         next_z_index: 3,
@@ -175,7 +203,7 @@ pub fn default_session_state() -> PersistedSessionState {
 pub fn pause_process_windows_for_restore(state: &mut PersistedWorkspaceState) {
     for window in &mut state.windows {
         if window.preset.requires_process() {
-            window.status = WindowProcessStatus::Exited;
+            window.status = WindowState::Stopped;
         }
     }
 }
@@ -446,6 +474,8 @@ mod tests {
                         height: 480.0,
                     }),
                     persist: true,
+                    agent_id: None,
+                    agent_color: None,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -458,11 +488,13 @@ mod tests {
                         height: 360.0,
                     },
                     z_index: 5,
-                    status: WindowProcessStatus::Ready,
+                    status: WindowState::Running,
                     minimized: true,
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    agent_id: None,
+                    agent_color: None,
                 },
             ],
             next_z_index: 6,
@@ -502,6 +534,81 @@ mod tests {
         assert!(!loaded.windows[0].minimized);
         assert!(!loaded.windows[0].maximized);
         assert!(loaded.windows[0].pre_maximize_geometry.is_none());
+        // SPEC #2133: legacy window payloads predate agent_id / agent_color.
+        // serde `default` は無い値を None に初期化する。
+        assert!(loaded.windows[0].agent_id.is_none());
+        assert!(loaded.windows[0].agent_color.is_none());
+    }
+
+    #[test]
+    fn persisted_window_state_accepts_new_agent_id_field() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "claude-1",
+      "title": "Claude",
+      "preset": "claude",
+      "geometry": { "x": 0.0, "y": 0.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true,
+      "agent_id": "claude"
+    }
+  ],
+  "next_z_index": 2
+}"#,
+        )
+        .expect("write new-format workspace");
+
+        let loaded = load_workspace_state(&path).expect("load");
+        assert_eq!(loaded.windows[0].agent_id.as_deref(), Some("claude"));
+        // agent_color は wire 専用なので disk 読み込みでは常に None
+        assert!(loaded.windows[0].agent_color.is_none());
+    }
+
+    #[test]
+    fn persisted_window_state_serializes_agent_color_without_persisting() {
+        // wire serialize では agent_color を含むが、deserialize は無視する。
+        // disk 読み書きの round-trip では agent_color 情報が落ちることを確認。
+        let original = PersistedWindowState {
+            id: "w-1".into(),
+            title: "Claude".into(),
+            preset: WindowPreset::Claude,
+            geometry: WindowGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 200.0,
+            },
+            z_index: 1,
+            status: WindowProcessStatus::Running,
+            minimized: false,
+            maximized: false,
+            pre_maximize_geometry: None,
+            persist: true,
+            agent_id: Some("claude".into()),
+            agent_color: Some(AgentColor::Yellow),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        assert!(
+            json.contains("\"agent_id\":\"claude\""),
+            "agent_id should be serialized: {json}"
+        );
+        assert!(
+            json.contains("\"agent_color\":\"yellow\""),
+            "agent_color should be serialized as snake_case: {json}"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed.agent_id.as_deref(), Some("claude"));
+        assert!(
+            parsed.agent_color.is_none(),
+            "agent_color must be wire-only: skip_deserializing drops it"
+        );
     }
 
     #[test]
@@ -536,6 +643,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    agent_id: None,
+                    agent_color: None,
                 },
                 PersistedWindowState {
                     id: "file-tree-1".to_string(),
@@ -548,11 +657,13 @@ mod tests {
                         height: 500.0,
                     },
                     z_index: 2,
-                    status: WindowProcessStatus::Ready,
+                    status: WindowState::Running,
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    agent_id: None,
+                    agent_color: None,
                 },
             ],
             next_z_index: 3,
@@ -560,8 +671,8 @@ mod tests {
         save_workspace_state(&workspace_state_path(&project_root), &state).expect("save");
 
         let restored = load_restored_workspace_state(&project_root).expect("restore");
-        assert_eq!(restored.windows[0].status, WindowProcessStatus::Exited);
-        assert_eq!(restored.windows[1].status, WindowProcessStatus::Ready);
+        assert_eq!(restored.windows[0].status, WindowState::Stopped);
+        assert_eq!(restored.windows[1].status, WindowState::Running);
     }
 
     #[test]
@@ -746,6 +857,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    agent_id: None,
+                    agent_color: None,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -758,11 +871,13 @@ mod tests {
                         height: 420.0,
                     },
                     z_index: 2,
-                    status: WindowProcessStatus::Ready,
+                    status: WindowState::Running,
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    agent_id: None,
+                    agent_color: None,
                 },
             ],
             next_z_index: 3,
@@ -770,7 +885,34 @@ mod tests {
 
         pause_process_windows_for_restore(&mut state);
 
-        assert_eq!(state.windows[0].status, WindowProcessStatus::Exited);
-        assert_eq!(state.windows[1].status, WindowProcessStatus::Ready);
+        assert_eq!(state.windows[0].status, WindowState::Stopped);
+        assert_eq!(state.windows[1].status, WindowState::Running);
+    }
+
+    #[test]
+    fn window_state_round_trips_modern_variants_and_accepts_legacy_status_names() {
+        let waiting = serde_json::from_str::<WindowState>(r#""waiting""#).expect("waiting");
+        let running = serde_json::from_str::<WindowState>(r#""running""#).expect("running");
+        let stopped = serde_json::from_str::<WindowState>(r#""stopped""#).expect("stopped");
+        let error = serde_json::from_str::<WindowState>(r#""error""#).expect("error");
+
+        assert_eq!(waiting, WindowState::Waiting);
+        assert_eq!(running, WindowState::Running);
+        assert_eq!(stopped, WindowState::Stopped);
+        assert_eq!(error, WindowState::Error);
+
+        let legacy_starting =
+            serde_json::from_str::<WindowState>(r#""starting""#).expect("legacy starting");
+        let legacy_ready = serde_json::from_str::<WindowState>(r#""ready""#).expect("legacy ready");
+        let legacy_exited =
+            serde_json::from_str::<WindowState>(r#""exited""#).expect("legacy exited");
+
+        assert_eq!(legacy_starting, WindowState::Running);
+        assert_eq!(legacy_ready, WindowState::Running);
+        assert_eq!(legacy_exited, WindowState::Stopped);
+        assert_eq!(
+            serde_json::to_string(&WindowState::Waiting).expect("serialize"),
+            r#""waiting""#
+        );
     }
 }

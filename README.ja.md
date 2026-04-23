@@ -6,9 +6,13 @@ gwt は Git worktree の管理と、`Claude Code` / `Codex` / `Gemini` /
 ## インストール
 
 [GitHub Releases](https://github.com/akiojin/gwt/releases) からお使いの
-プラットフォーム向けバイナリをダウンロードし、`PATH` に配置してください。
+プラットフォーム向け release asset を取得してください。
 
 ### macOS
+
+- GUI 向けの主配布物: `gwt-macos-universal.dmg`
+- マウントした DMG から `GWT.app` を開くとネイティブ GUI をそのまま起動できます
+- `PATH` に `gwt` を入れたい場合は install script を使います
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -17,12 +21,21 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/i
 特定バージョンを指定する場合:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version 6.30.3
+curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash -s -- --version <version>
 ```
 
-### Windows / Linux
+### Windows
 
-GitHub Releases からバイナリを取得して `PATH` に配置します。
+- GUI 向けの主配布物: `gwt-windows-x86_64.msi`
+- portable bundle: `gwt-windows-x86_64.zip`
+- public front door は `gwt.exe` で、`gwtd.exe` は内部 runtime 用の companion binary です
+
+### Linux
+
+- portable bundle:
+  - `gwt-linux-x86_64.tar.gz`
+  - `gwt-linux-aarch64.tar.gz`
+- 展開した `gwt` / `gwtd` を `PATH` 上のディレクトリへ配置します
 
 ### アンインストール（macOS）
 
@@ -140,13 +153,13 @@ gwt issue spec <number> --section spec|plan|tasks
 ### ビルド
 
 ```bash
-cargo build -p gwt
+cargo build -p gwt --bin gwt --bin gwtd
 ```
 
 ### 実行
 
 ```bash
-cargo run -p gwt
+cargo run -p gwt --bin gwt
 ```
 
 ### macOS 向け `.app` bundle
@@ -160,6 +173,24 @@ cargo bundle -p gwt --format osx
 
 ```bash
 cargo test -p gwt-core -p gwt --all-features
+```
+
+### Release Asset Contract
+
+```bash
+npm run test:release-assets
+```
+
+### Frontend Bundle Contract
+
+```bash
+npm run test:frontend-bundle
+```
+
+### Release Flow Checks
+
+```bash
+npm run test:release-flow
 ```
 
 ### Lint

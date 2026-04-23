@@ -21,11 +21,15 @@
 
 mod actions;
 mod board;
+mod build;
+mod discuss;
 mod env;
 pub mod hook;
 mod issue;
 mod issue_spec;
+mod plan;
 mod pr;
+mod skill_state_runtime;
 pub mod update;
 
 use std::{
@@ -243,6 +247,30 @@ pub enum CliCommand {
     InternalRunInstaller { rest: Vec<String> },
     /// `gwt __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
     InternalDaemonHook { name: String, rest: Vec<String> },
+    /// `gwt discuss <resolve|park|reject|clear-next-question> --proposal <label>`.
+    Discuss(DiscussAction),
+    /// `gwt plan <start|phase|complete|abort> --spec <n> [...]`.
+    Plan(SkillStateAction),
+    /// `gwt build <start|phase|complete|abort> --spec <n> [...]`.
+    Build(SkillStateAction),
+}
+
+/// Sub-action for `gwt discuss ...` (SPEC-1935 FR-014p).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscussAction {
+    Resolve { proposal: String },
+    Park { proposal: String },
+    Reject { proposal: String },
+    ClearNextQuestion { proposal: String },
+}
+
+/// Sub-action for `gwt plan ...` / `gwt build ...` (SPEC-1935 FR-014q/r).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillStateAction {
+    Start { spec: u64 },
+    Phase { spec: u64, label: String },
+    Complete { spec: u64 },
+    Abort { spec: u64, reason: Option<String> },
 }
 
 /// Errors surfaced by argv parsing.
@@ -272,14 +300,25 @@ impl std::error::Error for CliParseError {}
 
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with
-/// `issue`, `pr`, `actions`, `board`, or `hook`. The GUI launcher keeps its
-/// legacy behaviour (positional repo path) for any other shape.
+/// a supported top-level CLI verb such as `issue`, `pr`, `actions`, `board`,
+/// `hook`, `discuss`, `plan`, `build`, `update`, or `__internal`. The GUI
+/// launcher keeps its legacy behaviour (positional repo path) for any other
+/// shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
     args.get(1)
         .map(|s| {
             matches!(
                 s.as_str(),
-                "issue" | "pr" | "actions" | "board" | "hook" | "update" | "__internal"
+                "issue"
+                    | "pr"
+                    | "actions"
+                    | "board"
+                    | "hook"
+                    | "update"
+                    | "__internal"
+                    | "discuss"
+                    | "plan"
+                    | "build"
             )
         })
         .unwrap_or(false)
@@ -346,6 +385,83 @@ pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     })
 }
 
+/// Parse `gwt discuss <action> --proposal <label>` (SPEC-1935 FR-014p).
+pub fn parse_discuss_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
+    let proposal = parse_named_string(rest, "--proposal")?;
+    let action = match head.as_str() {
+        "resolve" => DiscussAction::Resolve { proposal },
+        "park" => DiscussAction::Park { proposal },
+        "reject" => DiscussAction::Reject { proposal },
+        "clear-next-question" => DiscussAction::ClearNextQuestion { proposal },
+        other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+    };
+    Ok(CliCommand::Discuss(action))
+}
+
+/// Parse `gwt plan <action> --spec <n> [...]` (SPEC-1935 FR-014q).
+pub fn parse_plan_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    parse_skill_state_args(args).map(CliCommand::Plan)
+}
+
+/// Parse `gwt build <action> --spec <n> [...]` (SPEC-1935 FR-014r).
+pub fn parse_build_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    parse_skill_state_args(args).map(CliCommand::Build)
+}
+
+fn parse_skill_state_args(args: &[String]) -> Result<SkillStateAction, CliParseError> {
+    let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
+    match head.as_str() {
+        "start" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            Ok(SkillStateAction::Start { spec })
+        }
+        "phase" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            let label = parse_named_string(rest, "--label")?;
+            Ok(SkillStateAction::Phase { spec, label })
+        }
+        "complete" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            Ok(SkillStateAction::Complete { spec })
+        }
+        "abort" => {
+            let spec = parse_named_u64(rest, "--spec")?;
+            let reason = parse_optional_named_string(rest, "--reason");
+            Ok(SkillStateAction::Abort { spec, reason })
+        }
+        other => Err(CliParseError::UnknownSubcommand(other.to_string())),
+    }
+}
+
+fn parse_named_string(args: &[String], flag: &'static str) -> Result<String, CliParseError> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            let value = args.get(i + 1).ok_or(CliParseError::MissingFlag(flag))?;
+            return Ok(value.clone());
+        }
+        i += 1;
+    }
+    Err(CliParseError::MissingFlag(flag))
+}
+
+fn parse_optional_named_string(args: &[String], flag: &'static str) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            return args.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_named_u64(args: &[String], flag: &'static str) -> Result<u64, CliParseError> {
+    let raw = parse_named_string(args, flag)?;
+    raw.parse().map_err(|_| CliParseError::InvalidNumber(raw))
+}
+
 /// Dispatch a parsed [`CliCommand`] against the given [`CliEnv`].
 ///
 /// We collect output into a String buffer first so the [`SpecOps`] borrow of
@@ -385,6 +501,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         cmd @ (CliCommand::BoardShow { .. } | CliCommand::BoardPost { .. }) => {
             board::run(env, cmd, &mut out)?
         }
+        CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
+        CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
+        CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Hook { name, rest } => {
             return run_hook(env, &name, &rest);
         }
@@ -474,7 +593,8 @@ fn render_pr(out: &mut String, pr: &PrStatus) {
     out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
     out.push_str(&format!("url: {}\n", pr.url));
     out.push_str(&format!("ci: {}\n", pr.ci_status));
-    out.push_str(&format!("mergeable: {}\n", pr.mergeable));
+    out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
+    out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
     out.push_str(&format!("review: {}\n", pr.review_status));
 }
 
@@ -754,7 +874,7 @@ fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrS
             "pr",
             "view",
             "--json",
-            "number,title,state,url,mergeable,statusCheckRollup,reviewDecision",
+            "number,title,state,url,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
         ])
         .current_dir(repo_path)
         .output()?;
@@ -1218,14 +1338,15 @@ fn fetch_pr_checks_via_gh(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let checks = parse_pr_checks_items_response(&stdout, &stderr, output.status.success())?;
+    let merge_status = pr.effective_merge_status().to_string();
 
     Ok(PrChecksSummary {
         summary: format!(
             "PR #{} | CI: {} | Merge: {} | Review: {}",
-            pr.number, pr.ci_status, pr.mergeable, pr.review_status
+            pr.number, pr.ci_status, merge_status, pr.review_status
         ),
         ci_status: pr.ci_status,
-        merge_status: pr.mergeable,
+        merge_status,
         review_status: pr.review_status,
         checks,
     })
@@ -1465,7 +1586,10 @@ pub fn run_daemon_hook<E: CliEnv>(
     name: &str,
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{block_bash_policy, workflow_policy, BlockDecision, HookKind};
+    use crate::cli::hook::{
+        block_bash_policy, skill_build_spec_stop_check, skill_discussion_stop_check,
+        skill_plan_spec_stop_check, workflow_policy, HookKind, HookOutput,
+    };
 
     let Some(kind) = HookKind::from_name(name) else {
         let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
@@ -1473,18 +1597,11 @@ pub fn run_daemon_hook<E: CliEnv>(
     };
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
 
-    fn emit_block_decision<E: CliEnv>(env: &mut E, decision: &BlockDecision) -> i32 {
-        match serde_json::to_vec(decision) {
-            Ok(bytes) => {
-                let _ = env.stdout().write_all(&bytes);
-                let _ = env.stdout().flush();
-                2
-            }
+    fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match output.serialize_to(env.stdout()) {
+            Ok(()) => output.exit_code(),
             Err(err) => {
-                let _ = writeln!(
-                    env.stderr(),
-                    "gwt hook: failed to serialize decision: {err}"
-                );
+                let _ = writeln!(env.stderr(), "gwt hook: failed to serialize output: {err}");
                 1
             }
         }
@@ -1529,25 +1646,48 @@ pub fn run_daemon_hook<E: CliEnv>(
                 );
                 return Ok(2);
             };
-            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin, env.stdout()) {
-                Ok(()) => Ok(0),
+            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
                 Err(err) => Ok(emit_hook_error(env, name, err)),
             }
         }
         HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Ok(output) => Ok(emit_hook_output(env, &output)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
         HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
-            Ok(None) => Ok(0),
-            Ok(Some(decision)) => Ok(emit_block_decision(env, &decision)),
+            Ok(output) => Ok(emit_hook_output(env, &output)),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
         HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
             Ok(()) => Ok(0),
             Err(err) => Ok(emit_hook_error(env, name, err)),
         },
+        HookKind::SkillDiscussionStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillPlanSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_plan_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillBuildSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_build_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
     }
 }
 
@@ -1582,7 +1722,13 @@ use std::{env, fs, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
     format!(
-        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+    )
+}
+
+fn behind_pr_json(number: &str, title: &str) -> String {
+    format!(
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"BEHIND\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"REVIEW_REQUIRED\"}}"
     )
 }
 
@@ -1606,13 +1752,21 @@ fn main() -> ExitCode {
                 eprintln!("no pull requests found for branch");
                 return ExitCode::from(1);
             }
-            println!("{}", pr_json("12", "Current PR"));
+            if mode == "behind" {
+                println!("{}", behind_pr_json("12", "Current PR"));
+            } else {
+                println!("{}", pr_json("12", "Current PR"));
+            }
             return ExitCode::SUCCESS;
         }
         [pr, view, number, repo_flag, _, json_flag, ..]
             if pr == "pr" && view == "view" && repo_flag == "--repo" && json_flag == "--json" =>
         {
-            println!("{}", pr_json(number, "Fetched PR"));
+            if mode == "behind" {
+                println!("{}", behind_pr_json(number, "Fetched PR"));
+            } else {
+                println!("{}", pr_json(number, "Fetched PR"));
+            }
             return ExitCode::SUCCESS;
         }
         [pr, create, ..] if pr == "pr" && create == "create" => {
@@ -1852,6 +2006,7 @@ fn main() -> ExitCode {
             url: "https://github.com/akiojin/gwt/pull/128".to_string(),
             ci_status: "SUCCESS".to_string(),
             mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
             review_status: "APPROVED".to_string(),
         }
     }
@@ -1921,6 +2076,7 @@ fn main() -> ExitCode {
         assert!(out.contains("=== comment:7 (2026-04-20T01:00:00Z) ==="));
         assert!(out.contains("#128 [OPEN] Enforce coverage"));
         assert!(out.contains("ci: SUCCESS"));
+        assert!(out.contains("merge_state: CLEAN"));
         assert!(out.contains("workflow: coverage"));
         assert!(out.contains("=== review:review-1 [APPROVED] by reviewer"));
         assert!(out.contains(
@@ -2130,6 +2286,7 @@ fn main() -> ExitCode {
                 .expect("current pr")
                 .expect("current pr exists");
             assert_eq!(current.number, 12);
+            assert_eq!(current.merge_state_status, "CLEAN");
 
             let created = create_pr_via_gh(
                 "akiojin/gwt",
@@ -2199,6 +2356,17 @@ fn main() -> ExitCode {
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].workflow, "coverage");
             assert_eq!(checks.checks[0].url, "https://example.test/checks/12");
+        });
+
+        with_fake_gh("behind", |repo_path| {
+            let current = fetch_current_pr_via_gh(repo_path)
+                .expect("current pr")
+                .expect("current pr exists");
+            assert_eq!(current.effective_merge_status(), "BEHIND");
+
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert!(checks.summary.contains("Merge: BEHIND"));
+            assert_eq!(checks.merge_status, "BEHIND");
         });
 
         with_fake_gh("job-log-zip", |repo_path| {
