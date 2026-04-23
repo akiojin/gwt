@@ -109,7 +109,7 @@ def load_gitignore_patterns(project_root: Path) -> List[str]:
     gitignore = project_root / ".gitignore"
     patterns: List[str] = list(DEFAULT_IGNORE_PATTERNS)
     if gitignore.is_file():
-        for line in gitignore.read_text(errors="replace").splitlines():
+        for line in gitignore.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 patterns.append(line)
@@ -221,7 +221,7 @@ def extract_description(file_path: Path) -> str:
     name = file_path.name.lower()
 
     try:
-        content = file_path.read_text(errors="replace")
+        content = file_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return file_path.name
 
@@ -832,7 +832,7 @@ def action_index_specs(project_root: str, db_path: str) -> dict:
             continue
 
         try:
-            meta = json.loads(metadata_file.read_text(errors="replace"))
+            meta = json.loads(metadata_file.read_text(encoding="utf-8", errors="replace"))
         except (json.JSONDecodeError, ValueError, OSError):
             continue
 
@@ -846,7 +846,7 @@ def action_index_specs(project_root: str, db_path: str) -> dict:
         spec_md = spec_path / "spec.md"
         if spec_md.is_file():
             try:
-                spec_content = spec_md.read_text(errors="replace")[:500]
+                spec_content = spec_md.read_text(encoding="utf-8", errors="replace")[:500]
             except OSError:
                 pass
 
@@ -1049,7 +1049,7 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
     if os.name == "nt":
         import msvcrt  # type: ignore
 
-        fh = open(lock_path, "a+")
+        fh = open(lock_path, "a+b")
         try:
             mode = msvcrt.LK_LOCK  # always blocking; Windows lacks shared locks here
             msvcrt.locking(fh.fileno(), mode, 1)
@@ -1067,7 +1067,7 @@ def acquire_lock(db_path: Path, exclusive: bool = True) -> Iterator[None]:
 
     import fcntl  # type: ignore
 
-    fh = open(lock_path, "a+")
+    fh = open(lock_path, "a+b")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         try:
@@ -1243,7 +1243,7 @@ def read_manifest(worktree_dir: Path, scope: str) -> List[Dict[str, Any]]:
     if not path.is_file():
         return []
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
     if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
@@ -1261,7 +1261,7 @@ def write_manifest(worktree_dir: Path, scope: str, entries: List[Dict[str, Any]]
         "scope": scope,
         "entries": entries,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def compute_manifest_diff(
@@ -1361,7 +1361,7 @@ def embed_documents_for_paths(
             continue
         desc = extract_description(fpath)
         try:
-            text = fpath.read_text(errors="replace")[:2000]
+            text = fpath.read_text(encoding="utf-8", errors="replace")[:2000]
         except OSError:
             text = ""
         ids.append(rel)
@@ -1679,14 +1679,16 @@ def _read_issue_meta(db_path: Path) -> Optional[Dict[str, Any]]:
     if not meta_file.is_file():
         return None
     try:
-        return json.loads(meta_file.read_text())
+        return json.loads(meta_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
 
 
 def _write_issue_meta(db_path: Path, payload: Dict[str, Any]) -> None:
     db_path.mkdir(parents=True, exist_ok=True)
-    (db_path / META_FILENAME).write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    (db_path / META_FILENAME).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _now_utc() -> datetime.datetime:
@@ -1757,12 +1759,14 @@ def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
         if not meta_path.is_file():
             continue
         try:
-            meta = json.loads(meta_path.read_text())
-        except (json.JSONDecodeError, OSError, ValueError):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
             continue
         try:
-            body = body_path.read_text() if body_path.is_file() else ""
-        except OSError:
+            body = (
+                body_path.read_text(encoding="utf-8") if body_path.is_file() else ""
+            )
+        except (OSError, UnicodeDecodeError):
             body = ""
         labels = meta.get("labels", [])
         if isinstance(labels, str):
@@ -1799,8 +1803,8 @@ def _load_cached_spec_documents(
         if not meta_path.is_file():
             continue
         try:
-            meta = json.loads(meta_path.read_text())
-        except (json.JSONDecodeError, OSError, ValueError):
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
             continue
 
         labels = _normalize_labels(meta.get("labels", []))
@@ -1811,8 +1815,12 @@ def _load_cached_spec_documents(
         body_path = entry / "body.md"
         source_path = spec_path if spec_path.is_file() else body_path
         try:
-            content = source_path.read_text() if source_path.is_file() else ""
-        except OSError:
+            content = (
+                source_path.read_text(encoding="utf-8")
+                if source_path.is_file()
+                else ""
+            )
+        except (OSError, UnicodeDecodeError):
             content = ""
 
         manifest_entry = _build_cache_manifest_entry(
@@ -1921,8 +1929,8 @@ def _read_scope_meta_blob(
     if not meta_path.is_file():
         return {"schema_version": INDEX_SCHEMA_VERSION, "scopes": {}}
     try:
-        payload = json.loads(meta_path.read_text())
-    except (json.JSONDecodeError, OSError, ValueError):
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
         return {"schema_version": INDEX_SCHEMA_VERSION, "scopes": {}}
     if not isinstance(payload, dict):
         return {"schema_version": INDEX_SCHEMA_VERSION, "scopes": {}}
@@ -1963,7 +1971,9 @@ def _write_scope_meta(
         scope_payload.update(updates)
     scopes[scope] = scope_payload
     meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    meta_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _scope_collection_name(scope: str) -> str:
