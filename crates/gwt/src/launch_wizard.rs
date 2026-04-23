@@ -4088,7 +4088,7 @@ mod tests {
 
         let mut ctx = context(branch("origin/feature/gui"), "feature/gui");
         ctx.quick_start_root = worktree;
-        let mut state = LaunchWizardState::open(ctx, dir.path(), &dir.path().join("versions.json"));
+        let state = LaunchWizardState::open(ctx, dir.path(), &dir.path().join("versions.json"));
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
         assert_eq!(state.quick_start_entries.len(), 1);
@@ -4130,12 +4130,17 @@ mod tests {
         assert!(!loading.is_hydrating);
         assert_eq!(loading.hydration_error.as_deref(), Some("network failed"));
 
-        state.apply(LaunchWizardAction::ApplyQuickStart {
+        let mut resumable = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            state.quick_start_entries.clone(),
+        );
+        resumable.apply(LaunchWizardAction::ApplyQuickStart {
             index: 0,
             mode: QuickStartLaunchMode::Resume,
         });
         assert!(matches!(
-            state.completion.as_ref(),
+            resumable.completion.as_ref(),
             Some(LaunchWizardCompletion::Launch(config))
                 if matches!(
                     config.as_ref(),
