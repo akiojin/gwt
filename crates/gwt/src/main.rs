@@ -2337,6 +2337,22 @@ mod tests {
         config
     }
 
+    fn sample_custom_bunx_launch_config() -> gwt_agent::LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Custom("claude-code-openai".to_string()))
+            .working_dir("E:/gwt/develop")
+            .build();
+        config.command = "bunx".to_string();
+        config.args = vec![
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--print".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
+        config
+    }
+
     #[test]
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
@@ -2385,6 +2401,39 @@ mod tests {
         assert!(!changed, "successful bunx probe should keep bunx");
         assert_eq!(config.command, original_command);
         assert_eq!(config.args, original_args);
+    }
+
+    #[test]
+    fn host_package_runner_fallback_switches_custom_bunx_to_npx_when_probe_fails() {
+        let mut config = sample_custom_bunx_launch_config();
+
+        let changed = apply_host_package_runner_fallback_with_probe(
+            &mut config,
+            "npx".to_string(),
+            |command, args, _env, cwd| {
+                assert_eq!(command, "bunx");
+                assert_eq!(
+                    args,
+                    vec![
+                        "@anthropic-ai/claude-code@latest".to_string(),
+                        "--version".to_string(),
+                    ]
+                );
+                assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
+                false
+            },
+        );
+
+        assert!(changed, "expected custom bunx failure to switch to npx");
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ]
+        );
     }
 
     #[test]
