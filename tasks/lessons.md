@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-04-23 — fix(gui): agent-color の「色が出ない」は ANSI 色ではなく frontend surface contract を先に疑う
+
+### 事象
+
+`feature/agent-color` で「Window一覧でも terminal でもエージェント毎の色が出ない」
+という報告に対し、初手で ANSI/terminal color 側の切り分けに寄ってしまった。
+実際には対象は `SPEC #2133` の agent surface color で、`origin/develop`
+取り込み後の frontend bundle (`index.html` / `app.js`) から
+`data-agent-color` / `agent-dot` 契約が落ちていたのが原因だった。
+
+### 原因
+
+- 「terminal でも色が出ない」という表現を ANSI color 問題として解釈し、
+  現在の owner SPEC と UI contract を先に突き合わせなかった。
+- `feature/agent-color` が `origin/develop` に大きく behind している事実を
+ 先に使わず、古い branch 上の実装前提で調査を始めた。
+
+### 再発防止策
+
+1. `agent-color` / `エージェント毎の色` 系の報告では、まず ANSI 色ではなく
+   `workspace window` / `window list` / `launch wizard` / `board` の
+   surface contract を確認する。
+2. feature branch が `origin/develop` に大きく behind のときは、個別修正前に
+   先に develop を取り込んでから退行点を再確認する。
+3. frontend bundle 分離後の回帰では、`embedded_web.rs` に CSS/DOM bind
+   契約テストを追加してから修正する。
+
 ## 2026-04-23 — refactor: Windows spawn splitでも interactive cmd wrapper 契約を落とさない
 
 ### 事象
