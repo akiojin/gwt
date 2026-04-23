@@ -507,7 +507,7 @@ fn resolve_host_package_runner_with_probe<F>(
 where
     F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
 {
-    let version_spec = package_runner_version_spec(config)?;
+    let version_spec = host_package_runner_version_spec(config)?;
     if !command_matches_runner(&config.command, "bunx") {
         return None;
     }
@@ -525,6 +525,26 @@ where
         executable: fallback_executable,
         args,
     })
+}
+
+fn host_package_runner_version_spec(config: &LaunchConfig) -> Option<String> {
+    package_runner_version_spec(config)
+        .or_else(|| infer_package_runner_version_spec(&config.command, &config.args))
+}
+
+fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<String> {
+    if !(command_matches_runner(command, "bunx") || command_matches_runner(command, "npx")) {
+        return None;
+    }
+
+    let version_spec = match args.first().map(String::as_str) {
+        Some("--yes") | Some("-y") => args.get(1)?,
+        _ => args.first()?,
+    };
+    if version_spec.is_empty() || version_spec.starts_with('-') {
+        return None;
+    }
+    Some(version_spec.clone())
 }
 
 fn probe_host_package_runner(
@@ -1253,6 +1273,36 @@ mod tests {
         config
     }
 
+    fn sample_custom_bunx_launch_config(worktree: &Path) -> LaunchConfig {
+        let mut config = AgentLaunchBuilder::new(AgentId::Custom("claude-code-openai".to_string()))
+            .working_dir(worktree)
+            .branch("feature/demo")
+            .session_mode(SessionMode::Normal)
+            .build();
+        config.command = "bunx".to_string();
+        config.args = vec![
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "--print".to_string(),
+        ];
+        config.env_vars = HashMap::from([("TERM".to_string(), "xterm-256color".to_string())]);
+        config.working_dir = Some(worktree.to_path_buf());
+        config.runtime_target = LaunchRuntimeTarget::Host;
+        config.docker_lifecycle_intent = DockerLifecycleIntent::Connect;
+        config
+    }
+
+    #[test]
+    fn host_package_runner_version_spec_uses_runner_args_for_custom_bunx_launch() {
+        let temp = tempdir().expect("tempdir");
+        let config = sample_custom_bunx_launch_config(temp.path());
+
+        assert_eq!(super::package_runner_version_spec(&config), None);
+        assert_eq!(
+            super::host_package_runner_version_spec(&config),
+            Some("@anthropic-ai/claude-code@latest".to_string())
+        );
+    }
+
     #[test]
     fn prepare_agent_launch_persists_session_and_builds_process_launch() {
         let temp = tempdir().expect("tempdir");
@@ -1328,6 +1378,60 @@ mod tests {
             .exists());
         assert_eq!(prepared.session.launch_command, "npx");
         assert_eq!(prepared.session.branch, "feature/demo");
+    }
+
+    #[test]
+    fn prepare_agent_launch_uses_npx_fallback_for_custom_bunx_launch() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        let sessions_dir = temp.path().join(".gwt").join("sessions");
+        fs::create_dir_all(&worktree).expect("create worktree");
+
+        let mut probe_host_runner =
+            |_command: &str,
+             _args: Vec<String>,
+             _env: &HashMap<String, String>,
+             _cwd: Option<PathBuf>| false;
+        let lookup_gwt_bin =
+            |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe"));
+        let prepared = prepare_agent_launch_with(
+            &worktree,
+            &sessions_dir,
+            sample_custom_bunx_launch_config(&worktree),
+            None,
+            |path| {
+                assert_eq!(path, worktree.as_path());
+                Ok(())
+            },
+            PrepareLaunchDeps {
+                current_exe: Path::new(
+                    r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+                ),
+                probe_host_runner: &mut probe_host_runner,
+                lookup_gwt_bin: &lookup_gwt_bin,
+            },
+        )
+        .expect("prepare launch");
+
+        assert!(prepared.used_host_package_runner_fallback);
+        assert_eq!(prepared.process_launch.command, "npx");
+        assert_eq!(
+            prepared.process_launch.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ]
+        );
+        assert_eq!(prepared.session.launch_command, "npx");
+        assert_eq!(
+            prepared.session.launch_args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ]
+        );
     }
 
     #[test]
