@@ -21,11 +21,11 @@ pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
 
     match spawn_wrapper(
         Path::new(&resolved.command),
+        &config.args,
         &config.env,
         &config.remove_env,
     ) {
-        Some((command, mut args)) => {
-            args.extend(config.args);
+        Some((command, args)) => {
             config.command = command;
             config.args = args;
         }
@@ -38,6 +38,31 @@ pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
     }
 
     config
+}
+
+fn escape_cmd_double_quoted(value: &str) -> String {
+    value.replace('"', "\"\"")
+}
+
+fn quote_cmd_token_if_needed(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(c, '&' | '|' | '<' | '>' | '(' | ')' | '^' | '%' | '!' | '"')
+        });
+
+    if needs_quotes {
+        format!("\"{}\"", escape_cmd_double_quoted(value))
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(quote_cmd_token_if_needed(command));
+    parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
+    parts.join(" ")
 }
 
 fn resolve_spawn_target(
@@ -99,6 +124,7 @@ fn resolve_path_candidate(
 
 fn spawn_wrapper(
     resolved: &Path,
+    forwarded_args: &[String],
     env: &HashMap<String, String>,
     remove_env: &[String],
 ) -> Option<(String, Vec<String>)> {
@@ -118,13 +144,13 @@ fn spawn_wrapper(
     // with whitespace in the path (e.g. `C:\Program Files\nodejs\npx.cmd`).
     // Without `/s`, CMD's default rule preserves the quotes when the
     // command line has the typical `"<exe>" <args>` shape we emit here.
+    let expression = format!(
+        "{} & exit",
+        build_cmd_command_expression(&resolved.display().to_string(), forwarded_args)
+    );
     Some((
         PathBuf::from(comspec).display().to_string(),
-        vec![
-            "/d".to_string(),
-            "/c".to_string(),
-            resolved.display().to_string(),
-        ],
+        vec!["/d".to_string(), "/k".to_string(), expression],
     ))
 }
 
@@ -355,10 +381,27 @@ mod tests {
             normalized.args,
             vec![
                 "/d".to_string(),
-                "/c".to_string(),
-                cmd.display().to_string(),
-                "--dangerously-skip-permissions".to_string(),
+                "/k".to_string(),
+                format!("{} --dangerously-skip-permissions & exit", cmd.display()),
             ]
+        );
+    }
+
+    #[test]
+    fn build_cmd_command_expression_quotes_paths_and_metacharacters() {
+        let expression = build_cmd_command_expression(
+            r"C:\Program Files\nodejs\npx.cmd",
+            &[
+                "--cwd".to_string(),
+                r"C:\Users\Test User\repo".to_string(),
+                "a&b".to_string(),
+                r#"arg "quoted" value"#.to_string(),
+            ],
+        );
+
+        assert_eq!(
+            expression,
+            r#""C:\Program Files\nodejs\npx.cmd" --cwd "C:\Users\Test User\repo" "a&b" "arg ""quoted"" value""#
         );
     }
 
@@ -586,16 +629,20 @@ mod tests {
             normalized.args,
         );
         assert!(
+            normalized.args.iter().any(|a| a.eq_ignore_ascii_case("/k")),
+            "interactive batch shim should stay on /k wrapper, got {:?}",
+            normalized.args,
+        );
+        let expected_expression = format!(
+            "\"{}\" --yes @anthropic-ai/claude-code@latest & exit",
+            npx_cmd.display()
+        );
+        assert!(
             normalized
                 .args
                 .iter()
-                .any(|a| a == "@anthropic-ai/claude-code@latest"),
-            "expected original package spec preserved in argv, got {:?}",
-            normalized.args,
-        );
-        assert!(
-            normalized.args.iter().any(|a| a == "--yes"),
-            "expected --yes preserved in argv, got {:?}",
+                .any(|arg| arg == &expected_expression),
+            "expected original package spec preserved inside cmd wrapper expression, got {:?}",
             normalized.args,
         );
     }
@@ -612,7 +659,16 @@ mod tests {
         std::fs::write(&cmd_path, "@echo off\n").expect("cmd");
 
         let env: HashMap<String, String> = HashMap::new();
-        let wrapped = spawn_wrapper(&cmd_path, &env, &[]).expect("wrapper");
+        let wrapped = spawn_wrapper(
+            &cmd_path,
+            &[
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+            ],
+            &env,
+            &[],
+        )
+        .expect("wrapper");
 
         assert!(
             !wrapped.1.iter().any(|a| a.eq_ignore_ascii_case("/s")),
@@ -625,8 +681,18 @@ mod tests {
             wrapped.1,
         );
         assert!(
-            wrapped.1.iter().any(|a| a.eq_ignore_ascii_case("/c")),
-            "wrapper should still include /c, got {:?}",
+            wrapped.1.iter().any(|a| a.eq_ignore_ascii_case("/k")),
+            "interactive wrapper should use /k so ConPTY input forwarding stays intact, got {:?}",
+            wrapped.1,
+        );
+        let expected_expression = format!(
+            "\"{}\" --yes @anthropic-ai/claude-code@latest & exit",
+            cmd_path.display()
+        );
+        assert_eq!(
+            wrapped.1.last().map(String::as_str),
+            Some(expected_expression.as_str()),
+            "wrapper should preserve quoting for spaced shim paths and append `& exit`, got {:?}",
             wrapped.1,
         );
     }

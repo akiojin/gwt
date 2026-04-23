@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-23 — refactor: Windows spawn splitでも interactive cmd wrapper 契約を落とさない
+
+### 事象
+
+Windows の Codex pane で通常対話中にもキー入力が断続的に欠落した。`terminal_input`
+fast-path は残っていたが、Codex のような shim 起動エージェントでだけ再発していた。
+
+### 原因
+
+`b330d7e8` で Windows spawn 解決を `crates/gwt-terminal/src/pty/windows_spawn.rs`
+へ分離した際、`#1604/#1608` で確立していた interactive batch wrapper 契約
+(`cmd.exe /D /K <expression> & exit`) が脱落し、`.cmd` / `.bat` shim が再び
+`/C` で包まれていた。Codex は `codex.cmd` / `npx.cmd` などの shim 経由で起動
+しやすく、ConPTY の入力転送が最初に壊れた。
+
+### 再発防止策
+
+1. Windows の `.cmd` / `.bat` shim 解決を触るときは、path 解決だけでなく
+   interactive wrapper 契約 (`/D /K <expression> & exit`) まで引き継ぐ。
+2. 回帰テストには、spaced shim path、metachar を含む引数、`/S` omission、
+   Node.js 配布の `npx.cmd` shim を必ず含める。
+3. Codex の入力欠落を調査するときは、frontend や WebSocket より先に
+   Windows launch wrapper の `/K` / `/C` 契約を確認する。
+
 ## 2026-04-23 — release: macOS `.app` 内の CFBundleExecutable を他バイナリより先に codesign しない
 
 ### 事象
