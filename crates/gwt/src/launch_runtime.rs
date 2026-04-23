@@ -236,7 +236,7 @@ fn resolve_host_package_runner_with_probe<F>(
 where
     F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
 {
-    let version_spec = package_runner_version_spec(config)?;
+    let version_spec = host_package_runner_version_spec(config)?;
     if !command_matches_runner(&config.command, "bunx") {
         return None;
     }
@@ -254,6 +254,26 @@ where
         executable: fallback_executable,
         args,
     })
+}
+
+fn host_package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
+    package_runner_version_spec(config)
+        .or_else(|| infer_package_runner_version_spec(&config.command, &config.args))
+}
+
+fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<String> {
+    if !(command_matches_runner(command, "bunx") || command_matches_runner(command, "npx")) {
+        return None;
+    }
+
+    let version_spec = match args.first().map(String::as_str) {
+        Some("--yes") | Some("-y") => args.get(1)?,
+        _ => args.first()?,
+    };
+    if version_spec.is_empty() || version_spec.starts_with('-') {
+        return None;
+    }
+    Some(version_spec.clone())
 }
 
 fn probe_host_package_runner(
