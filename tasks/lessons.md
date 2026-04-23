@@ -1,5 +1,40 @@
 # Lessons Learned
 
+## 2026-04-23 — fix: Python の file I/O は `encoding="utf-8"` を必ず明示する
+
+### 事象
+
+`bunx @akiojin/gwt@latest` を日本語Windows (`C:\Users\AkioJinsenji秦泉寺章夫`)
+で実行すると、indexing フェーズで `chroma_index_runner.py` が
+`'cp932' codec can't decode byte 0x94 in position 172: illegal multibyte sequence`
+で `RUNTIME_ERROR` を返し、`SessionStart` / `UserPromptSubmit` フックも同じ
+エラーで落ちていた。2026-04-22 の lessons にも同症状の記録あり。
+
+### 原因
+
+`chroma_index_runner.py` の production 側 `Path.read_text()` /
+`Path.write_text()` / `open()` が `encoding` 未指定だった。Python 3 は
+`locale.getpreferredencoding(False)` をデフォルトに使うため、日本語Windows
+では `cp932` として UTF-8 の `~/.gwt/cache/issues/<n>/meta.json` 等を読もう
+として失敗していた。`_load_cached_issue_documents` の except で
+`UnicodeDecodeError` (実体は `ValueError` subclass) を飲み込んでいたため、
+静かに空リストを返していた経路もあった。
+
+### 再発防止策
+
+1. Python で `Path.read_text()` / `Path.write_text()` / `open()` を **テキスト
+   モード**で使うときは、必ず `encoding="utf-8"` を明示する。ロケール依存の
+   暗黙デフォルトは許容しない。
+2. Lock file や binary-safe なファイルを開く場合は `open(path, "a+b")` など
+   binary モードを使い、暗黙デコードを発生させない。
+3. JSON / YAML の読み込みには `(UnicodeDecodeError, ValueError,
+   json.JSONDecodeError, OSError)` を except で受け、旧キャッシュの混入
+   エンコードでサイレントに進まないようにする。意図を明確化するために
+   `UnicodeDecodeError` を明示する。
+4. 回帰テストでは `locale.getpreferredencoding` に頼らず、`io.open` を
+   monkey-patch して `encoding is None` 時に cp932 を注入するパターンで
+   Windows 日本語ロケールを再現する (`tests/test_cp932_safety.py` 参照)。
+
 ## 2026-04-23 — refactor: Windows spawn splitでも interactive cmd wrapper 契約を落とさない
 
 ### 事象
