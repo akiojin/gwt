@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.8.2] - 2026-04-23
+
+### Bug Fixes
+
+- Custom Claude bunx launchでnpx fallbackを使う
+- **terminal:** Restore Windows interactive shim wrapper (#2149)
+- **gui:** エージェント色のfrontend配線を復元
+
 ## [9.8.1] - 2026-04-23
 
 ### Bug Fixes
