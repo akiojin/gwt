@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.8.1] - 2026-04-23
+
+### Bug Fixes
+
+- **release:** Sign gwtd before gwt in macOS app bundle codesign order by @akiojin
+- Launch wizardでcustom agentを選択可能にする
+
+### Testing
+
+- Make launch wizard quick start resume deterministic
+
 
 ## [9.8.0] - 2026-04-23
 

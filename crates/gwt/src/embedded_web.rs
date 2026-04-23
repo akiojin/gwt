@@ -282,6 +282,68 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
+        let html = index_html();
+
+        assert!(
+            html.contains("--agent-claude")
+                && html.contains("--agent-codex")
+                && html.contains("--agent-gemini")
+                && html.contains("--agent-opencode")
+                && html.contains("--agent-copilot")
+                && html.contains("--agent-custom"),
+            "expected embedded html to define the AgentColor palette variables",
+        );
+        assert!(
+            html.contains("[data-agent-color=\"yellow\"]")
+                && html.contains("[data-agent-color=\"cyan\"]")
+                && html.contains("[data-agent-color=\"magenta\"]")
+                && html.contains("[data-agent-color=\"green\"]")
+                && html.contains("[data-agent-color=\"blue\"]")
+                && html.contains("[data-agent-color=\"gray\"]"),
+            "expected embedded html to map serialized AgentColor values to the shared CSS variable",
+        );
+        assert!(
+            html.contains(".workspace-window[data-agent-color]::before")
+                && html.contains(".window-list-row[data-agent-color]::before"),
+            "expected embedded html to expose agent-color accent bars for workspace windows and the window list",
+        );
+        assert!(
+            html.contains(".agent-dot"),
+            "expected embedded html to style the shared agent color dot surface",
+        );
+    }
+
+    #[test]
+    fn embedded_web_agent_color_is_bound_for_windows_wizard_and_board() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("if (windowData.agent_color)")
+                && html.contains("element.dataset.agentColor = windowData.agent_color"),
+            "expected embedded bundle to bind workspace window colors from windowData.agent_color",
+        );
+        assert!(
+            html.contains("row.dataset.agentColor = entry.agent_color"),
+            "expected embedded bundle to bind window list rows from entry.agent_color",
+        );
+        assert!(
+            html.contains("card.dataset.agentColor = entry.agent_color"),
+            "expected embedded bundle to bind board cards from entry.agent_color",
+        );
+        assert!(
+            html.contains("if (entry.agent_color)")
+                && html.contains("createNode(\"span\", \"agent-dot\")"),
+            "expected embedded bundle to render board entry agent dots when agent_color is present",
+        );
+        assert!(
+            html.contains("if (option.color)")
+                && html.contains("button.dataset.agentColor = option.color"),
+            "expected embedded bundle to bind launch wizard agent colors from option.color",
+        );
+    }
+
+    #[test]
     fn embedded_web_shell_windows_do_not_render_waiting_status() {
         let js = app_js();
 

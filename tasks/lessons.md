@@ -1,5 +1,56 @@
 # Lessons Learned
 
+## 2026-04-23 — fix(gui): agent-color の「色が出ない」は ANSI 色ではなく frontend surface contract を先に疑う
+
+### 事象
+
+`feature/agent-color` で「Window一覧でも terminal でもエージェント毎の色が出ない」
+という報告に対し、初手で ANSI/terminal color 側の切り分けに寄ってしまった。
+実際には対象は `SPEC #2133` の agent surface color で、`origin/develop`
+取り込み後の frontend bundle (`index.html` / `app.js`) から
+`data-agent-color` / `agent-dot` 契約が落ちていたのが原因だった。
+
+### 原因
+
+- 「terminal でも色が出ない」という表現を ANSI color 問題として解釈し、
+  現在の owner SPEC と UI contract を先に突き合わせなかった。
+- `feature/agent-color` が `origin/develop` に大きく behind している事実を
+ 先に使わず、古い branch 上の実装前提で調査を始めた。
+
+### 再発防止策
+
+1. `agent-color` / `エージェント毎の色` 系の報告では、まず ANSI 色ではなく
+   `workspace window` / `window list` / `launch wizard` / `board` の
+   surface contract を確認する。
+2. feature branch が `origin/develop` に大きく behind のときは、個別修正前に
+   先に develop を取り込んでから退行点を再確認する。
+3. frontend bundle 分離後の回帰では、`embedded_web.rs` に CSS/DOM bind
+   契約テストを追加してから修正する。
+
+## 2026-04-23 — refactor: Windows spawn splitでも interactive cmd wrapper 契約を落とさない
+
+### 事象
+
+Windows の Codex pane で通常対話中にもキー入力が断続的に欠落した。`terminal_input`
+fast-path は残っていたが、Codex のような shim 起動エージェントでだけ再発していた。
+
+### 原因
+
+`b330d7e8` で Windows spawn 解決を `crates/gwt-terminal/src/pty/windows_spawn.rs`
+へ分離した際、`#1604/#1608` で確立していた interactive batch wrapper 契約
+(`cmd.exe /D /K <expression> & exit`) が脱落し、`.cmd` / `.bat` shim が再び
+`/C` で包まれていた。Codex は `codex.cmd` / `npx.cmd` などの shim 経由で起動
+しやすく、ConPTY の入力転送が最初に壊れた。
+
+### 再発防止策
+
+1. Windows の `.cmd` / `.bat` shim 解決を触るときは、path 解決だけでなく
+   interactive wrapper 契約 (`/D /K <expression> & exit`) まで引き継ぐ。
+2. 回帰テストには、spaced shim path、metachar を含む引数、`/S` omission、
+   Node.js 配布の `npx.cmd` shim を必ず含める。
+3. Codex の入力欠落を調査するときは、frontend や WebSocket より先に
+   Windows launch wrapper の `/K` / `/C` 契約を確認する。
+
 ## 2026-04-23 — release: macOS `.app` 内の CFBundleExecutable を他バイナリより先に codesign しない
 
 ### 事象
