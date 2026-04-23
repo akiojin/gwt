@@ -489,6 +489,9 @@
           const row = document.createElement("button");
           row.type = "button";
           row.className = "window-list-row";
+          if (entry.agent_color) {
+            row.dataset.agentColor = entry.agent_color;
+          }
           const geometryLabel = windowGeometryLabel(entry);
           const runtimeState = runtimeStateForWindow(entry);
           const runtimeLabel = windowRuntimeLabel(runtimeState);
@@ -2790,17 +2793,24 @@
         }
         for (const entry of state.entries) {
           const card = createNode("article", "board-entry");
+          if (entry.agent_color) {
+            card.dataset.agentColor = entry.agent_color;
+          }
           if (state.replyParentId === entry.id) {
             card.classList.add("reply-target");
           }
 
           const header = createNode("div", "board-entry-header");
-          const meta = createNode(
-            "div",
-            "board-entry-meta",
-            `${entry.author || "Unknown"} · ${boardTimestampLabel(
-              entry.updated_at || entry.created_at,
-            )}`,
+          const meta = createNode("div", "board-entry-meta");
+          if (entry.agent_color) {
+            meta.appendChild(createNode("span", "agent-dot"));
+          }
+          meta.appendChild(
+            document.createTextNode(
+              `${entry.author || "Unknown"} · ${boardTimestampLabel(
+                entry.updated_at || entry.created_at,
+              )}`,
+            ),
           );
           const chips = createNode("div", "board-entry-chips");
           chips.appendChild(
@@ -3017,7 +3027,13 @@
         if (selected) {
           button.classList.add("selected");
         }
-        button.appendChild(createNode("span", "launch-choice-title", option.label));
+        const title = createNode("span", "launch-choice-title");
+        if (option.color) {
+          button.dataset.agentColor = option.color;
+          title.appendChild(createNode("span", "agent-dot"));
+        }
+        title.appendChild(document.createTextNode(option.label));
+        button.appendChild(title);
         if (option.description) {
           button.appendChild(
             createNode("span", "launch-choice-detail", option.description),
@@ -5285,6 +5301,11 @@
         }
 
         element.querySelector(".title-text").textContent = windowData.title;
+        if (windowData.agent_color) {
+          element.dataset.agentColor = windowData.agent_color;
+        } else {
+          delete element.dataset.agentColor;
+        }
         const wasMinimized = element.classList.contains("minimized");
         const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
