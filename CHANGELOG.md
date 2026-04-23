@@ -1,6 +1,150 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.8.0] - 2026-04-23
+
+### Bug Fixes
+
+- **gwt,ai:** Codex レビューの 2 件の P1 を修正 by @akiojin
+- **ci:** Split wix components so gwtd.exe gets its own auto GUID by @akiojin
+- **gui:** Canvas-stage の GPU レイヤーキャッシュ由来のテキストぼやけを解消 by @akiojin
+- Stop enabling codex hooks by default by @akiojin
+- Harden project index health checks by @akiojin
+- **agent:** Prefer .cmd variants of bunx/npx on Windows by @akiojin
+- **terminal:** Harden Windows shim resolution for Node.js distribution shims by @akiojin
+- **gwt:** Run backend connection probe off event loop
+- **gui:** Refresh terminal viewport after xterm writes
+- **gui:** Skip minimized terminal viewport refresh
+- **gwt:** Use selected custom agent preset id
+- **gui:** Issue Bridgeの表示とリンクを復旧
+- **gui:** Issue Bridgeの起動リンク契約を修正
+- **gui:** Issue Bridgeの未リンク起動を正規化
+- **test:** Normalize embedded html contract after merge
+- 既存Codexセッションのlegacy codex_hooks flagを除去
+- **skills:** Align gwt-arch-review scope contract
+- **skills:** Align gwt-register-issue intake contract
+- **hooks:** Hook envelopeを型安全化
+- **skills:** Sync current public workflow contracts
+- Avoid vt100 wide glyph resize panic
+- Avoid vt100 resize panic on release base
+- Preserve vt100 state during narrow resize
+- **release:** Sign macos dmg assets
+- **release:** Use macos-compatible base64 decode
+- **gwt:** Address launch wizard and release review blockers
+- Keep Launch Agent resume available for Codex
+- Reuse resumable quick start session profile
+- **docker:** 生成したcompose overrideを起動経路へ適用
+- **docker:** Bundle archとoverride serviceを起動対象に合わせる
+- **docker:** Generated override を分離し unsupported platform を明示エラー化
+- **pr:** Detect update-branch requirements from mergeStateStatus
+- **gwt:** Keep frontend event dispatch exhaustive
+- **installer:** Make Windows MSI usable after install
+- **update:** Centralize release asset contract
+- **update:** Preserve windows msi update path
+- **update:** Gate windows-only updater helpers
+- **gui:** Remove redundant window builder mut
+- **hook:** Emit systemMessage for board-reminder Stop to satisfy Claude Code schema
+- **branch-cleanup:** Use canonical remote base for safe cleanup
+- **branch-cleanup:** Keep remote rows risky when upstream is ahead
+- **docker:** Fallback to USERPROFILE for compose host mounts
+- **hooks:** Skill-discussion-stop-block の 2 件の Codex review 指摘を修正
+- **agent:** Custom agent名の誤分類を防ぐ
+- **agent:** Broaden custom agent regression coverage
+- **agent:** Align window state review contracts
+- **gui:** Sync terminal geometry after minimized restore
+- **gui:** Keep package front door on gwt binary
+- **gui:** Align release docs and package scripts
+- **gui:** Expose actual branch cleanup merge target refs
+- **ci:** Align markdownlint and managed assets test
+- **pr:** Address review feedback on runtime and docker flows
+- **ci:** Avoid gtk init in embedded server test
+- **pr:** Address follow-up review conversations
+- Keep build helper verbs on detached cli path
+
+### Documentation
+
+- **lessons:** Record WiX multi-file component auto GUID failure by @akiojin
+- Remove tui-design from agent guide by @akiojin
+
+### Features
+
+- Add project index self-healing diagnostics by @akiojin
+- Implement profile window management
+- **docker:** Auto-download gwt bundle for docker agents
+- **branch-list:** Pin main/master/develop to top of branch list
+- **hooks:** Skill単位のStop-block handler と LLM向け exit CLI を追加
+- **ui:** Color agent surfaces by AgentColor (#2133)
+- Agent window の runtime state 可視化を追加
+- **gui:** Add cache-backed board window
+- **gui:** Add cache-backed logs window
+- **gui:** Add repo-scoped memo window
+- **gui:** Add config-backed profile window
+- Normalize canvas window state badges
+
+### Miscellaneous Tasks
+
+- **merge:** Sync origin/develop into issue 2096
+- **merge:** Sync merged issue 2096 fix
+- **merge:** Sync develop into issue 2102 branch
+- Merge origin/develop into feature/not-implemantation
+- Merge latest develop into feature/not-implemantation
+- Merge latest develop
+- **merge:** Sync origin/develop into issue 2045
+- Merge latest develop
+- Merge origin/develop into feature/issue-2035
+- Merge origin develop into issue 2099
+- Merge latest develop
+- **merge:** Sync develop into issue 2102 branch
+- **merge:** Sync develop into windows installer branch
+- Merge origin/develop into feature/update-gwt-arch-review
+- Merge origin/develop into bugfix/codex-warning
+- Merge origin/develop into bugfix/codex-warning
+- **gui:** Align frontend verification flow
+- Merge origin/develop into bugfix/issue-2096
+- Merge origin/develop into spec-1921
+
+### Refactor
+
+- **gwt,agent:** Simplify レビューで検出された 8 件を解消 by @akiojin
+- **terminal:** Trim duplicate narrative from npx shim regression test
+- **gwt:** Extract custom agents controller
+- **gwt:** Dispatch custom agent presets by id
+- Centralize agent launch preparation
+- Split windows spawn resolution from pty
+- **gwt:** Extract launch wizard runtime module
+- Split launch wizard quick start loading
+- **docker:** Extract docker setup module
+- **gwt:** Centralize custom agent config path helper
+- Isolate custom agents settings state
+- **gwt:** Extract board view helpers from main
+- Extract embedded server module
+- **gui:** Extract app runtime module
+- **gui:** Extract launch runtime module
+- **gui:** Extract docker launch module
+- **gui:** Extract update front door module
+- **gui:** Extract runtime support module
+- **gui:** Map frontend state ownership
+- **gui:** Extract frontend surface units
+- **gui:** Externalize embedded web app bundle
+- **gui:** Retire legacy frontend poc paths
+
+### Testing
+
+- Relax async event wait in gwt tests by @akiojin
+- **gwt:** Cover custom agents dispatch config path errors
+- **gwt:** Align custom agent dispatch preset tests
+- **gui:** Cover embedded server route contracts
+- **gui:** Cover app runtime event contracts
+- **gui:** Cover native and browser launch surfaces
+- **gui:** Cover runtime sync and persistence contracts
+- **gui:** Cover embedded web frontend contracts
+- **gui:** Cover shared browser and native bundle contract
+- **gui:** Cover gui primary cli front door contract
+- **gui:** Cover canvas raster hint contract
+- **gui:** Guard protocol source layout ownership
+- **gui:** Guard cache-backed knowledge bridge path
+
 ## [9.7.0] - 2026-04-21
 
 ### Bug Fixes
