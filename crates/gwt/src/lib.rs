@@ -39,9 +39,9 @@ pub use knowledge_bridge::{
     KnowledgeKind, KnowledgeListItem,
 };
 pub use launch_wizard::{
-    build_builtin_agent_options, default_wizard_version_cache_path, AgentOption,
-    DockerWizardContext, LaunchTargetKind, LaunchWizardAction, LaunchWizardCompletion,
-    LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
+    build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
+    load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
+    LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
     LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardQuickStartView,
     LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
     LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
