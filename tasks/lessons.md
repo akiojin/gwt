@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-23 — release: macOS `.app` 内の CFBundleExecutable を他バイナリより先に codesign しない
+
+### 事象
+
+`release.yml` の `Build DMG installer (macOS)` で `Sign app bundle` ステップが
+`dist/GWT.app/Contents/MacOS/gwt: code object is not signed at all`
+`In subcomponent: .../MacOS/gwtd` と出して exit 1。結果として v9.8.0 の DMG ビルドが
+失敗し、`upload-release` / `publish-npm` まで連鎖失敗してドラフトリリースが公開されなかった。
+
+### 原因
+
+`GWT.app/Contents/MacOS/` に CFBundleExecutable (`gwt`) と helper (`gwtd`) が
+並んで置かれているとき、CFBundleExecutable を先に `codesign --sign` すると
+codesign はバンドルの他の subcomponent (この場合 `gwtd`) が既に署名済みで
+あることを要求し、未署名だと "code object is not signed at all" で失敗する。
+
+### 再発防止策
+
+1. `.app` バンドル内を個別に署名する場合、helper バイナリ → CFBundleExecutable → バンドル
+   の順で `codesign --sign` を呼ぶ。順序を逆にしない。
+2. もしくは `codesign --force --deep --sign` を `.app` 1 回だけ呼ぶ。
+3. 新しい helper バイナリを `.app/Contents/MacOS/` に追加するときは、`release.yml` の
+   署名順を必ず見直す。
+
 ## 2026-04-22 — verify: Windows GUI smoke は `browser URL` 出力だけで成功扱いしない
 
 ### 事象

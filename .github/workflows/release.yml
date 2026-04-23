@@ -348,9 +348,9 @@ jobs:
         run: |
           set -euo pipefail
           codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
-            dist/GWT.app/Contents/MacOS/gwt
-          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
             dist/GWT.app/Contents/MacOS/gwtd
+          codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
+            dist/GWT.app/Contents/MacOS/gwt
           codesign --force --options runtime --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
             dist/GWT.app
           codesign --verify --deep --strict --verbose=4 dist/GWT.app
