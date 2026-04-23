@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    custom::{CustomAgentType, CustomCodingAgent},
     session::GWT_SESSION_RUNTIME_PATH_ENV,
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
@@ -157,6 +158,27 @@ pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
     }
 }
 
+fn resolve_custom_runner(agent: &CustomCodingAgent) -> ResolvedRunner {
+    match agent.agent_type {
+        CustomAgentType::Command | CustomAgentType::Path => ResolvedRunner {
+            executable: agent.command.clone(),
+            base_args: Vec::new(),
+        },
+        CustomAgentType::Bunx => {
+            let (executable, needs_yes) = find_bunx_or_npx();
+            let mut base_args = Vec::new();
+            if needs_yes {
+                base_args.push("--yes".to_string());
+            }
+            base_args.push(agent.command.clone());
+            ResolvedRunner {
+                executable,
+                base_args,
+            }
+        }
+    }
+}
+
 /// Platform-specific priority list of package-runner executables to probe via
 /// `which::which`. Each entry is `(name, needs_yes)`.
 ///
@@ -239,6 +261,7 @@ pub enum PermissionMode {
 #[derive(Debug, Clone)]
 pub struct AgentLaunchBuilder {
     agent_id: AgentId,
+    custom_agent: Option<CustomCodingAgent>,
     working_dir: Option<PathBuf>,
     branch: Option<String>,
     base_branch: Option<String>,
@@ -268,6 +291,7 @@ impl AgentLaunchBuilder {
     pub fn new(agent_id: AgentId) -> Self {
         Self {
             agent_id,
+            custom_agent: None,
             working_dir: None,
             branch: None,
             base_branch: None,
@@ -287,6 +311,11 @@ impl AgentLaunchBuilder {
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
         }
+    }
+
+    pub fn custom_agent(mut self, agent: CustomCodingAgent) -> Self {
+        self.custom_agent = Some(agent);
+        self
     }
 
     pub fn working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -388,6 +417,11 @@ impl AgentLaunchBuilder {
     /// Build the final `LaunchConfig`.
     pub fn build(self) -> LaunchConfig {
         let mut env_vars = HashMap::new();
+        let skip_permissions = self.skip_permissions
+            || matches!(
+                self.permission_mode,
+                Some(PermissionMode::BypassPermissions)
+            );
 
         // Common env vars
         env_vars.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -406,12 +440,24 @@ impl AgentLaunchBuilder {
         }
 
         // Resolve runner (installed binary vs bunx/npx)
-        let runner = resolve_runner(
-            &self.agent_id,
-            self.version.as_deref().unwrap_or("installed"),
-        );
+        let runner = self
+            .custom_agent
+            .as_ref()
+            .map(resolve_custom_runner)
+            .unwrap_or_else(|| {
+                resolve_runner(
+                    &self.agent_id,
+                    self.version.as_deref().unwrap_or("installed"),
+                )
+            });
 
         let mut args = runner.base_args;
+        if let Some(custom_agent) = self.custom_agent.as_ref() {
+            args.extend(custom_agent.build_args(self.session_mode));
+            if skip_permissions {
+                args.extend(custom_agent.skip_permissions_args.clone());
+            }
+        }
 
         // Agent-specific configuration
         match &self.agent_id {
@@ -443,13 +489,20 @@ impl AgentLaunchBuilder {
         // SPEC-1921 FR-063: merge CustomCodingAgent.env AFTER Common and
         // agent-specific env so preset entries win over built-in defaults
         // but BEFORE env_overrides (explicit caller overrides still win).
+        if let Some(custom_agent) = self.custom_agent.as_ref() {
+            env_vars.extend(custom_agent.env.clone());
+        }
         env_vars.extend(self.custom_agent_env);
 
         // Apply env overrides last (user wins)
         env_vars.extend(self.env_overrides);
 
         let agent_id = self.agent_id.clone();
-        let display_name = self.agent_id.display_name().to_string();
+        let display_name = self
+            .custom_agent
+            .as_ref()
+            .map(|agent| agent.display_name.clone())
+            .unwrap_or_else(|| self.agent_id.display_name().to_string());
         let color = self.agent_id.default_color();
         let model = self.model.clone();
         let tool_version = self
@@ -459,11 +512,6 @@ impl AgentLaunchBuilder {
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
-        let skip_permissions = self.skip_permissions
-            || matches!(
-                self.permission_mode,
-                Some(PermissionMode::BypassPermissions)
-            );
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
         LaunchConfig {
@@ -660,6 +708,8 @@ impl AgentLaunchBuilder {
 
 #[cfg(test)]
 mod tests {
+    use crate::custom::{CustomAgentType, CustomCodingAgent, ModeArgs};
+
     use super::*;
 
     // SPEC-1921 Phase 53 / Issue #2091: canonical_launch_args is the single
@@ -1227,6 +1277,60 @@ mod tests {
         assert_eq!(config.display_name, "aider");
         assert_eq!(config.color, AgentColor::Gray);
         assert!(config.args.contains(&"--no-git".to_string()));
+    }
+
+    #[test]
+    fn custom_agent_definition_overrides_display_name_runner_args_and_env() {
+        let agent = CustomCodingAgent {
+            id: "proxy-agent".to_string(),
+            display_name: "Claude Proxy".to_string(),
+            agent_type: CustomAgentType::Bunx,
+            command: "@anthropic-ai/claude-code@latest".to_string(),
+            default_args: vec!["--print".to_string()],
+            mode_args: Some(ModeArgs {
+                normal: Vec::new(),
+                continue_mode: vec!["--continue".to_string()],
+                resume: vec!["--resume".to_string()],
+            }),
+            skip_permissions_args: vec!["--dangerously-skip-permissions".to_string()],
+            env: HashMap::from([(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://proxy.local:32768".to_string(),
+            )]),
+        };
+
+        let config = AgentLaunchBuilder::new(AgentId::Custom("proxy-agent".into()))
+            .custom_agent(agent)
+            .session_mode(SessionMode::Continue)
+            .skip_permissions(true)
+            .build();
+
+        assert_eq!(config.display_name, "Claude Proxy");
+        assert!(
+            config.command.contains("bunx") || config.command.contains("npx"),
+            "custom bunx agent should resolve through a package runner: {}",
+            config.command
+        );
+        assert!(
+            config
+                .args
+                .iter()
+                .any(|arg| arg.contains("@anthropic-ai/claude-code@latest")),
+            "custom bunx agent must include the package spec: {:?}",
+            config.args
+        );
+        assert!(config.args.contains(&"--print".to_string()));
+        assert!(config.args.contains(&"--continue".to_string()));
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+        assert_eq!(
+            config
+                .env_vars
+                .get("ANTHROPIC_BASE_URL")
+                .map(String::as_str),
+            Some("http://proxy.local:32768")
+        );
     }
 
     #[test]

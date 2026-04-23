@@ -129,13 +129,14 @@ pub struct LaunchWizardView {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AgentOption {
     pub id: String,
     pub name: String,
     pub available: bool,
     pub installed_version: Option<String>,
     pub versions: Vec<String>,
+    pub custom_agent: Option<gwt_agent::CustomCodingAgent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,10 +425,7 @@ impl LaunchWizardState {
     }
 
     pub fn open(context: LaunchWizardContext, sessions_dir: &Path, cache_path: &Path) -> Self {
-        let agent_options = build_builtin_agent_options(
-            gwt_agent::AgentDetector::detect_all(),
-            &gwt_agent::VersionCache::load(cache_path),
-        );
+        let agent_options = load_agent_options(&gwt_agent::VersionCache::load(cache_path));
         let quick_start_entries = load_quick_start_entries(
             &context.quick_start_root,
             sessions_dir,
@@ -628,7 +626,7 @@ impl LaunchWizardState {
                 let max_index = self.current_options().len().saturating_sub(1);
                 self.selected = index.min(max_index);
                 self.apply_selection();
-                if self.completion.is_none() {
+                if self.completion.is_none() && self.error.is_none() {
                     self.advance_after_current_step();
                 }
             }
@@ -642,8 +640,19 @@ impl LaunchWizardState {
         if !self.launch_target_is_agent() {
             return Err("Agent launch target is not selected".to_string());
         }
-        let agent_id = agent_id_from_key(&self.agent_id);
+        let selected_agent = self
+            .selected_agent()
+            .cloned()
+            .ok_or_else(|| "Agent option is unavailable".to_string())?;
+        if !selected_agent.available {
+            return Err("Agent option is unavailable".to_string());
+        }
+
+        let agent_id = agent_id_from_key(&selected_agent.id);
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
+        if let Some(custom_agent) = selected_agent.custom_agent.clone() {
+            builder = builder.custom_agent(custom_agent);
+        }
 
         if !self.is_new_branch {
             if let Some(worktree_path) = &self.context.worktree_path {
@@ -824,6 +833,10 @@ impl LaunchWizardState {
             }
             LaunchWizardStep::AgentSelect => {
                 if let Some(agent) = self.detected_agents.get(self.selected) {
+                    if !agent.available {
+                        self.error = Some("Agent option is unavailable".to_string());
+                        return;
+                    }
                     self.agent_id = agent.id.clone();
                 }
                 self.sync_selected_agent_options();
@@ -1014,15 +1027,18 @@ impl LaunchWizardState {
     }
 
     fn set_agent_id(&mut self, agent_id: &str) {
-        if self
+        match self
             .detected_agents
             .iter()
-            .any(|candidate| candidate.id == agent_id)
+            .find(|candidate| candidate.id == agent_id)
         {
-            self.agent_id = agent_id.to_string();
-            self.sync_selected_agent_options();
-        } else {
-            self.error = Some("Agent option is unavailable".to_string());
+            Some(candidate) if candidate.available => {
+                self.agent_id = agent_id.to_string();
+                self.sync_selected_agent_options();
+            }
+            _ => {
+                self.error = Some("Agent option is unavailable".to_string());
+            }
         }
     }
 
@@ -1398,7 +1414,10 @@ impl LaunchWizardState {
             return self.detected_agents.get(self.selected);
         }
         if self.agent_id.is_empty() {
-            self.detected_agents.first()
+            self.detected_agents
+                .iter()
+                .find(|agent| agent.available)
+                .or_else(|| self.detected_agents.first())
         } else {
             self.detected_agents
                 .iter()
@@ -2491,11 +2510,65 @@ fn agent_description(agent: &AgentOption) -> String {
     let availability = if agent.available {
         "Installed"
     } else {
-        "Not installed"
+        "Unavailable"
     };
     match agent.installed_version.as_deref() {
         Some(version) => format!("{availability} · {version}"),
         None => availability.to_string(),
+    }
+}
+
+fn load_global_custom_agents() -> Vec<gwt_agent::CustomCodingAgent> {
+    if std::env::var_os(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV).is_some() {
+        return Vec::new();
+    }
+
+    gwt_agent::load_custom_agents_from_path(&gwt_core::paths::gwt_config_path()).unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn package_runner_candidates() -> &'static [&'static str] {
+    &["bunx.cmd", "bunx", "npx.cmd", "npx"]
+}
+
+#[cfg(not(windows))]
+fn package_runner_candidates() -> &'static [&'static str] {
+    &["bunx", "npx"]
+}
+
+fn package_runner_available() -> bool {
+    package_runner_candidates().iter().any(|candidate| {
+        which::which(candidate)
+            .ok()
+            .is_some_and(|path| !path.to_string_lossy().contains("node_modules"))
+    })
+}
+
+fn command_version(command: &str) -> Option<String> {
+    let output = std::process::Command::new(command)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!raw.is_empty()).then_some(raw)
+}
+
+fn custom_agent_availability(agent: &gwt_agent::CustomCodingAgent) -> (bool, Option<String>) {
+    match agent.agent_type {
+        gwt_agent::custom::CustomAgentType::Command => {
+            gwt_agent::AgentDetector::detect_by_command(&agent.command)
+                .map(|detected| (true, detected.version))
+                .unwrap_or((false, None))
+        }
+        gwt_agent::custom::CustomAgentType::Path => {
+            let path = Path::new(&agent.command);
+            (path.is_file(), command_version(&agent.command))
+        }
+        gwt_agent::custom::CustomAgentType::Bunx => (package_runner_available(), None),
     }
 }
 
@@ -2508,6 +2581,34 @@ fn agent_option_color(agent_id: &str) -> Option<gwt_agent::AgentColor> {
 
 pub fn default_wizard_version_cache_path() -> PathBuf {
     gwt_core::paths::gwt_cache_dir().join("agent-versions.json")
+}
+
+pub fn build_agent_options(
+    detected_agents: Vec<gwt_agent::DetectedAgent>,
+    cache: &gwt_agent::VersionCache,
+    custom_agents: Vec<gwt_agent::CustomCodingAgent>,
+) -> Vec<AgentOption> {
+    let mut options = build_builtin_agent_options(detected_agents, cache);
+    options.extend(custom_agents.into_iter().map(|agent| {
+        let (available, installed_version) = custom_agent_availability(&agent);
+        AgentOption {
+            id: agent.id.clone(),
+            name: agent.display_name.clone(),
+            available,
+            installed_version,
+            versions: Vec::new(),
+            custom_agent: Some(agent),
+        }
+    }));
+    options
+}
+
+pub fn load_agent_options(cache: &gwt_agent::VersionCache) -> Vec<AgentOption> {
+    build_agent_options(
+        gwt_agent::AgentDetector::detect_all(),
+        cache,
+        load_global_custom_agents(),
+    )
 }
 
 pub fn build_builtin_agent_options(
@@ -2536,6 +2637,7 @@ pub fn build_builtin_agent_options(
                     .get(&agent_id)
                     .map(|versions| versions.to_vec())
                     .unwrap_or_default(),
+                custom_agent: None,
             }
         })
         .collect()
@@ -2543,6 +2645,8 @@ pub fn build_builtin_agent_options(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
@@ -2556,6 +2660,7 @@ mod tests {
                 available: true,
                 installed_version: Some("1.0.0".to_string()),
                 versions: vec!["0.9.0".to_string(), "1.0.0".to_string()],
+                custom_agent: None,
             },
             AgentOption {
                 id: "codex".to_string(),
@@ -2563,8 +2668,31 @@ mod tests {
                 available: true,
                 installed_version: Some("0.110.0".to_string()),
                 versions: vec!["0.109.0".to_string(), "0.110.0".to_string()],
+                custom_agent: None,
             },
         ]
+    }
+
+    fn sample_custom_agent(
+        id: &str,
+        display_name: &str,
+        agent_type: gwt_agent::custom::CustomAgentType,
+        command: impl Into<String>,
+    ) -> gwt_agent::CustomCodingAgent {
+        gwt_agent::CustomCodingAgent {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            agent_type,
+            command: command.into(),
+            default_args: vec!["--serve".to_string()],
+            mode_args: Some(gwt_agent::custom::ModeArgs {
+                normal: Vec::new(),
+                continue_mode: vec!["--continue".to_string()],
+                resume: vec!["--resume".to_string()],
+            }),
+            skip_permissions_args: vec!["--unsafe".to_string()],
+            env: HashMap::from([("API_KEY".to_string(), "secret".to_string())]),
+        }
     }
 
     #[test]
@@ -2591,6 +2719,52 @@ mod tests {
             Some(gwt_agent::AgentColor::Gray)
         );
         assert_eq!(agent_option_color(""), None);
+    }
+
+    #[test]
+    fn build_agent_options_appends_config_backed_custom_agents_after_builtins() {
+        let dir = tempdir().expect("tempdir");
+        let available_path = dir.path().join("custom-agent");
+        std::fs::write(&available_path, "echo custom").expect("write custom agent stub");
+        let missing_path = dir.path().join("missing-agent");
+
+        let options = build_agent_options(
+            vec![gwt_agent::DetectedAgent {
+                agent_id: gwt_agent::AgentId::ClaudeCode,
+                version: Some("1.2.3".to_string()),
+                path: PathBuf::from("/tmp/claude"),
+            }],
+            &gwt_agent::VersionCache::new(),
+            vec![
+                sample_custom_agent(
+                    "proxy-agent",
+                    "Claude Proxy",
+                    gwt_agent::custom::CustomAgentType::Path,
+                    available_path.display().to_string(),
+                ),
+                sample_custom_agent(
+                    "missing-agent",
+                    "Missing Agent",
+                    gwt_agent::custom::CustomAgentType::Path,
+                    missing_path.display().to_string(),
+                ),
+            ],
+        );
+
+        let proxy = options
+            .iter()
+            .position(|option| option.id == "proxy-agent")
+            .expect("custom agent appended");
+        let missing = options
+            .iter()
+            .position(|option| option.id == "missing-agent")
+            .expect("missing custom agent appended");
+
+        assert!(proxy > 0, "custom agents must appear after builtin options");
+        assert!(missing > proxy, "custom agents should keep append order");
+        assert_eq!(options[proxy].name, "Claude Proxy");
+        assert!(options[proxy].available);
+        assert!(!options[missing].available);
     }
 
     fn branch(name: &str) -> BranchListEntry {
@@ -3472,6 +3646,123 @@ mod tests {
         let config = state.build_launch_config().expect("config");
 
         assert_eq!(config.linked_issue_number, Some(1234));
+    }
+
+    #[test]
+    fn build_launch_config_for_custom_agent_uses_stored_definition() {
+        let dir = tempdir().expect("tempdir");
+        let custom_path = dir.path().join("custom-agent");
+        std::fs::write(&custom_path, "echo custom").expect("write custom agent stub");
+
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            build_agent_options(
+                Vec::new(),
+                &gwt_agent::VersionCache::new(),
+                vec![sample_custom_agent(
+                    "proxy-agent",
+                    "Claude Proxy",
+                    gwt_agent::custom::CustomAgentType::Path,
+                    custom_path.display().to_string(),
+                )],
+            ),
+            Vec::new(),
+        );
+        state.set_agent_id("proxy-agent");
+        state.set_execution_mode("resume");
+        state.resume_session_id = Some("resume-1".to_string());
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("custom launch config");
+
+        assert_eq!(config.command, custom_path.display().to_string());
+        assert_eq!(config.display_name, "Claude Proxy");
+        assert!(config.args.contains(&"--serve".to_string()));
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(config.args.contains(&"--unsafe".to_string()));
+        assert_eq!(
+            config.env_vars.get("API_KEY").map(String::as_str),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn build_launch_config_rejects_unavailable_custom_agent() {
+        let missing_path = PathBuf::from("/tmp/nonexistent-custom-agent");
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            build_agent_options(
+                Vec::new(),
+                &gwt_agent::VersionCache::new(),
+                vec![sample_custom_agent(
+                    "missing-agent",
+                    "Missing Agent",
+                    gwt_agent::custom::CustomAgentType::Path,
+                    missing_path.display().to_string(),
+                )],
+            ),
+            Vec::new(),
+        );
+        state.set_agent_id("missing-agent");
+
+        let error = state
+            .build_launch_config()
+            .expect_err("unavailable custom agent must not launch");
+        assert_eq!(error, "Agent option is unavailable");
+    }
+
+    #[test]
+    fn quick_start_resume_for_custom_agent_uses_config_backed_definition() {
+        let dir = tempdir().expect("tempdir");
+        let custom_path = dir.path().join("custom-agent");
+        std::fs::write(&custom_path, "echo custom").expect("write custom agent stub");
+
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            build_agent_options(
+                Vec::new(),
+                &gwt_agent::VersionCache::new(),
+                vec![sample_custom_agent(
+                    "proxy-agent",
+                    "Claude Proxy",
+                    gwt_agent::custom::CustomAgentType::Path,
+                    custom_path.display().to_string(),
+                )],
+            ),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "proxy-agent".to_string(),
+                tool_label: "Claude Proxy".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.command, custom_path.display().to_string());
+                    assert_eq!(config.display_name, "Claude Proxy");
+                    assert!(config.args.contains(&"--resume".to_string()));
+                    assert!(config.args.contains(&"--unsafe".to_string()));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected quick start launch completion, got {other:?}"),
+        }
     }
 
     #[test]

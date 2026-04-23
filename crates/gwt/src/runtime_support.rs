@@ -189,10 +189,9 @@ pub(crate) fn resolve_launch_wizard_hydration(
     active_session_branches: &std::collections::HashSet<String>,
     sessions_dir: &Path,
 ) -> Result<LaunchWizardHydration, String> {
-    let agent_options = build_builtin_agent_options(
-        gwt_agent::AgentDetector::detect_all(),
-        &gwt_agent::VersionCache::load(&default_wizard_version_cache_path()),
-    );
+    let agent_options = load_agent_options(&gwt_agent::VersionCache::load(
+        &default_wizard_version_cache_path(),
+    ));
     let entries = list_branch_entries_with_active_sessions(project_root, active_session_branches)
         .map_err(|error| error.to_string())?;
     let selected_branch = entries

@@ -11,8 +11,8 @@ use std::{
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
 use base64::Engine;
 use gwt::{
-    build_builtin_agent_options, cleanup_selected_branches, default_wizard_version_cache_path,
-    detect_shell_program, list_branch_entries_with_active_sessions, list_directory_entries,
+    cleanup_selected_branches, default_wizard_version_cache_path, detect_shell_program,
+    list_branch_entries_with_active_sessions, list_directory_entries, load_agent_options,
     load_knowledge_bridge, load_restored_workspace_state, load_session_state,
     migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
     save_session_state, save_workspace_state, workspace_state_path, BackendEvent,
@@ -704,6 +704,7 @@ mod tests {
             available: true,
             installed_version: Some("0.110.0".to_string()),
             versions: vec!["0.110.0".to_string()],
+            custom_agent: None,
         }]
     }
 
