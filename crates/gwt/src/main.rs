@@ -1151,6 +1151,7 @@ mod tests {
             KnowledgeKind::Issue,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(knowledge_missing.len(), 1);
         assert!(matches!(
@@ -1164,6 +1165,7 @@ mod tests {
             KnowledgeKind::Issue,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(knowledge_wrong.len(), 1);
         assert!(matches!(
@@ -1734,6 +1736,7 @@ mod tests {
                     knowledge_kind: KnowledgeKind::Issue,
                     selected_number: None,
                     refresh: false,
+                    list_scope: None,
                 },
             )
             .is_empty());
@@ -1744,6 +1747,7 @@ mod tests {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
                     number: 42,
+                    list_scope: None,
                 },
             )
             .is_empty());

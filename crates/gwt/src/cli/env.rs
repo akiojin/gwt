@@ -1252,8 +1252,11 @@ fn main() -> ExitCode {
                 "hello"
             );
 
+            // `DefaultCliEnv` spawns `current_exe()`, which is the Rust test harness in unit tests.
+            // Use `--help` so the spawned binary exits successfully regardless of whether it is the
+            // real CLI binary or the harness wrapper.
             let output = env
-                .run_internal_command(&["gwt".to_string(), "issue".to_string()], "")
+                .run_internal_command(&["gwt".to_string(), "--help".to_string()], "")
                 .expect("internal dispatch");
             assert_eq!(output.status, 0);
         });

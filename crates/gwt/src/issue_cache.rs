@@ -4,16 +4,32 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
+use chrono::{DateTime, Utc};
 use gwt_core::{
     paths::gwt_cache_dir,
     repo_hash::{compute_repo_hash, RepoHash},
 };
-use gwt_github::{client::IssueSnapshot, Cache, IssueNumber, IssueState, UpdatedAt};
+use gwt_github::{
+    cache::write_atomic,
+    client::{CommentId, CommentSnapshot, IssueSnapshot},
+    Cache, IssueNumber, IssueState, UpdatedAt,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const DETACHED_REPO_CACHE_DIR: &str = "__detached__";
+const SPEC_LABEL: &str = "gwt-spec";
+const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
+pub(crate) const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IssueCacheRefreshMeta {
+    last_full_refresh: String,
+    ttl_minutes: u64,
+}
 
 pub(crate) fn issue_cache_base_root() -> PathBuf {
     gwt_cache_dir().join("issues")
@@ -55,6 +71,21 @@ pub(crate) fn sync_issue_cache_from_remote_if_missing(
     sync_issue_cache_from_remote(repo_path, cache_root)
 }
 
+pub(crate) fn sync_issue_cache_from_remote_if_stale(
+    repo_path: &Path,
+    cache_root: &Path,
+    ttl: Duration,
+) -> Result<bool, String> {
+    if issue_cache_root_for_repo_path(repo_path).is_none() {
+        return Ok(false);
+    }
+    if !issue_cache_refresh_is_stale(cache_root, ttl) {
+        return Ok(false);
+    }
+    sync_issue_cache_from_remote(repo_path, cache_root)?;
+    Ok(true)
+}
+
 pub(crate) fn sync_issue_cache_from_remote(
     repo_path: &Path,
     cache_root: &Path,
@@ -62,19 +93,30 @@ pub(crate) fn sync_issue_cache_from_remote(
     let snapshots = fetch_issue_list_snapshots(repo_path)?;
     if snapshots.is_empty() {
         fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
+        write_issue_cache_refresh_meta(cache_root, ISSUE_CACHE_TTL)?;
         return Ok(());
     }
 
     let cache = Cache::new(cache_root.to_path_buf());
-    for snapshot in &snapshots {
+    for listed_snapshot in &snapshots {
+        let snapshot = if listed_snapshot
+            .labels
+            .iter()
+            .any(|label| label == SPEC_LABEL)
+        {
+            fetch_issue_snapshot(repo_path, listed_snapshot.number)?
+        } else {
+            listed_snapshot.clone()
+        };
         cache
-            .write_snapshot(snapshot)
+            .write_snapshot(&snapshot)
             .map_err(|err| format!("write issue cache: {err}"))?;
     }
+    write_issue_cache_refresh_meta(cache_root, ISSUE_CACHE_TTL)?;
     Ok(())
 }
 
-fn issue_cache_has_entries(cache_root: &Path) -> bool {
+pub(crate) fn issue_cache_has_entries(cache_root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(cache_root) else {
         return false;
     };
@@ -96,6 +138,43 @@ fn gh_executable() -> std::ffi::OsString {
         return path;
     }
     std::ffi::OsString::from("gh")
+}
+
+fn issue_cache_refresh_meta_path(cache_root: &Path) -> PathBuf {
+    cache_root.join(ISSUE_CACHE_REFRESH_META_FILE)
+}
+
+fn read_issue_cache_refresh_meta(cache_root: &Path) -> Option<IssueCacheRefreshMeta> {
+    let path = issue_cache_refresh_meta_path(cache_root);
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_issue_cache_refresh_meta(cache_root: &Path, ttl: Duration) -> Result<(), String> {
+    fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
+    let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
+    let payload = IssueCacheRefreshMeta {
+        last_full_refresh: Utc::now().to_rfc3339(),
+        ttl_minutes,
+    };
+    let bytes = serde_json::to_vec_pretty(&payload).map_err(|err| err.to_string())?;
+    write_atomic(&issue_cache_refresh_meta_path(cache_root), &bytes).map_err(|err| err.to_string())
+}
+
+fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
+    if !issue_cache_has_entries(cache_root) {
+        return true;
+    }
+    let Some(meta) = read_issue_cache_refresh_meta(cache_root) else {
+        return true;
+    };
+    let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
+        return true;
+    };
+    Utc::now()
+        .signed_duration_since(last.with_timezone(&Utc))
+        .to_std()
+        .map_or(true, |age| age >= ttl)
 }
 
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
@@ -123,6 +202,129 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
     parse_issue_list_snapshots(&String::from_utf8_lossy(&output.stdout))
 }
 
+fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSnapshot, String> {
+    let output = Command::new(gh_executable())
+        .args([
+            "issue",
+            "view",
+            &number.0.to_string(),
+            "--json",
+            "number,title,body,labels,state,updatedAt,comments",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("gh issue view #{number}: {err}", number = number.0))?;
+    if !output.status.success() {
+        return Err(format!(
+            "gh issue view #{number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            number = number.0
+        ));
+    }
+
+    parse_issue_snapshot(&String::from_utf8_lossy(&output.stdout), number)
+}
+
+fn parse_issue_state(value: Option<&str>) -> IssueState {
+    match value {
+        Some("CLOSED") | Some("closed") => IssueState::Closed,
+        _ => IssueState::Open,
+    }
+}
+
+fn parse_issue_labels(issue: &Value) -> Vec<String> {
+    issue
+        .get("labels")
+        .and_then(|value| value.as_array())
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    label
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_comment_id(comment: &Value) -> Option<u64> {
+    if let Some(id) = comment.get("databaseId").and_then(|value| value.as_u64()) {
+        return Some(id);
+    }
+    if let Some(id) = comment.get("id").and_then(|value| value.as_u64()) {
+        return Some(id);
+    }
+    let url = comment.get("url").and_then(|value| value.as_str())?;
+    url.rsplit_once("issuecomment-")
+        .and_then(|(_, raw)| raw.parse::<u64>().ok())
+}
+
+fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot, String> {
+    let issue: Value = serde_json::from_str(json).map_err(|err| err.to_string())?;
+    let actual_number = issue
+        .get("number")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| format!("issue #{number} missing number field", number = number.0))?;
+    let title = issue
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let body = issue
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let labels = parse_issue_labels(&issue);
+    let state = parse_issue_state(issue.get("state").and_then(|value| value.as_str()));
+    let issue_updated_at = issue
+        .get("updatedAt")
+        .and_then(|value| value.as_str())
+        .unwrap_or("1970-01-01T00:00:00Z")
+        .to_string();
+    let comments = issue
+        .get("comments")
+        .and_then(|value| value.as_array())
+        .map(|comments| {
+            comments
+                .iter()
+                .filter_map(|comment| {
+                    let id = parse_comment_id(comment)?;
+                    let body = comment
+                        .get("body")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let updated_at = comment
+                        .get("updatedAt")
+                        .or_else(|| comment.get("createdAt"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(issue_updated_at.as_str())
+                        .to_string();
+                    Some(CommentSnapshot {
+                        id: CommentId(id),
+                        body,
+                        updated_at: UpdatedAt::new(updated_at),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(IssueSnapshot {
+        number: IssueNumber(actual_number),
+        title,
+        body,
+        labels,
+        state,
+        updated_at: UpdatedAt::new(issue_updated_at),
+        comments,
+    })
+}
+
 fn parse_issue_list_snapshots(json: &str) -> Result<Vec<IssueSnapshot>, String> {
     let raw: Vec<Value> = serde_json::from_str(json).map_err(|err| err.to_string())?;
     Ok(raw
@@ -139,25 +341,8 @@ fn parse_issue_list_snapshots(json: &str) -> Result<Vec<IssueSnapshot>, String> 
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let labels = issue
-                .get("labels")
-                .and_then(|value| value.as_array())
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .filter_map(|label| {
-                            label
-                                .get("name")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let state = match issue.get("state").and_then(|value| value.as_str()) {
-                Some("CLOSED") | Some("closed") => IssueState::Closed,
-                _ => IssueState::Open,
-            };
+            let labels = parse_issue_labels(&issue);
+            let state = parse_issue_state(issue.get("state").and_then(|value| value.as_str()));
             let updated_at = issue
                 .get("updatedAt")
                 .and_then(|value| value.as_str())
@@ -288,7 +473,7 @@ if /I \"%FAKE_GH_MODE%\"==\"empty\" (\r\n\
   echo []\r\n\
   exit /b 0\r\n\
 )\r\n\
-echo [{\"number\":7,\"title\":\"Cached issue\",\"body\":\"Body\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
+echo [{\"number\":7,\"title\":\"Cached issue\",\"body\":\"Body\",\"labels\":[{\"name\":\"bug\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
 exit /b 0\r\n",
         )
         .expect("write fake gh");
@@ -309,15 +494,20 @@ exit /b 0\r\n",
             .expect("cached issue entry should exist");
         assert_eq!(entry.snapshot.title, "Cached issue");
         assert_eq!(entry.snapshot.body, "Body");
-        assert_eq!(entry.snapshot.labels, vec!["gwt-spec".to_string()]);
+        assert_eq!(entry.snapshot.labels, vec!["bug".to_string()]);
 
         env::set_var("FAKE_GH_MODE", "empty");
         sync_issue_cache_from_remote(&repo_path, &empty_cache_root).expect("empty sync succeeds");
         assert!(empty_cache_root.is_dir());
-        assert!(fs::read_dir(&empty_cache_root)
+        let entries = fs::read_dir(&empty_cache_root)
             .expect("read empty cache")
-            .next()
-            .is_none());
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect empty cache entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].file_name().to_string_lossy(),
+            ISSUE_CACHE_REFRESH_META_FILE
+        );
 
         env::set_var("FAKE_GH_MODE", "fail");
         let err = sync_issue_cache_from_remote(&repo_path, &cache_root).unwrap_err();
@@ -328,5 +518,92 @@ exit /b 0\r\n",
             None => env::remove_var("GWT_TEST_GH"),
         }
         env::remove_var("FAKE_GH_MODE");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn sync_issue_cache_from_remote_fetches_full_spec_snapshots_with_comment_sections() {
+        let _guard = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&repo_path).expect("create repo path");
+        let fake_gh = repo_path.join("gh.cmd");
+        fs::write(
+            &fake_gh,
+            "@echo off\r\n\
+if /I \"%1 %2\"==\"issue list\" (\r\n\
+  echo [{\"number\":7,\"title\":\"Cached spec\",\"body\":\"<!-- gwt-spec id=7 version=1 -->\\n<!-- sections:\\nplan=comment:700\\nspec=body\\ntasks=body\\n-->\\n\\n<!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n<!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
+  exit /b 0\r\n\
+)\r\n\
+if /I \"%1 %2\"==\"issue view\" (\r\n\
+  echo {\"number\":7,\"title\":\"Cached spec\",\"body\":\"<!-- gwt-spec id=7 version=1 -->\\n<!-- sections:\\nplan=comment:700\\nspec=body\\ntasks=body\\n-->\\n\\n<!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n<!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"updatedAt\":\"2026-04-20T00:00:00Z\",\"comments\":[{\"id\":\"IC_kwDOExample\",\"url\":\"https://github.com/example/repo/issues/7#issuecomment-700\",\"body\":\"<!-- artifact:plan BEGIN -->\\nPlan body\\n<!-- artifact:plan END -->\",\"createdAt\":\"2026-04-20T00:00:00Z\"}]}\r\n\
+  exit /b 0\r\n\
+)\r\n\
+>&2 echo unexpected gh invocation %*\r\n\
+exit /b 1\r\n",
+        )
+        .expect("write fake gh");
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo_path)
+            .status()
+            .expect("git init");
+
+        let old_gh = env::var_os("GWT_TEST_GH");
+        env::set_var("GWT_TEST_GH", &fake_gh);
+
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("sync success");
+        let cache = Cache::new(cache_root);
+        let entry = cache
+            .load_entry(IssueNumber(7))
+            .expect("cached spec entry should exist");
+        assert_eq!(
+            entry
+                .spec_body
+                .sections
+                .get(&gwt_github::SectionName("plan".to_string())),
+            Some(&"Plan body".to_string())
+        );
+        assert_eq!(entry.snapshot.comments.len(), 1);
+        assert_eq!(entry.snapshot.comments[0].id, gwt_github::CommentId(700));
+
+        match old_gh {
+            Some(value) => env::set_var("GWT_TEST_GH", value),
+            None => env::remove_var("GWT_TEST_GH"),
+        }
+    }
+
+    #[test]
+    fn issue_cache_refresh_is_stale_tracks_cache_metadata() {
+        let temp = tempdir().expect("tempdir");
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(cache_root.join("7")).expect("create issue cache entry");
+
+        assert!(
+            issue_cache_refresh_is_stale(&cache_root, ISSUE_CACHE_TTL),
+            "cache without refresh metadata should be stale",
+        );
+
+        write_issue_cache_refresh_meta(&cache_root, Duration::from_secs(60))
+            .expect("write refresh meta");
+        assert!(
+            !issue_cache_refresh_is_stale(&cache_root, Duration::from_secs(60)),
+            "fresh refresh metadata should suppress stale refresh",
+        );
+
+        let stale_meta = IssueCacheRefreshMeta {
+            last_full_refresh: (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339(),
+            ttl_minutes: 15,
+        };
+        let bytes = serde_json::to_vec_pretty(&stale_meta).expect("serialize stale meta");
+        write_atomic(&issue_cache_refresh_meta_path(&cache_root), &bytes)
+            .expect("write stale refresh meta");
+        assert!(
+            issue_cache_refresh_is_stale(&cache_root, ISSUE_CACHE_TTL),
+            "expired refresh metadata should mark cache stale",
+        );
     }
 }

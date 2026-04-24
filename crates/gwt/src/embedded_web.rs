@@ -636,6 +636,15 @@ mod tests {
             "expected knowledge bridge refresh affordance to describe cache-backed reloads",
         );
         assert!(
+            html.contains("data-knowledge-scope=\"open\"")
+                && html.contains("data-knowledge-scope=\"closed\""),
+            "expected issue knowledge bridge surface to expose open and closed cache tabs",
+        );
+        assert!(
+            html.contains("list_scope"),
+            "expected knowledge bridge requests to carry the active issue list scope",
+        );
+        assert!(
             html.contains("Loading cache-backed data"),
             "expected knowledge bridge loading copy to describe cache-backed reads",
         );
