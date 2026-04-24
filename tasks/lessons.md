@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-24 — fix(index): chunked index の health check は下限不変条件を残す
+
+### 事象
+
+Project index hardening の PR で、SPEC は 1 Issue から複数 Chroma record を生成できるため
+`document_count != manifest_count` を一律に許容した。その結果、manifest には複数 SPEC が
+あるのに Chroma collection が一部 record しか持たない部分破損でも `healthy=true` と
+報告される余地ができた。
+
+### 原因
+
+- chunking による「manifest より多い record」は正常だが、「manifest より少ない record」は
+  破損という片側条件を明文化していなかった。
+- Review 後に auto-merge が先に完了し、未解決 review thread の確認が完了報告前の
+  gate として固定されていなかった。
+
+### 再発防止策
+
+1. chunked collection の health check は `document_count >= manifest_count` のような
+   one-sided invariant として書き、等価比較を丸ごと無効化しない。
+2. `gwt pr checks` が全通過しても、完了報告前に `gwt pr review-threads <n>` を再確認し、
+   auto-merge 後に出た valid comment は follow-up PR で解消する。
+3. health status と audit log の両方を追加する変更では、UI 表示だけでなく structured
+   log の top-level status が同じ truth を示す回帰テストを追加する。
+
 ## 2026-04-24 — fix(logging): structured runtime log は project-scoped canonical file 以外へ出さない
 
 ### 事象

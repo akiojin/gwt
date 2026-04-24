@@ -2089,6 +2089,10 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
+    elif scope == "specs" and document_count < manifest_count:
+        reason = "count_mismatch"
+        healthy = False
+        repair_required = True
     elif scope != "specs" and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False

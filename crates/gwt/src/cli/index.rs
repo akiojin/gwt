@@ -331,7 +331,15 @@ fn audit_status(
     exit_code: i32,
 ) -> io::Result<()> {
     let mut fields = base_audit_fields(context, "project_index_status", "index status");
-    fields.insert("status".to_string(), json!("ready"));
+    let health = audit_health(payload);
+    fields.insert("status".to_string(), json!(health.status));
+    fields.insert("repair_required".to_string(), json!(health.repair_required));
+    if !health.unhealthy_scopes.is_empty() {
+        fields.insert(
+            "unhealthy_scopes".to_string(),
+            json!(health.unhealthy_scopes),
+        );
+    }
     fields.insert("exit_code".to_string(), json!(exit_code));
     fields.insert(
         "runtime_repaired".to_string(),
@@ -355,6 +363,50 @@ fn audit_status(
         fields.insert("scopes".to_string(), status.clone());
     }
     append_index_audit_event(log_dir, Value::Object(fields))
+}
+
+struct AuditHealth {
+    status: &'static str,
+    repair_required: bool,
+    unhealthy_scopes: Vec<String>,
+}
+
+fn audit_health(payload: &Value) -> AuditHealth {
+    let Some(status) = payload.get("status").and_then(Value::as_object) else {
+        return AuditHealth {
+            status: "unknown",
+            repair_required: false,
+            unhealthy_scopes: Vec::new(),
+        };
+    };
+
+    let mut unhealthy_scopes = Vec::new();
+    for scope in ["issues", "specs", "files", "files-docs"] {
+        let Some(scope_status) = status.get(scope) else {
+            continue;
+        };
+        let healthy = scope_status
+            .get("healthy")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let repair_required = scope_status
+            .get("repair_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(!healthy);
+        if !healthy || repair_required {
+            unhealthy_scopes.push(scope.to_string());
+        }
+    }
+
+    AuditHealth {
+        status: if unhealthy_scopes.is_empty() {
+            "ready"
+        } else {
+            "repair_required"
+        },
+        repair_required: !unhealthy_scopes.is_empty(),
+        unhealthy_scopes,
+    }
 }
 
 fn audit_status_failure(
@@ -574,10 +626,67 @@ mod tests {
             content.contains("\"message\":\"project_index_status\""),
             "{content}"
         );
+        assert!(content.contains("\"status\":\"ready\""), "{content}");
+        assert!(content.contains("\"repair_required\":false"), "{content}");
         assert!(content.contains("\"runner\":true"), "{content}");
         assert!(content.contains("\"files-docs\""), "{content}");
         assert!(
             content.contains("\"last_repair_at\":\"2026-04-24T06:15:20Z\""),
+            "{content}"
+        );
+        assert!(!dir.path().join("index.log").exists());
+    }
+
+    #[test]
+    fn audit_status_marks_unhealthy_scope_as_repair_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = IndexContext {
+            project_root: dir.path().join("repo"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://github.com/example/project.git",
+            ),
+            worktree_hash: "feedfacecafebeef".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        };
+        let report = gwt_core::runtime::ProjectIndexRuntimeReport {
+            runner_hash: "aaaaaaaaaaaaaaaa".to_string(),
+            requirements_hash: "bbbbbbbbbbbbbbbb".to_string(),
+            runner_smoke_tested: true,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "status": {
+                "specs": {
+                    "healthy": false,
+                    "repair_required": true,
+                    "reason": "count_mismatch",
+                    "document_count": 1
+                },
+                "files": {
+                    "healthy": true,
+                    "repair_required": false,
+                    "reason": "ready",
+                    "document_count": 310
+                }
+            }
+        });
+
+        audit_status(dir.path(), &context, &report, &payload, 0).unwrap();
+
+        let log_path = gwt_core::logging::current_log_file(dir.path());
+        let content = std::fs::read_to_string(log_path).unwrap();
+        assert!(
+            content.contains("\"status\":\"repair_required\""),
+            "{content}"
+        );
+        assert!(content.contains("\"repair_required\":true"), "{content}");
+        assert!(
+            content.contains("\"unhealthy_scopes\":[\"specs\"]"),
+            "{content}"
+        );
+        assert!(
+            content.contains("\"reason\":\"count_mismatch\""),
             "{content}"
         );
         assert!(!dir.path().join("index.log").exists());
