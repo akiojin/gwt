@@ -110,6 +110,10 @@ Available windows include:
 tree view. The remaining windows are currently mock surfaces where production
 behavior has not been wired yet.
 
+On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
+PowerShell, or PowerShell 7. The selected shell applies to both `Shell` and
+`Agent` windows; Docker launches continue to use the container shell.
+
 In terminal windows, drag to select text and release the mouse button to copy.
 On Windows and Linux, `Ctrl+Shift+C` also copies the current terminal
 selection. `Ctrl+C` stays mapped to the running terminal process.

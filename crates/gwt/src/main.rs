@@ -64,9 +64,9 @@ pub(crate) use docker_launch::{
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback, build_shell_process_launch,
-    ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env, resolve_launch_worktree,
-    resolve_shell_launch_worktree,
+    apply_host_package_runner_fallback, apply_windows_host_shell_wrapper,
+    build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
+    resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
@@ -237,10 +237,10 @@ mod tests {
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
-        build_shell_process_launch, close_window_from_workspace, combined_window_id,
-        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
-        gui_front_door_launch_surface, hook_forward_authorized,
+        apply_windows_host_shell_wrapper, broadcast_log_entry, broadcast_runtime_hook_event,
+        build_frontend_sync_events, build_shell_process_launch, close_window_from_workspace,
+        combined_window_id, current_git_branch, docker_bundle_mounts_for_home,
+        docker_bundle_override_content, gui_front_door_launch_surface, hook_forward_authorized,
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
@@ -2568,6 +2568,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::from([("EXTRA_FLAG".to_string(), "1".to_string())]),
+            windows_shell: None,
         };
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
@@ -2583,6 +2584,103 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
+    }
+
+    #[test]
+    fn build_shell_process_launch_for_host_uses_selected_windows_shell() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/gui".to_string()),
+            base_branch: None,
+            display_name: "Shell".to_string(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            env_vars: HashMap::new(),
+            windows_shell: Some(gwt_agent::WindowsShellKind::WindowsPowerShell),
+        };
+
+        let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
+
+        assert_eq!(launch.command, "powershell");
+        assert_eq!(launch.args, vec!["-NoLogo".to_string()]);
+    }
+
+    #[test]
+    fn windows_shell_process_command_mapping_is_owned_by_launch_runtime() {
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::CommandPrompt
+            ),
+            "cmd.exe"
+        );
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::WindowsPowerShell
+            ),
+            "powershell"
+        );
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::PowerShell7
+            ),
+            "pwsh"
+        );
+    }
+
+    #[test]
+    fn command_prompt_agent_wrapper_preserves_spaced_cmd_path() {
+        let mut config = sample_versioned_launch_config();
+        config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "value with space".to_string(),
+        ];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap command prompt");
+
+        assert_eq!(config.command, "cmd.exe");
+        assert_eq!(
+            config.args,
+            vec![
+                "/d".to_string(),
+                "/k".to_string(),
+                "%GWT_WINDOWS_HOST_SHELL_EXPRESSION%".to_string()
+            ]
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
+                .map(String::as_str),
+            Some(
+                r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space" & exit"#
+            )
+        );
+    }
+
+    #[test]
+    fn powershell_agent_wrapper_quotes_spaced_path_and_single_quotes() {
+        let mut config = sample_versioned_launch_config();
+        config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
+        config.args = vec!["value's".to_string()];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap powershell");
+
+        assert_eq!(config.command, "pwsh");
+        assert_eq!(config.args[0], "-NoLogo");
+        assert_eq!(config.args[1], "-NoProfile");
+        assert_eq!(config.args[2], "-Command");
+        let script = config.args[3].as_str();
+        assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
+        assert!(script.contains("'value''s'"));
+        assert!(script.contains("exit $LASTEXITCODE"));
     }
 
     #[test]
@@ -3285,6 +3383,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::new(),
+            windows_shell: None,
         };
         super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");

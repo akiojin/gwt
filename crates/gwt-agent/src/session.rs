@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 use crate::{
     launch::{normalize_launch_args, LaunchConfig},
-    types::{AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WorkflowBypass},
+    types::{
+        AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WindowsShellKind,
+        WorkflowBypass,
+    },
 };
 
 /// Idle duration (in seconds) after which a session is considered stopped.
@@ -62,6 +65,8 @@ pub struct Session {
     pub launch_command: String,
     #[serde(default)]
     pub launch_args: Vec<String>,
+    #[serde(default)]
+    pub windows_shell: Option<WindowsShellKind>,
     /// Schema version of this persisted session. SPEC-1921 Phase 53 / FR-066:
     /// bumped by `Session::migrate_legacy_launch_args` so migrations are
     /// idempotent. Legacy TOML files without this field deserialize as `0`.
@@ -127,6 +132,7 @@ impl Session {
             workflow_bypass: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
+            windows_shell: None,
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             created_at: now,
             updated_at: now,
@@ -137,9 +143,9 @@ impl Session {
 
     /// Create a persisted session snapshot from a prepared launch config.
     ///
-    /// The launch command/args are captured before any outer runtime wrapper
-    /// (for example `docker compose exec`) is applied so resume/quick-start
-    /// metadata preserves the logical agent command.
+    /// The launch command/args are captured from the prepared Host command.
+    /// Docker still persists the logical agent command before `compose exec`
+    /// is applied.
     pub fn from_launch_config(
         worktree_path: impl Into<PathBuf>,
         branch: impl Into<String>,
@@ -158,6 +164,7 @@ impl Session {
         session.linked_issue_number = config.linked_issue_number;
         session.launch_command = config.command.clone();
         session.launch_args = config.args.clone();
+        session.windows_shell = config.windows_shell;
         session.update_status(AgentStatus::Running);
         session
     }
@@ -1036,6 +1043,28 @@ mod tests {
         );
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn session_from_launch_config_persists_windows_shell_choice() {
+        let mut config = crate::AgentLaunchBuilder::new(AgentId::Codex)
+            .working_dir("/tmp/worktree")
+            .branch("feature/shell")
+            .build();
+        config.command = "pwsh".to_string();
+        config.args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "& 'codex'".to_string(),
+        ];
+        config.windows_shell = Some(WindowsShellKind::PowerShell7);
+
+        let session = Session::from_launch_config("/tmp/worktree", "feature/shell", &config);
+
+        assert_eq!(session.windows_shell, Some(WindowsShellKind::PowerShell7));
+        assert_eq!(session.launch_command, "pwsh");
+        assert_eq!(session.launch_args, config.args);
     }
 
     #[test]

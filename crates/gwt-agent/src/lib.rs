@@ -47,6 +47,6 @@ pub use store::{
 };
 pub use types::{
     resolve_agent_id, AgentColor, AgentId, AgentInfo, AgentStatus, DockerLifecycleIntent,
-    LaunchRuntimeTarget, SessionMode, WorkflowBypass,
+    LaunchRuntimeTarget, SessionMode, WindowsShellKind, WorkflowBypass,
 };
 pub use version_cache::{build_version_options, VersionCache, VersionOption};

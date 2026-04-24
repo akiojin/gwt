@@ -171,6 +171,16 @@ pub enum LaunchRuntimeTarget {
     Docker,
 }
 
+/// Windows Host shell used to wrap interactive launch commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsShellKind {
+    CommandPrompt,
+    WindowsPowerShell,
+    #[serde(rename = "power_shell_7", alias = "power_shell7")]
+    PowerShell7,
+}
+
 /// Non-persisted lifecycle intent for a Docker launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockerLifecycleIntent {
@@ -401,5 +411,25 @@ mod tests {
             let parsed: WorkflowBypass = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, bypass);
         }
+    }
+
+    #[test]
+    fn windows_shell_kind_wire_values_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&WindowsShellKind::CommandPrompt).unwrap(),
+            "\"command_prompt\""
+        );
+        assert_eq!(
+            serde_json::from_str::<WindowsShellKind>("\"windows_power_shell\"").unwrap(),
+            WindowsShellKind::WindowsPowerShell
+        );
+        assert_eq!(
+            serde_json::from_str::<WindowsShellKind>("\"power_shell_7\"").unwrap(),
+            WindowsShellKind::PowerShell7
+        );
+        assert_eq!(
+            serde_json::from_str::<WindowsShellKind>("\"power_shell7\"").unwrap(),
+            WindowsShellKind::PowerShell7
+        );
     }
 }
