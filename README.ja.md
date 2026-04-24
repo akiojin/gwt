@@ -108,6 +108,10 @@ managed hook と runtime 委譲の入口も引き続き `gwt` です。利用者
 `Shell` と `Agent` は実プロセスを持つウィンドウです。`File Tree` は実装済みの
 read-only ツリーです。それ以外は現時点では mock surface です。
 
+Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
+PowerShell 7 を選択できます。選択したシェルは `Shell` と `Agent` の両方に適用され、
+Docker 起動では引き続きコンテナ内のシェルを使います。
+
 ターミナルウィンドウでは、テキストをドラッグ選択してマウスボタンを離すとコピー
 できます。Windows / Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 `Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
