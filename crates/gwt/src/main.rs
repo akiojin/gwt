@@ -713,7 +713,7 @@ mod tests {
             session_id: "gwt-session-1".to_string(),
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             reasoning: Some("high".to_string()),
             version: Some("0.110.0".to_string()),
             resume_session_id: Some("resume-1".to_string()),
