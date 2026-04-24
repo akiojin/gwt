@@ -60,8 +60,9 @@ fn run_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsEr
     if !output.status.success() {
         out.push_str("runtime: error\n");
         out.push_str(&format_runner_failure(&output));
+        let log_dir = audit_log_dir(&context);
         let _ = audit_status_failure(
-            &gwt_core::paths::gwt_logs_dir(),
+            &log_dir,
             &context,
             &format_runner_failure(&output),
             output.status.code().unwrap_or(1),
@@ -71,13 +72,8 @@ fn run_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsEr
 
     let payload = parse_runner_json(&output.stdout)?;
     render_index_status(out, &report, &payload);
-    let _ = audit_status(
-        &gwt_core::paths::gwt_logs_dir(),
-        &context,
-        &report,
-        &payload,
-        0,
-    );
+    let log_dir = audit_log_dir(&context);
+    let _ = audit_status(&log_dir, &context, &report, &payload, 0);
     Ok(0)
 }
 
@@ -99,8 +95,8 @@ fn run_rebuild<E: CliEnv>(
     ));
 
     let mut ok = true;
+    let log_dir = audit_log_dir(&context);
     for action in rebuild_actions(scope) {
-        let log_dir = gwt_core::paths::gwt_logs_dir();
         let _ = audit_rebuild_start(&log_dir, &context, action.label);
         let output = run_runner_rebuild(&context, action)?;
         let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
@@ -321,6 +317,10 @@ fn format_runner_failure(output: &std::process::Output) -> String {
         (false, false) => format!("{stderr}; stdout={stdout}"),
     };
     format!("runner exit={} detail={detail}\n", output.status)
+}
+
+fn audit_log_dir(context: &IndexContext) -> PathBuf {
+    gwt_core::paths::gwt_project_logs_dir_for_project_path(&context.project_root)
 }
 
 fn audit_status(
@@ -548,6 +548,32 @@ mod tests {
                 scope: IndexScope::All
             }
         );
+    }
+
+    #[test]
+    fn audit_log_dir_uses_project_scoped_gwt_log_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("repo");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let project_hash = gwt_core::repo_hash::compute_path_hash(&project_root);
+        let context = IndexContext {
+            project_root,
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://github.com/example/project.git",
+            ),
+            worktree_hash: "feedfacecafebeef".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        };
+
+        let log_dir = audit_log_dir(&context);
+
+        assert!(log_dir.ends_with(
+            PathBuf::from("projects")
+                .join(project_hash.as_str())
+                .join("logs")
+        ));
+        assert!(!log_dir.ends_with(PathBuf::from(".gwt").join("logs")));
     }
 
     #[test]
