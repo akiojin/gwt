@@ -3529,3 +3529,22 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 1. Python と Rust の両方が同じ on-disk layout を読む場合、`HOME` / `USERPROFILE` / fallback の優先順を一致させる。
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
+
+## 2026-04-24 — process: 実装前に関連 SPEC を必ず gwt-search で確認する
+
+### 事象
+
+Codex 対応モデル一覧の更新で、関連 SPEC が存在するにもかかわらず初動で SPEC
+確認を省略し、ユーザーから「関連SPECがないですか？あるはずです。」と指摘された。
+
+### 原因
+
+- 変更が小さく見えたため、`feat` 相当の実装前ワークフローを軽視した。
+- `gwt-search` による SPEC / Issue / project file の横断検索を、実装前の必須ゲートとして扱わなかった。
+- SPEC owner が見つかる前に実装計画を進めようとしたため、受け入れ条件と実装対象の同期が遅れた。
+
+### 再発防止策
+
+1. `feat` / `fix` / `refactor` の実装前は、変更規模に関わらず `gwt-search` で関連 SPEC / Issue を先に確認する。
+2. ユーザーが「SPEC があるはず」と示唆した場合は、実装を止めて SPEC owner を特定し、SPEC / plan / tasks を更新してから再開する。
+3. 完了報告前に、対象 SPEC が今回の変更と受け入れ条件を反映していることをセルフチェックする。
