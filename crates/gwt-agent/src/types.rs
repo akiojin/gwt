@@ -171,6 +171,49 @@ pub enum LaunchRuntimeTarget {
     Docker,
 }
 
+/// Windows Host shell used to wrap interactive launch commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsShellKind {
+    CommandPrompt,
+    WindowsPowerShell,
+    PowerShell7,
+}
+
+impl WindowsShellKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CommandPrompt => "Command Prompt",
+            Self::WindowsPowerShell => "Windows PowerShell",
+            Self::PowerShell7 => "PowerShell 7",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::CommandPrompt => "Run through cmd.exe",
+            Self::WindowsPowerShell => "Run through Windows PowerShell",
+            Self::PowerShell7 => "Run through PowerShell 7",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::CommandPrompt => "cmd.exe",
+            Self::WindowsPowerShell => "powershell",
+            Self::PowerShell7 => "pwsh",
+        }
+    }
+
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::CommandPrompt => "command_prompt",
+            Self::WindowsPowerShell => "windows_power_shell",
+            Self::PowerShell7 => "power_shell_7",
+        }
+    }
+}
+
 /// Non-persisted lifecycle intent for a Docker launch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockerLifecycleIntent {
@@ -401,5 +444,23 @@ mod tests {
             let parsed: WorkflowBypass = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, bypass);
         }
+    }
+
+    #[test]
+    fn windows_shell_kind_wire_values_and_labels_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&WindowsShellKind::CommandPrompt).unwrap(),
+            "\"command_prompt\""
+        );
+        assert_eq!(
+            serde_json::from_str::<WindowsShellKind>("\"windows_power_shell\"").unwrap(),
+            WindowsShellKind::WindowsPowerShell
+        );
+        assert_eq!(WindowsShellKind::CommandPrompt.label(), "Command Prompt");
+        assert_eq!(
+            WindowsShellKind::WindowsPowerShell.label(),
+            "Windows PowerShell"
+        );
+        assert_eq!(WindowsShellKind::PowerShell7.command(), "pwsh");
     }
 }

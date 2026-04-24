@@ -3010,6 +3010,7 @@ impl AppRuntime {
                 });
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
+            apply_windows_host_shell_wrapper(&mut config)?;
 
             let branch_name = config
                 .branch
@@ -3031,6 +3032,7 @@ impl AppRuntime {
             session.linked_issue_number = config.linked_issue_number;
             session.launch_command = config.command.clone();
             session.launch_args = config.args.clone();
+            session.windows_shell = config.windows_shell;
             session.update_status(gwt_agent::AgentStatus::Running);
 
             let session_id = session.id.clone();

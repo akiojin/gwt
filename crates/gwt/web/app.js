@@ -3505,6 +3505,19 @@
             );
             grid.appendChild(note);
           }
+          if (launchWizard.show_windows_shell) {
+            appendSelectField(
+              grid,
+              "Shell",
+              launchWizard.windows_shell_options || [],
+              launchWizard.selected_windows_shell,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_windows_shell",
+                  shell: value,
+                }),
+            );
+          }
           section.appendChild(grid);
           panel.appendChild(section);
         }
