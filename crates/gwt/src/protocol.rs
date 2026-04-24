@@ -11,7 +11,7 @@ use crate::{
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
-    knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
+    knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem, KnowledgeListScope},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
@@ -121,11 +121,13 @@ pub enum FrontendEvent {
         knowledge_kind: KnowledgeKind,
         selected_number: Option<u64>,
         refresh: bool,
+        list_scope: Option<KnowledgeListScope>,
     },
     SelectKnowledgeBridgeEntry {
         id: String,
         knowledge_kind: KnowledgeKind,
         number: u64,
+        list_scope: Option<KnowledgeListScope>,
     },
     RunBranchCleanup {
         id: String,
@@ -395,6 +397,9 @@ pub enum BackendEvent {
     LaunchProgress {
         id: String,
         message: String,
+    },
+    ProjectIndexStatus {
+        status: crate::ProjectIndexStatusView,
     },
     RuntimeHookEvent {
         event: RuntimeHookEvent,

@@ -37,6 +37,19 @@ class IndexHealthTests(unittest.TestCase):
         )
         (issue / "body.md").write_text("Search should repair missing issue collection.")
 
+    def _write_cached_spec(self, cache_root: Path) -> None:
+        issue = cache_root / "1939"
+        sections = issue / "sections"
+        sections.mkdir(parents=True, exist_ok=True)
+        (issue / "meta.json").write_text(
+            '{"number":1939,"title":"Project index SPEC",'
+            '"labels":["gwt-spec","phase/review"],"state":"open",'
+            '"updated_at":"2026-04-21T00:00:00Z","comment_ids":[]}'
+        )
+        (sections / "spec.md").write_text(
+            "# Project index SPEC\nRuntime repair must rebuild corrupt stores."
+        )
+
     def _files_db_path(self, db_root: Path) -> Path:
         return runner.resolve_db_path(
             self.REPO_HASH,
@@ -240,6 +253,37 @@ class IndexHealthTests(unittest.TestCase):
 
             self.assertFalse(search["ok"])
             self.assertEqual(search.get("error_code"), "INDEX_UNHEALTHY")
+
+    def test_index_specs_full_rebuild_retries_after_corrupt_store_open_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            db_root = Path(tmp) / "index_root"
+            cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / self.REPO_HASH
+            self._write_cached_spec(cache_root)
+
+            original_make = runner._make_chroma_collection
+            calls = {"count": 0}
+
+            def flaky_make(db_path, collection_name):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise RuntimeError("corrupt hnsw")
+                return original_make(db_path, collection_name)
+
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                with mock.patch.object(runner, "_make_chroma_collection", flaky_make):
+                    result = runner.action_index_specs_v2(
+                        project_root=str(root),
+                        repo_hash=self.REPO_HASH,
+                        worktree_hash=None,
+                        mode="full",
+                        db_root=db_root,
+                    )
+
+            self.assertTrue(result["ok"], result)
+            self.assertGreater(result["indexed"], 0)
+            self.assertGreaterEqual(calls["count"], 2)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
+      const indexStatusLabel = document.getElementById("index-status");
 
       const decoderMap = new Map();
       const pendingOutputMap = new Map();
@@ -209,9 +210,34 @@
         recent_projects: [],
       };
       let versionState = { current: "", latest: "" };
+      let indexStatusState = { state: "", detail: "" };
       let projectError = "";
       const BRANCH_CLEANUP_TIMEOUT_MS = 30000;
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
+
+      function renderIndexStatus() {
+        const state = indexStatusState.state || "";
+        indexStatusLabel.hidden = !state || state === "skipped";
+        indexStatusLabel.className = `index-status ${state}`;
+        const label =
+          state === "ready"
+            ? "Index: ready"
+            : state === "repair_required"
+              ? "Index: repair"
+              : state === "error"
+                ? "Index: error"
+                : "Index: checking";
+        indexStatusLabel.textContent = label;
+        indexStatusLabel.title = indexStatusState.detail || label;
+      }
+
+      function setIndexStatus(status) {
+        indexStatusState = {
+          state: status?.state || "",
+          detail: status?.detail || "",
+        };
+        renderIndexStatus();
+      }
 
       function formatVersionLabel() {
         const current = versionState.current;
@@ -1419,6 +1445,7 @@
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
             kind: knowledgeKind,
+            listScope: "open",
             entries: [],
             selectedNumber: null,
             detail: null,
@@ -1432,6 +1459,9 @@
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         state.kind = knowledgeKind || state.kind;
+        if (!state.listScope) {
+          state.listScope = "open";
+        }
         return state;
       }
 
@@ -1578,12 +1608,15 @@
         }
         state.loading = true;
         state.error = "";
+        const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "load_knowledge_bridge",
           id: windowId,
-          knowledge_kind: knowledgeKind,
+          knowledge_kind: effectiveKind,
           selected_number: state.selectedNumber ?? null,
           refresh,
+          list_scope:
+            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -1591,11 +1624,14 @@
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         state.selectedNumber = number;
         state.detailLoading = true;
+        const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
-          knowledge_kind: knowledgeKind,
+          knowledge_kind: effectiveKind,
           number,
+          list_scope:
+            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -3919,10 +3955,12 @@
         }
       }
 
-      function knowledgeSearchPlaceholder(kind) {
+      function knowledgeSearchPlaceholder(kind, listScope = "open") {
         switch (kind) {
           case "issue":
-            return "Search cached issues";
+            return listScope === "closed"
+              ? "Search cached closed issues"
+              : "Search cached open issues";
           case "spec":
             return "Search cached SPECs";
           case "pr":
@@ -3950,6 +3988,23 @@
         );
       }
 
+      function switchKnowledgeListScope(windowId, nextScope) {
+        const state = ensureKnowledgeBridgeState(
+          windowId,
+          knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
+        );
+        if (state.kind !== "issue" || state.listScope === nextScope || state.loading) {
+          return;
+        }
+        state.listScope = nextScope;
+        state.entries = [];
+        state.selectedNumber = null;
+        state.detail = null;
+        state.detailLoading = false;
+        requestKnowledgeBridge(windowId, state.kind, false);
+        renderKnowledgeBridge(windowId);
+      }
+
       function renderKnowledgeBridge(windowId) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -3964,12 +4019,21 @@
         const status = element.querySelector(".knowledge-status");
         const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
         const searchInput = element.querySelector(".knowledge-search");
+        const scopeButtons = element.querySelectorAll("[data-knowledge-scope]");
         if (!list || !detailPane || !status || !refreshButton || !searchInput) {
           return;
         }
 
         refreshButton.disabled = !state.refreshEnabled || state.loading;
-        searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
+        searchInput.placeholder = knowledgeSearchPlaceholder(
+          state.kind,
+          state.listScope,
+        );
+        for (const button of scopeButtons) {
+          const active = button.dataset.knowledgeScope === state.listScope;
+          button.classList.toggle("active", active);
+          button.disabled = state.loading && !active;
+        }
 
         status.className = "knowledge-status";
         status.textContent = "";
@@ -4908,6 +4972,14 @@
               <div class="knowledge-toolbar">
                 <div class="knowledge-toolbar-main">
                   <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
+                  ${
+                    knowledgeKind === "issue"
+                      ? `<div class="branch-filter-group">
+                  <button class="branch-filter-button" type="button" data-knowledge-scope="open">Open</button>
+                  <button class="branch-filter-button" type="button" data-knowledge-scope="closed">Closed</button>
+                </div>`
+                      : ""
+                  }
                   <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
                 </div>
                 <div class="knowledge-toolbar-actions">
@@ -4939,6 +5011,15 @@
               windowData.id,
             );
           });
+          for (const button of body.querySelectorAll("[data-knowledge-scope]")) {
+            button.addEventListener("click", (event) => {
+              event.stopPropagation();
+              frontendUnits.knowledgeSettingsSurface.switchKnowledgeListScope(
+                windowData.id,
+                button.dataset.knowledgeScope,
+              );
+            });
+          }
           body
             .querySelector("[data-action='refresh-knowledge']")
             .addEventListener("click", (event) => {
@@ -5490,6 +5571,7 @@
         ensureKnowledgeBridgeState,
         requestKnowledgeBridge,
         requestKnowledgeDetail,
+        switchKnowledgeListScope,
         renderKnowledgeBridge,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -5547,6 +5629,9 @@
             }
             break;
           }
+          case "project_index_status":
+            setIndexStatus(event.status);
+            break;
           case "file_tree_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
               event.id,

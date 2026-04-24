@@ -159,6 +159,35 @@
         display: none;
       }
 
+      .index-status {
+        display: inline-flex;
+        align-items: center;
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        border-radius: 6px;
+        background: #f8fafc;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .index-status.ready {
+        border-color: rgba(34, 197, 94, 0.34);
+        color: #166534;
+      }
+
+      .index-status.repair_required,
+      .index-status.error {
+        border-color: rgba(245, 158, 11, 0.45);
+        color: #92400e;
+      }
+
+      .index-status[hidden] {
+        display: none;
+      }
+
       .canvas-area {
         position: relative;
         flex: 1;
@@ -684,6 +713,10 @@
         background: #0f172a;
         border-color: #0f172a;
         color: #ffffff;
+      }
+
+      .knowledge-toolbar .branch-filter-group {
+        flex-wrap: wrap;
       }
 
       .branch-cleanup-trigger[disabled],
@@ -2461,6 +2494,7 @@
         <div class="project-bar">
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
+            <span class="index-status" id="index-status" hidden></span>
             <span class="app-version" id="app-version" hidden></span>
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project

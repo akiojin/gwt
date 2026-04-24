@@ -3561,6 +3561,47 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
 
+## 2026-04-24 — fix: SPEC section 更新の PowerShell join は必ず全文 readback で検証する
+
+### 事象
+
+Project index hardening の SPEC #1939 更新時、PowerShell で既存 section に追記するつもりの式が
+`($tasks -join "\n" + $append)` になり、演算子優先順位により各行の間へ追記文が挿入された。直後に
+`gwt issue spec <n> --section tasks` を readback して検知し、plan/tasks を全文置換して復旧した。
+
+### 原因
+
+- PowerShell の `-join` と `+` を同じ式で使う際の結合範囲を固定していなかった。
+- section 更新後の readback を実施したため検知できたが、更新式自体は構造化されていなかった。
+- SPEC body は markdown section parser に依存するため、1 行の結合ミスでも別 section への parse error に波及する。
+
+### 再発防止策
+
+1. `gwt issue spec ... --edit` に渡す markdown は、差分追記よりも一時ファイルの全文生成を優先する。
+2. PowerShell で配列結合と文字列連結を混ぜる場合は、`(($lines -join "`n") + $append)` のように結合結果を明示的に括る。
+3. SPEC section を更新した直後は、必ず対象 section を readback し、見出し構造と末尾の expected lines を確認してから次へ進む。
+
+## 2026-04-24 — fix: detached CLI の監査ログは非同期 tracing guard に依存しない
+
+### 事象
+
+Project index の手動 `gwt index status` / `gwt index rebuild` ログを正規の
+`gwt.log.YYYY-MM-DD` へ統合する際、GUI 起動後の tracing subscriber だけを前提にすると
+detached CLI 経路ではログが残らない設計になることを確認した。
+
+### 原因
+
+- `runtime_support::run_cli()` は CLI dispatch 後に `std::process::exit` する。
+- `std::process::exit` は通常の drop を走らせないため、`tracing_appender` の
+  non-blocking `WorkerGuard` flush に依存するとイベントが失われる。
+- `gwt index` は GUI 起動前に処理される detached CLI なので、GUI 用 logging init の対象外だった。
+
+### 再発防止策
+
+1. `std::process::exit` を通る短命 CLI の必須監査ログは、同期 write + flush の JSONL append にする。
+2. 既存ログ基盤へ統合する場合も、ファイル名は `current_log_file()` に揃え、別名ログファイルを増やさない。
+3. CLI ログ追加のテストでは、出力先が `gwt.log.YYYY-MM-DD` であることと、旧 `index.log` を作らないことを同時に固定する。
+
 ## 2026-04-24 — process: 実装前に関連 SPEC を必ず gwt-search で確認する
 
 ### 事象

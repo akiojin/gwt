@@ -254,6 +254,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_project_bar_renders_index_status_badge() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains("id=\"index-status\""),
+            "expected project bar to expose project index status badge",
+        );
+        assert!(
+            html.contains(".index-status.ready") && html.contains(".index-status.error"),
+            "expected embedded css to define index health states",
+        );
+        assert!(
+            js.contains("function setIndexStatus(status)")
+                && js.contains("case \"project_index_status\""),
+            "expected frontend to consume project_index_status events",
+        );
+    }
+
+    #[test]
     fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
         let js = app_js();
 
@@ -634,6 +654,15 @@ mod tests {
         assert!(
             html.contains("Refresh cached knowledge"),
             "expected knowledge bridge refresh affordance to describe cache-backed reloads",
+        );
+        assert!(
+            html.contains("data-knowledge-scope=\"open\"")
+                && html.contains("data-knowledge-scope=\"closed\""),
+            "expected issue knowledge bridge surface to expose open and closed cache tabs",
+        );
+        assert!(
+            html.contains("list_scope"),
+            "expected knowledge bridge requests to carry the active issue list scope",
         );
         assert!(
             html.contains("Loading cache-backed data"),
