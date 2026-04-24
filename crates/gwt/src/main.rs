@@ -118,6 +118,27 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
     )]);
 }
 
+fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
+    let project_root = std::env::current_dir().ok();
+    drop(runtime.spawn(async move {
+        let status = match project_root {
+            Some(path) => tokio::task::spawn_blocking(move || {
+                gwt::index_worker::project_index_status_for_path(&path)
+            })
+            .await
+            .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
+                state: "error".to_string(),
+                detail: format!("Project index status task failed: {err}"),
+            }),
+            None => gwt::ProjectIndexStatusView {
+                state: "skipped".to_string(),
+                detail: "No current directory".to_string(),
+            },
+        };
+        let _ = proxy.send_event(UserEvent::ProjectIndexStatus { status });
+    }));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -158,6 +179,9 @@ enum UserEvent {
     LaunchProgress {
         window_id: String,
         message: String,
+    },
+    ProjectIndexStatus {
+        status: gwt::ProjectIndexStatusView,
     },
     LaunchComplete {
         window_id: String,
@@ -3709,6 +3733,7 @@ fn main() -> wry::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    spawn_project_index_status_check(&runtime, proxy.clone());
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -3763,8 +3788,12 @@ fn main() -> wry::Result<()> {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+                let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let events = app.handle_frontend_event(client_id, event);
                 clients.dispatch(events);
+                if refresh_index_status {
+                    spawn_project_index_status_check(&runtime, proxy.clone());
+                }
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 broadcast_log_entry(&clients, entry);
@@ -3787,6 +3816,11 @@ fn main() -> wry::Result<()> {
                         id: window_id,
                         message,
                     },
+                )]);
+            }
+            Event::UserEvent(UserEvent::ProjectIndexStatus { status }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::ProjectIndexStatus { status },
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {

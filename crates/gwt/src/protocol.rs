@@ -398,6 +398,9 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
+    ProjectIndexStatus {
+        status: crate::ProjectIndexStatusView,
+    },
     RuntimeHookEvent {
         event: RuntimeHookEvent,
     },

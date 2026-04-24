@@ -3529,3 +3529,23 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 1. Python と Rust の両方が同じ on-disk layout を読む場合、`HOME` / `USERPROFILE` / fallback の優先順を一致させる。
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
+
+## 2026-04-24 — fix: SPEC section 更新の PowerShell join は必ず全文 readback で検証する
+
+### 事象
+
+Project index hardening の SPEC #1939 更新時、PowerShell で既存 section に追記するつもりの式が
+`($tasks -join "\n" + $append)` になり、演算子優先順位により各行の間へ追記文が挿入された。直後に
+`gwt issue spec <n> --section tasks` を readback して検知し、plan/tasks を全文置換して復旧した。
+
+### 原因
+
+- PowerShell の `-join` と `+` を同じ式で使う際の結合範囲を固定していなかった。
+- section 更新後の readback を実施したため検知できたが、更新式自体は構造化されていなかった。
+- SPEC body は markdown section parser に依存するため、1 行の結合ミスでも別 section への parse error に波及する。
+
+### 再発防止策
+
+1. `gwt issue spec ... --edit` に渡す markdown は、差分追記よりも一時ファイルの全文生成を優先する。
+2. PowerShell で配列結合と文字列連結を混ぜる場合は、`(($lines -join "`n") + $append)` のように結合結果を明示的に括る。
+3. SPEC section を更新した直後は、必ず対象 section を readback し、見出し構造と末尾の expected lines を確認してから次へ進む。

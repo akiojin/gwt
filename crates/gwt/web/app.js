@@ -42,6 +42,7 @@
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
+      const indexStatusLabel = document.getElementById("index-status");
 
       const decoderMap = new Map();
       const pendingOutputMap = new Map();
@@ -209,9 +210,34 @@
         recent_projects: [],
       };
       let versionState = { current: "", latest: "" };
+      let indexStatusState = { state: "", detail: "" };
       let projectError = "";
       const BRANCH_CLEANUP_TIMEOUT_MS = 30000;
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
+
+      function renderIndexStatus() {
+        const state = indexStatusState.state || "";
+        indexStatusLabel.hidden = !state || state === "skipped";
+        indexStatusLabel.className = `index-status ${state}`;
+        const label =
+          state === "ready"
+            ? "Index: ready"
+            : state === "repair_required"
+              ? "Index: repair"
+              : state === "error"
+                ? "Index: error"
+                : "Index: checking";
+        indexStatusLabel.textContent = label;
+        indexStatusLabel.title = indexStatusState.detail || label;
+      }
+
+      function setIndexStatus(status) {
+        indexStatusState = {
+          state: status?.state || "",
+          detail: status?.detail || "",
+        };
+        renderIndexStatus();
+      }
 
       function formatVersionLabel() {
         const current = versionState.current;
@@ -5603,6 +5629,9 @@
             }
             break;
           }
+          case "project_index_status":
+            setIndexStatus(event.status);
+            break;
           case "file_tree_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(
               event.id,

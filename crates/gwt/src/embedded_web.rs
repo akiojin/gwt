@@ -254,6 +254,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_project_bar_renders_index_status_badge() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains("id=\"index-status\""),
+            "expected project bar to expose project index status badge",
+        );
+        assert!(
+            html.contains(".index-status.ready") && html.contains(".index-status.error"),
+            "expected embedded css to define index health states",
+        );
+        assert!(
+            js.contains("function setIndexStatus(status)")
+                && js.contains("case \"project_index_status\""),
+            "expected frontend to consume project_index_status events",
+        );
+    }
+
+    #[test]
     fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
         let js = app_js();
 
