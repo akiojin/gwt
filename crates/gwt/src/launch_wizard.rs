@@ -927,9 +927,7 @@ impl LaunchWizardState {
         self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         self.sync_selected_agent_options();
-        if let Some(model) = entry.model {
-            self.model = model;
-        }
+        self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
         }
@@ -1358,6 +1356,18 @@ impl LaunchWizardState {
         self.sync_reasoning_state();
     }
 
+    fn apply_saved_model(&mut self, model: Option<&str>) {
+        let Some(model) = model else {
+            return;
+        };
+        if current_model_options(self.effective_agent_id())
+            .iter()
+            .any(|candidate| candidate == &model)
+        {
+            self.model = model.to_string();
+        }
+    }
+
     fn sync_reasoning_state(&mut self) {
         let options = self.current_reasoning_options();
         if options.is_empty() {
@@ -1593,9 +1603,7 @@ impl LaunchWizardState {
         }
         self.sync_selected_agent_options();
 
-        if let Some(model) = entry.model {
-            self.model = model;
-        }
+        self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
         }
@@ -3174,6 +3182,45 @@ mod tests {
         assert_eq!(state.docker_service.as_deref(), Some("gwt"));
         assert!(state.skip_permissions);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_with_removed_codex_model_falls_back_to_auto() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.2-codex".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        assert_eq!(state.model, "Default (Auto)");
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert!(config.model.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
     }
 
     #[test]
