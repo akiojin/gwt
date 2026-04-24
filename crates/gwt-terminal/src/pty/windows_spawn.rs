@@ -12,7 +12,11 @@ struct WindowsSpawnTarget {
     args_prefix: Vec<String>,
 }
 
+const CMD_WRAPPER_EXPRESSION_ENV: &str = "GWT_WINDOWS_CMD_WRAPPER_EXPRESSION";
+
 pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
+    config.command = normalize_command_token(&config.command);
+
     let resolved = resolve_spawn_target(&config.command, &config.env, &config.remove_env)
         .unwrap_or_else(|| WindowsSpawnTarget {
             command: config.command.clone(),
@@ -25,9 +29,12 @@ pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
         &config.env,
         &config.remove_env,
     ) {
-        Some((command, args)) => {
+        Some((command, args, expression)) => {
             config.command = command;
             config.args = args;
+            config
+                .env
+                .insert(CMD_WRAPPER_EXPRESSION_ENV.to_string(), expression);
         }
         None => {
             let mut args = resolved.args_prefix;
@@ -38,6 +45,25 @@ pub(super) fn normalize_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
     }
 
     config
+}
+
+fn normalize_command_token(command: &str) -> String {
+    let trimmed = command.trim();
+    if trimmed.len() < 2 {
+        return trimmed.to_string();
+    }
+
+    let mut chars = trimmed.chars();
+    let first = chars.next();
+    let last = chars.next_back();
+    if matches!(
+        (first, last),
+        (Some('"'), Some('"')) | (Some('\''), Some('\''))
+    ) {
+        chars.as_str().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn escape_cmd_double_quoted(value: &str) -> String {
@@ -60,6 +86,7 @@ fn quote_cmd_token_if_needed(value: &str) -> String {
 
 fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
     let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push("call".to_string());
     parts.push(quote_cmd_token_if_needed(command));
     parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
     parts.join(" ")
@@ -127,7 +154,7 @@ fn spawn_wrapper(
     forwarded_args: &[String],
     env: &HashMap<String, String>,
     remove_env: &[String],
-) -> Option<(String, Vec<String>)> {
+) -> Option<(String, Vec<String>, String)> {
     let ext = resolved
         .extension()
         .and_then(|value| value.to_str())
@@ -139,18 +166,21 @@ fn spawn_wrapper(
     let comspec =
         windows_env_value("ComSpec", env, remove_env).unwrap_or_else(|| OsString::from("cmd.exe"));
 
-    // SPEC-1921 FR-082: Do NOT pass `/s`. `/s` forces CMD to strip the
-    // quotes that surround the executable path, which breaks invocations
-    // with whitespace in the path (e.g. `C:\Program Files\nodejs\npx.cmd`).
-    // Without `/s`, CMD's default rule preserves the quotes when the
-    // command line has the typical `"<exe>" <args>` shape we emit here.
+    // SPEC-1921 FR-082: Do NOT pass `/s`. The command expression is expanded
+    // from an env var so `portable-pty` does not backslash-escape the inner
+    // quotes before CMD parses spaced `.cmd` paths.
     let expression = format!(
         "{} & exit",
         build_cmd_command_expression(&resolved.display().to_string(), forwarded_args)
     );
     Some((
         PathBuf::from(comspec).display().to_string(),
-        vec!["/d".to_string(), "/k".to_string(), expression],
+        vec![
+            "/d".to_string(),
+            "/k".to_string(),
+            format!("%{CMD_WRAPPER_EXPRESSION_ENV}%"),
+        ],
+        expression,
     ))
 }
 
@@ -327,11 +357,11 @@ fn has_executable_extension(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{collections::HashMap, path::PathBuf, time::Duration};
 
     use super::*;
     use crate::pty::PtyHandle;
-    use crate::test_util::lock_pty_test;
+    use crate::test_util::{answer_cursor_position_query, lock_pty_test, read_until_contains};
 
     fn normalized_config(
         command: &str,
@@ -382,8 +412,15 @@ mod tests {
             vec![
                 "/d".to_string(),
                 "/k".to_string(),
-                format!("{} --dangerously-skip-permissions & exit", cmd.display()),
+                format!("%{CMD_WRAPPER_EXPRESSION_ENV}%"),
             ]
+        );
+        assert_eq!(
+            normalized.env.get(CMD_WRAPPER_EXPRESSION_ENV),
+            Some(&format!(
+                "call {} --dangerously-skip-permissions & exit",
+                cmd.display()
+            ))
         );
     }
 
@@ -401,7 +438,7 @@ mod tests {
 
         assert_eq!(
             expression,
-            r#""C:\Program Files\nodejs\npx.cmd" --cwd "C:\Users\Test User\repo" "a&b" "arg ""quoted"" value""#
+            r#"call "C:\Program Files\nodejs\npx.cmd" --cwd "C:\Users\Test User\repo" "a&b" "arg ""quoted"" value""#
         );
     }
 
@@ -634,16 +671,93 @@ mod tests {
             normalized.args,
         );
         let expected_expression = format!(
-            "\"{}\" --yes @anthropic-ai/claude-code@latest & exit",
+            "call \"{}\" --yes @anthropic-ai/claude-code@latest & exit",
             npx_cmd.display()
         );
         assert!(
-            normalized
-                .args
-                .iter()
-                .any(|arg| arg == &expected_expression),
+            normalized.env.get(CMD_WRAPPER_EXPRESSION_ENV) == Some(&expected_expression),
             "expected original package spec preserved inside cmd wrapper expression, got {:?}",
-            normalized.args,
+            normalized.env,
+        );
+    }
+
+    #[test]
+    fn spawn_succeeds_via_spaced_npx_cmd_path() {
+        let _pty_guard = lock_pty_test();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("Program Files").join("nodejs");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let cmd_path = bin_dir.join("npx.cmd");
+        std::fs::write(
+            &cmd_path,
+            "@echo off\r\necho GWT_NPX_OK %*\r\nexit /b 0\r\n",
+        )
+        .expect("npx.cmd");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: "npx".to_string(),
+            args: vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env,
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn npx.cmd");
+        answer_cursor_position_query(&handle);
+        let reader = handle.reader().expect("reader");
+
+        let output = read_until_contains(reader, Duration::from_secs(5), "GWT_NPX_OK")
+            .expect("read npx output");
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains("GWT_NPX_OK --yes @anthropic-ai/claude-code@latest"),
+            "expected fake npx.cmd to receive forwarded args, got: {text}"
+        );
+    }
+
+    #[test]
+    fn spawn_strips_outer_quotes_from_spaced_npx_cmd_path() {
+        let _pty_guard = lock_pty_test();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("Program Files").join("nodejs");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let cmd_path = bin_dir.join("npx.cmd");
+        std::fs::write(
+            &cmd_path,
+            "@echo off\r\necho GWT_QUOTED_NPX_OK %*\r\nexit /b 0\r\n",
+        )
+        .expect("npx.cmd");
+
+        let handle = PtyHandle::spawn(SpawnConfig {
+            command: format!("\"{}\"", cmd_path.display()),
+            args: vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        })
+        .expect("spawn quoted npx.cmd");
+        answer_cursor_position_query(&handle);
+        let reader = handle.reader().expect("reader");
+
+        let output = read_until_contains(reader, Duration::from_secs(5), "GWT_QUOTED_NPX_OK")
+            .expect("read quoted npx output");
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains("GWT_QUOTED_NPX_OK --yes @anthropic-ai/claude-code@latest"),
+            "expected quoted fake npx.cmd to receive forwarded args, got: {text}"
         );
     }
 
@@ -686,14 +800,14 @@ mod tests {
             wrapped.1,
         );
         let expected_expression = format!(
-            "\"{}\" --yes @anthropic-ai/claude-code@latest & exit",
+            "call \"{}\" --yes @anthropic-ai/claude-code@latest & exit",
             cmd_path.display()
         );
         assert_eq!(
-            wrapped.1.last().map(String::as_str),
-            Some(expected_expression.as_str()),
+            wrapped.2.as_str(),
+            expected_expression.as_str(),
             "wrapper should preserve quoting for spaced shim paths and append `& exit`, got {:?}",
-            wrapped.1,
+            wrapped,
         );
     }
 }
