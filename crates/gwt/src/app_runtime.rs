@@ -301,8 +301,8 @@ impl AppRuntime {
         blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
-        let log_dir = gwt_core::paths::gwt_logs_dir();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&launch_dir);
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
         migrate_legacy_workspace_state(
