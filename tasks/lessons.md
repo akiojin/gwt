@@ -1,5 +1,36 @@
 # Lessons Learned
 
+## 2026-04-24 — fix(logging): structured runtime log は project-scoped canonical file 以外へ出さない
+
+### 事象
+
+ログ機能の仕様追加を重ねる中で、#1924 の古い `~/.gwt/logs/` 契約、#2021 の
+`~/.gwt/projects/<repo-hash>/logs/` 契約、実装上の `gwt_logs_dir()` 使用が混在し、
+新しい診断機能が別ログファイルや legacy path へ出力される余地が残っていた。
+
+### 原因
+
+- `gwt_core::logging::init` 自体は単一入口だったが、呼び出し側が任意の
+  `log_dir` を渡せるため、entrypoint ごとに path 解決が割れた。
+- README と #2021 は project-scoped path を示していた一方、#1924 の Phase 5
+  説明と一部コードコメントに legacy path が残っていた。
+- 新規診断機能追加時に「Logs window と同じ canonical file に出ること」を
+  テストや acceptance で固定していなかった。
+
+### 再発防止策
+
+1. structured runtime log の保存先は
+   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD` のみとする。Git origin
+   がない場合は `project_scope_hash(path)` の path hash fallback を使う。
+2. logging 初期化では `gwt_logs_dir()` を直接使わず、必ず project-scoped
+   canonical resolver を通す。
+3. 新しい診断機能は独自の `.log` / `.jsonl` writer を追加せず、`tracing`
+   target / fields / spans として canonical structured log に流す。
+4. logging 変更では writer / watcher / housekeeping / SPEC / README / docs を同時に確認し、
+   legacy path が残っていないか `rg "~/.gwt/logs|gwt_logs_dir\\(\\)"` で確認する。
+5. regression test で `LoggingConfig::new(gwt_logs_dir())` や `crates/gwt` の
+   logging setup における direct legacy path 使用を失敗させる。
+
 ## 2026-04-23 — fix: Python の file I/O は `encoding="utf-8"` を必ず明示する
 
 ### 事象

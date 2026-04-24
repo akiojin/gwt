@@ -37,4 +37,4 @@ gwt は単一の Rust バイナリで GUI と CLI を提供します。
 - Issue / SPEC キャッシュ:
   - `~/.gwt/cache/issues/<repo-hash>/`
 - ログ:
-  - `~/.gwt/logs/`
+  - `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
