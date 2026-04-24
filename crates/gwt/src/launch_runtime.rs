@@ -161,7 +161,7 @@ pub(crate) fn build_shell_process_launch(
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
         let shell = match config.windows_shell {
             Some(windows_shell) => gwt::ShellProgram {
-                command: windows_shell.command().to_string(),
+                command: windows_shell_process_command(windows_shell).to_string(),
                 args: interactive_windows_shell_args(windows_shell),
             },
             None => detect_shell_program().map_err(|error| error.to_string())?,
@@ -210,6 +210,14 @@ pub(crate) fn build_shell_process_launch(
 
 pub(crate) const WINDOWS_HOST_SHELL_EXPRESSION_ENV: &str = "GWT_WINDOWS_HOST_SHELL_EXPRESSION";
 
+pub(crate) fn windows_shell_process_command(shell: gwt_agent::WindowsShellKind) -> &'static str {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => "cmd.exe",
+        gwt_agent::WindowsShellKind::WindowsPowerShell => "powershell",
+        gwt_agent::WindowsShellKind::PowerShell7 => "pwsh",
+    }
+}
+
 fn interactive_windows_shell_args(shell: gwt_agent::WindowsShellKind) -> Vec<String> {
     match shell {
         gwt_agent::WindowsShellKind::CommandPrompt => Vec::new(),
@@ -246,7 +254,7 @@ fn wrap_windows_host_shell_command(
             let expression = format!("{} & exit", build_cmd_command_expression(command, args));
             env.insert(WINDOWS_HOST_SHELL_EXPRESSION_ENV.to_string(), expression);
             (
-                shell.command().to_string(),
+                windows_shell_process_command(shell).to_string(),
                 vec![
                     "/d".to_string(),
                     "/k".to_string(),
@@ -256,7 +264,7 @@ fn wrap_windows_host_shell_command(
         }
         gwt_agent::WindowsShellKind::WindowsPowerShell
         | gwt_agent::WindowsShellKind::PowerShell7 => (
-            shell.command().to_string(),
+            windows_shell_process_command(shell).to_string(),
             vec![
                 "-NoLogo".to_string(),
                 "-NoProfile".to_string(),

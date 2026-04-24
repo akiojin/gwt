@@ -2541,6 +2541,28 @@ mod tests {
     }
 
     #[test]
+    fn windows_shell_process_command_mapping_is_owned_by_launch_runtime() {
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::CommandPrompt
+            ),
+            "cmd.exe"
+        );
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::WindowsPowerShell
+            ),
+            "powershell"
+        );
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::PowerShell7
+            ),
+            "pwsh"
+        );
+    }
+
+    #[test]
     fn command_prompt_agent_wrapper_preserves_spaced_cmd_path() {
         let mut config = sample_versioned_launch_config();
         config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();

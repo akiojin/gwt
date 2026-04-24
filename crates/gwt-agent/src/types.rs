@@ -177,41 +177,8 @@ pub enum LaunchRuntimeTarget {
 pub enum WindowsShellKind {
     CommandPrompt,
     WindowsPowerShell,
+    #[serde(rename = "power_shell_7", alias = "power_shell7")]
     PowerShell7,
-}
-
-impl WindowsShellKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::CommandPrompt => "Command Prompt",
-            Self::WindowsPowerShell => "Windows PowerShell",
-            Self::PowerShell7 => "PowerShell 7",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::CommandPrompt => "Run through cmd.exe",
-            Self::WindowsPowerShell => "Run through Windows PowerShell",
-            Self::PowerShell7 => "Run through PowerShell 7",
-        }
-    }
-
-    pub fn command(self) -> &'static str {
-        match self {
-            Self::CommandPrompt => "cmd.exe",
-            Self::WindowsPowerShell => "powershell",
-            Self::PowerShell7 => "pwsh",
-        }
-    }
-
-    pub fn value(self) -> &'static str {
-        match self {
-            Self::CommandPrompt => "command_prompt",
-            Self::WindowsPowerShell => "windows_power_shell",
-            Self::PowerShell7 => "power_shell_7",
-        }
-    }
 }
 
 /// Non-persisted lifecycle intent for a Docker launch.
@@ -447,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_shell_kind_wire_values_and_labels_are_stable() {
+    fn windows_shell_kind_wire_values_are_stable() {
         assert_eq!(
             serde_json::to_string(&WindowsShellKind::CommandPrompt).unwrap(),
             "\"command_prompt\""
@@ -456,11 +423,13 @@ mod tests {
             serde_json::from_str::<WindowsShellKind>("\"windows_power_shell\"").unwrap(),
             WindowsShellKind::WindowsPowerShell
         );
-        assert_eq!(WindowsShellKind::CommandPrompt.label(), "Command Prompt");
         assert_eq!(
-            WindowsShellKind::WindowsPowerShell.label(),
-            "Windows PowerShell"
+            serde_json::from_str::<WindowsShellKind>("\"power_shell_7\"").unwrap(),
+            WindowsShellKind::PowerShell7
         );
-        assert_eq!(WindowsShellKind::PowerShell7.command(), "pwsh");
+        assert_eq!(
+            serde_json::from_str::<WindowsShellKind>("\"power_shell7\"").unwrap(),
+            WindowsShellKind::PowerShell7
+        );
     }
 }
