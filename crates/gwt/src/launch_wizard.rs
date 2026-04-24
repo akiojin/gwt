@@ -954,9 +954,7 @@ impl LaunchWizardState {
         self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         self.sync_selected_agent_options();
-        if let Some(model) = entry.model {
-            self.model = model;
-        }
+        self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
         }
@@ -1391,6 +1389,18 @@ impl LaunchWizardState {
         self.sync_reasoning_state();
     }
 
+    fn apply_saved_model(&mut self, model: Option<&str>) {
+        let Some(model) = model else {
+            return;
+        };
+        if current_model_options(self.effective_agent_id())
+            .iter()
+            .any(|candidate| candidate == &model)
+        {
+            self.model = model.to_string();
+        }
+    }
+
     fn sync_reasoning_state(&mut self) {
         let options = self.current_reasoning_options();
         if options.is_empty() {
@@ -1634,9 +1644,7 @@ impl LaunchWizardState {
         }
         self.sync_selected_agent_options();
 
-        if let Some(model) = entry.model {
-            self.model = model;
-        }
+        self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
         }
@@ -1931,42 +1939,34 @@ const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     },
 ];
 
-const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 9] = [
+const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     ModelDisplayOption {
         label: "Default (Auto)",
-        description: "Use Codex default model",
+        description: "Use Codex default model (gpt-5.5)",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.5",
+        description: "Frontier model for complex coding, research, and real-world work",
     },
     ModelDisplayOption {
         label: "gpt-5.4",
-        description: "Latest frontier agentic coding model",
+        description: "Strong model for everyday coding",
     },
     ModelDisplayOption {
         label: "gpt-5.4-mini",
-        description: "Smaller frontier agentic coding model",
+        description: "Small, fast, and cost-efficient model for simpler coding tasks",
     },
     ModelDisplayOption {
         label: "gpt-5.3-codex",
-        description: "Frontier Codex-optimized coding model",
+        description: "Coding-optimized model",
     },
     ModelDisplayOption {
         label: "gpt-5.3-codex-spark",
         description: "Ultra-fast coding model",
     },
     ModelDisplayOption {
-        label: "gpt-5.2-codex",
-        description: "Frontier agentic coding model",
-    },
-    ModelDisplayOption {
         label: "gpt-5.2",
-        description: "Optimized for professional work",
-    },
-    ModelDisplayOption {
-        label: "gpt-5.1-codex-max",
-        description: "Deep and fast reasoning",
-    },
-    ModelDisplayOption {
-        label: "gpt-5.1-codex-mini",
-        description: "Cheaper and faster codex option",
+        description: "Optimized for professional work and long-running agents",
     },
 ];
 
@@ -2994,7 +2994,7 @@ mod tests {
         session.display_name = session.agent_id.display_name().to_string();
         session.agent_session_id = resume_id.map(str::to_string);
         session.tool_version = Some("installed".to_string());
-        session.model = Some("gpt-5.4".to_string());
+        session.model = Some("gpt-5.5".to_string());
         session.reasoning_level = Some("high".to_string());
         session.skip_permissions = true;
         session.codex_fast_mode = true;
@@ -3018,7 +3018,7 @@ mod tests {
         session.display_name = session.agent_id.display_name().to_string();
         session.agent_session_id = resume_id.map(str::to_string);
         session.tool_version = Some("installed".to_string());
-        session.model = Some("gpt-5.4".to_string());
+        session.model = Some("gpt-5.5".to_string());
         session.reasoning_level = Some("high".to_string());
         session.skip_permissions = true;
         session.codex_fast_mode = true;
@@ -3049,7 +3049,7 @@ mod tests {
             ),
             "codex" => (
                 "Codex",
-                Some("gpt-5.4"),
+                Some("gpt-5.5"),
                 Some("high"),
                 Some("0.110.0"),
                 true,
@@ -3095,7 +3095,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3222,7 +3222,7 @@ mod tests {
             Some("resume-older"),
         );
         older.tool_version = Some("0.110.0".to_string());
-        older.model = Some("gpt-5.4".to_string());
+        older.model = Some("gpt-5.5".to_string());
         older.reasoning_level = Some("high".to_string());
         older.skip_permissions = true;
         older.codex_fast_mode = true;
@@ -3257,7 +3257,7 @@ mod tests {
             entries[0].resume_session_id.as_deref(),
             Some("resume-older")
         );
-        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.5"));
         assert_eq!(entries[0].reasoning.as_deref(), Some("high"));
         assert_eq!(entries[0].version.as_deref(), Some("0.110.0"));
         assert_eq!(
@@ -3292,7 +3292,7 @@ mod tests {
             Vec::new(),
         );
         state.agent_id = "codex".to_string();
-        state.model = "gpt-5.4".to_string();
+        state.model = "gpt-5.5".to_string();
         state.reasoning = "high".to_string();
         state.version = "0.110.0".to_string();
         state.mode = "resume".to_string();
@@ -3324,7 +3324,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3343,7 +3343,7 @@ mod tests {
         });
 
         assert_eq!(state.agent_id, "codex");
-        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.model, "gpt-5.5");
         assert_eq!(state.reasoning, "high");
         assert_eq!(state.version, "0.110.0");
         assert_eq!(state.mode, "resume");
@@ -3352,6 +3352,45 @@ mod tests {
         assert_eq!(state.docker_service.as_deref(), Some("gwt"));
         assert!(state.skip_permissions);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_with_removed_codex_model_falls_back_to_auto() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.2-codex".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        assert_eq!(state.model, "Default (Auto)");
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert!(config.model.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3374,7 +3413,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3426,7 +3465,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3467,7 +3506,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: None,
@@ -3513,7 +3552,7 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
         state.apply(LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
@@ -3531,7 +3570,7 @@ mod tests {
 
         assert_eq!(view.branch_mode, "use_selected");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "high");
         assert_eq!(view.selected_runtime_target, "host");
         assert_eq!(view.selected_version, "0.110.0");
@@ -3585,8 +3624,8 @@ mod tests {
         state.set_agent_id("missing");
         assert_eq!(state.error.as_deref(), Some("Agent option is unavailable"));
 
-        state.set_model("gpt-5.4");
-        assert_eq!(state.model, "gpt-5.4");
+        state.set_model("gpt-5.5");
+        assert_eq!(state.model, "gpt-5.5");
         state.set_model("bad-model");
         assert_eq!(state.error.as_deref(), Some("Model option is unavailable"));
 
@@ -3703,7 +3742,7 @@ mod tests {
         state.step = LaunchWizardStep::ModelSelect;
         state.selected = 1;
         state.apply_selection();
-        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.model, "gpt-5.5");
 
         state.step = LaunchWizardStep::ReasoningLevel;
         state.selected = 1;
@@ -4130,7 +4169,7 @@ mod tests {
             "fix/coverage"
         );
         assert_eq!(apply_branch_prefix("  ", "chore/"), "chore/");
-        assert!(is_explicit_model_selection("gpt-5.4"));
+        assert!(is_explicit_model_selection("gpt-5.5"));
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
         assert!(!agent_has_npm_package("custom"));
@@ -4172,7 +4211,18 @@ mod tests {
             .any(|option| option.value == "resume"));
 
         assert!(current_model_options("claude").contains(&"sonnet"));
-        assert!(current_model_options("codex").contains(&"gpt-5.4"));
+        assert_eq!(
+            current_model_options("codex"),
+            vec![
+                "Default (Auto)",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex",
+                "gpt-5.3-codex-spark",
+                "gpt-5.2",
+            ]
+        );
         assert!(current_model_options("gemini").contains(&"gemini-2.5-pro"));
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
@@ -4185,7 +4235,7 @@ mod tests {
             session_id: "gwt-session-1".to_string(),
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             reasoning: Some("high".to_string()),
             version: Some("0.110.0".to_string()),
             resume_session_id: Some("resume-1".to_string()),
@@ -4197,7 +4247,7 @@ mod tests {
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
         });
 
-        assert_eq!(summary, "Codex · gpt-5.4 · high · 0.110.0 · docker:gwt");
+        assert_eq!(summary, "Codex · gpt-5.5 · high · 0.110.0 · docker:gwt");
     }
 
     #[test]
@@ -4239,7 +4289,7 @@ mod tests {
 
         state.launch_target = LaunchTargetKind::Agent;
         state.agent_id = "codex".to_string();
-        state.model = "gpt-5.4".to_string();
+        state.model = "gpt-5.5".to_string();
         state.reasoning = "high".to_string();
         state.version = "0.110.0".to_string();
         state.mode = "resume".to_string();
@@ -4258,7 +4308,7 @@ mod tests {
             step_default_selection(LaunchWizardStep::ModelSelect, &state),
             current_model_options("codex")
                 .iter()
-                .position(|model| model == &"gpt-5.4")
+                .position(|model| model == &"gpt-5.5")
                 .unwrap()
         );
         assert_eq!(
@@ -4300,7 +4350,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),

@@ -112,10 +112,35 @@ fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<
     }
 }
 
+fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
+}
+
 fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) {
     clients.dispatch(vec![OutboundEvent::broadcast(
         BackendEvent::LogEntryAppended { entry },
     )]);
+}
+
+fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
+    let project_root = std::env::current_dir().ok();
+    drop(runtime.spawn(async move {
+        let status = match project_root {
+            Some(path) => tokio::task::spawn_blocking(move || {
+                gwt::index_worker::project_index_status_for_path(&path)
+            })
+            .await
+            .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
+                state: "error".to_string(),
+                detail: format!("Project index status task failed: {err}"),
+            }),
+            None => gwt::ProjectIndexStatusView {
+                state: "skipped".to_string(),
+                detail: "No current directory".to_string(),
+            },
+        };
+        let _ = proxy.send_event(UserEvent::ProjectIndexStatus { status });
+    }));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +183,9 @@ enum UserEvent {
     LaunchProgress {
         window_id: String,
         message: String,
+    },
+    ProjectIndexStatus {
+        status: gwt::ProjectIndexStatusView,
     },
     LaunchComplete {
         window_id: String,
@@ -213,11 +241,11 @@ mod tests {
         build_frontend_sync_events, build_shell_process_launch, close_window_from_workspace,
         combined_window_id, current_git_branch, docker_bundle_mounts_for_home,
         docker_bundle_override_content, gui_front_door_launch_surface, hook_forward_authorized,
-        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
-        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub, DispatchTarget,
-        LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent,
-        WindowAddress,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
+        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -387,6 +415,43 @@ mod tests {
         assert!(native_payload.contains("\"kind\":\"log_entry_appended\""));
         assert!(native_payload.contains("\"severity\":\"Warn\""));
         assert!(native_payload.contains("\"message\":\"reader stalled\""));
+    }
+
+    #[test]
+    fn logging_dir_for_startup_path_uses_project_scoped_fallback() {
+        let temp = tempdir().expect("tempdir");
+        let log_dir = logging_dir_for_startup_path(temp.path());
+        let project_hash = gwt_core::repo_hash::compute_path_hash(temp.path());
+
+        assert!(log_dir.ends_with(
+            Path::new("projects")
+                .join(project_hash.as_str())
+                .join("logs")
+        ));
+    }
+
+    #[test]
+    fn logging_initialization_sources_do_not_use_legacy_log_dir() {
+        let legacy_helper = ["gwt_core::paths::", "gwt_logs_dir", "()"].concat();
+        let forbidden_init = [
+            "LoggingConfig::new(",
+            "gwt_core::paths::",
+            "gwt_logs_dir",
+            "()",
+        ]
+        .concat();
+
+        let main_source = include_str!("main.rs");
+        let runtime_source = include_str!("app_runtime.rs");
+
+        assert!(
+            !main_source.contains(&forbidden_init),
+            "main logging initialization must use the project-scoped canonical resolver"
+        );
+        assert!(
+            !runtime_source.contains(&legacy_helper),
+            "AppRuntime log snapshots must use the project-scoped canonical resolver"
+        );
     }
 
     #[test]
@@ -713,7 +778,7 @@ mod tests {
             session_id: "gwt-session-1".to_string(),
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             reasoning: Some("high".to_string()),
             version: Some("0.110.0".to_string()),
             resume_session_id: Some("resume-1".to_string()),
@@ -1151,6 +1216,7 @@ mod tests {
             KnowledgeKind::Issue,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(knowledge_missing.len(), 1);
         assert!(matches!(
@@ -1164,6 +1230,7 @@ mod tests {
             KnowledgeKind::Issue,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(knowledge_wrong.len(), 1);
         assert!(matches!(
@@ -1734,6 +1801,7 @@ mod tests {
                     knowledge_kind: KnowledgeKind::Issue,
                     selected_number: None,
                     refresh: false,
+                    list_scope: None,
                 },
             )
             .is_empty());
@@ -1744,6 +1812,7 @@ mod tests {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
                     number: 42,
+                    list_scope: None,
                 },
             )
             .is_empty());
@@ -3738,25 +3807,25 @@ fn main() -> wry::Result<()> {
         }
     }
 
+    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let log_dir = logging_dir_for_startup_path(&startup_dir);
+
     // Install the tracing subscriber so that `tracing::debug!/info!` lands in
-    // `~/.gwt/logs/gwt.log`. The returned guard must outlive the event loop;
-    // we bind it to `log_handles` and keep it until `main` returns.
+    // the startup project's canonical `gwt.log.YYYY-MM-DD`. The returned guard
+    // must outlive the event loop; we bind it to `log_handles` and keep it
+    // until `main` returns.
     //
     // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
     // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
     // `RUST_LOG=gwt_input_trace=debug`.
-    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
-        gwt_core::paths::gwt_logs_dir(),
-    ))
-    .map_err(|error| {
-        eprintln!("gwt logging init failed: {error}");
-    })
-    .ok();
+    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(log_dir))
+        .map_err(|error| {
+            eprintln!("gwt logging init failed: {error}");
+        })
+        .ok();
 
-    if let Ok(project_root) = std::env::current_dir() {
-        if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&project_root) {
-            eprintln!("gwt daemon bootstrap: {error}");
-        }
+    if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&startup_dir) {
+        eprintln!("gwt daemon bootstrap: {error}");
     }
 
     let runtime = Runtime::new().expect("tokio runtime");
@@ -3804,6 +3873,7 @@ fn main() -> wry::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    spawn_project_index_status_check(&runtime, proxy.clone());
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -3858,8 +3928,12 @@ fn main() -> wry::Result<()> {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+                let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let events = app.handle_frontend_event(client_id, event);
                 clients.dispatch(events);
+                if refresh_index_status {
+                    spawn_project_index_status_check(&runtime, proxy.clone());
+                }
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 broadcast_log_entry(&clients, entry);
@@ -3882,6 +3956,11 @@ fn main() -> wry::Result<()> {
                         id: window_id,
                         message,
                     },
+                )]);
+            }
+            Event::UserEvent(UserEvent::ProjectIndexStatus { status }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::ProjectIndexStatus { status },
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {

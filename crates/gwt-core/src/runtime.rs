@@ -8,10 +8,12 @@ use std::{
 };
 
 use crate::{GwtError, Result};
+use sha2::{Digest, Sha256};
 
 const RUNNER_SOURCE: &str = include_str!("../runtime/chroma_index_runner.py");
 const REQUIREMENTS_SOURCE: &str = include_str!("../runtime/project_index_requirements.txt");
 const REQUIREMENTS_FILE: &str = "project_index_requirements.txt";
+const RUNTIME_MANIFEST_FILE: &str = "project_index_runtime_manifest.json";
 const PYTHON_VERSION_SNIPPET: &str =
     "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')";
 const PROJECT_INDEX_RUNTIME_ERROR_PREFIX: &str = "[gwt-project-index-runtime]";
@@ -39,9 +41,13 @@ pub enum ProjectIndexRuntimeErrorKind {
 pub struct ProjectIndexRuntimeReport {
     pub runner_updated: bool,
     pub requirements_updated: bool,
+    pub manifest_updated: bool,
     pub venv_created: bool,
     pub venv_rebuilt: bool,
     pub dependencies_installed: bool,
+    pub runner_smoke_tested: bool,
+    pub runner_hash: String,
+    pub requirements_hash: String,
 }
 
 pub fn ensure_project_index_runtime() -> Result<ProjectIndexRuntimeReport> {
@@ -54,6 +60,7 @@ trait RuntimeProvisioner {
     fn create_venv(&self, python: &BootstrapPython, venv_dir: &Path) -> Result<()>;
     fn install_requirements(&self, venv_python: &Path, requirements: &Path) -> Result<()>;
     fn probe_chromadb(&self, venv_python: &Path) -> Result<()>;
+    fn probe_runner(&self, venv_python: &Path, runner_script: &Path) -> Result<()>;
 }
 
 struct RealProvisioner;
@@ -92,6 +99,16 @@ impl RuntimeProvisioner for RealProvisioner {
             "python -c import chromadb",
         )
     }
+
+    fn probe_runner(&self, venv_python: &Path, runner_script: &Path) -> Result<()> {
+        run_checked(
+            Command::new(venv_python)
+                .arg(runner_script)
+                .arg("--action")
+                .arg("probe"),
+            "project index runner probe",
+        )
+    }
 }
 
 fn ensure_project_index_runtime_with(
@@ -107,6 +124,12 @@ fn ensure_project_index_runtime_with(
     crate::paths::ensure_dir(&runtime_dir)?;
     report.runner_updated = write_if_changed(&runner_path, RUNNER_SOURCE)?;
     report.requirements_updated = write_if_changed(&requirements_path, REQUIREMENTS_SOURCE)?;
+    report.runner_hash = content_hash(RUNNER_SOURCE);
+    report.requirements_hash = content_hash(REQUIREMENTS_SOURCE);
+    report.manifest_updated = write_if_changed(
+        &runtime_dir.join(RUNTIME_MANIFEST_FILE),
+        &runtime_manifest_contents(&report),
+    )?;
 
     let mut venv_python = venv_python_path(&venv_dir);
     let mut needs_install = report.requirements_updated;
@@ -139,7 +162,50 @@ fn ensure_project_index_runtime_with(
             .map_err(|_| first_probe_error)?;
     }
 
+    if let Err(first_probe_error) = provisioner.probe_runner(&venv_python, &runner_path) {
+        if venv_dir.exists() {
+            fs::remove_dir_all(&venv_dir)?;
+        }
+        let python = provisioner.find_python()?;
+        provisioner.create_venv(&python, &venv_dir)?;
+        venv_python = venv_python_path(&venv_dir);
+        provisioner.install_requirements(&venv_python, &requirements_path)?;
+        report.venv_rebuilt = true;
+        report.dependencies_installed = true;
+        if provisioner.probe_chromadb(&venv_python).is_err() {
+            return Err(first_probe_error);
+        }
+        if provisioner
+            .probe_runner(&venv_python, &runner_path)
+            .is_err()
+        {
+            return Err(first_probe_error);
+        }
+    }
+    report.runner_smoke_tested = true;
+
     Ok(report)
+}
+
+fn content_hash(contents: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(contents.as_bytes());
+    hex::encode(hasher.finalize())[..16].to_string()
+}
+
+fn runtime_manifest_contents(report: &ProjectIndexRuntimeReport) -> String {
+    serde_json::json!({
+        "schema_version": 1,
+        "runner": {
+            "path": "chroma_index_runner.py",
+            "sha256_16": report.runner_hash,
+        },
+        "requirements": {
+            "path": REQUIREMENTS_FILE,
+            "sha256_16": report.requirements_hash,
+        },
+    })
+    .to_string()
 }
 
 fn venv_python_path(venv_dir: &Path) -> PathBuf {
@@ -510,6 +576,7 @@ mod tests {
         calls: RefCell<Vec<&'static str>>,
         create_venv_prefix_args: RefCell<Vec<&'static str>>,
         fail_probe_once: Cell<bool>,
+        fail_runner_probe_once: Cell<bool>,
         python: BootstrapPython,
     }
 
@@ -521,6 +588,7 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 create_venv_prefix_args: RefCell::new(Vec::new()),
                 fail_probe_once: Cell::new(false),
+                fail_runner_probe_once: Cell::new(false),
                 python: BootstrapPython {
                     program: python,
                     prefix_args: &[],
@@ -561,6 +629,15 @@ mod tests {
             }
             Ok(())
         }
+
+        fn probe_runner(&self, _venv_python: &Path, runner_script: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("probe_runner");
+            assert!(runner_script.exists());
+            if self.fail_runner_probe_once.replace(false) {
+                return Err(GwtError::Other("runner probe failed".into()));
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -573,9 +650,17 @@ mod tests {
 
         assert!(report.runner_updated);
         assert!(report.requirements_updated);
+        assert!(report.manifest_updated);
         assert!(report.venv_created);
         assert!(report.dependencies_installed);
+        assert!(report.runner_smoke_tested);
+        assert_eq!(report.runner_hash.len(), 16);
+        assert_eq!(report.requirements_hash.len(), 16);
         assert!(gwt_runtime_runner_path_from(&gwt_home).exists());
+        assert!(gwt_home
+            .join("runtime")
+            .join(RUNTIME_MANIFEST_FILE)
+            .exists());
         assert!(venv_python_path(&gwt_project_index_venv_dir_from(&gwt_home)).exists());
         assert_eq!(
             provisioner.calls(),
@@ -583,7 +668,8 @@ mod tests {
                 "find_python",
                 "create_venv",
                 "install_requirements",
-                "probe_chromadb"
+                "probe_chromadb",
+                "probe_runner"
             ]
         );
     }
@@ -602,10 +688,12 @@ mod tests {
         let second = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(!second.runner_updated);
         assert!(!second.requirements_updated);
+        assert!(!second.manifest_updated);
         assert!(!second.venv_created);
         assert!(!second.venv_rebuilt);
         assert!(!second.dependencies_installed);
-        assert_eq!(provisioner.calls(), vec!["probe_chromadb"]);
+        assert!(second.runner_smoke_tested);
+        assert_eq!(provisioner.calls(), vec!["probe_chromadb", "probe_runner"]);
     }
 
     #[test]
@@ -628,7 +716,36 @@ mod tests {
                 "find_python",
                 "create_venv",
                 "install_requirements",
-                "probe_chromadb"
+                "probe_chromadb",
+                "probe_runner"
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_project_index_runtime_rebuilds_venv_when_runner_probe_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+        let provisioner = FakeProvisioner::new(root.path());
+
+        let _ = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        provisioner.calls.borrow_mut().clear();
+        provisioner.fail_runner_probe_once.set(true);
+
+        let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        assert!(report.venv_rebuilt);
+        assert!(report.dependencies_installed);
+        assert!(report.runner_smoke_tested);
+        assert_eq!(
+            provisioner.calls(),
+            vec![
+                "probe_chromadb",
+                "probe_runner",
+                "find_python",
+                "create_venv",
+                "install_requirements",
+                "probe_chromadb",
+                "probe_runner"
             ]
         );
     }

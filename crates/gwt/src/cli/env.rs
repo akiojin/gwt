@@ -491,6 +491,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "pr" => parse_pr_args(&rest),
         "actions" => parse_actions_args(&rest),
         "board" => parse_board_args(&rest),
+        "index" => super::parse_index_args(&rest),
         "hook" => parse_hook_args(&rest),
         "discuss" => super::parse_discuss_args(&rest),
         "plan" => super::parse_plan_args(&rest),
@@ -1252,8 +1253,11 @@ fn main() -> ExitCode {
                 "hello"
             );
 
+            // `DefaultCliEnv` spawns `current_exe()`, which is the Rust test harness in unit tests.
+            // Use `--help` so the spawned binary exits successfully regardless of whether it is the
+            // real CLI binary or the harness wrapper.
             let output = env
-                .run_internal_command(&["gwt".to_string(), "issue".to_string()], "")
+                .run_internal_command(&["gwt".to_string(), "--help".to_string()], "")
                 .expect("internal dispatch");
             assert_eq!(output.status, 0);
         });

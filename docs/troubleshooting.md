@@ -4,7 +4,7 @@
 
 1. ログを確認します。
 
-- `~/.gwt/logs/`
+- `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD`
 - `stderr` に出力される `http://127.0.0.1:<port>/` の URL を通常のブラウザで開き、WebView 固有の問題かどうかを切り分けます。
 
 1. 開発環境では GUI を直接起動して確認します。
@@ -38,4 +38,4 @@ cargo run -p gwt
 2. 起動を実行し、失敗ケースを再現します（旧バージョンからのマイグレーション済みプロジェクトを含む）。
 3. 失敗時に terminal タブへ `PTY stream error` を含むメッセージと `Press Enter to close this tab.` が表示されることを確認します。
 4. terminal タブをアクティブにして `Enter` を押し、タブが閉じることを確認します。
-5. 表示されない / 閉じられない場合は `~/.gwt/logs/` の該当時刻ログを採取し、起動条件（branch / profile / runtime）とあわせて記録します。
+5. 表示されない / 閉じられない場合は `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD` の該当時刻ログを採取し、起動条件（branch / profile / runtime）とあわせて記録します。

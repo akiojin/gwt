@@ -1,9 +1,10 @@
 //! Secret-name classifier for the agent launch audit log (FR-047, FR-063).
 //!
-//! The launch audit log writes a JSONL line per agent launch that includes the
-//! resolved command, args, cwd, and environment. To prevent plaintext API keys
-//! from ending up in `~/.gwt/logs/agent-launch.jsonl`, env entries whose keys
-//! match a known secret pattern are masked before the line is written.
+//! Agent launch diagnostics are emitted through the canonical structured
+//! logging pipeline with resolved command, args, cwd, and environment. To
+//! prevent plaintext API keys from ending up in the project-scoped
+//! `gwt.log.YYYY-MM-DD`, env entries whose keys match a known secret pattern
+//! are masked before the event is emitted.
 
 /// Placeholder string that replaces a secret value in the audit record.
 pub const REDACTED_PLACEHOLDER: &str = "***REDACTED***";

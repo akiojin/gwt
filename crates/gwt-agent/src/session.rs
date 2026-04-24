@@ -1009,7 +1009,7 @@ mod tests {
             "@openai/codex@0.122.0".to_string(),
             "--no-alt-screen".to_string(),
         ];
-        config.model = Some("gpt-5.4".to_string());
+        config.model = Some("gpt-5.5".to_string());
         config.reasoning_level = Some("high".to_string());
         config.skip_permissions = true;
         config.codex_fast_mode = true;
@@ -1031,7 +1031,7 @@ mod tests {
                 "--no-alt-screen".to_string(),
             ]
         );
-        assert_eq!(session.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(session.reasoning_level.as_deref(), Some("high"));
         assert!(session.skip_permissions);
         assert!(session.codex_fast_mode);

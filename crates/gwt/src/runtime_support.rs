@@ -380,7 +380,7 @@ pub(crate) fn front_door_route(argv: &[String]) -> FrontDoorRoute {
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
             debug_assert!(matches!(
                 top_verb,
-                "board" | "hook" | "discuss" | "plan" | "build" | "update" | "__internal"
+                "board" | "index" | "hook" | "discuss" | "plan" | "build" | "update" | "__internal"
             ));
             FrontDoorRoute::DetachedCli
         }

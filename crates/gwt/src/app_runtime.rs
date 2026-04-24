@@ -301,8 +301,8 @@ impl AppRuntime {
         blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
-        let log_dir = gwt_core::paths::gwt_logs_dir();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&launch_dir);
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
         migrate_legacy_workspace_state(
@@ -437,23 +437,27 @@ impl AppRuntime {
                 knowledge_kind,
                 selected_number,
                 refresh,
+                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 &id,
                 knowledge_kind,
                 selected_number,
                 refresh,
+                list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
                 number,
+                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 &id,
                 knowledge_kind,
                 Some(number),
                 false,
+                list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
             ),
             FrontendEvent::RunBranchCleanup {
                 id,
@@ -1942,6 +1946,7 @@ impl AppRuntime {
         kind: KnowledgeKind,
         selected_number: Option<u64>,
         refresh: bool,
+        list_scope: gwt::KnowledgeListScope,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -1984,7 +1989,13 @@ impl AppRuntime {
             )];
         }
 
-        match load_knowledge_bridge(&tab.project_root, kind, selected_number, refresh) {
+        match load_knowledge_bridge(
+            &tab.project_root,
+            kind,
+            selected_number,
+            refresh,
+            list_scope,
+        ) {
             Ok(view) => vec![
                 OutboundEvent::reply(
                     client_id,
@@ -4389,6 +4400,7 @@ mod tests {
             gwt::KnowledgeKind::Issue,
             Some(42),
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(issue_events.len(), 2);
         assert!(matches!(
@@ -4420,6 +4432,7 @@ mod tests {
             gwt::KnowledgeKind::Spec,
             Some(1930),
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(spec_events.len(), 2);
         assert!(matches!(
@@ -4466,6 +4479,7 @@ mod tests {
             gwt::KnowledgeKind::Pr,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
 
         assert_eq!(events.len(), 2);
