@@ -3549,3 +3549,24 @@ Project index hardening の SPEC #1939 更新時、PowerShell で既存 section 
 1. `gwt issue spec ... --edit` に渡す markdown は、差分追記よりも一時ファイルの全文生成を優先する。
 2. PowerShell で配列結合と文字列連結を混ぜる場合は、`(($lines -join "`n") + $append)` のように結合結果を明示的に括る。
 3. SPEC section を更新した直後は、必ず対象 section を readback し、見出し構造と末尾の expected lines を確認してから次へ進む。
+
+## 2026-04-24 — fix: detached CLI の監査ログは非同期 tracing guard に依存しない
+
+### 事象
+
+Project index の手動 `gwt index status` / `gwt index rebuild` ログを正規の
+`gwt.log.YYYY-MM-DD` へ統合する際、GUI 起動後の tracing subscriber だけを前提にすると
+detached CLI 経路ではログが残らない設計になることを確認した。
+
+### 原因
+
+- `runtime_support::run_cli()` は CLI dispatch 後に `std::process::exit` する。
+- `std::process::exit` は通常の drop を走らせないため、`tracing_appender` の
+  non-blocking `WorkerGuard` flush に依存するとイベントが失われる。
+- `gwt index` は GUI 起動前に処理される detached CLI なので、GUI 用 logging init の対象外だった。
+
+### 再発防止策
+
+1. `std::process::exit` を通る短命 CLI の必須監査ログは、同期 write + flush の JSONL append にする。
+2. 既存ログ基盤へ統合する場合も、ファイル名は `current_log_file()` に揃え、別名ログファイルを増やさない。
+3. CLI ログ追加のテストでは、出力先が `gwt.log.YYYY-MM-DD` であることと、旧 `index.log` を作らないことを同時に固定する。

@@ -1,12 +1,14 @@
 use std::{
+    fs::OpenOptions,
     io,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use gwt_core::{repo_hash::RepoHash, worktree_hash::compute_worktree_hash};
 use gwt_github::{client::ApiError, SpecOpsError};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 use super::{CliCommand, CliEnv, CliParseError, IndexScope};
 
@@ -58,11 +60,24 @@ fn run_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsEr
     if !output.status.success() {
         out.push_str("runtime: error\n");
         out.push_str(&format_runner_failure(&output));
+        let _ = audit_status_failure(
+            &gwt_core::paths::gwt_logs_dir(),
+            &context,
+            &format_runner_failure(&output),
+            output.status.code().unwrap_or(1),
+        );
         return Ok(1);
     }
 
     let payload = parse_runner_json(&output.stdout)?;
     render_index_status(out, &report, &payload);
+    let _ = audit_status(
+        &gwt_core::paths::gwt_logs_dir(),
+        &context,
+        &report,
+        &payload,
+        0,
+    );
     Ok(0)
 }
 
@@ -85,7 +100,11 @@ fn run_rebuild<E: CliEnv>(
 
     let mut ok = true;
     for action in rebuild_actions(scope) {
+        let log_dir = gwt_core::paths::gwt_logs_dir();
+        let _ = audit_rebuild_start(&log_dir, &context, action.label);
         let output = run_runner_rebuild(&context, action)?;
+        let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
+        let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
         if output.status.success() {
             out.push_str(&format!("{}: ok\n", action.label));
         } else {
@@ -304,6 +323,148 @@ fn format_runner_failure(output: &std::process::Output) -> String {
     format!("runner exit={} detail={detail}\n", output.status)
 }
 
+fn audit_status(
+    log_dir: &Path,
+    context: &IndexContext,
+    report: &gwt_core::runtime::ProjectIndexRuntimeReport,
+    payload: &Value,
+    exit_code: i32,
+) -> io::Result<()> {
+    let mut fields = base_audit_fields(context, "project_index_status", "index status");
+    fields.insert("status".to_string(), json!("ready"));
+    fields.insert("exit_code".to_string(), json!(exit_code));
+    fields.insert(
+        "runtime_repaired".to_string(),
+        json!({
+            "runner": report.runner_updated,
+            "requirements": report.requirements_updated,
+            "manifest": report.manifest_updated,
+            "venv_created": report.venv_created,
+            "venv_rebuilt": report.venv_rebuilt,
+            "dependencies": report.dependencies_installed,
+        }),
+    );
+    fields.insert(
+        "runner_hash".to_string(),
+        json!(report.runner_hash.as_str()),
+    );
+    if let Some(runtime) = payload.get("runtime") {
+        fields.insert("runtime".to_string(), runtime.clone());
+    }
+    if let Some(status) = payload.get("status") {
+        fields.insert("scopes".to_string(), status.clone());
+    }
+    append_index_audit_event(log_dir, Value::Object(fields))
+}
+
+fn audit_status_failure(
+    log_dir: &Path,
+    context: &IndexContext,
+    detail: &str,
+    exit_code: i32,
+) -> io::Result<()> {
+    let mut fields = base_audit_fields(context, "project_index_status", "index status");
+    fields.insert("status".to_string(), json!("runner_error"));
+    fields.insert("exit_code".to_string(), json!(exit_code));
+    fields.insert("detail".to_string(), json!(detail.trim()));
+    append_index_audit_event(log_dir, Value::Object(fields))
+}
+
+fn audit_rebuild_start(log_dir: &Path, context: &IndexContext, scope: &str) -> io::Result<()> {
+    let mut fields = base_audit_fields(context, "project_index_rebuild", "index rebuild");
+    fields.insert("stage".to_string(), json!("start"));
+    fields.insert("scope".to_string(), json!(scope));
+    append_index_audit_event(log_dir, Value::Object(fields))
+}
+
+fn audit_rebuild_result(
+    log_dir: &Path,
+    context: &IndexContext,
+    scope: &str,
+    output: &std::process::Output,
+) -> io::Result<()> {
+    let mut fields = base_audit_fields(context, "project_index_rebuild", "index rebuild");
+    fields.insert("stage".to_string(), json!("result"));
+    fields.insert("scope".to_string(), json!(scope));
+    fields.insert("success".to_string(), json!(output.status.success()));
+    fields.insert(
+        "exit_code".to_string(),
+        json!(output.status.code().unwrap_or(1)),
+    );
+    if output.status.success() {
+        if let Ok(payload) = serde_json::from_slice::<Value>(&output.stdout) {
+            fields.insert("result".to_string(), payload);
+        }
+    } else {
+        fields.insert(
+            "detail".to_string(),
+            json!(format_runner_failure(output).trim()),
+        );
+    }
+    append_index_audit_event(log_dir, Value::Object(fields))
+}
+
+fn audit_runner_progress(
+    log_dir: &Path,
+    context: &IndexContext,
+    action_scope: &str,
+    stderr: &[u8],
+) -> io::Result<()> {
+    let stderr = String::from_utf8_lossy(stderr);
+    for line in stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(progress) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let mut fields =
+            base_audit_fields(context, "project_index_runner_progress", "index rebuild");
+        fields.insert("action_scope".to_string(), json!(action_scope));
+        if let Some(object) = progress.as_object() {
+            for key in ["phase", "scope", "mode", "done", "total", "indexed"] {
+                if let Some(value) = object.get(key) {
+                    fields.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        fields.insert("progress".to_string(), progress);
+        append_index_audit_event(log_dir, Value::Object(fields))?;
+    }
+    Ok(())
+}
+
+fn base_audit_fields(context: &IndexContext, message: &str, command: &str) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("message".to_string(), json!(message));
+    fields.insert("event".to_string(), json!(message));
+    fields.insert("command".to_string(), json!(command));
+    fields.insert("repo_hash".to_string(), json!(context.repo_hash.as_str()));
+    fields.insert("worktree_hash".to_string(), json!(context.worktree_hash));
+    fields.insert(
+        "project_root".to_string(),
+        json!(context.project_root.to_string_lossy().to_string()),
+    );
+    fields
+}
+
+fn append_index_audit_event(log_dir: &Path, fields: Value) -> io::Result<()> {
+    std::fs::create_dir_all(log_dir)?;
+    let path = gwt_core::logging::current_log_file(log_dir);
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let event = json!({
+        "timestamp": chrono::Local::now().to_rfc3339(),
+        "level": "INFO",
+        "target": "gwt::index",
+        "fields": fields,
+    });
+    serde_json::to_writer(&mut file, &event)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    file.write_all(b"\n")?;
+    file.flush()
+}
+
 fn io_error(err: io::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
 }
@@ -366,5 +527,88 @@ mod tests {
         assert!(out.contains("runtime: ready asset=cccccccccccccccc smoke=passed"));
         assert!(out
             .contains("files: unhealthy reason=manifest_missing documents=3 repair_required=true"));
+    }
+
+    #[test]
+    fn audit_status_writes_to_unified_gwt_log_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = IndexContext {
+            project_root: dir.path().join("repo"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://github.com/example/project.git",
+            ),
+            worktree_hash: "feedfacecafebeef".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        };
+        let report = gwt_core::runtime::ProjectIndexRuntimeReport {
+            runner_hash: "aaaaaaaaaaaaaaaa".to_string(),
+            requirements_hash: "bbbbbbbbbbbbbbbb".to_string(),
+            runner_smoke_tested: true,
+            runner_updated: true,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "runtime": {
+                "reason": "ready",
+                "asset_hash": "aaaaaaaaaaaaaaaa",
+                "smoke_test": "passed"
+            },
+            "status": {
+                "files-docs": {
+                    "healthy": true,
+                    "repair_required": false,
+                    "reason": "ready",
+                    "document_count": 16,
+                    "last_repair_at": "2026-04-24T06:15:20Z"
+                }
+            }
+        });
+
+        audit_status(dir.path(), &context, &report, &payload, 0).unwrap();
+
+        let log_path = gwt_core::logging::current_log_file(dir.path());
+        let content = std::fs::read_to_string(log_path).unwrap();
+        assert!(content.contains("\"target\":\"gwt::index\""), "{content}");
+        assert!(
+            content.contains("\"message\":\"project_index_status\""),
+            "{content}"
+        );
+        assert!(content.contains("\"runner\":true"), "{content}");
+        assert!(content.contains("\"files-docs\""), "{content}");
+        assert!(
+            content.contains("\"last_repair_at\":\"2026-04-24T06:15:20Z\""),
+            "{content}"
+        );
+        assert!(!dir.path().join("index.log").exists());
+    }
+
+    #[test]
+    fn audit_runner_progress_translates_stderr_ndjson_to_unified_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = IndexContext {
+            project_root: dir.path().join("repo"),
+            repo_hash: gwt_core::repo_hash::compute_repo_hash(
+                "https://github.com/example/project.git",
+            ),
+            worktree_hash: "feedfacecafebeef".to_string(),
+            python: PathBuf::from("python"),
+            runner: PathBuf::from("runner.py"),
+        };
+        let stderr = br#"{"phase":"indexing","scope":"files-docs","done":0,"total":16}
+not json
+{"phase":"complete","scope":"files-docs","indexed":16,"total":16}
+"#;
+
+        audit_runner_progress(dir.path(), &context, "files-docs", stderr).unwrap();
+
+        let log_path = gwt_core::logging::current_log_file(dir.path());
+        let content = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(content.lines().count(), 2);
+        assert!(content.contains("\"phase\":\"indexing\""), "{content}");
+        assert!(content.contains("\"phase\":\"complete\""), "{content}");
+        assert!(content.contains("\"scope\":\"files-docs\""), "{content}");
+        assert!(!content.contains("not json"), "{content}");
+        assert!(!dir.path().join("index.log").exists());
     }
 }
