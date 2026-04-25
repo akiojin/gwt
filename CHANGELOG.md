@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - **board:** Correlate composer submit completion
 - **hook:** Treat empty stdin as silent no-op for runtime_state
 - **cli:** Canonicalize internal dispatch executable
+- **agent:** Close window after stopped runtime hook
 
 ### Documentation
 
