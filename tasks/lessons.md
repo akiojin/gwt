@@ -1,5 +1,50 @@
 # Lessons Learned
 
+## 2026-04-25 — fix(board): canvas wheel routing の allowlist に新しい scroll surface を必ず登録する
+
+### 事象
+
+GUI Board を chat timeline に寄せても、Board 上の trackpad / wheel scroll が
+canvas pan に奪われると、ユーザーからは「Board がスクロールできない」ように見える。
+
+### 原因
+
+canvas は capture-phase の wheel handler で terminal / repo browser など一部 surface
+だけを native scroll として早期 return していた。Board の scroll container は
+allowlist に入っておらず、plain wheel が canvas pan として処理されていた。
+
+### 再発防止策
+
+1. 新しい window 内 scroll surface を追加したら、DOM/CSS だけでなく
+   `findNativeWheelScrollSurface` の allowlist を同時に更新する。
+2. window 内 scroll は、scroll 端でも canvas pan へフォールバックしない方針を
+   surface ごとに明示し、embedded frontend contract test で固定する。
+3. 「UI が分かりにくい」と「操作不能」が同時に出た場合、まず wheel ownership と
+   primary layout model を分けて原因を確認する。
+
+## 2026-04-25 — fix(update): installer URL は platform kind 判定後にのみ installer 扱いする
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` で update tests が macOS 上だけ失敗した。
+cache に Windows MSI のような current platform 非対応 installer URL が残っていると、
+portable asset があるのに `choose_apply_plan` が installer path で `None` に落ちた。
+
+### 原因
+
+`installer_kind_for_url(platform, url)?` を使っていたため、platform 非対応 installer URL が
+「installer なし」ではなく「apply plan 全体なし」として扱われた。さらに macOS CLI install
+test は `/usr/local/bin` の実 filesystem writable 状態に依存していた。
+
+### 再発防止策
+
+1. installer URL は `installer_kind_for_url` が `Some` を返したときだけ installer plan にする。
+   platform 非対応 URL は portable fallback を妨げない。
+2. writable / non-writable 分岐をテストする場合、実環境の `/usr/local/bin` などに依存せず
+   temp dir または explicit writable helper を使う。
+3. update cache の fallback asset test では、portable と installer の両方があるケースで
+   current platform 非対応 installer が portable を潰さないことを固定する。
+
 ## 2026-04-24 — fix(index): chunked index の health check は下限不変条件を残す
 
 ### 事象
