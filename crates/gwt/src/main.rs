@@ -967,7 +967,10 @@ mod tests {
         assert!(existing);
         assert_eq!(new_active, "tab-1");
         assert!(runtime.launch_wizard.is_none());
-        assert_eq!(runtime.recent_projects[0].path, repo);
+        assert!(super::same_worktree_path(
+            &runtime.recent_projects[0].path,
+            &repo
+        ));
 
         let added = runtime
             .open_project_path(scratch.clone())
@@ -975,7 +978,10 @@ mod tests {
 
         assert!(!added);
         assert_eq!(runtime.tabs.len(), 3);
-        assert_eq!(runtime.recent_projects[0].path, scratch);
+        assert!(super::same_worktree_path(
+            &runtime.recent_projects[0].path,
+            &scratch
+        ));
         assert!(runtime
             .active_tab_id
             .as_deref()
@@ -3002,7 +3008,11 @@ mod tests {
                 .expect("compose file from defaults"),
             &compose_file,
         ));
-        assert_eq!(defaults.compose_files, vec![compose_file.clone()]);
+        assert_eq!(defaults.compose_files.len(), 1);
+        assert!(super::same_worktree_path(
+            &defaults.compose_files[0],
+            &compose_file
+        ));
         assert!(super::same_worktree_path(
             super::docker_compose_file_for_launch(&project_root, &files)
                 .unwrap()
@@ -3063,11 +3073,13 @@ mod tests {
         .expect("write devcontainer");
 
         let plan = super::resolve_docker_launch_plan(&project, None).expect("launch plan");
-        assert_eq!(
-            plan.compose_files,
-            vec![base.clone(), override_file.clone()]
-        );
-        assert_eq!(plan.compose_file, base);
+        assert_eq!(plan.compose_files.len(), 2);
+        assert!(super::same_worktree_path(&plan.compose_files[0], &base));
+        assert!(super::same_worktree_path(
+            &plan.compose_files[1],
+            &override_file
+        ));
+        assert!(super::same_worktree_path(&plan.compose_file, &base));
         assert_eq!(plan.container_cwd, "/workspace/override");
     }
 
@@ -3280,7 +3292,9 @@ mod tests {
             &mut existing_env,
         )
         .expect("existing worktree");
-        assert_eq!(existing_dir.as_deref(), Some(existing_worktree.as_path()));
+        assert!(existing_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
         assert!(existing_env
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
@@ -3369,10 +3383,10 @@ mod tests {
         launch_config.working_dir = None;
         launch_config.env_vars = HashMap::new();
         super::resolve_launch_worktree(&repo, &mut launch_config).expect("agent launch wrapper");
-        assert_eq!(
-            launch_config.working_dir.as_deref(),
-            Some(existing_worktree.as_path())
-        );
+        assert!(launch_config
+            .working_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
 
         let mut shell_config = ShellLaunchConfig {
             working_dir: None,
@@ -3387,10 +3401,10 @@ mod tests {
         };
         super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");
-        assert_eq!(
-            shell_config.working_dir.as_deref(),
-            Some(existing_worktree.as_path())
-        );
+        assert!(shell_config
+            .working_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
     }
 
     #[test]
