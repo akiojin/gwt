@@ -1471,6 +1471,15 @@
         return state;
       }
 
+      function clearKnowledgeBridgeState(windowId) {
+        const state = knowledgeBridgeStateMap.get(windowId);
+        if (state?.pendingSearchTimer) {
+          clearTimeout(state.pendingSearchTimer);
+          state.pendingSearchTimer = null;
+        }
+        knowledgeBridgeStateMap.delete(windowId);
+      }
+
       function ensureLogState(windowId) {
         if (!logStateMap.has(windowId)) {
           logStateMap.set(windowId, {
@@ -1665,6 +1674,9 @@
         state.emptyMessage = "";
         state.pendingSearchTimer = setTimeout(() => {
           state.pendingSearchTimer = null;
+          if (!workspaceWindowById(windowId)) {
+            return;
+          }
           send({
             kind: "search_knowledge_bridge",
             id: windowId,
@@ -5334,7 +5346,7 @@
           profileStateMap.delete(windowId);
           boardStateMap.delete(windowId);
           logStateMap.delete(windowId);
-          knowledgeBridgeStateMap.delete(windowId);
+          clearKnowledgeBridgeState(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
