@@ -1301,39 +1301,34 @@
         overflow-wrap: anywhere;
       }
 
-      .board-layout {
+      .board-chat-shell {
         flex: 1;
         min-height: 0;
-        display: grid;
-        grid-template-columns: minmax(0, 1.7fr) minmax(240px, 0.9fr);
+        display: flex;
+        flex-direction: column;
+        background:
+          radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 34%),
+          linear-gradient(180deg, #f8fafc 0%, #ffffff 42%);
       }
 
-      .board-timeline-pane,
-      .board-side-pane {
-        min-width: 0;
-        min-height: 0;
-      }
-
-      .board-timeline-pane {
-        border-right: 1px solid rgba(148, 163, 184, 0.18);
-        overflow: auto;
-      }
-
-      .board-side-pane {
-        display: grid;
-        grid-template-rows: minmax(0, 0.9fr) minmax(0, 1.1fr);
-      }
-
-      .board-timeline,
-      .board-agent-pane,
-      .board-composer-pane {
+      .board-timeline-scroll {
+        flex: 1;
         min-height: 0;
         overflow: auto;
+        padding: 16px;
+      }
+
+      .board-timeline {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .board-composer-bar {
+        border-top: 1px solid rgba(148, 163, 184, 0.22);
+        background: rgba(255, 255, 255, 0.94);
         padding: 12px;
-      }
-
-      .board-agent-pane {
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        box-shadow: 0 -18px 40px rgba(15, 23, 42, 0.08);
       }
 
       .board-status {
@@ -1349,61 +1344,44 @@
         color: #b91c1c;
       }
 
-      .board-entry {
+      .board-message {
         display: grid;
-        gap: 8px;
-        padding: 12px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        gap: 7px;
+        width: min(78%, 560px);
+        padding: 12px 14px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.94);
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
       }
 
-      .board-entry.reply-target {
-        background: rgba(59, 130, 246, 0.08);
+      .board-message.user {
+        align-self: flex-start;
+        border-bottom-left-radius: 5px;
       }
 
-      .board-entry-header,
-      .board-entry-footer {
-        display: flex;
+      .board-message.agent {
+        align-self: flex-end;
+        border-bottom-right-radius: 5px;
+        background: #eff6ff;
+      }
+
+      .board-message.system {
+        align-self: center;
+        width: min(86%, 620px);
+        text-align: center;
+        background: #f8fafc;
+      }
+
+      .board-message-meta {
+        display: inline-flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .board-entry-meta,
-      .board-entry-link,
-      .board-agent-copy,
-      .board-reply-copy {
+        gap: 6px;
         font-size: 12px;
         color: #475569;
       }
 
-      .board-entry-meta {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .board-entry-chips,
-      .board-entry-links {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        flex-wrap: wrap;
-      }
-
-      .board-chip {
-        padding: 4px 8px;
-        border-radius: 999px;
-        background: rgba(59, 130, 246, 0.1);
-        color: #1d4ed8;
-        font-size: 11px;
-      }
-
-      .board-chip.state {
-        background: rgba(16, 185, 129, 0.12);
-        color: #047857;
-      }
-
-      .board-entry-body {
+      .board-message-body {
         font-size: 13px;
         line-height: 1.5;
         color: #0f172a;
@@ -1411,35 +1389,24 @@
         overflow-wrap: anywhere;
       }
 
-      .board-agent-status {
-        font-size: 12px;
-        font-weight: 700;
-        color: #0f172a;
-      }
-
-      .board-field {
-        display: grid;
-        gap: 6px;
-        margin-bottom: 10px;
-      }
-
       .board-textarea {
-        min-height: 110px;
-        resize: vertical;
-        padding: 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
+        min-height: 76px;
+        width: 100%;
+        resize: none;
+        padding: 11px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.38);
         font: inherit;
         color: #0f172a;
+        background: #ffffff;
       }
 
-      .board-reply-box,
       .board-composer-actions {
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        justify-content: flex-end;
         gap: 8px;
-        margin-bottom: 10px;
+        margin-top: 8px;
       }
 
       .logs-filter-bar {
