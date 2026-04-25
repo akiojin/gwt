@@ -457,6 +457,8 @@ impl CliEnv for DefaultCliEnv {
         stdin: &str,
     ) -> io::Result<InternalCommandOutput> {
         let current_exe = std::env::current_exe()?;
+        let current_exe =
+            dunce::canonicalize(&current_exe).unwrap_or_else(|_| current_exe.to_path_buf());
         let mut child = Command::new(current_exe)
             .args(args.iter().skip(1))
             .stdin(Stdio::piped())

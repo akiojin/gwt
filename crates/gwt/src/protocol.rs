@@ -123,6 +123,14 @@ pub enum FrontendEvent {
         refresh: bool,
         list_scope: Option<KnowledgeListScope>,
     },
+    SearchKnowledgeBridge {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        query: String,
+        request_id: u64,
+        selected_number: Option<u64>,
+        list_scope: Option<KnowledgeListScope>,
+    },
     SelectKnowledgeBridgeEntry {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -349,6 +357,16 @@ pub enum BackendEvent {
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
+        entries: Vec<KnowledgeListItem>,
+        selected_number: Option<u64>,
+        empty_message: Option<String>,
+        refresh_enabled: bool,
+    },
+    KnowledgeSearchResults {
+        id: String,
+        knowledge_kind: KnowledgeKind,
+        query: String,
+        request_id: u64,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
