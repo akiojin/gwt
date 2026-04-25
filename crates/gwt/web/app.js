@@ -1491,6 +1491,7 @@
             replyParentId: null,
             composerKind: "status",
             composerBody: "",
+            pendingSubmit: null,
           });
         }
         return boardStateMap.get(windowId);
@@ -2694,12 +2695,18 @@
         state.loading = true;
         state.submitting = true;
         state.error = "";
+        const parentId = state.replyParentId || null;
+        state.pendingSubmit = {
+          body,
+          parentId,
+          existingEntryIds: new Set(state.entries.map((entry) => entry.id)),
+        };
         send({
           kind: "post_board_entry",
           id: windowId,
           entry_kind: state.composerKind,
           body,
-          parent_id: state.replyParentId,
+          parent_id: parentId,
           topics: [],
           owners: [],
         });
@@ -2801,7 +2808,7 @@
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
         const bodyInput = document.createElement("textarea");
-        bodyInput.className = "board-textarea";
+        bodyInput.className = "board-textarea board-scroll-surface";
         bodyInput.value = state.composerBody;
         bodyInput.placeholder = "Share the current state, next action, or blocker";
         bodyInput.addEventListener("input", () => {
@@ -5504,19 +5511,32 @@
           }
           case "board_entries": {
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
-            state.entries = event.entries || [];
+            const incomingEntries = event.entries || [];
+            const completedSubmit = Boolean(state.pendingSubmit)
+              && incomingEntries.some((entry) => {
+                const parentId = entry.parent_id || null;
+                return Boolean(entry.id)
+                  && !state.pendingSubmit.existingEntryIds.has(entry.id)
+                  && parentId === state.pendingSubmit.parentId
+                  && String(entry.author_kind || "").toLowerCase() === "user"
+                  && String(entry.body || "").trim() === state.pendingSubmit.body;
+              });
+            state.entries = incomingEntries;
             if (
               state.replyParentId &&
               !state.entries.some((entry) => entry.id === state.replyParentId)
             ) {
               state.replyParentId = null;
             }
-            if (state.submitting) {
-              state.composerBody = "";
+            if (completedSubmit) {
+              if (state.composerBody.trim() === state.pendingSubmit.body) {
+                state.composerBody = "";
+              }
               state.replyParentId = null;
+              state.pendingSubmit = null;
+              state.submitting = false;
             }
             state.loading = false;
-            state.submitting = false;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
             break;
@@ -5616,6 +5636,7 @@
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
             state.loading = false;
             state.submitting = false;
+            state.pendingSubmit = null;
             state.error = event.message;
             frontendUnits.boardSurface.renderBoard(event.id);
             break;
