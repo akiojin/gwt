@@ -39,6 +39,7 @@ All notable changes to this project will be documented in this file.
 - Merge origin develop
 - Merge origin develop
 - **husky:** Unset inherited git env in test hooks
+- **husky:** Serialize llvm-cov tests in pre-push coverage gate
 
 ### Styling
 

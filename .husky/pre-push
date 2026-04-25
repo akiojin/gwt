@@ -15,7 +15,7 @@ echo "Running CI-equivalent lint checks..."
 
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
-cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json
+cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json -- --test-threads=1
 node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90
 bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md
 pnpm lint:skills
