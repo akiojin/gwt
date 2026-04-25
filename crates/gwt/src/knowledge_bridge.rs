@@ -240,7 +240,7 @@ pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Siz
         return Ok(non_repo_view(kind));
     }
 
-    let mut entries = load_cache_entries_for_repo(repo_path, false)?
+    let mut entries = load_local_cache_entries_for_repo(repo_path)?
         .into_iter()
         .filter(|entry| candidate_matches_kind_and_scope(entry, kind, list_scope))
         .collect::<Vec<_>>();
@@ -315,6 +315,12 @@ fn load_cache_entries_for_repo(repo_path: &Path, refresh: bool) -> Result<Vec<Ca
         }
     }
 
+    let cache = Cache::new(cache_root);
+    load_cache_entries(&cache)
+}
+
+fn load_local_cache_entries_for_repo(repo_path: &Path) -> Result<Vec<CacheEntry>, String> {
+    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
     let cache = Cache::new(cache_root);
     load_cache_entries(&cache)
 }
@@ -1154,6 +1160,67 @@ Extra context.
         assert_eq!(view.entries[0].number, 11);
         assert_eq!(view.entries[0].match_score, Some(80));
         assert_eq!(view.selected_number, Some(11));
+    }
+
+    #[test]
+    fn semantic_issue_search_reads_cache_without_stale_remote_sync() {
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                11,
+                "Open semantic issue",
+                "Need semantic search.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write issue");
+
+        let marker = home.path().join("gh-was-called");
+        let fake_gh = home.path().join("fake-gh");
+        fs::write(
+            &fake_gh,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("write fake gh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+        }
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        let view = search_knowledge_bridge_with_client(
+            &repo,
+            KnowledgeKind::Issue,
+            "semantic search",
+            None,
+            KnowledgeListScope::Open,
+            &FakeSemanticSearchClient {
+                hits: vec![SemanticSearchHit {
+                    number: 11,
+                    distance: Some(0.1),
+                }],
+            },
+        )
+        .expect("search view");
+
+        assert_eq!(view.entries.len(), 1);
+        assert!(
+            !marker.exists(),
+            "interactive semantic search must not invoke stale remote cache sync"
+        );
     }
 
     #[test]

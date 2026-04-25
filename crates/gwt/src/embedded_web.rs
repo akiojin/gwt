@@ -709,6 +709,24 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_cancels_pending_semantic_search_on_window_teardown() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function clearKnowledgeBridgeState(windowId)"),
+            "expected knowledge bridge teardown to clear pending timers before deleting state",
+        );
+        assert!(
+            html.contains("clearKnowledgeBridgeState(windowId);"),
+            "expected workspace window removal to use knowledge bridge cleanup",
+        );
+        assert!(
+            html.contains("if (!workspaceWindowById(windowId))"),
+            "expected debounced semantic search to verify the window still exists before sending",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 
