@@ -2,6 +2,15 @@
 
 set -e
 
+# git は hook 子プロセスへ GIT_DIR / GIT_INDEX_FILE などを export する。
+# それらが cargo test 配下の subprocess (git on tempdir 等) に継承される
+# と、tempdir に対する git 操作が本リポジトリ自身に向いてしまい、
+# tests が並列実行時に flaky になる。pre-push の検証はリポジトリ
+# 自身の git 状態に依存しないので、ここで一律に unset しておく。
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_NAMESPACE GIT_COMMON_DIR
+
 echo "Running CI-equivalent lint checks..."
 
 cargo clippy --all-targets --all-features -- -D warnings
