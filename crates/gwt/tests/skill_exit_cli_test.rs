@@ -1,5 +1,5 @@
 //! Integration tests for the SPEC-1935 Phase 10 LLM-facing exit CLIs:
-//! `gwt discuss <action>`, `gwt plan <action>`, and `gwt build <action>`.
+//! `gwtd discuss <action>`, `gwtd plan <action>`, and `gwtd build <action>`.
 //!
 //! These tests drive the real `dispatch` entry point over `TestEnv` so
 //! the end-to-end parse → run path stays covered. The underlying state

@@ -12,7 +12,7 @@ scenarios.
 
 This phase works on:
 
-GitHub Issue #<Issue番号> の spec セクション。`gwt issue spec <Issue番号> --section spec` で取得する。
+GitHub Issue #<Issue番号> の spec セクション。`gwtd issue spec <Issue番号> --section spec` で取得する。
 
 spec セクションは以下の構造を含む:
 
@@ -31,7 +31,7 @@ spec セクションは以下の構造を含む:
 ### Step 1: Read current spec.md
 
 ```bash
-gwt issue spec <Issue番号> --section spec
+gwtd issue spec <Issue番号> --section spec
 ```
 
 If spec.md does not exist, return to Phase 3 (registration) first.
@@ -83,7 +83,7 @@ After receiving answers:
 Upload:
 
 ```bash
-gwt issue spec <Issue番号> --edit spec -f /tmp/spec.md
+gwtd issue spec <Issue番号> --edit spec -f /tmp/spec.md
 ```
 
 ### Step 6: Decide next step

@@ -33,11 +33,11 @@ SPEC-1935 FR-014r routes Stop through `skill-build-spec-stop-check`, which
 reads `.gwt/skill-state/build-spec.json` and blocks Stop while the skill is
 active. Register the skill lifecycle with the exit CLI:
 
-- `gwt build start --spec <n>` when the skill starts an implementation pass
-- `gwt build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
+- `gwtd build start --spec <n>` when the skill starts an implementation pass
+- `gwtd build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
   TDD milestone (logging only)
-- `gwt build complete --spec <n>` once the PR is open and verification passed
-- `gwt build abort --spec <n> --reason '<text>'` when implementation cannot
+- `gwtd build complete --spec <n>` once the PR is open and verification passed
+- `gwtd build abort --spec <n> --reason '<text>'` when implementation cannot
   proceed without a product decision or blocking merge conflict
 
 The Stop-block handler honours Claude Code / Codex's built-in

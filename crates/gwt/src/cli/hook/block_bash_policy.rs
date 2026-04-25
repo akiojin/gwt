@@ -1,4 +1,4 @@
-//! `gwt hook block-bash-policy` — consolidated PreToolUse Bash policy hook.
+//! `gwtd hook block-bash-policy` — consolidated PreToolUse Bash policy hook.
 //!
 //! Evaluates the existing Bash safety rules in a fixed order and returns the
 //! first blocking decision, if any.
@@ -95,11 +95,11 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
         format!(
             "Use the gwt workflow surfaces instead of direct `gh issue`, `gh pr`, `gh run`, or workflow-focused `gh api` commands.\n\n\
 Recommended alternatives:\n\
-- read: `gwt issue view <number>`, `gwt issue comments <number>`, `gwt issue linked-prs <number>`\n\
-- write: `gwt issue create --title ... -f <file>`, `gwt issue comment <number> -f <file>`\n\
-- PR workflow: `gwt pr current`, `gwt pr view <number>`, `gwt pr comment <number> -f <file>`, `gwt pr checks <number>`\n\
-- PR reviews: `gwt pr reviews <number>`, `gwt pr review-threads <number>`, `gwt pr review-threads reply-and-resolve <number> -f <file>`\n\
-- Actions logs: `gwt actions logs --run <id>`, `gwt actions job-logs --job <id>`\n\
+- read: `gwtd issue view <number>`, `gwtd issue comments <number>`, `gwtd issue linked-prs <number>`\n\
+- write: `gwtd issue create --title ... -f <file>`, `gwtd issue comment <number> -f <file>`\n\
+- PR workflow: `gwtd pr current`, `gwtd pr view <number>`, `gwtd pr comment <number> -f <file>`, `gwtd pr checks <number>`\n\
+- PR reviews: `gwtd pr reviews <number>`, `gwtd pr review-threads <number>`, `gwtd pr review-threads reply-and-resolve <number> -f <file>`\n\
+- Actions logs: `gwtd actions logs --run <id>`, `gwtd actions job-logs --job <id>`\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),

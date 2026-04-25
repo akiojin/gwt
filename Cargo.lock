@@ -1203,6 +1203,7 @@ dependencies = [
  "base64",
  "chrono",
  "dunce",
+ "fs2",
  "futures-util",
  "gwt-agent",
  "gwt-ai",

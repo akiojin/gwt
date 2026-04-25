@@ -9,7 +9,7 @@ gwt maintains ChromaDB vector search indexes for three scopes (Phase 8 layout):
 
 | Scope | Content | Lifecycle |
 |-------|---------|-----------|
-| SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by `gwt issue spec pull` or TUI startup sync |
+| SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by `gwtd issue spec pull` or TUI startup sync |
 | Issues | GitHub Issues (all states) | TUI startup async refresh (TTL 15 min) + runner auto-build on first search |
 | Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Watcher (TUI) + runner auto-build on first search |
 

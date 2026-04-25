@@ -16,11 +16,11 @@ Rules:
 - Update tasks.md after each task slice is verified, not before.
 - Do not mark tasks complete until the implementation passes verification.
 - Do not batch-mark multiple tasks; update incrementally.
-- アーティファクト操作には `gwt issue spec <N> --edit tasks -f <file>` を使用する。
+- アーティファクト操作には `gwtd issue spec <N> --edit tasks -f <file>` を使用する。
 
 ## 進捗追跡
 
-tasks セクションのチェックボックスを `gwt issue spec <N> --edit tasks -f <file>` で更新する。
+tasks セクションのチェックボックスを `gwtd issue spec <N> --edit tasks -f <file>` で更新する。
 
 ### ルール
 

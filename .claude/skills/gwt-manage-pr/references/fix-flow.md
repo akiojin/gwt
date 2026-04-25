@@ -8,7 +8,7 @@
 
 ## Step 2: Resolve the PR
 
-- Prefer the current branch PR through `gwt pr current`.
+- Prefer the current branch PR through `gwtd pr current`.
 - If the user provides a PR number or URL, use that directly.
 
 ## Step 3: Inspect based on mode
@@ -30,8 +30,8 @@
 
 ### Checks Mode (`--mode checks`)
 
-- Inspect failing CI checks through `gwt pr checks <number>`.
-- Fetch GitHub Actions logs through `gwt actions logs --run <id>` or `gwt actions job-logs --job <id>` and extract failure snippets.
+- Inspect failing CI checks through `gwtd pr checks <number>`.
+- Fetch GitHub Actions logs through `gwtd actions logs --run <id>` or `gwtd actions job-logs --job <id>` and extract failure snippets.
 - For external checks (Buildkite, etc.), report URL only.
 
 ### All Mode (`--mode all`)
@@ -118,7 +118,7 @@ Blocking items: <N>
 - For each unresolved thread:
   - Addressed: "Fixed: <what was done in commit abc1234>."
   - Not addressed: "Not addressed: <reason>."
-- Use `gwt pr review-threads reply-and-resolve <number> -f <file>` with coverage for ALL threads.
+- Use `gwtd pr review-threads reply-and-resolve <number> -f <file>` with coverage for ALL threads.
 - Script validates completeness; rejects if any thread missing.
 - Requires `Repository Permissions > Contents: Read and Write`.
 - Resolve threads after code fix is pushed. Do not wait for CI.
@@ -135,7 +135,7 @@ Blocking items: <N>
 
 ## Step 8: Notify reviewers (mandatory)
 
-- Post comment via `gwt pr comment <number> -f <file>`.
+- Post comment via `gwtd pr comment <number> -f <file>`.
 - Include summary of what was fixed (list each B-item and action taken).
 - This step is not optional.
 
@@ -179,14 +179,14 @@ Blocking items: <N>
 
 ```bash
 # Inspect current PR status
-gwt pr current
-gwt pr checks "<number>"
-gwt pr reviews "<number>"
-gwt pr review-threads "<number>"
+gwtd pr current
+gwtd pr checks "<number>"
+gwtd pr reviews "<number>"
+gwtd pr review-threads "<number>"
 
 # Reply, resolve, and notify
-gwt pr review-threads reply-and-resolve "<number>" -f /tmp/replies.json
-gwt pr comment "<number>" -f /tmp/pr-comment.md
+gwtd pr review-threads reply-and-resolve "<number>" -f /tmp/replies.json
+gwtd pr comment "<number>" -f /tmp/pr-comment.md
 ```
 
 ## Output Examples

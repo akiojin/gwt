@@ -107,7 +107,7 @@ fn forward_hook_exits_zero() {
     assert_eq!(env.internal_command_call_log.len(), 1);
     assert_eq!(
         env.internal_command_call_log[0].args,
-        argv(&["gwt", "__internal", "daemon-hook", "forward"])
+        argv(&["gwtd", "__internal", "daemon-hook", "forward"])
     );
 }
 
@@ -129,7 +129,7 @@ fn delegated_block_hook_preserves_block_json_contract() {
     assert_eq!(env.internal_command_call_log.len(), 1);
     assert_eq!(
         env.internal_command_call_log[0].args,
-        argv(&["gwt", "__internal", "daemon-hook", "block-bash-policy"])
+        argv(&["gwtd", "__internal", "daemon-hook", "block-bash-policy"])
     );
 
     let stdout = String::from_utf8(env.stdout).unwrap();
@@ -150,7 +150,7 @@ fn delegated_block_hook_preserves_block_json_contract() {
         "short summary must remain in the visible reason: {stdout}"
     );
     assert!(
-        stdout.contains("gwt pr view"),
+        stdout.contains("gwtd pr view"),
         "canonical gwt alternative must be present in the visible reason: {stdout}"
     );
     assert!(

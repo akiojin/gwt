@@ -14,7 +14,6 @@ use crate::{
     types::{AgentId, DockerLifecycleIntent, LaunchRuntimeTarget},
 };
 
-const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
@@ -406,7 +405,7 @@ pub fn install_launch_gwt_bin_env_with_lookup(
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> Result<(), String> {
     let gwt_bin = match runtime_target {
-        LaunchRuntimeTarget::Docker => DOCKER_GWT_BIN_PATH.to_string(),
+        LaunchRuntimeTarget::Docker => DOCKER_GWTD_BIN_PATH.to_string(),
         LaunchRuntimeTarget::Host => resolve_public_gwt_bin_with_lookup(current_exe, lookup)
             .to_string_lossy()
             .into_owned(),
@@ -429,13 +428,27 @@ pub fn resolve_public_gwt_bin_with_lookup(
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
     if should_prefer_path_gwt(current_exe) {
-        if let Some(candidate) = lookup("gwt").filter(|candidate| {
+        if let Some(candidate) = lookup("gwtd").filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
         }) {
             return candidate;
         }
+        if let Some(candidate) = sibling_gwtd_binary(current_exe) {
+            return candidate;
+        }
     }
     current_exe.to_path_buf()
+}
+
+fn sibling_gwtd_binary(path: &Path) -> Option<PathBuf> {
+    if !is_named_gwt_binary(path) {
+        return None;
+    }
+    let sibling_name = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("exe") => "gwtd.exe".to_string(),
+        _ => "gwtd".to_string(),
+    };
+    Some(path.with_file_name(sibling_name))
 }
 
 fn apply_docker_runtime_to_launch_config(
@@ -605,7 +618,6 @@ fn docker_compose_mount_path(path: &Path) -> String {
 }
 
 fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
-    let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
         "{DOCKER_GWT_OVERRIDE_HEADER}\n\
@@ -613,7 +625,6 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
          services:\n\
            {service}:\n\
              volumes:\n\
-               - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
                - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
     )
 }
@@ -1207,7 +1218,7 @@ fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, Stri
 }
 
 fn should_prefer_path_gwt(current_exe: &Path) -> bool {
-    is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
+    is_bunx_temp_executable(current_exe) || !is_named_gwtd_binary(current_exe)
 }
 
 fn is_named_gwt_binary(path: &Path) -> bool {
@@ -1216,6 +1227,14 @@ fn is_named_gwt_binary(path: &Path) -> bool {
         .next_back()
         .map(|value| value.trim_end_matches(".exe").to_string())
         .is_some_and(|value| value.eq_ignore_ascii_case("gwt"))
+}
+
+fn is_named_gwtd_binary(path: &Path) -> bool {
+    normalized_path_segments(path)
+        .into_iter()
+        .next_back()
+        .map(|value| value.trim_end_matches(".exe").to_string())
+        .is_some_and(|value| value.eq_ignore_ascii_case("gwtd"))
 }
 
 fn is_bunx_temp_executable(path: &Path) -> bool {
@@ -1317,7 +1336,7 @@ mod tests {
              _env: &HashMap<String, String>,
              _cwd: Option<PathBuf>| false;
         let lookup_gwt_bin =
-            |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe"));
+            |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwtd.exe"));
         let prepared = prepare_agent_launch_with(
             &worktree,
             &sessions_dir,
@@ -1354,7 +1373,7 @@ mod tests {
                 .env
                 .get(GWT_BIN_PATH_ENV)
                 .map(String::as_str),
-            Some(r"C:\Users\Example\.bun\bin\gwt.exe")
+            Some(r"C:\Users\Example\.bun\bin\gwtd.exe")
         );
         assert_eq!(
             prepared
@@ -1435,26 +1454,19 @@ mod tests {
     }
 
     #[test]
-    fn docker_bundle_override_content_mounts_front_door_and_daemon() {
+    fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
         let content = docker_bundle_override_content("app", &bundle);
 
-        assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
         let volume_lines = content
             .lines()
-            .filter(|line| {
-                line.contains(":/usr/local/bin/gwt:ro") || line.contains(":/usr/local/bin/gwtd:ro")
-            })
+            .filter(|line| line.contains(":/usr/local/bin/gwtd:ro"))
             .collect::<Vec<_>>();
-        assert_eq!(volume_lines.len(), 2);
-        let leading_spaces = volume_lines
-            .iter()
-            .map(|line| line.chars().take_while(|ch| *ch == ' ').count())
-            .collect::<Vec<_>>();
-        assert_eq!(leading_spaces, vec![leading_spaces[0], leading_spaces[0]]);
+        assert_eq!(volume_lines.len(), 1);
         assert!(volume_lines
             .iter()
             .all(|line| line.trim_start().starts_with("- ")));
@@ -1486,8 +1498,8 @@ mod tests {
 
         let override_content = fs::read_to_string(docker_compose_override_path(repo.path()))
             .expect("override content");
-        assert!(override_content.contains("gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(override_content.contains("gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!override_content.contains("/usr/local/bin/gwt:ro"));
     }
 
     #[test]
@@ -1583,7 +1595,7 @@ mod tests {
             ),
             (
                 GWT_BIN_PATH_ENV.to_string(),
-                DOCKER_GWT_BIN_PATH.to_string(),
+                DOCKER_GWTD_BIN_PATH.to_string(),
             ),
         ]);
 

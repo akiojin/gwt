@@ -49,12 +49,12 @@ pub fn resolve_public_gwt_bin_with_lookup(
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
     if should_prefer_path_gwt(current_exe) {
-        if let Some(candidate) = lookup("gwt").filter(|candidate| {
+        if let Some(candidate) = lookup(INTERNAL_DAEMON_BINARY_NAME).filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
         }) {
             return candidate;
         }
-        if let Some(candidate) = sibling_front_door_binary(current_exe) {
+        if let Some(candidate) = sibling_daemon_binary(current_exe) {
             return candidate;
         }
     }
@@ -62,7 +62,7 @@ pub fn resolve_public_gwt_bin_with_lookup(
 }
 
 fn should_prefer_path_gwt(current_exe: &Path) -> bool {
-    is_bunx_temp_executable(current_exe) || !is_named_gwt_binary(current_exe)
+    is_bunx_temp_executable(current_exe) || !is_named_gwtd_binary(current_exe)
 }
 
 fn strip_windows_exe_suffix(value: &str) -> &str {
@@ -95,13 +95,15 @@ fn is_bunx_temp_executable(path: &Path) -> bool {
         .any(|segment| segment.starts_with("bunx-"))
 }
 
-fn sibling_front_door_binary(path: &Path) -> Option<PathBuf> {
-    if !is_named_gwtd_binary(path) {
+fn sibling_daemon_binary(path: &Path) -> Option<PathBuf> {
+    if !is_named_gwt_binary(path) {
         return None;
     }
     let sibling_name = match path.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("exe") => format!("{GUI_FRONT_DOOR_BINARY_NAME}.exe"),
-        _ => GUI_FRONT_DOOR_BINARY_NAME.to_string(),
+        Some(ext) if ext.eq_ignore_ascii_case("exe") => {
+            format!("{INTERNAL_DAEMON_BINARY_NAME}.exe")
+        }
+        _ => INTERNAL_DAEMON_BINARY_NAME.to_string(),
     };
     Some(path.with_file_name(sibling_name))
 }
@@ -176,14 +178,14 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn bunx_temp_current_exe_prefers_stable_path_gwt() {
+    fn bunx_temp_current_exe_prefers_stable_path_gwtd() {
         let current_exe = Path::new(
             r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
         );
-        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe");
+        let stable = PathBuf::from(r"C:\Users\Example\.bun\bin\gwtd.exe");
 
         let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |command| {
-            assert_eq!(command, "gwt");
+            assert_eq!(command, "gwtd");
             Some(stable.clone())
         });
 
@@ -191,39 +193,39 @@ mod tests {
     }
 
     #[test]
-    fn stable_gwt_current_exe_is_kept_without_path_lookup() {
-        let current_exe = Path::new(r"C:\Users\Example\.bun\bin\gwt.exe");
+    fn stable_gwtd_current_exe_is_kept_without_path_lookup() {
+        let current_exe = Path::new(r"C:\Users\Example\.bun\bin\gwtd.exe");
 
         let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| {
-            panic!("stable gwt binary should not hit PATH lookup");
+            panic!("stable gwtd binary should not hit PATH lookup");
         });
 
         assert_eq!(resolved, current_exe);
     }
 
     #[test]
-    fn bunx_temp_current_exe_keeps_current_when_path_only_returns_bunx_temp() {
+    fn bunx_temp_current_exe_falls_back_to_gwtd_sibling_when_path_only_returns_bunx_temp() {
         let current_exe = Path::new(
             r"C:\Users\Example\AppData\Local\Temp\bunx-1234567890-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
         );
         let path_candidate = PathBuf::from(
-            r"C:\Users\Example\AppData\Local\Temp\bunx-2222222222-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwt.exe",
+            r"C:\Users\Example\AppData\Local\Temp\bunx-2222222222-@akiojin\gwt@latest\node_modules\@akiojin\gwt\bin\gwtd.exe",
         );
 
         let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| {
             Some(path_candidate.clone())
         });
 
-        assert_eq!(resolved, current_exe);
+        assert_eq!(resolved, current_exe.with_file_name("gwtd.exe"));
     }
 
     #[test]
-    fn gwtd_current_exe_prefers_gui_front_door_sibling_when_path_lookup_is_missing() {
-        let current_exe = Path::new(r"C:\Program Files\GWT\gwtd.exe");
+    fn gui_front_door_current_exe_prefers_daemon_sibling_when_path_lookup_is_missing() {
+        let current_exe = Path::new(r"C:\Program Files\GWT\gwt.exe");
 
         let resolved = resolve_public_gwt_bin_with_lookup(current_exe, |_command| None);
 
-        assert_eq!(resolved, current_exe.with_file_name("gwt.exe"));
+        assert_eq!(resolved, current_exe.with_file_name("gwtd.exe"));
     }
 
     #[test]
@@ -248,7 +250,7 @@ mod tests {
                 .map(String::as_str),
             Some("gwt.exe")
         );
-        assert!(!should_prefer_path_gwt(stable));
+        assert!(should_prefer_path_gwt(stable));
         assert!(should_prefer_path_gwt(bunx));
         assert!(should_prefer_path_gwt(other));
     }
