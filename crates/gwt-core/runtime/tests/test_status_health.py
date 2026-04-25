@@ -82,6 +82,11 @@ class StatusHealthTests(unittest.TestCase):
                 db_root=db_root,
             )
             self.assertTrue(status["ok"], status)
+            self.assertEqual(status["runtime"]["reason"], "ready")
+            self.assertTrue(status["runtime"]["healthy"])
+            self.assertFalse(status["runtime"]["repaired"])
+            self.assertRegex(status["runtime"]["asset_hash"], r"^[0-9a-f]{16}$")
+            self.assertEqual(status["runtime"]["smoke_test"], "passed")
 
             files = status["status"]["files"]
             docs = status["status"]["files-docs"]
@@ -170,6 +175,73 @@ class StatusHealthTests(unittest.TestCase):
             self.assertEqual(specs["reason"], "ready")
             self.assertFalse(specs["legacy_residue_detected"])
             self.assertIsNotNone(specs["last_repair_at"])
+
+    def test_status_allows_chunked_specs_to_have_more_records_than_manifest_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index_root"
+            db_path = runner.resolve_db_path(
+                self.REPO_HASH,
+                None,
+                "specs",
+                db_root=db_root,
+            )
+            db_path.mkdir(parents=True)
+            (db_path / "chroma.sqlite3").write_text("placeholder")
+            runner.write_manifest(
+                db_path,
+                scope="specs",
+                entries=[{"path": "1939", "mtime": 1, "size": 2}],
+            )
+
+            with mock.patch.object(
+                runner, "_scope_document_count", return_value=(True, 5)
+            ):
+                specs = runner._scope_status_v2(
+                    self.REPO_HASH,
+                    None,
+                    "specs",
+                    db_root=db_root,
+                )
+
+            self.assertTrue(specs["healthy"], specs)
+            self.assertFalse(specs["repair_required"], specs)
+            self.assertEqual(specs["reason"], "ready")
+            self.assertEqual(specs["document_count"], 5)
+
+    def test_status_reports_undersized_specs_index_as_unhealthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index_root"
+            db_path = runner.resolve_db_path(
+                self.REPO_HASH,
+                None,
+                "specs",
+                db_root=db_root,
+            )
+            db_path.mkdir(parents=True)
+            (db_path / "chroma.sqlite3").write_text("placeholder")
+            runner.write_manifest(
+                db_path,
+                scope="specs",
+                entries=[
+                    {"path": "1939", "mtime": 1, "size": 2},
+                    {"path": "1940", "mtime": 1, "size": 2},
+                ],
+            )
+
+            with mock.patch.object(
+                runner, "_scope_document_count", return_value=(True, 1)
+            ):
+                specs = runner._scope_status_v2(
+                    self.REPO_HASH,
+                    None,
+                    "specs",
+                    db_root=db_root,
+                )
+
+            self.assertFalse(specs["healthy"], specs)
+            self.assertTrue(specs["repair_required"], specs)
+            self.assertEqual(specs["reason"], "count_mismatch")
+            self.assertEqual(specs["document_count"], 1)
 
 
 if __name__ == "__main__":

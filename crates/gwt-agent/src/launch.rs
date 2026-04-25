@@ -245,6 +245,7 @@ pub struct LaunchConfig {
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     pub linked_issue_number: Option<u64>,
+    pub windows_shell: Option<crate::WindowsShellKind>,
 }
 
 /// Permission mode for agent launch.
@@ -285,6 +286,7 @@ pub struct AgentLaunchBuilder {
     docker_service: Option<String>,
     docker_lifecycle_intent: DockerLifecycleIntent,
     linked_issue_number: Option<u64>,
+    windows_shell: Option<crate::WindowsShellKind>,
 }
 
 impl AgentLaunchBuilder {
@@ -310,6 +312,7 @@ impl AgentLaunchBuilder {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
+            windows_shell: None,
         }
     }
 
@@ -411,6 +414,11 @@ impl AgentLaunchBuilder {
 
     pub fn linked_issue_number(mut self, n: u64) -> Self {
         self.linked_issue_number = Some(n);
+        self
+    }
+
+    pub fn windows_shell(mut self, shell: crate::WindowsShellKind) -> Self {
+        self.windows_shell = Some(shell);
         self
     }
 
@@ -535,6 +543,7 @@ impl AgentLaunchBuilder {
             docker_service: self.docker_service,
             docker_lifecycle_intent: self.docker_lifecycle_intent,
             linked_issue_number: self.linked_issue_number,
+            windows_shell: self.windows_shell,
         }
     }
 

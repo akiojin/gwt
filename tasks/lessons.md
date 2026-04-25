@@ -1,5 +1,166 @@
 # Lessons Learned
 
+## 2026-04-25 — fix(board): canvas wheel routing の allowlist に新しい scroll surface を必ず登録する
+
+### 事象
+
+GUI Board を chat timeline に寄せても、Board 上の trackpad / wheel scroll が
+canvas pan に奪われると、ユーザーからは「Board がスクロールできない」ように見える。
+
+### 原因
+
+canvas は capture-phase の wheel handler で terminal / repo browser など一部 surface
+だけを native scroll として早期 return していた。Board の scroll container は
+allowlist に入っておらず、plain wheel が canvas pan として処理されていた。
+
+### 再発防止策
+
+1. 新しい window 内 scroll surface を追加したら、DOM/CSS だけでなく
+   `findNativeWheelScrollSurface` の allowlist を同時に更新する。
+2. window 内 scroll は、scroll 端でも canvas pan へフォールバックしない方針を
+   surface ごとに明示し、embedded frontend contract test で固定する。
+3. 「UI が分かりにくい」と「操作不能」が同時に出た場合、まず wheel ownership と
+   primary layout model を分けて原因を確認する。
+
+## 2026-04-25 — fix(board): async post 成功判定は対象 response に相関させる
+
+### 事象
+
+GUI Board の composer は投稿後に draft を消す必要があるが、`board_entries` は
+投稿成功 response だけでなく通常 refresh / load response でも使われる。submit 中に
+古い load response が先に届くと、実際の投稿成功前にユーザー入力を消せる状態だった。
+
+### 原因
+
+- frontend state は `submitting=true` だけを成功判定に使っていた。
+- `post_board_entry` response と `load_board` response が同じ `board_entries` event を使うため、
+  response の由来を state だけで区別できなかった。
+- composer の textarea 自体も native scroll allowlist に入れておらず、container だけの
+  wheel routing test では入力欄上の scroll 取りこぼしを検知できなかった。
+
+### 再発防止策
+
+1. 非同期 request の副作用で入力を破棄する場合は、`submitting` だけでなく request marker
+   と response 内容を照合してから clear する。
+2. 既存 event を複数 request 種別で共有する場合、frontend contract test で「無関係な
+   response では draft を消さない」ことを固定する。
+3. scrollable container を増やしたときは、container だけでなく textarea/list など実際に
+   wheel target になる child element も allowlist 対象か確認する。
+
+## 2026-04-25 — fix(update): installer URL は platform kind 判定後にのみ installer 扱いする
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` で update tests が macOS 上だけ失敗した。
+cache に Windows MSI のような current platform 非対応 installer URL が残っていると、
+portable asset があるのに `choose_apply_plan` が installer path で `None` に落ちた。
+
+### 原因
+
+`installer_kind_for_url(platform, url)?` を使っていたため、platform 非対応 installer URL が
+「installer なし」ではなく「apply plan 全体なし」として扱われた。さらに macOS CLI install
+test は `/usr/local/bin` の実 filesystem writable 状態に依存していた。
+
+### 再発防止策
+
+1. installer URL は `installer_kind_for_url` が `Some` を返したときだけ installer plan にする。
+   platform 非対応 URL は portable fallback を妨げない。
+2. writable / non-writable 分岐をテストする場合、実環境の `/usr/local/bin` などに依存せず
+   temp dir または explicit writable helper を使う。
+3. update cache の fallback asset test では、portable と installer の両方があるケースで
+   current platform 非対応 installer が portable を潰さないことを固定する。
+
+## 2026-04-24 — fix(index): chunked index の health check は下限不変条件を残す
+
+### 事象
+
+Project index hardening の PR で、SPEC は 1 Issue から複数 Chroma record を生成できるため
+`document_count != manifest_count` を一律に許容した。その結果、manifest には複数 SPEC が
+あるのに Chroma collection が一部 record しか持たない部分破損でも `healthy=true` と
+報告される余地ができた。
+
+### 原因
+
+- chunking による「manifest より多い record」は正常だが、「manifest より少ない record」は
+  破損という片側条件を明文化していなかった。
+- Review 後に auto-merge が先に完了し、未解決 review thread の確認が完了報告前の
+  gate として固定されていなかった。
+
+### 再発防止策
+
+1. chunked collection の health check は `document_count >= manifest_count` のような
+   one-sided invariant として書き、等価比較を丸ごと無効化しない。
+2. `gwt pr checks` が全通過しても、完了報告前に `gwt pr review-threads <n>` を再確認し、
+   auto-merge 後に出た valid comment は follow-up PR で解消する。
+3. health status と audit log の両方を追加する変更では、UI 表示だけでなく structured
+   log の top-level status が同じ truth を示す回帰テストを追加する。
+
+## 2026-04-24 — fix(logging): structured runtime log は project-scoped canonical file 以外へ出さない
+
+### 事象
+
+ログ機能の仕様追加を重ねる中で、#1924 の古い `~/.gwt/logs/` 契約、#2021 の
+`~/.gwt/projects/<repo-hash>/logs/` 契約、実装上の `gwt_logs_dir()` 使用が混在し、
+新しい診断機能が別ログファイルや legacy path へ出力される余地が残っていた。
+
+### 原因
+
+- `gwt_core::logging::init` 自体は単一入口だったが、呼び出し側が任意の
+  `log_dir` を渡せるため、entrypoint ごとに path 解決が割れた。
+- README と #2021 は project-scoped path を示していた一方、#1924 の Phase 5
+  説明と一部コードコメントに legacy path が残っていた。
+- 新規診断機能追加時に「Logs window と同じ canonical file に出ること」を
+  テストや acceptance で固定していなかった。
+
+### 再発防止策
+
+1. structured runtime log の保存先は
+   `~/.gwt/projects/<repo-hash>/logs/gwt.log.YYYY-MM-DD` のみとする。Git origin
+   がない場合は `project_scope_hash(path)` の path hash fallback を使う。
+2. logging 初期化では `gwt_logs_dir()` を直接使わず、必ず project-scoped
+   canonical resolver を通す。
+3. 新しい診断機能は独自の `.log` / `.jsonl` writer を追加せず、`tracing`
+   target / fields / spans として canonical structured log に流す。
+4. logging 変更では writer / watcher / housekeeping / SPEC / README / docs を同時に確認し、
+   legacy path が残っていないか `rg "~/.gwt/logs|gwt_logs_dir\\(\\)"` で確認する。
+5. regression test で `LoggingConfig::new(gwt_logs_dir())` や `crates/gwt` の
+   logging setup における direct legacy path 使用を失敗させる。
+
+## 2026-04-23 — fix: Python の file I/O は `encoding="utf-8"` を必ず明示する
+
+### 事象
+
+`bunx @akiojin/gwt@latest` を日本語Windows (`C:\Users\AkioJinsenji秦泉寺章夫`)
+で実行すると、indexing フェーズで `chroma_index_runner.py` が
+`'cp932' codec can't decode byte 0x94 in position 172: illegal multibyte sequence`
+で `RUNTIME_ERROR` を返し、`SessionStart` / `UserPromptSubmit` フックも同じ
+エラーで落ちていた。2026-04-22 の lessons にも同症状の記録あり。
+
+### 原因
+
+`chroma_index_runner.py` の production 側 `Path.read_text()` /
+`Path.write_text()` / `open()` が `encoding` 未指定だった。Python 3 は
+`locale.getpreferredencoding(False)` をデフォルトに使うため、日本語Windows
+では `cp932` として UTF-8 の `~/.gwt/cache/issues/<n>/meta.json` 等を読もう
+として失敗していた。`_load_cached_issue_documents` の except で
+`UnicodeDecodeError` (実体は `ValueError` subclass) を飲み込んでいたため、
+静かに空リストを返していた経路もあった。
+
+### 再発防止策
+
+1. Python で `Path.read_text()` / `Path.write_text()` / `open()` を **テキスト
+   モード**で使うときは、必ず `encoding="utf-8"` を明示する。ロケール依存の
+   暗黙デフォルトは許容しない。
+2. Lock file や binary-safe なファイルを開く場合は `open(path, "a+b")` など
+   binary モードを使い、暗黙デコードを発生させない。
+3. JSON / YAML の読み込みには `(UnicodeDecodeError, ValueError,
+   json.JSONDecodeError, OSError)` を except で受け、旧キャッシュの混入
+   エンコードでサイレントに進まないようにする。意図を明確化するために
+   `UnicodeDecodeError` を明示する。
+4. 回帰テストでは `locale.getpreferredencoding` に頼らず、`io.open` を
+   monkey-patch して `encoding is None` 時に cp932 を注入するパターンで
+   Windows 日本語ロケールを再現する (`tests/test_cp932_safety.py` 参照)。
+
 ## 2026-04-23 — fix(gui): agent-color の「色が出ない」は ANSI 色ではなく frontend surface contract を先に疑う
 
 ### 事象
@@ -3494,3 +3655,88 @@ Project index の manual quickstart で、Python runner は `HOME` 注入先の 
 1. Python と Rust の両方が同じ on-disk layout を読む場合、`HOME` / `USERPROFILE` / fallback の優先順を一致させる。
 2. runtime helper を manual verification する場合、fresh `HOME` では managed venv 作成に入るため、既存 runtime を使う通常 HOME と temp index subtree の cleanup も確認する。
 3. index root を注入する unit test だけでなく、public path resolver の環境変数 contract も regression test で固定する。
+
+## 2026-04-24 — fix: SPEC section 更新の PowerShell join は必ず全文 readback で検証する
+
+### 事象
+
+Project index hardening の SPEC #1939 更新時、PowerShell で既存 section に追記するつもりの式が
+`($tasks -join "\n" + $append)` になり、演算子優先順位により各行の間へ追記文が挿入された。直後に
+`gwt issue spec <n> --section tasks` を readback して検知し、plan/tasks を全文置換して復旧した。
+
+### 原因
+
+- PowerShell の `-join` と `+` を同じ式で使う際の結合範囲を固定していなかった。
+- section 更新後の readback を実施したため検知できたが、更新式自体は構造化されていなかった。
+- SPEC body は markdown section parser に依存するため、1 行の結合ミスでも別 section への parse error に波及する。
+
+### 再発防止策
+
+1. `gwt issue spec ... --edit` に渡す markdown は、差分追記よりも一時ファイルの全文生成を優先する。
+2. PowerShell で配列結合と文字列連結を混ぜる場合は、`(($lines -join "`n") + $append)` のように結合結果を明示的に括る。
+3. SPEC section を更新した直後は、必ず対象 section を readback し、見出し構造と末尾の expected lines を確認してから次へ進む。
+
+## 2026-04-24 — fix: detached CLI の監査ログは非同期 tracing guard に依存しない
+
+### 事象
+
+Project index の手動 `gwt index status` / `gwt index rebuild` ログを正規の
+`gwt.log.YYYY-MM-DD` へ統合する際、GUI 起動後の tracing subscriber だけを前提にすると
+detached CLI 経路ではログが残らない設計になることを確認した。
+
+### 原因
+
+- `runtime_support::run_cli()` は CLI dispatch 後に `std::process::exit` する。
+- `std::process::exit` は通常の drop を走らせないため、`tracing_appender` の
+  non-blocking `WorkerGuard` flush に依存するとイベントが失われる。
+- `gwt index` は GUI 起動前に処理される detached CLI なので、GUI 用 logging init の対象外だった。
+
+### 再発防止策
+
+1. `std::process::exit` を通る短命 CLI の必須監査ログは、同期 write + flush の JSONL append にする。
+2. 既存ログ基盤へ統合する場合も、ファイル名は `current_log_file()` に揃え、別名ログファイルを増やさない。
+3. CLI ログ追加のテストでは、出力先が `gwt.log.YYYY-MM-DD` であることと、旧 `index.log` を作らないことを同時に固定する。
+
+## 2026-04-24 — process: 実装前に関連 SPEC を必ず gwt-search で確認する
+
+### 事象
+
+Codex 対応モデル一覧の更新で、関連 SPEC が存在するにもかかわらず初動で SPEC
+確認を省略し、ユーザーから「関連SPECがないですか？あるはずです。」と指摘された。
+
+### 原因
+
+- 変更が小さく見えたため、`feat` 相当の実装前ワークフローを軽視した。
+- `gwt-search` による SPEC / Issue / project file の横断検索を、実装前の必須ゲートとして扱わなかった。
+- SPEC owner が見つかる前に実装計画を進めようとしたため、受け入れ条件と実装対象の同期が遅れた。
+
+### 再発防止策
+
+1. `feat` / `fix` / `refactor` の実装前は、変更規模に関わらず `gwt-search` で関連 SPEC / Issue を先に確認する。
+2. ユーザーが「SPEC があるはず」と示唆した場合は、実装を止めて SPEC owner を特定し、SPEC / plan / tasks を更新してから再開する。
+3. 完了報告前に、対象 SPEC が今回の変更と受け入れ条件を反映していることをセルフチェックする。
+
+## 2026-04-25 — fix(agent): runtime hook の session 相関は gwt_session_id を優先する
+
+### 事象
+
+エージェント終了時に、以前の修正で auto-close するはずの Agent window が閉じずに残った。
+PTY の `Completed(0)` 経路では閉じるが、runtime hook の `status=Stopped/Exited` 経路では
+`RuntimeHookEvent` の broadcast だけで workspace から window が削除されなかった。
+
+### 原因
+
+- `handle_runtime_hook_event` は hook state を `window_hook_states` に反映して status badge を更新するだけで、
+  `should_auto_close_agent_window` / `close_window_from_workspace` を通していなかった。
+- `active_window_for_runtime_event` が `agent_session_id` を gwt 管理 session ID と比較していた。
+  実際の hook payload では `gwt_session_id` が gwt session、`agent_session_id` が上流 agent session なので、
+  active window との相関に失敗しうる状態だった。
+
+### 再発防止策
+
+1. Runtime hook event を active agent window に結び付けるときは `gwt_session_id` を優先し、
+   互換 fallback としてのみ `agent_session_id` を使う。
+2. Agent の正常終了を扱う経路は、PTY status と runtime hook status の両方で
+   `should_auto_close_agent_window` と workspace close helper を通す。
+3. hook event の regression test では、`gwt_session_id != agent_session_id` の実 payload 形状を使い、
+   status badge だけでなく workspace から window が消えることまで固定する。

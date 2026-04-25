@@ -25,6 +25,7 @@ pub enum LaunchWizardStep {
     ModelSelect,
     ReasoningLevel,
     RuntimeTarget,
+    WindowsShell,
     DockerServiceSelect,
     DockerLifecycle,
     VersionSelect,
@@ -106,6 +107,8 @@ pub struct LaunchWizardView {
     pub selected_reasoning: String,
     pub runtime_target_options: Vec<LaunchWizardOptionView>,
     pub selected_runtime_target: String,
+    pub windows_shell_options: Vec<LaunchWizardOptionView>,
+    pub selected_windows_shell: Option<String>,
     pub docker_service_options: Vec<LaunchWizardOptionView>,
     pub selected_docker_service: Option<String>,
     pub docker_lifecycle_options: Vec<LaunchWizardOptionView>,
@@ -118,6 +121,7 @@ pub struct LaunchWizardView {
     pub show_agent_settings: bool,
     pub show_reasoning: bool,
     pub show_runtime_target: bool,
+    pub show_windows_shell: bool,
     pub show_docker_service: bool,
     pub show_docker_lifecycle: bool,
     pub show_version: bool,
@@ -165,6 +169,7 @@ pub struct ShellLaunchConfig {
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    pub windows_shell: Option<gwt_agent::WindowsShellKind>,
     pub env_vars: HashMap<String, String>,
 }
 
@@ -280,6 +285,9 @@ pub enum LaunchWizardAction {
     SetRuntimeTarget {
         target: gwt_agent::LaunchRuntimeTarget,
     },
+    SetWindowsShell {
+        shell: gwt_agent::WindowsShellKind,
+    },
     SetDockerService {
         service: String,
     },
@@ -322,6 +330,7 @@ pub struct LaunchWizardState {
     pub mode: String,
     pub resume_session_id: Option<String>,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub windows_shell: gwt_agent::WindowsShellKind,
     pub docker_service: Option<String>,
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub skip_permissions: bool,
@@ -395,6 +404,7 @@ impl LaunchWizardState {
             mode: "normal".to_string(),
             resume_session_id: None,
             runtime_target,
+            windows_shell: default_windows_shell_kind(),
             docker_service,
             docker_lifecycle_intent,
             skip_permissions: false,
@@ -461,6 +471,10 @@ impl LaunchWizardState {
             selected_reasoning: self.reasoning.clone(),
             runtime_target_options: runtime_target_options_view(),
             selected_runtime_target: runtime_target_value(self.runtime_target).to_string(),
+            windows_shell_options: windows_shell_options_view(),
+            selected_windows_shell: self
+                .windows_shell_for_launch()
+                .map(|shell| windows_shell_option_value(shell).to_string()),
             docker_service_options: self.docker_service_options_view(),
             selected_docker_service: self.docker_service.clone(),
             docker_lifecycle_options: self.docker_lifecycle_options_view(),
@@ -474,6 +488,7 @@ impl LaunchWizardState {
             show_agent_settings: self.launch_target_is_agent(),
             show_reasoning: self.launch_target_is_agent() && self.agent_uses_reasoning_step(),
             show_runtime_target: self.has_docker_workflow(),
+            show_windows_shell: self.show_windows_shell_selection(),
             show_docker_service: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
                 && self.docker_service_prompt_required(),
             show_docker_lifecycle: self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker,
@@ -577,6 +592,9 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetRuntimeTarget { target } => {
                 self.set_runtime_target(target);
+            }
+            LaunchWizardAction::SetWindowsShell { shell } => {
+                self.windows_shell = shell;
             }
             LaunchWizardAction::SetDockerService { service } => {
                 self.set_docker_service(&service);
@@ -693,6 +711,9 @@ impl LaunchWizardState {
         }
 
         builder = builder.runtime_target(self.runtime_target);
+        if let Some(windows_shell) = self.windows_shell_for_launch() {
+            builder = builder.windows_shell(windows_shell);
+        }
         if let Some(docker_service) = self.docker_service.as_deref() {
             builder = builder.docker_service(docker_service.to_string());
         }
@@ -749,6 +770,7 @@ impl LaunchWizardState {
             runtime_target: self.runtime_target,
             docker_service: self.docker_service.clone(),
             docker_lifecycle_intent: self.docker_lifecycle_intent,
+            windows_shell: self.windows_shell_for_launch(),
             env_vars,
         })
     }
@@ -867,6 +889,11 @@ impl LaunchWizardState {
                 }
                 self.sync_docker_lifecycle_default();
             }
+            LaunchWizardStep::WindowsShell => {
+                if let Some(option) = WINDOWS_SHELL_OPTIONS.get(self.selected) {
+                    self.windows_shell = *option;
+                }
+            }
             LaunchWizardStep::DockerServiceSelect => {
                 if let Some(service) = self.docker_service_options().get(self.selected) {
                     self.docker_service = Some(service.clone());
@@ -927,9 +954,7 @@ impl LaunchWizardState {
         self.launch_target = LaunchTargetKind::Agent;
         self.agent_id = entry.agent_id.clone();
         self.sync_selected_agent_options();
-        if let Some(model) = entry.model {
-            self.model = model;
-        }
+        self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
         }
@@ -1290,6 +1315,12 @@ impl LaunchWizardState {
                 "host".to_string()
             },
         });
+        if let Some(windows_shell) = self.windows_shell_for_launch() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Shell".to_string(),
+                value: windows_shell_option_label(windows_shell).to_string(),
+            });
+        }
         if self.launch_target_is_agent() {
             summary.push(LaunchWizardSummaryView {
                 label: "Permissions".to_string(),
@@ -1356,6 +1387,18 @@ impl LaunchWizardState {
             self.codex_fast_mode = false;
         }
         self.sync_reasoning_state();
+    }
+
+    fn apply_saved_model(&mut self, model: Option<&str>) {
+        let Some(model) = model else {
+            return;
+        };
+        if current_model_options(self.effective_agent_id())
+            .iter()
+            .any(|candidate| candidate == &model)
+        {
+            self.model = model.to_string();
+        }
     }
 
     fn sync_reasoning_state(&mut self) {
@@ -1452,6 +1495,14 @@ impl LaunchWizardState {
 
     fn has_docker_workflow(&self) -> bool {
         self.context.docker_context.is_some()
+    }
+
+    fn show_windows_shell_selection(&self) -> bool {
+        cfg!(windows) && self.windows_shell_for_launch().is_some()
+    }
+
+    fn windows_shell_for_launch(&self) -> Option<gwt_agent::WindowsShellKind> {
+        (self.runtime_target == gwt_agent::LaunchRuntimeTarget::Host).then_some(self.windows_shell)
     }
 
     fn docker_service_prompt_required(&self) -> bool {
@@ -1593,9 +1644,7 @@ impl LaunchWizardState {
         }
         self.sync_selected_agent_options();
 
-        if let Some(model) = entry.model {
-            self.model = model;
-        }
+        self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
             self.reasoning = reasoning;
         }
@@ -1756,6 +1805,7 @@ impl LaunchWizardState {
                     color: None,
                 })
                 .collect(),
+            LaunchWizardStep::WindowsShell => windows_shell_options_view(),
             LaunchWizardStep::DockerServiceSelect => self
                 .docker_service_options()
                 .into_iter()
@@ -1889,42 +1939,34 @@ const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
     },
 ];
 
-const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 9] = [
+const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     ModelDisplayOption {
         label: "Default (Auto)",
-        description: "Use Codex default model",
+        description: "Use Codex default model (gpt-5.5)",
+    },
+    ModelDisplayOption {
+        label: "gpt-5.5",
+        description: "Frontier model for complex coding, research, and real-world work",
     },
     ModelDisplayOption {
         label: "gpt-5.4",
-        description: "Latest frontier agentic coding model",
+        description: "Strong model for everyday coding",
     },
     ModelDisplayOption {
         label: "gpt-5.4-mini",
-        description: "Smaller frontier agentic coding model",
+        description: "Small, fast, and cost-efficient model for simpler coding tasks",
     },
     ModelDisplayOption {
         label: "gpt-5.3-codex",
-        description: "Frontier Codex-optimized coding model",
+        description: "Coding-optimized model",
     },
     ModelDisplayOption {
         label: "gpt-5.3-codex-spark",
         description: "Ultra-fast coding model",
     },
     ModelDisplayOption {
-        label: "gpt-5.2-codex",
-        description: "Frontier agentic coding model",
-    },
-    ModelDisplayOption {
         label: "gpt-5.2",
-        description: "Optimized for professional work",
-    },
-    ModelDisplayOption {
-        label: "gpt-5.1-codex-max",
-        description: "Deep and fast reasoning",
-    },
-    ModelDisplayOption {
-        label: "gpt-5.1-codex-mini",
-        description: "Cheaper and faster codex option",
+        description: "Optimized for professional work and long-running agents",
     },
 ];
 
@@ -2077,6 +2119,12 @@ const RUNTIME_TARGET_OPTIONS: [ChoiceOption; 2] = [
     },
 ];
 
+const WINDOWS_SHELL_OPTIONS: [gwt_agent::WindowsShellKind; 3] = [
+    gwt_agent::WindowsShellKind::CommandPrompt,
+    gwt_agent::WindowsShellKind::WindowsPowerShell,
+    gwt_agent::WindowsShellKind::PowerShell7,
+];
+
 const YES_NO_OPTIONS: [ChoiceOption; 2] = [
     ChoiceOption {
         label: "Yes",
@@ -2113,176 +2161,228 @@ fn default_docker_lifecycle_intent(
     }
 }
 
-fn next_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<LaunchWizardStep> {
-    match current {
-        LaunchWizardStep::QuickStart => match state.selected_quick_start_action() {
-            QuickStartAction::ChooseDifferent => Some(LaunchWizardStep::BranchAction),
-            QuickStartAction::FocusExistingSession => Some(LaunchWizardStep::FocusExistingSession),
-            QuickStartAction::ReuseEntry { .. } | QuickStartAction::StartNewEntry { .. } => {
-                Some(LaunchWizardStep::SkipPermissions)
+struct LaunchWizardFlow<'a> {
+    state: &'a LaunchWizardState,
+}
+
+impl<'a> LaunchWizardFlow<'a> {
+    fn new(state: &'a LaunchWizardState) -> Self {
+        Self { state }
+    }
+
+    fn next_step(&self, current: LaunchWizardStep) -> Option<LaunchWizardStep> {
+        match current {
+            LaunchWizardStep::QuickStart => match self.state.selected_quick_start_action() {
+                QuickStartAction::ChooseDifferent => Some(LaunchWizardStep::BranchAction),
+                QuickStartAction::FocusExistingSession => {
+                    Some(LaunchWizardStep::FocusExistingSession)
+                }
+                QuickStartAction::ReuseEntry { .. } | QuickStartAction::StartNewEntry { .. } => {
+                    Some(LaunchWizardStep::SkipPermissions)
+                }
+            },
+            LaunchWizardStep::FocusExistingSession => None,
+            LaunchWizardStep::BranchAction => {
+                if self.state.selected == 0 {
+                    Some(LaunchWizardStep::LaunchTarget)
+                } else {
+                    Some(LaunchWizardStep::BranchTypeSelect)
+                }
             }
-        },
-        LaunchWizardStep::FocusExistingSession => None,
-        LaunchWizardStep::BranchAction => {
-            if state.selected == 0 {
-                Some(LaunchWizardStep::LaunchTarget)
-            } else {
-                Some(LaunchWizardStep::BranchTypeSelect)
+            LaunchWizardStep::BranchTypeSelect => Some(LaunchWizardStep::BranchNameInput),
+            LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::LaunchTarget),
+            LaunchWizardStep::LaunchTarget => self.next_after_launch_target(),
+            LaunchWizardStep::AgentSelect => {
+                if self.state.agent_has_models() {
+                    Some(LaunchWizardStep::ModelSelect)
+                } else {
+                    self.next_after_agent_configuration()
+                }
             }
+            LaunchWizardStep::ModelSelect => {
+                if self.state.agent_uses_reasoning_step() {
+                    Some(LaunchWizardStep::ReasoningLevel)
+                } else {
+                    self.next_after_agent_configuration()
+                }
+            }
+            LaunchWizardStep::ReasoningLevel => self.next_after_agent_configuration(),
+            LaunchWizardStep::RuntimeTarget => self.next_after_runtime_target(),
+            LaunchWizardStep::WindowsShell => self.next_after_windows_shell(),
+            LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::DockerLifecycle),
+            LaunchWizardStep::DockerLifecycle => self.next_after_docker_lifecycle(),
+            LaunchWizardStep::VersionSelect => Some(LaunchWizardStep::ExecutionMode),
+            LaunchWizardStep::ExecutionMode => Some(LaunchWizardStep::SkipPermissions),
+            LaunchWizardStep::SkipPermissions => {
+                if self.state.agent_is_codex() {
+                    Some(LaunchWizardStep::CodexFastMode)
+                } else {
+                    None
+                }
+            }
+            LaunchWizardStep::CodexFastMode => None,
         }
-        LaunchWizardStep::BranchTypeSelect => Some(LaunchWizardStep::BranchNameInput),
-        LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::LaunchTarget),
-        LaunchWizardStep::LaunchTarget => {
-            if state.launch_target_is_agent() {
-                Some(LaunchWizardStep::AgentSelect)
-            } else if state.has_docker_workflow() {
-                Some(LaunchWizardStep::RuntimeTarget)
-            } else {
-                None
+    }
+
+    fn prev_step(&self, current: LaunchWizardStep) -> Option<LaunchWizardStep> {
+        match current {
+            LaunchWizardStep::QuickStart => None,
+            LaunchWizardStep::FocusExistingSession => Some(LaunchWizardStep::QuickStart),
+            LaunchWizardStep::BranchAction => {
+                if !self.state.quick_start_entries.is_empty()
+                    || !self.state.context.live_sessions.is_empty()
+                {
+                    Some(LaunchWizardStep::QuickStart)
+                } else {
+                    None
+                }
             }
-        }
-        LaunchWizardStep::AgentSelect => {
-            if state.agent_has_models() {
-                Some(LaunchWizardStep::ModelSelect)
-            } else if state.has_docker_workflow() {
-                Some(LaunchWizardStep::RuntimeTarget)
-            } else if agent_has_npm_package(state.effective_agent_id()) {
-                Some(LaunchWizardStep::VersionSelect)
-            } else {
-                Some(LaunchWizardStep::ExecutionMode)
+            LaunchWizardStep::BranchTypeSelect => Some(LaunchWizardStep::BranchAction),
+            LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::BranchTypeSelect),
+            LaunchWizardStep::LaunchTarget => {
+                if self.state.is_new_branch {
+                    Some(LaunchWizardStep::BranchNameInput)
+                } else {
+                    Some(LaunchWizardStep::BranchAction)
+                }
             }
-        }
-        LaunchWizardStep::ModelSelect => {
-            if state.agent_uses_reasoning_step() {
-                Some(LaunchWizardStep::ReasoningLevel)
-            } else if state.has_docker_workflow() {
-                Some(LaunchWizardStep::RuntimeTarget)
-            } else if agent_has_npm_package(state.effective_agent_id()) {
-                Some(LaunchWizardStep::VersionSelect)
-            } else {
-                Some(LaunchWizardStep::ExecutionMode)
+            LaunchWizardStep::AgentSelect => Some(LaunchWizardStep::LaunchTarget),
+            LaunchWizardStep::ModelSelect => Some(LaunchWizardStep::AgentSelect),
+            LaunchWizardStep::ReasoningLevel => Some(LaunchWizardStep::ModelSelect),
+            LaunchWizardStep::RuntimeTarget => {
+                if self.state.launch_target_is_shell() {
+                    Some(LaunchWizardStep::LaunchTarget)
+                } else {
+                    self.previous_agent_configuration_step()
+                }
             }
-        }
-        LaunchWizardStep::ReasoningLevel => {
-            if state.has_docker_workflow() {
-                Some(LaunchWizardStep::RuntimeTarget)
-            } else if agent_has_npm_package(state.effective_agent_id()) {
-                Some(LaunchWizardStep::VersionSelect)
-            } else {
-                Some(LaunchWizardStep::ExecutionMode)
+            LaunchWizardStep::WindowsShell => self.previous_before_windows_shell(),
+            LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::RuntimeTarget),
+            LaunchWizardStep::DockerLifecycle => {
+                if self.state.docker_service_prompt_required() {
+                    Some(LaunchWizardStep::DockerServiceSelect)
+                } else {
+                    Some(LaunchWizardStep::RuntimeTarget)
+                }
             }
+            LaunchWizardStep::VersionSelect => self.previous_before_version_select(),
+            LaunchWizardStep::ExecutionMode => self.previous_before_execution_mode(),
+            LaunchWizardStep::SkipPermissions => Some(LaunchWizardStep::ExecutionMode),
+            LaunchWizardStep::CodexFastMode => Some(LaunchWizardStep::SkipPermissions),
         }
-        LaunchWizardStep::RuntimeTarget => {
-            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
-                && state.docker_service_prompt_required()
-            {
-                Some(LaunchWizardStep::DockerServiceSelect)
-            } else if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                Some(LaunchWizardStep::DockerLifecycle)
-            } else if state.launch_target_is_shell() {
-                None
-            } else if agent_has_npm_package(state.effective_agent_id()) {
-                Some(LaunchWizardStep::VersionSelect)
-            } else {
-                Some(LaunchWizardStep::ExecutionMode)
-            }
+    }
+
+    fn next_after_launch_target(&self) -> Option<LaunchWizardStep> {
+        if self.state.launch_target_is_agent() {
+            Some(LaunchWizardStep::AgentSelect)
+        } else if self.state.has_docker_workflow() {
+            Some(LaunchWizardStep::RuntimeTarget)
+        } else {
+            self.next_after_host_runtime()
         }
-        LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::DockerLifecycle),
-        LaunchWizardStep::DockerLifecycle => {
-            if state.launch_target_is_shell() {
-                None
-            } else if agent_has_npm_package(state.effective_agent_id()) {
-                Some(LaunchWizardStep::VersionSelect)
-            } else {
-                Some(LaunchWizardStep::ExecutionMode)
-            }
+    }
+
+    fn next_after_agent_configuration(&self) -> Option<LaunchWizardStep> {
+        if self.state.has_docker_workflow() {
+            Some(LaunchWizardStep::RuntimeTarget)
+        } else {
+            self.next_after_host_runtime()
         }
-        LaunchWizardStep::VersionSelect => Some(LaunchWizardStep::ExecutionMode),
-        LaunchWizardStep::ExecutionMode => Some(LaunchWizardStep::SkipPermissions),
-        LaunchWizardStep::SkipPermissions => {
-            if state.agent_is_codex() {
-                Some(LaunchWizardStep::CodexFastMode)
-            } else {
-                None
-            }
+    }
+
+    fn next_after_runtime_target(&self) -> Option<LaunchWizardStep> {
+        if self.state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker
+            && self.state.docker_service_prompt_required()
+        {
+            Some(LaunchWizardStep::DockerServiceSelect)
+        } else if self.state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+            Some(LaunchWizardStep::DockerLifecycle)
+        } else {
+            self.next_after_host_runtime()
         }
-        LaunchWizardStep::CodexFastMode => None,
+    }
+
+    fn next_after_host_runtime(&self) -> Option<LaunchWizardStep> {
+        if self.state.show_windows_shell_selection() {
+            Some(LaunchWizardStep::WindowsShell)
+        } else {
+            self.next_after_windows_shell()
+        }
+    }
+
+    fn next_after_windows_shell(&self) -> Option<LaunchWizardStep> {
+        if self.state.launch_target_is_shell() {
+            None
+        } else if agent_has_npm_package(self.state.effective_agent_id()) {
+            Some(LaunchWizardStep::VersionSelect)
+        } else {
+            Some(LaunchWizardStep::ExecutionMode)
+        }
+    }
+
+    fn next_after_docker_lifecycle(&self) -> Option<LaunchWizardStep> {
+        if self.state.launch_target_is_shell() {
+            None
+        } else if agent_has_npm_package(self.state.effective_agent_id()) {
+            Some(LaunchWizardStep::VersionSelect)
+        } else {
+            Some(LaunchWizardStep::ExecutionMode)
+        }
+    }
+
+    fn previous_agent_configuration_step(&self) -> Option<LaunchWizardStep> {
+        if self.state.agent_uses_reasoning_step() {
+            Some(LaunchWizardStep::ReasoningLevel)
+        } else if self.state.agent_has_models() {
+            Some(LaunchWizardStep::ModelSelect)
+        } else {
+            Some(LaunchWizardStep::AgentSelect)
+        }
+    }
+
+    fn previous_before_windows_shell(&self) -> Option<LaunchWizardStep> {
+        if self.state.has_docker_workflow() {
+            Some(LaunchWizardStep::RuntimeTarget)
+        } else if self.state.launch_target_is_shell() {
+            Some(LaunchWizardStep::LaunchTarget)
+        } else {
+            self.previous_agent_configuration_step()
+        }
+    }
+
+    fn previous_before_version_select(&self) -> Option<LaunchWizardStep> {
+        if self.state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+            Some(LaunchWizardStep::DockerLifecycle)
+        } else if self.state.show_windows_shell_selection() {
+            Some(LaunchWizardStep::WindowsShell)
+        } else if self.state.has_docker_workflow() {
+            Some(LaunchWizardStep::RuntimeTarget)
+        } else {
+            self.previous_agent_configuration_step()
+        }
+    }
+
+    fn previous_before_execution_mode(&self) -> Option<LaunchWizardStep> {
+        if self.state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+            Some(LaunchWizardStep::DockerLifecycle)
+        } else if self.state.show_windows_shell_selection() {
+            Some(LaunchWizardStep::WindowsShell)
+        } else if agent_has_npm_package(self.state.effective_agent_id()) {
+            Some(LaunchWizardStep::VersionSelect)
+        } else if self.state.has_docker_workflow() {
+            Some(LaunchWizardStep::RuntimeTarget)
+        } else {
+            self.previous_agent_configuration_step()
+        }
     }
 }
 
+fn next_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<LaunchWizardStep> {
+    LaunchWizardFlow::new(state).next_step(current)
+}
+
 fn prev_step(current: LaunchWizardStep, state: &LaunchWizardState) -> Option<LaunchWizardStep> {
-    match current {
-        LaunchWizardStep::QuickStart => None,
-        LaunchWizardStep::FocusExistingSession => Some(LaunchWizardStep::QuickStart),
-        LaunchWizardStep::BranchAction => {
-            if !state.quick_start_entries.is_empty() || !state.context.live_sessions.is_empty() {
-                Some(LaunchWizardStep::QuickStart)
-            } else {
-                None
-            }
-        }
-        LaunchWizardStep::BranchTypeSelect => Some(LaunchWizardStep::BranchAction),
-        LaunchWizardStep::BranchNameInput => Some(LaunchWizardStep::BranchTypeSelect),
-        LaunchWizardStep::LaunchTarget => {
-            if state.is_new_branch {
-                Some(LaunchWizardStep::BranchNameInput)
-            } else {
-                Some(LaunchWizardStep::BranchAction)
-            }
-        }
-        LaunchWizardStep::AgentSelect => Some(LaunchWizardStep::LaunchTarget),
-        LaunchWizardStep::ModelSelect => Some(LaunchWizardStep::AgentSelect),
-        LaunchWizardStep::ReasoningLevel => Some(LaunchWizardStep::ModelSelect),
-        LaunchWizardStep::RuntimeTarget => {
-            if state.launch_target_is_shell() {
-                Some(LaunchWizardStep::LaunchTarget)
-            } else if state.agent_uses_reasoning_step() {
-                Some(LaunchWizardStep::ReasoningLevel)
-            } else if state.agent_has_models() {
-                Some(LaunchWizardStep::ModelSelect)
-            } else {
-                Some(LaunchWizardStep::AgentSelect)
-            }
-        }
-        LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::RuntimeTarget),
-        LaunchWizardStep::DockerLifecycle => {
-            if state.docker_service_prompt_required() {
-                Some(LaunchWizardStep::DockerServiceSelect)
-            } else {
-                Some(LaunchWizardStep::RuntimeTarget)
-            }
-        }
-        LaunchWizardStep::VersionSelect => {
-            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                Some(LaunchWizardStep::DockerLifecycle)
-            } else if state.has_docker_workflow() {
-                Some(LaunchWizardStep::RuntimeTarget)
-            } else if state.agent_uses_reasoning_step() {
-                Some(LaunchWizardStep::ReasoningLevel)
-            } else if state.agent_has_models() {
-                Some(LaunchWizardStep::ModelSelect)
-            } else {
-                Some(LaunchWizardStep::AgentSelect)
-            }
-        }
-        LaunchWizardStep::ExecutionMode => {
-            if state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                Some(LaunchWizardStep::DockerLifecycle)
-            } else if agent_has_npm_package(state.effective_agent_id()) {
-                Some(LaunchWizardStep::VersionSelect)
-            } else if state.has_docker_workflow() {
-                Some(LaunchWizardStep::RuntimeTarget)
-            } else if state.agent_uses_reasoning_step() {
-                Some(LaunchWizardStep::ReasoningLevel)
-            } else if state.agent_has_models() {
-                Some(LaunchWizardStep::ModelSelect)
-            } else {
-                Some(LaunchWizardStep::AgentSelect)
-            }
-        }
-        LaunchWizardStep::SkipPermissions => Some(LaunchWizardStep::ExecutionMode),
-        LaunchWizardStep::CodexFastMode => Some(LaunchWizardStep::SkipPermissions),
-    }
+    LaunchWizardFlow::new(state).prev_step(current)
 }
 
 fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizardState) -> usize {
@@ -2316,6 +2416,10 @@ fn step_default_selection(step: LaunchWizardStep, state: &LaunchWizardState) -> 
         LaunchWizardStep::RuntimeTarget => {
             usize::from(state.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker)
         }
+        LaunchWizardStep::WindowsShell => WINDOWS_SHELL_OPTIONS
+            .iter()
+            .position(|option| *option == state.windows_shell)
+            .unwrap_or(0),
         LaunchWizardStep::DockerServiceSelect => state
             .preferred_docker_service()
             .and_then(|service| {
@@ -2436,6 +2540,72 @@ fn runtime_target_options_view() -> Vec<LaunchWizardOptionView> {
             color: None,
         })
         .collect()
+}
+
+fn windows_shell_options_view() -> Vec<LaunchWizardOptionView> {
+    WINDOWS_SHELL_OPTIONS
+        .iter()
+        .copied()
+        .map(|shell| LaunchWizardOptionView {
+            value: windows_shell_option_value(shell).to_string(),
+            label: windows_shell_option_label(shell).to_string(),
+            description: Some(windows_shell_option_description(shell).to_string()),
+            color: None,
+        })
+        .collect()
+}
+
+fn windows_shell_option_value(shell: gwt_agent::WindowsShellKind) -> &'static str {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => "command_prompt",
+        gwt_agent::WindowsShellKind::WindowsPowerShell => "windows_power_shell",
+        gwt_agent::WindowsShellKind::PowerShell7 => "power_shell_7",
+    }
+}
+
+fn windows_shell_option_label(shell: gwt_agent::WindowsShellKind) -> &'static str {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => "Command Prompt",
+        gwt_agent::WindowsShellKind::WindowsPowerShell => "Windows PowerShell",
+        gwt_agent::WindowsShellKind::PowerShell7 => "PowerShell 7",
+    }
+}
+
+fn windows_shell_option_description(shell: gwt_agent::WindowsShellKind) -> &'static str {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => "Run through cmd.exe",
+        gwt_agent::WindowsShellKind::WindowsPowerShell => "Run through Windows PowerShell",
+        gwt_agent::WindowsShellKind::PowerShell7 => "Run through PowerShell 7",
+    }
+}
+
+fn windows_shell_detection_command(shell: gwt_agent::WindowsShellKind) -> &'static str {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => "cmd.exe",
+        gwt_agent::WindowsShellKind::WindowsPowerShell => "powershell",
+        gwt_agent::WindowsShellKind::PowerShell7 => "pwsh",
+    }
+}
+
+fn default_windows_shell_kind() -> gwt_agent::WindowsShellKind {
+    default_windows_shell_kind_with(gwt_core::process::command_exists)
+}
+
+fn default_windows_shell_kind_with<F>(mut command_exists: F) -> gwt_agent::WindowsShellKind
+where
+    F: FnMut(&str) -> bool,
+{
+    if command_exists(windows_shell_detection_command(
+        gwt_agent::WindowsShellKind::PowerShell7,
+    )) {
+        return gwt_agent::WindowsShellKind::PowerShell7;
+    }
+    if command_exists(windows_shell_detection_command(
+        gwt_agent::WindowsShellKind::WindowsPowerShell,
+    )) {
+        return gwt_agent::WindowsShellKind::WindowsPowerShell;
+    }
+    gwt_agent::WindowsShellKind::CommandPrompt
 }
 
 fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
@@ -2824,7 +2994,7 @@ mod tests {
         session.display_name = session.agent_id.display_name().to_string();
         session.agent_session_id = resume_id.map(str::to_string);
         session.tool_version = Some("installed".to_string());
-        session.model = Some("gpt-5.4".to_string());
+        session.model = Some("gpt-5.5".to_string());
         session.reasoning_level = Some("high".to_string());
         session.skip_permissions = true;
         session.codex_fast_mode = true;
@@ -2848,7 +3018,7 @@ mod tests {
         session.display_name = session.agent_id.display_name().to_string();
         session.agent_session_id = resume_id.map(str::to_string);
         session.tool_version = Some("installed".to_string());
-        session.model = Some("gpt-5.4".to_string());
+        session.model = Some("gpt-5.5".to_string());
         session.reasoning_level = Some("high".to_string());
         session.skip_permissions = true;
         session.codex_fast_mode = true;
@@ -2879,7 +3049,7 @@ mod tests {
             ),
             "codex" => (
                 "Codex",
-                Some("gpt-5.4"),
+                Some("gpt-5.5"),
                 Some("high"),
                 Some("0.110.0"),
                 true,
@@ -2925,7 +3095,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3052,7 +3222,7 @@ mod tests {
             Some("resume-older"),
         );
         older.tool_version = Some("0.110.0".to_string());
-        older.model = Some("gpt-5.4".to_string());
+        older.model = Some("gpt-5.5".to_string());
         older.reasoning_level = Some("high".to_string());
         older.skip_permissions = true;
         older.codex_fast_mode = true;
@@ -3087,7 +3257,7 @@ mod tests {
             entries[0].resume_session_id.as_deref(),
             Some("resume-older")
         );
-        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(entries[0].model.as_deref(), Some("gpt-5.5"));
         assert_eq!(entries[0].reasoning.as_deref(), Some("high"));
         assert_eq!(entries[0].version.as_deref(), Some("0.110.0"));
         assert_eq!(
@@ -3122,7 +3292,7 @@ mod tests {
             Vec::new(),
         );
         state.agent_id = "codex".to_string();
-        state.model = "gpt-5.4".to_string();
+        state.model = "gpt-5.5".to_string();
         state.reasoning = "high".to_string();
         state.version = "0.110.0".to_string();
         state.mode = "resume".to_string();
@@ -3154,7 +3324,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3173,7 +3343,7 @@ mod tests {
         });
 
         assert_eq!(state.agent_id, "codex");
-        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.model, "gpt-5.5");
         assert_eq!(state.reasoning, "high");
         assert_eq!(state.version, "0.110.0");
         assert_eq!(state.mode, "resume");
@@ -3182,6 +3352,45 @@ mod tests {
         assert_eq!(state.docker_service.as_deref(), Some("gwt"));
         assert!(state.skip_permissions);
         assert!(state.codex_fast_mode);
+    }
+
+    #[test]
+    fn quick_start_with_removed_codex_model_falls_back_to_auto() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.2-codex".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: Some("resume-1".to_string()),
+                live_window_id: None,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+
+        assert_eq!(state.model, "Default (Auto)");
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert!(config.model.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3204,7 +3413,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3256,7 +3465,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -3297,7 +3506,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: None,
@@ -3343,7 +3552,7 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
         });
         state.apply(LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
@@ -3361,7 +3570,7 @@ mod tests {
 
         assert_eq!(view.branch_mode, "use_selected");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_model, "gpt-5.5");
         assert_eq!(view.selected_reasoning, "high");
         assert_eq!(view.selected_runtime_target, "host");
         assert_eq!(view.selected_version, "0.110.0");
@@ -3415,8 +3624,8 @@ mod tests {
         state.set_agent_id("missing");
         assert_eq!(state.error.as_deref(), Some("Agent option is unavailable"));
 
-        state.set_model("gpt-5.4");
-        assert_eq!(state.model, "gpt-5.4");
+        state.set_model("gpt-5.5");
+        assert_eq!(state.model, "gpt-5.5");
         state.set_model("bad-model");
         assert_eq!(state.error.as_deref(), Some("Model option is unavailable"));
 
@@ -3533,7 +3742,7 @@ mod tests {
         state.step = LaunchWizardStep::ModelSelect;
         state.selected = 1;
         state.apply_selection();
-        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.model, "gpt-5.5");
 
         state.step = LaunchWizardStep::ReasoningLevel;
         state.selected = 1;
@@ -3631,6 +3840,149 @@ mod tests {
                 assert_eq!(config.branch.as_deref(), Some("feature/gui"));
                 assert_eq!(config.display_name, "Shell");
                 assert_eq!(config.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+            }
+            other => panic!("expected shell launch request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_windows_shell_kind_prefers_pwsh_then_windows_powershell_then_cmd() {
+        let shell = default_windows_shell_kind_with(|command| command == "pwsh");
+        assert_eq!(shell, gwt_agent::WindowsShellKind::PowerShell7);
+
+        let shell = default_windows_shell_kind_with(|command| command == "powershell");
+        assert_eq!(shell, gwt_agent::WindowsShellKind::WindowsPowerShell);
+
+        let shell = default_windows_shell_kind_with(|_| false);
+        assert_eq!(shell, gwt_agent::WindowsShellKind::CommandPrompt);
+    }
+
+    #[test]
+    fn windows_shell_option_metadata_is_owned_by_launch_wizard() {
+        assert_eq!(
+            windows_shell_option_value(gwt_agent::WindowsShellKind::CommandPrompt),
+            "command_prompt"
+        );
+        assert_eq!(
+            windows_shell_option_label(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            "Windows PowerShell"
+        );
+        assert_eq!(
+            windows_shell_option_description(gwt_agent::WindowsShellKind::PowerShell7),
+            "Run through PowerShell 7"
+        );
+    }
+
+    #[test]
+    fn launch_wizard_flow_policy_centralizes_host_shell_step() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        let flow = LaunchWizardFlow::new(&state);
+        let expected_host_tail = if cfg!(windows) {
+            Some(LaunchWizardStep::WindowsShell)
+        } else if agent_has_npm_package(state.effective_agent_id()) {
+            Some(LaunchWizardStep::VersionSelect)
+        } else {
+            Some(LaunchWizardStep::ExecutionMode)
+        };
+
+        assert_eq!(flow.next_after_agent_configuration(), expected_host_tail);
+
+        let mut docker = state.clone();
+        docker.context.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("api".to_string()),
+        });
+        docker.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+
+        assert_ne!(
+            LaunchWizardFlow::new(&docker).next_after_runtime_target(),
+            Some(LaunchWizardStep::WindowsShell)
+        );
+    }
+
+    #[test]
+    fn windows_shell_selection_flows_to_agent_and_shell_launch_requests() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        state.apply(LaunchWizardAction::SetWindowsShell {
+            shell: gwt_agent::WindowsShellKind::PowerShell7,
+        });
+
+        let view = state.view();
+        assert_eq!(
+            view.selected_windows_shell.as_deref(),
+            Some("power_shell_7")
+        );
+        assert_eq!(view.windows_shell_options.len(), 3);
+        assert!(view
+            .windows_shell_options
+            .iter()
+            .any(|option| option.label == "PowerShell 7"));
+        assert!(view
+            .launch_summary
+            .iter()
+            .any(|item| item.label == "Shell" && item.value == "PowerShell 7"));
+
+        let config = state.build_launch_config().expect("agent config");
+        assert_eq!(
+            config.windows_shell,
+            Some(gwt_agent::WindowsShellKind::PowerShell7)
+        );
+
+        state.apply(LaunchWizardAction::SetLaunchTarget {
+            target: LaunchTargetKind::Shell,
+        });
+
+        match state.build_launch_request().expect("shell request") {
+            LaunchWizardLaunchRequest::Shell(config) => {
+                assert_eq!(
+                    config.windows_shell,
+                    Some(gwt_agent::WindowsShellKind::PowerShell7)
+                );
+            }
+            other => panic!("expected shell launch request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn docker_runtime_omits_windows_shell_from_launch_requests() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string()],
+            suggested_service: Some("api".to_string()),
+        });
+        let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+
+        state.apply(LaunchWizardAction::SetWindowsShell {
+            shell: gwt_agent::WindowsShellKind::CommandPrompt,
+        });
+        state.apply(LaunchWizardAction::SetRuntimeTarget {
+            target: gwt_agent::LaunchRuntimeTarget::Docker,
+        });
+
+        let config = state.build_launch_config().expect("agent config");
+        assert_eq!(
+            config.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(config.windows_shell, None);
+
+        state.apply(LaunchWizardAction::SetLaunchTarget {
+            target: LaunchTargetKind::Shell,
+        });
+        match state.build_launch_request().expect("shell request") {
+            LaunchWizardLaunchRequest::Shell(config) => {
+                assert_eq!(
+                    config.runtime_target,
+                    gwt_agent::LaunchRuntimeTarget::Docker
+                );
+                assert_eq!(config.windows_shell, None);
             }
             other => panic!("expected shell launch request, got {other:?}"),
         }
@@ -3817,7 +4169,7 @@ mod tests {
             "fix/coverage"
         );
         assert_eq!(apply_branch_prefix("  ", "chore/"), "chore/");
-        assert!(is_explicit_model_selection("gpt-5.4"));
+        assert!(is_explicit_model_selection("gpt-5.5"));
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
         assert!(!agent_has_npm_package("custom"));
@@ -3859,7 +4211,18 @@ mod tests {
             .any(|option| option.value == "resume"));
 
         assert!(current_model_options("claude").contains(&"sonnet"));
-        assert!(current_model_options("codex").contains(&"gpt-5.4"));
+        assert_eq!(
+            current_model_options("codex"),
+            vec![
+                "Default (Auto)",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex",
+                "gpt-5.3-codex-spark",
+                "gpt-5.2",
+            ]
+        );
         assert!(current_model_options("gemini").contains(&"gemini-2.5-pro"));
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
@@ -3872,7 +4235,7 @@ mod tests {
             session_id: "gwt-session-1".to_string(),
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             reasoning: Some("high".to_string()),
             version: Some("0.110.0".to_string()),
             resume_session_id: Some("resume-1".to_string()),
@@ -3884,7 +4247,7 @@ mod tests {
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
         });
 
-        assert_eq!(summary, "Codex · gpt-5.4 · high · 0.110.0 · docker:gwt");
+        assert_eq!(summary, "Codex · gpt-5.5 · high · 0.110.0 · docker:gwt");
     }
 
     #[test]
@@ -3926,7 +4289,7 @@ mod tests {
 
         state.launch_target = LaunchTargetKind::Agent;
         state.agent_id = "codex".to_string();
-        state.model = "gpt-5.4".to_string();
+        state.model = "gpt-5.5".to_string();
         state.reasoning = "high".to_string();
         state.version = "0.110.0".to_string();
         state.mode = "resume".to_string();
@@ -3945,7 +4308,7 @@ mod tests {
             step_default_selection(LaunchWizardStep::ModelSelect, &state),
             current_model_options("codex")
                 .iter()
-                .position(|model| model == &"gpt-5.4")
+                .position(|model| model == &"gpt-5.5")
                 .unwrap()
         );
         assert_eq!(
@@ -3987,7 +4350,7 @@ mod tests {
                 session_id: "gwt-session-1".to_string(),
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.4".to_string()),
+                model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
                 version: Some("0.110.0".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
@@ -4394,7 +4757,15 @@ mod tests {
             Some(LaunchWizardStep::AgentSelect)
         );
         plain.launch_target = LaunchTargetKind::Shell;
-        assert_eq!(next_step(LaunchWizardStep::LaunchTarget, &plain), None);
+        let expected_shell_step = if cfg!(windows) {
+            Some(LaunchWizardStep::WindowsShell)
+        } else {
+            None
+        };
+        assert_eq!(
+            next_step(LaunchWizardStep::LaunchTarget, &plain),
+            expected_shell_step
+        );
         plain.apply(LaunchWizardAction::SetLinkedIssue { issue_number: 42 });
         assert_eq!(plain.linked_issue_number, Some(42));
         plain.apply(LaunchWizardAction::ClearLinkedIssue);

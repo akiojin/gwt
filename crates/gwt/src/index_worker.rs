@@ -14,7 +14,9 @@ use gwt_core::{
     },
     paths::{gwt_project_index_venv_dir, gwt_runtime_runner_path},
     repo_hash::RepoHash,
+    worktree_hash::compute_worktree_hash,
 };
+use serde::Serialize;
 
 /// Determine `RepoHash` for the given repository root by shelling out to
 /// `git remote get-url origin`. Returns `None` if no origin is configured.
@@ -29,6 +31,91 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
         runner_script: gwt_runtime_runner_path(),
     };
     bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectIndexStatusView {
+    pub state: String,
+    pub detail: String,
+}
+
+pub fn project_index_status_for_path(project_root: &Path) -> ProjectIndexStatusView {
+    match project_index_status_for_path_inner(project_root) {
+        Ok(status) => status,
+        Err(error) => ProjectIndexStatusView {
+            state: "error".to_string(),
+            detail: error,
+        },
+    }
+}
+
+fn project_index_status_for_path_inner(
+    project_root: &Path,
+) -> Result<ProjectIndexStatusView, String> {
+    let Some(repo_root) = resolve_git_worktree_root(project_root) else {
+        return Ok(ProjectIndexStatusView {
+            state: "skipped".to_string(),
+            detail: "No git worktree detected".to_string(),
+        });
+    };
+    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
+        return Ok(ProjectIndexStatusView {
+            state: "skipped".to_string(),
+            detail: "No origin remote configured".to_string(),
+        });
+    };
+    let worktree_hash =
+        compute_worktree_hash(&repo_root).map_err(|err| format!("compute worktree hash: {err}"))?;
+    let report =
+        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
+    let output = Command::new(project_index_python_path())
+        .arg(gwt_runtime_runner_path())
+        .arg("--action")
+        .arg("status")
+        .arg("--repo-hash")
+        .arg(repo_hash.as_str())
+        .arg("--worktree-hash")
+        .arg(worktree_hash.as_str())
+        .current_dir(&repo_root)
+        .output()
+        .map_err(|err| format!("run project index status: {err}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Ok(ProjectIndexStatusView {
+            state: "error".to_string(),
+            detail: format!("runner exit {}: {detail}", output.status),
+        });
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|err| format!("parse project index status: {err}"))?;
+    let unhealthy = payload
+        .get("status")
+        .and_then(serde_json::Value::as_object)
+        .map(|status| {
+            status
+                .values()
+                .filter(|scope| {
+                    !scope
+                        .get("healthy")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if unhealthy == 0 {
+        Ok(ProjectIndexStatusView {
+            state: "ready".to_string(),
+            detail: format!("Runtime ready; asset {}", report.runner_hash),
+        })
+    } else {
+        Ok(ProjectIndexStatusView {
+            state: "repair_required".to_string(),
+            detail: format!("{unhealthy} index scope(s) require repair"),
+        })
+    }
 }
 
 pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(

@@ -45,6 +45,25 @@ pub fn command_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()
 }
 
+/// Drop `GIT_*` env vars from `cmd` that override path-specific lookup.
+///
+/// When `git` runs from a hook context (e.g. husky pre-commit), it exports
+/// `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, etc. Subprocesses inherit
+/// them, and these env vars take precedence over `-C`/`current_dir`, so a
+/// child `git` command nominally targeting a tempdir actually operates on
+/// the calling repo. Apply this helper to a `Command` whose target is
+/// determined by `current_dir` so the invocation stays hermetic.
+pub fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_PREFIX")
+        .env_remove("GIT_NAMESPACE")
+        .env_remove("GIT_COMMON_DIR")
+}
+
 /// Get the version string of a command by running `<cmd> --version`.
 pub fn get_command_version(cmd: &str) -> Result<String> {
     run_command(cmd, &["--version"])

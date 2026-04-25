@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs};
 
-use gwt::{load_knowledge_bridge, KnowledgeKind};
+use gwt::{load_knowledge_bridge, KnowledgeKind, KnowledgeListScope};
 use gwt_core::{paths::gwt_cache_dir, repo_hash::detect_repo_hash};
 use gwt_github::{
     Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
@@ -13,13 +13,14 @@ fn sample_issue(
     labels: &[&str],
     body: &str,
     updated_at: &str,
+    state: IssueState,
 ) -> IssueSnapshot {
     IssueSnapshot {
         number: IssueNumber(number),
         title: title.to_string(),
         body: body.to_string(),
         labels: labels.iter().map(|label| (*label).to_string()).collect(),
-        state: IssueState::Open,
+        state,
         updated_at: UpdatedAt::new(updated_at),
         comments: vec![CommentSnapshot {
             id: CommentId(number * 10),
@@ -44,6 +45,7 @@ fn load_knowledge_bridge_filters_plain_issues_and_counts_linked_branches() {
             &["bug"],
             "Issue body",
             "2026-04-20T10:00:00Z",
+            IssueState::Open,
         ))
         .expect("write issue");
     cache
@@ -61,6 +63,7 @@ fn load_knowledge_bridge_filters_plain_issues_and_counts_linked_branches() {
                 "<!-- artifact:spec END -->\n"
             ),
             "2026-04-19T09:00:00Z",
+            IssueState::Open,
         ))
         .expect("write spec");
 
@@ -69,8 +72,14 @@ fn load_knowledge_bridge_filters_plain_issues_and_counts_linked_branches() {
         HashMap::from([("feature/issue-bridge".to_string(), 42)]),
     );
 
-    let loaded =
-        load_knowledge_bridge(&repo_path, KnowledgeKind::Issue, Some(42), false).expect("load");
+    let loaded = load_knowledge_bridge(
+        &repo_path,
+        KnowledgeKind::Issue,
+        Some(42),
+        false,
+        KnowledgeListScope::Open,
+    )
+    .expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Issue);
     assert_eq!(loaded.entries.len(), 1);
@@ -115,11 +124,18 @@ fn load_knowledge_bridge_filters_specs_and_exposes_cached_sections() {
                 "<!-- artifact:tasks END -->\n"
             ),
             "2026-04-20T10:00:00Z",
+            IssueState::Open,
         ))
         .expect("write spec");
 
-    let loaded =
-        load_knowledge_bridge(&repo_path, KnowledgeKind::Spec, Some(2017), false).expect("load");
+    let loaded = load_knowledge_bridge(
+        &repo_path,
+        KnowledgeKind::Spec,
+        Some(2017),
+        false,
+        KnowledgeListScope::Open,
+    )
+    .expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Spec);
     assert_eq!(loaded.entries.len(), 1);
@@ -147,7 +163,14 @@ fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists(
     fs::create_dir_all(&repo_path).expect("create repo");
     init_repo(&repo_path);
 
-    let loaded = load_knowledge_bridge(&repo_path, KnowledgeKind::Pr, None, false).expect("load");
+    let loaded = load_knowledge_bridge(
+        &repo_path,
+        KnowledgeKind::Pr,
+        None,
+        false,
+        KnowledgeListScope::Open,
+    )
+    .expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Pr);
     assert!(loaded.entries.is_empty());
@@ -161,6 +184,60 @@ fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists(
         .sections
         .iter()
         .any(|section| section.body.contains("cache-backed PR list support")));
+}
+
+#[test]
+fn load_knowledge_bridge_separates_open_and_closed_issue_lists() {
+    let dir = tempdir().expect("tempdir");
+    let repo_path = dir.path().join("repo");
+    fs::create_dir_all(&repo_path).expect("create repo");
+    init_repo(&repo_path);
+
+    let cache = Cache::new(issue_cache_root(&repo_path));
+    cache
+        .write_snapshot(&sample_issue(
+            42,
+            "Open issue",
+            &["bug"],
+            "Open issue body",
+            "2026-04-20T10:00:00Z",
+            IssueState::Open,
+        ))
+        .expect("write open issue");
+    cache
+        .write_snapshot(&sample_issue(
+            43,
+            "Closed issue",
+            &["bug"],
+            "Closed issue body",
+            "2026-04-19T10:00:00Z",
+            IssueState::Closed,
+        ))
+        .expect("write closed issue");
+
+    let open_view = load_knowledge_bridge(
+        &repo_path,
+        KnowledgeKind::Issue,
+        None,
+        false,
+        KnowledgeListScope::Open,
+    )
+    .expect("load open issues");
+    assert_eq!(open_view.entries.len(), 1);
+    assert_eq!(open_view.entries[0].number, 42);
+    assert_eq!(open_view.detail.number, Some(42));
+
+    let closed_view = load_knowledge_bridge(
+        &repo_path,
+        KnowledgeKind::Issue,
+        None,
+        false,
+        KnowledgeListScope::Closed,
+    )
+    .expect("load closed issues");
+    assert_eq!(closed_view.entries.len(), 1);
+    assert_eq!(closed_view.entries[0].number, 43);
+    assert_eq!(closed_view.detail.number, Some(43));
 }
 
 fn init_repo(repo_path: &std::path::Path) {

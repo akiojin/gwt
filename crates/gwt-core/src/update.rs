@@ -970,11 +970,12 @@ fn choose_apply_plan(
     if platform.os == "windows" {
         if let (Some(current_exe), Some(url)) = (current_exe, installer_url) {
             if windows_should_prefer_installer(current_exe) {
-                let kind = installer_kind_for_url(platform, url)?;
-                return Some(ApplyPlan::Installer {
-                    url: url.to_string(),
-                    kind,
-                });
+                if let Some(kind) = installer_kind_for_url(platform, url) {
+                    return Some(ApplyPlan::Installer {
+                        url: url.to_string(),
+                        kind,
+                    });
+                }
             }
         }
     }
@@ -1006,11 +1007,12 @@ fn choose_apply_plan_with_writable(
     if platform.os == "macos" {
         if running_from_app_bundle {
             if let Some(url) = installer_url {
-                let kind = installer_kind_for_url(platform, url)?;
-                return Some(ApplyPlan::Installer {
-                    url: url.to_string(),
-                    kind,
-                });
+                if let Some(kind) = installer_kind_for_url(platform, url) {
+                    return Some(ApplyPlan::Installer {
+                        url: url.to_string(),
+                        kind,
+                    });
+                }
             }
         } else if writable {
             if let Some(url) = portable_url {
@@ -1024,11 +1026,12 @@ fn choose_apply_plan_with_writable(
     // If we cannot replace in-place, prefer installer when available.
     if !writable {
         if let Some(url) = installer_url {
-            let kind = installer_kind_for_url(platform, url)?;
-            return Some(ApplyPlan::Installer {
-                url: url.to_string(),
-                kind,
-            });
+            if let Some(kind) = installer_kind_for_url(platform, url) {
+                return Some(ApplyPlan::Installer {
+                    url: url.to_string(),
+                    kind,
+                });
+            }
         }
         return None;
     }
@@ -1040,11 +1043,12 @@ fn choose_apply_plan_with_writable(
     }
 
     if let Some(url) = installer_url {
-        let kind = installer_kind_for_url(platform, url)?;
-        return Some(ApplyPlan::Installer {
-            url: url.to_string(),
-            kind,
-        });
+        if let Some(kind) = installer_kind_for_url(platform, url) {
+            return Some(ApplyPlan::Installer {
+                url: url.to_string(),
+                kind,
+            });
+        }
     }
 
     None
@@ -2084,6 +2088,8 @@ mod tests {
 
     #[test]
     fn choose_apply_plan_prefers_portable_for_macos_cli_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let current_exe = temp.path().join("gwt");
         let platform = Platform {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
@@ -2091,7 +2097,7 @@ mod tests {
 
         let plan = choose_apply_plan(
             &platform,
-            Some(Path::new("/usr/local/bin/gwt")),
+            Some(&current_exe),
             Some("https://example.com/gwt-macos-arm64.tar.gz"),
             Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
         );
@@ -2161,6 +2167,43 @@ mod tests {
             Some(ApplyPlan::Installer {
                 url: "https://example.com/gwt-windows-x86_64.msi".to_string(),
                 kind: InstallerKind::WindowsMsi,
+            })
+        );
+    }
+
+    #[test]
+    fn choose_apply_plan_windows_installer_preference_falls_back_to_portable_when_installer_url_is_unsupported(
+    ) {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("AppData").join("Local");
+        let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let plan = choose_apply_plan(
+            &Platform {
+                os: "windows".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            Some(&current_exe),
+            Some("https://example.com/gwt-windows-x86_64.zip"),
+            Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
+        );
+
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Portable {
+                url: "https://example.com/gwt-windows-x86_64.zip".to_string(),
             })
         );
     }
@@ -2484,7 +2527,11 @@ mod tests {
             asset_url: Some("https://example.com/gwt-legacy.zip".to_string()),
             ..missing
         };
-        match mgr.state_from_cache(&newer, None) {
+        let exe_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let exe_path = exe_dir.join("gwt");
+        std::fs::write(&exe_path, b"").unwrap();
+        match mgr.state_from_cache(&newer, Some(&exe_path)) {
             UpdateState::Available {
                 current,
                 latest,

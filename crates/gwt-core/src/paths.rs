@@ -128,6 +128,16 @@ pub fn gwt_project_logs_dir_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
     detect_repo_hash(repo_path).map(|repo_hash| gwt_project_logs_dir(&repo_hash))
 }
 
+/// Return the canonical structured-log directory for a project path.
+///
+/// Git repositories are scoped by normalized `origin` URL. Non-repository
+/// paths fall back to a stable path hash, matching project-scoped workspace
+/// storage.
+pub fn gwt_project_logs_dir_for_project_path(project_path: &Path) -> PathBuf {
+    let project_hash = project_scope_hash(project_path);
+    gwt_project_logs_dir(&project_hash)
+}
+
 /// Return the update check cache path (`~/.gwt/cache/update-check.json`).
 pub fn gwt_update_cache_path() -> PathBuf {
     gwt_cache_dir().join("update-check.json")
@@ -308,6 +318,29 @@ mod tests {
     }
 
     #[test]
+    fn gwt_project_logs_dir_for_project_path_uses_origin_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+        add_origin(&repo, "https://github.com/example/project.git");
+
+        let p = gwt_project_logs_dir_for_project_path(&repo);
+        let repo_hash = compute_repo_hash("https://github.com/example/project.git");
+
+        assert!(p.ends_with(gwt_home_suffix(&["projects", repo_hash.as_str(), "logs"])));
+    }
+
+    #[test]
+    fn gwt_project_logs_dir_for_project_path_uses_path_hash_without_origin() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let p = gwt_project_logs_dir_for_project_path(dir.path());
+        let path_hash = compute_path_hash(dir.path());
+
+        assert!(p.ends_with(gwt_home_suffix(&["projects", path_hash.as_str(), "logs"])));
+    }
+
+    #[test]
     fn gwt_coordination_dir_scopes_by_repo_hash() {
         let repo_hash = compute_repo_hash("https://github.com/example/project.git");
         let p = gwt_coordination_dir(&repo_hash);
@@ -359,5 +392,29 @@ mod tests {
     fn ensure_dir_succeeds_for_existing_directory() {
         let tmp = std::env::temp_dir();
         ensure_dir(&tmp).unwrap();
+    }
+
+    fn init_git_repo(path: &Path) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["init", path.to_str().unwrap()]);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git init");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn add_origin(path: &Path, url: &str) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["remote", "add", "origin", url]).current_dir(path);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git remote add origin");
+        assert!(
+            output.status.success(),
+            "git remote add origin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

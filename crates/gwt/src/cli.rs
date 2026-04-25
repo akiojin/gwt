@@ -25,6 +25,7 @@ mod build;
 mod discuss;
 mod env;
 pub mod hook;
+mod index;
 mod issue;
 mod issue_spec;
 mod plan;
@@ -47,6 +48,7 @@ use gwt_github::{
     cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
     SpecOpsError,
 };
+pub(crate) use index::parse as parse_index_args;
 
 /// Compact linked PR summary used by `gwt issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -234,6 +236,10 @@ pub enum CliCommand {
         topics: Vec<String>,
         owners: Vec<String>,
     },
+    /// `gwt index status`.
+    IndexStatus,
+    /// `gwt index rebuild [--scope <scope>]`.
+    IndexRebuild { scope: IndexScope },
     /// `gwt hook <name> [args...]` — dispatch to an in-binary hook handler.
     ///
     /// See SPEC #1942 (CORE-CLI) — replaces retired external hook scripts
@@ -253,6 +259,15 @@ pub enum CliCommand {
     Plan(SkillStateAction),
     /// `gwt build <start|phase|complete|abort> --spec <n> [...]`.
     Build(SkillStateAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexScope {
+    All,
+    Issues,
+    Specs,
+    Files,
+    FilesDocs,
 }
 
 /// Sub-action for `gwt discuss ...` (SPEC-1935 FR-014p).
@@ -287,7 +302,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwt issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]*"
+                "usage: gwt issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwt index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -316,6 +331,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "hook"
                     | "update"
                     | "__internal"
+                    | "index"
                     | "discuss"
                     | "plan"
                     | "build"
@@ -500,6 +516,9 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         }
         cmd @ (CliCommand::BoardShow { .. } | CliCommand::BoardPost { .. }) => {
             board::run(env, cmd, &mut out)?
+        }
+        cmd @ (CliCommand::IndexStatus | CliCommand::IndexRebuild { .. }) => {
+            index::run(env, cmd, &mut out)?
         }
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,

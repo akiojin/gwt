@@ -5,8 +5,9 @@ use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
 use serde::{Deserialize, Serialize};
 
 use crate::issue_cache::{
-    issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
-    sync_issue_cache_from_remote,
+    issue_cache_has_entries, issue_cache_root_for_repo_path,
+    issue_cache_root_for_repo_path_or_detached, sync_issue_cache_from_remote,
+    sync_issue_cache_from_remote_if_stale, ISSUE_CACHE_TTL,
 };
 
 const SPEC_LABEL: &str = "gwt-spec";
@@ -17,6 +18,13 @@ pub enum KnowledgeKind {
     Issue,
     Spec,
     Pr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeListScope {
+    Open,
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +69,7 @@ pub fn load_knowledge_bridge(
     kind: KnowledgeKind,
     selected_number: Option<u64>,
     refresh: bool,
+    list_scope: KnowledgeListScope,
 ) -> Result<KnowledgeBridgeView, String> {
     if !repo_path.is_dir() {
         return Err(format!(
@@ -80,13 +89,21 @@ pub fn load_knowledge_bridge(
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
     if refresh {
         sync_issue_cache_from_remote(repo_path, &cache_root)?;
+    } else if let Err(error) =
+        sync_issue_cache_from_remote_if_stale(repo_path, &cache_root, ISSUE_CACHE_TTL)
+    {
+        if !issue_cache_has_entries(&cache_root) {
+            return Err(error);
+        }
     }
 
     let cache = Cache::new(cache_root);
     let entries = load_cache_entries(&cache)?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(match kind {
-        KnowledgeKind::Issue => build_issue_view(entries, linked_branches, selected_number),
+        KnowledgeKind::Issue => {
+            build_issue_view(entries, linked_branches, selected_number, list_scope)
+        }
         KnowledgeKind::Spec => build_spec_view(entries, linked_branches, selected_number),
         KnowledgeKind::Pr => disabled_pr_view(),
     })
@@ -106,8 +123,13 @@ fn build_issue_view(
     mut entries: Vec<CacheEntry>,
     linked_branches: HashMap<u64, Vec<String>>,
     selected_number: Option<u64>,
+    list_scope: KnowledgeListScope,
 ) -> KnowledgeBridgeView {
     entries.retain(|entry| !is_spec_entry(entry));
+    entries.retain(|entry| match list_scope {
+        KnowledgeListScope::Open => entry.snapshot.state == IssueState::Open,
+        KnowledgeListScope::Closed => entry.snapshot.state == IssueState::Closed,
+    });
     entries.sort_by(issue_entry_sort);
 
     let list_items = entries
@@ -484,23 +506,23 @@ mod tests {
 
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo).expect("create repo");
-        let init = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repo)
-            .output()
-            .expect("git init");
+        let mut init_cmd = std::process::Command::new("git");
+        init_cmd.args(["init", "--quiet"]).current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut init_cmd);
+        let init = init_cmd.output().expect("git init");
         assert!(init.status.success(), "git init failed");
 
-        let remote = std::process::Command::new("git")
+        let mut remote_cmd = std::process::Command::new("git");
+        remote_cmd
             .args([
                 "remote",
                 "add",
                 "origin",
                 "https://github.com/example/repo.git",
             ])
-            .current_dir(repo)
-            .output()
-            .expect("git remote add");
+            .current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut remote_cmd);
+        let remote = remote_cmd.output().expect("git remote add");
         assert!(remote.status.success(), "git remote add failed");
     }
 
@@ -578,8 +600,14 @@ Extra context.
     fn load_knowledge_bridge_returns_non_repo_and_disabled_pr_views() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let issue_view = load_knowledge_bridge(dir.path(), KnowledgeKind::Issue, None, false)
-            .expect("issue view");
+        let issue_view = load_knowledge_bridge(
+            dir.path(),
+            KnowledgeKind::Issue,
+            None,
+            false,
+            KnowledgeListScope::Open,
+        )
+        .expect("issue view");
         assert_eq!(issue_view.kind, KnowledgeKind::Issue);
         assert!(!issue_view.refresh_enabled);
         assert_eq!(
@@ -587,8 +615,14 @@ Extra context.
             Some("Knowledge Bridge is available only for Git projects.")
         );
 
-        let pr_view =
-            load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
+        let pr_view = load_knowledge_bridge(
+            dir.path(),
+            KnowledgeKind::Pr,
+            Some(12),
+            false,
+            KnowledgeListScope::Open,
+        )
+        .expect("pr view");
         assert_eq!(pr_view.kind, KnowledgeKind::Pr);
         assert!(!pr_view.refresh_enabled);
         assert_eq!(pr_view.detail.title, "PR Bridge");
@@ -631,8 +665,14 @@ Extra context.
             ],
         );
 
-        let issue_view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(11), false)
-            .expect("issue bridge");
+        let issue_view = load_knowledge_bridge(
+            &repo,
+            KnowledgeKind::Issue,
+            Some(11),
+            false,
+            KnowledgeListScope::Open,
+        )
+        .expect("issue bridge");
         let issue_entry = issue_view
             .entries
             .iter()
@@ -658,8 +698,14 @@ Extra context.
             .any(|section| section.title == "Linked branches"
                 && section.body == "- `feature/coverage`\n- `feature/coverage-followup`"));
 
-        let spec_view = load_knowledge_bridge(&repo, KnowledgeKind::Spec, Some(22), false)
-            .expect("spec bridge");
+        let spec_view = load_knowledge_bridge(
+            &repo,
+            KnowledgeKind::Spec,
+            Some(22),
+            false,
+            KnowledgeListScope::Open,
+        )
+        .expect("spec bridge");
         let spec_entry = spec_view
             .entries
             .iter()

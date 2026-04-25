@@ -301,8 +301,8 @@ impl AppRuntime {
         blocking_tasks: BlockingTaskSpawner,
     ) -> std::io::Result<Self> {
         let session_state_path = gwt_core::paths::gwt_session_state_path();
-        let log_dir = gwt_core::paths::gwt_logs_dir();
         let launch_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let log_dir = gwt_core::paths::gwt_project_logs_dir_for_project_path(&launch_dir);
         let legacy_target = resolve_project_target(&launch_dir)
             .unwrap_or_else(|_| fallback_project_target(launch_dir.clone()));
         migrate_legacy_workspace_state(
@@ -437,23 +437,27 @@ impl AppRuntime {
                 knowledge_kind,
                 selected_number,
                 refresh,
+                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 &id,
                 knowledge_kind,
                 selected_number,
                 refresh,
+                list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
                 number,
+                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 &id,
                 knowledge_kind,
                 Some(number),
                 false,
+                list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
             ),
             FrontendEvent::RunBranchCleanup {
                 id,
@@ -1942,6 +1946,7 @@ impl AppRuntime {
         kind: KnowledgeKind,
         selected_number: Option<u64>,
         refresh: bool,
+        list_scope: gwt::KnowledgeListScope,
     ) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -1984,7 +1989,13 @@ impl AppRuntime {
             )];
         }
 
-        match load_knowledge_bridge(&tab.project_root, kind, selected_number, refresh) {
+        match load_knowledge_bridge(
+            &tab.project_root,
+            kind,
+            selected_number,
+            refresh,
+            list_scope,
+        ) {
             Ok(view) => vec![
                 OutboundEvent::reply(
                     client_id,
@@ -2623,7 +2634,26 @@ impl AppRuntime {
         let Some(composed_state) = self.recompute_window_state(&window_id) else {
             return events;
         };
+        let should_auto_close = should_auto_close_agent_window(
+            &self.active_agent_sessions,
+            &window_id,
+            &composed_state,
+        );
         let detail = self.window_details.get(&window_id).cloned();
+        if should_auto_close {
+            self.stop_window_runtime(&window_id);
+            self.remove_window_state_tracking(&window_id);
+            if close_window_from_workspace(
+                &mut self.tabs,
+                &mut self.window_lookup,
+                &mut self.window_details,
+                &window_id,
+            ) {
+                let _ = self.persist();
+                events.push(self.workspace_state_broadcast());
+            }
+            return events;
+        }
         let _ = self.persist();
         events.push(self.workspace_state_broadcast());
         events.extend(Self::status_events(window_id, composed_state, detail));
@@ -3010,6 +3040,7 @@ impl AppRuntime {
                 });
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
+            apply_windows_host_shell_wrapper(&mut config)?;
 
             let branch_name = config
                 .branch
@@ -3031,6 +3062,7 @@ impl AppRuntime {
             session.linked_issue_number = config.linked_issue_number;
             session.launch_command = config.command.clone();
             session.launch_args = config.args.clone();
+            session.windows_shell = config.windows_shell;
             session.update_status(gwt_agent::AgentStatus::Running);
 
             let session_id = session.id.clone();
@@ -3524,11 +3556,18 @@ impl AppRuntime {
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
-        let session_id = event.agent_session_id.as_deref()?;
-        self.active_agent_sessions
-            .iter()
-            .find(|(_, session)| session.session_id == session_id)
-            .map(|(window_id, _)| window_id.clone())
+        [
+            event.gwt_session_id.as_deref(),
+            event.agent_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|session_id| {
+            self.active_agent_sessions
+                .iter()
+                .find(|(_, session)| session.session_id == session_id)
+                .map(|(window_id, _)| window_id.clone())
+        })
     }
 
     fn recompute_window_state(&mut self, window_id: &str) -> Option<WindowProcessStatus> {
@@ -3899,6 +3938,33 @@ mod tests {
         }
     }
 
+    fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
+        ActiveAgentSession {
+            window_id: window_id.to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "feature/test".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            tab_id: tab_id.to_string(),
+        }
+    }
+
+    fn runtime_hook_state(status: &str, session_id: &str) -> gwt::RuntimeHookEvent {
+        gwt::RuntimeHookEvent {
+            kind: gwt::RuntimeHookEventKind::RuntimeState,
+            source_event: Some("Stop".to_string()),
+            gwt_session_id: Some(session_id.to_string()),
+            agent_session_id: Some("agent-session-1".to_string()),
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/test".to_string()),
+            status: Some(status.to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-04-25T00:00:00Z".to_string(),
+        }
+    }
+
     fn sample_runtime(
         temp_root: &Path,
         tabs: Vec<ProjectTabRuntime>,
@@ -4159,6 +4225,61 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::RuntimeHookEvent { .. }
+        ));
+        assert!(matches!(
+            events[1].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    }
+
+    #[test]
+    fn app_runtime_runtime_hook_stopped_without_active_session_keeps_window_open() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::RuntimeHookEvent { .. }
+        ));
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_some());
+    }
+
+    #[test]
     fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -4387,6 +4508,7 @@ mod tests {
             gwt::KnowledgeKind::Issue,
             Some(42),
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(issue_events.len(), 2);
         assert!(matches!(
@@ -4418,6 +4540,7 @@ mod tests {
             gwt::KnowledgeKind::Spec,
             Some(1930),
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(spec_events.len(), 2);
         assert!(matches!(
@@ -4464,6 +4587,7 @@ mod tests {
             gwt::KnowledgeKind::Pr,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
 
         assert_eq!(events.len(), 2);

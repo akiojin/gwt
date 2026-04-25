@@ -64,9 +64,9 @@ pub(crate) use docker_launch::{
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
-    apply_host_package_runner_fallback, build_shell_process_launch,
-    ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env, resolve_launch_worktree,
-    resolve_shell_launch_worktree,
+    apply_host_package_runner_fallback, apply_windows_host_shell_wrapper,
+    build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
+    resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
@@ -112,10 +112,35 @@ fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<
     }
 }
 
+fn logging_dir_for_startup_path(startup_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_logs_dir_for_project_path(startup_path)
+}
+
 fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) {
     clients.dispatch(vec![OutboundEvent::broadcast(
         BackendEvent::LogEntryAppended { entry },
     )]);
+}
+
+fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
+    let project_root = std::env::current_dir().ok();
+    drop(runtime.spawn(async move {
+        let status = match project_root {
+            Some(path) => tokio::task::spawn_blocking(move || {
+                gwt::index_worker::project_index_status_for_path(&path)
+            })
+            .await
+            .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
+                state: "error".to_string(),
+                detail: format!("Project index status task failed: {err}"),
+            }),
+            None => gwt::ProjectIndexStatusView {
+                state: "skipped".to_string(),
+                detail: "No current directory".to_string(),
+            },
+        };
+        let _ = proxy.send_event(UserEvent::ProjectIndexStatus { status });
+    }));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +183,9 @@ enum UserEvent {
     LaunchProgress {
         window_id: String,
         message: String,
+    },
+    ProjectIndexStatus {
+        status: gwt::ProjectIndexStatusView,
     },
     LaunchComplete {
         window_id: String,
@@ -209,15 +237,15 @@ mod tests {
 
     use super::{
         app_state_view_from_parts, apply_host_package_runner_fallback_with_probe,
-        broadcast_log_entry, broadcast_runtime_hook_event, build_frontend_sync_events,
-        build_shell_process_launch, close_window_from_workspace, combined_window_id,
-        current_git_branch, docker_bundle_mounts_for_home, docker_bundle_override_content,
-        gui_front_door_launch_surface, hook_forward_authorized,
-        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset, resolve_project_target,
-        should_auto_close_agent_window, should_auto_start_restored_window, ActiveAgentSession,
-        AppEventProxy, AppRuntime, BlockingTaskSpawner, ClientHub, DispatchTarget,
-        LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent,
-        WindowAddress,
+        apply_windows_host_shell_wrapper, broadcast_log_entry, broadcast_runtime_hook_event,
+        build_frontend_sync_events, build_shell_process_launch, close_window_from_workspace,
+        combined_window_id, current_git_branch, docker_bundle_mounts_for_home,
+        docker_bundle_override_content, gui_front_door_launch_surface, hook_forward_authorized,
+        install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
+        logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
+        should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
+        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -387,6 +415,43 @@ mod tests {
         assert!(native_payload.contains("\"kind\":\"log_entry_appended\""));
         assert!(native_payload.contains("\"severity\":\"Warn\""));
         assert!(native_payload.contains("\"message\":\"reader stalled\""));
+    }
+
+    #[test]
+    fn logging_dir_for_startup_path_uses_project_scoped_fallback() {
+        let temp = tempdir().expect("tempdir");
+        let log_dir = logging_dir_for_startup_path(temp.path());
+        let project_hash = gwt_core::repo_hash::compute_path_hash(temp.path());
+
+        assert!(log_dir.ends_with(
+            Path::new("projects")
+                .join(project_hash.as_str())
+                .join("logs")
+        ));
+    }
+
+    #[test]
+    fn logging_initialization_sources_do_not_use_legacy_log_dir() {
+        let legacy_helper = ["gwt_core::paths::", "gwt_logs_dir", "()"].concat();
+        let forbidden_init = [
+            "LoggingConfig::new(",
+            "gwt_core::paths::",
+            "gwt_logs_dir",
+            "()",
+        ]
+        .concat();
+
+        let main_source = include_str!("main.rs");
+        let runtime_source = include_str!("app_runtime.rs");
+
+        assert!(
+            !main_source.contains(&forbidden_init),
+            "main logging initialization must use the project-scoped canonical resolver"
+        );
+        assert!(
+            !runtime_source.contains(&legacy_helper),
+            "AppRuntime log snapshots must use the project-scoped canonical resolver"
+        );
     }
 
     #[test]
@@ -713,7 +778,7 @@ mod tests {
             session_id: "gwt-session-1".to_string(),
             agent_id: "codex".to_string(),
             tool_label: "Codex".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             reasoning: Some("high".to_string()),
             version: Some("0.110.0".to_string()),
             resume_session_id: Some("resume-1".to_string()),
@@ -902,7 +967,10 @@ mod tests {
         assert!(existing);
         assert_eq!(new_active, "tab-1");
         assert!(runtime.launch_wizard.is_none());
-        assert_eq!(runtime.recent_projects[0].path, repo);
+        assert!(super::same_worktree_path(
+            &runtime.recent_projects[0].path,
+            &repo
+        ));
 
         let added = runtime
             .open_project_path(scratch.clone())
@@ -910,7 +978,10 @@ mod tests {
 
         assert!(!added);
         assert_eq!(runtime.tabs.len(), 3);
-        assert_eq!(runtime.recent_projects[0].path, scratch);
+        assert!(super::same_worktree_path(
+            &runtime.recent_projects[0].path,
+            &scratch
+        ));
         assert!(runtime
             .active_tab_id
             .as_deref()
@@ -1151,6 +1222,7 @@ mod tests {
             KnowledgeKind::Issue,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(knowledge_missing.len(), 1);
         assert!(matches!(
@@ -1164,6 +1236,7 @@ mod tests {
             KnowledgeKind::Issue,
             None,
             false,
+            gwt::KnowledgeListScope::Open,
         );
         assert_eq!(knowledge_wrong.len(), 1);
         assert!(matches!(
@@ -1734,6 +1807,7 @@ mod tests {
                     knowledge_kind: KnowledgeKind::Issue,
                     selected_number: None,
                     refresh: false,
+                    list_scope: None,
                 },
             )
             .is_empty());
@@ -1744,6 +1818,7 @@ mod tests {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
                     number: 42,
+                    list_scope: None,
                 },
             )
             .is_empty());
@@ -2499,6 +2574,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::from([("EXTRA_FLAG".to_string(), "1".to_string())]),
+            windows_shell: None,
         };
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
@@ -2514,6 +2590,103 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
+    }
+
+    #[test]
+    fn build_shell_process_launch_for_host_uses_selected_windows_shell() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/gui".to_string()),
+            base_branch: None,
+            display_name: "Shell".to_string(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            env_vars: HashMap::new(),
+            windows_shell: Some(gwt_agent::WindowsShellKind::WindowsPowerShell),
+        };
+
+        let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
+
+        assert_eq!(launch.command, "powershell");
+        assert_eq!(launch.args, vec!["-NoLogo".to_string()]);
+    }
+
+    #[test]
+    fn windows_shell_process_command_mapping_is_owned_by_launch_runtime() {
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::CommandPrompt
+            ),
+            "cmd.exe"
+        );
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::WindowsPowerShell
+            ),
+            "powershell"
+        );
+        assert_eq!(
+            super::launch_runtime::windows_shell_process_command(
+                gwt_agent::WindowsShellKind::PowerShell7
+            ),
+            "pwsh"
+        );
+    }
+
+    #[test]
+    fn command_prompt_agent_wrapper_preserves_spaced_cmd_path() {
+        let mut config = sample_versioned_launch_config();
+        config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@anthropic-ai/claude-code@latest".to_string(),
+            "value with space".to_string(),
+        ];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap command prompt");
+
+        assert_eq!(config.command, "cmd.exe");
+        assert_eq!(
+            config.args,
+            vec![
+                "/d".to_string(),
+                "/k".to_string(),
+                "%GWT_WINDOWS_HOST_SHELL_EXPRESSION%".to_string()
+            ]
+        );
+        assert_eq!(
+            config
+                .env_vars
+                .get("GWT_WINDOWS_HOST_SHELL_EXPRESSION")
+                .map(String::as_str),
+            Some(
+                r#"call "C:\Program Files\nodejs\npx.cmd" --yes @anthropic-ai/claude-code@latest "value with space" & exit"#
+            )
+        );
+    }
+
+    #[test]
+    fn powershell_agent_wrapper_quotes_spaced_path_and_single_quotes() {
+        let mut config = sample_versioned_launch_config();
+        config.command = r"C:\Program Files\nodejs\npx.cmd".to_string();
+        config.args = vec!["value's".to_string()];
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::PowerShell7);
+
+        apply_windows_host_shell_wrapper(&mut config).expect("wrap powershell");
+
+        assert_eq!(config.command, "pwsh");
+        assert_eq!(config.args[0], "-NoLogo");
+        assert_eq!(config.args[1], "-NoProfile");
+        assert_eq!(config.args[2], "-Command");
+        let script = config.args[3].as_str();
+        assert!(script.contains(r"& 'C:\Program Files\nodejs\npx.cmd'"));
+        assert!(script.contains("'value''s'"));
+        assert!(script.contains("exit $LASTEXITCODE"));
     }
 
     #[test]
@@ -2835,7 +3008,11 @@ mod tests {
                 .expect("compose file from defaults"),
             &compose_file,
         ));
-        assert_eq!(defaults.compose_files, vec![compose_file.clone()]);
+        assert_eq!(defaults.compose_files.len(), 1);
+        assert!(super::same_worktree_path(
+            &defaults.compose_files[0],
+            &compose_file
+        ));
         assert!(super::same_worktree_path(
             super::docker_compose_file_for_launch(&project_root, &files)
                 .unwrap()
@@ -2896,11 +3073,13 @@ mod tests {
         .expect("write devcontainer");
 
         let plan = super::resolve_docker_launch_plan(&project, None).expect("launch plan");
-        assert_eq!(
-            plan.compose_files,
-            vec![base.clone(), override_file.clone()]
-        );
-        assert_eq!(plan.compose_file, base);
+        assert_eq!(plan.compose_files.len(), 2);
+        assert!(super::same_worktree_path(&plan.compose_files[0], &base));
+        assert!(super::same_worktree_path(
+            &plan.compose_files[1],
+            &override_file
+        ));
+        assert!(super::same_worktree_path(&plan.compose_file, &base));
         assert_eq!(plan.container_cwd, "/workspace/override");
     }
 
@@ -3113,7 +3292,9 @@ mod tests {
             &mut existing_env,
         )
         .expect("existing worktree");
-        assert_eq!(existing_dir.as_deref(), Some(existing_worktree.as_path()));
+        assert!(existing_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
         assert!(existing_env
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
@@ -3202,10 +3383,10 @@ mod tests {
         launch_config.working_dir = None;
         launch_config.env_vars = HashMap::new();
         super::resolve_launch_worktree(&repo, &mut launch_config).expect("agent launch wrapper");
-        assert_eq!(
-            launch_config.working_dir.as_deref(),
-            Some(existing_worktree.as_path())
-        );
+        assert!(launch_config
+            .working_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
 
         let mut shell_config = ShellLaunchConfig {
             working_dir: None,
@@ -3216,13 +3397,14 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::new(),
+            windows_shell: None,
         };
         super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");
-        assert_eq!(
-            shell_config.working_dir.as_deref(),
-            Some(existing_worktree.as_path())
-        );
+        assert!(shell_config
+            .working_dir
+            .as_deref()
+            .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
     }
 
     #[test]
@@ -3639,25 +3821,25 @@ fn main() -> wry::Result<()> {
         }
     }
 
+    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let log_dir = logging_dir_for_startup_path(&startup_dir);
+
     // Install the tracing subscriber so that `tracing::debug!/info!` lands in
-    // `~/.gwt/logs/gwt.log`. The returned guard must outlive the event loop;
-    // we bind it to `log_handles` and keep it until `main` returns.
+    // the startup project's canonical `gwt.log.YYYY-MM-DD`. The returned guard
+    // must outlive the event loop; we bind it to `log_handles` and keep it
+    // until `main` returns.
     //
     // Diagnostic trace for intermittent key-input drop (bugfix/input-key) is
     // emitted at `debug` level under `target: "gwt_input_trace"`. Enable with
     // `RUST_LOG=gwt_input_trace=debug`.
-    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(
-        gwt_core::paths::gwt_logs_dir(),
-    ))
-    .map_err(|error| {
-        eprintln!("gwt logging init failed: {error}");
-    })
-    .ok();
+    let mut log_handles = gwt_core::logging::init(gwt_core::logging::LoggingConfig::new(log_dir))
+        .map_err(|error| {
+            eprintln!("gwt logging init failed: {error}");
+        })
+        .ok();
 
-    if let Ok(project_root) = std::env::current_dir() {
-        if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&project_root) {
-            eprintln!("gwt daemon bootstrap: {error}");
-        }
+    if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&startup_dir) {
+        eprintln!("gwt daemon bootstrap: {error}");
     }
 
     let runtime = Runtime::new().expect("tokio runtime");
@@ -3705,6 +3887,7 @@ fn main() -> wry::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
+    spawn_project_index_status_check(&runtime, proxy.clone());
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -3759,8 +3942,12 @@ fn main() -> wry::Result<()> {
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
+                let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let events = app.handle_frontend_event(client_id, event);
                 clients.dispatch(events);
+                if refresh_index_status {
+                    spawn_project_index_status_check(&runtime, proxy.clone());
+                }
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 broadcast_log_entry(&clients, entry);
@@ -3783,6 +3970,11 @@ fn main() -> wry::Result<()> {
                         id: window_id,
                         message,
                     },
+                )]);
+            }
+            Event::UserEvent(UserEvent::ProjectIndexStatus { status }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::ProjectIndexStatus { status },
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {

@@ -159,7 +159,13 @@ pub(crate) fn build_shell_process_launch(
     env.extend(config.env_vars.clone());
 
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        let shell = detect_shell_program().map_err(|error| error.to_string())?;
+        let shell = match config.windows_shell {
+            Some(windows_shell) => gwt::ShellProgram {
+                command: windows_shell_process_command(windows_shell).to_string(),
+                args: interactive_windows_shell_args(windows_shell),
+            },
+            None => detect_shell_program().map_err(|error| error.to_string())?,
+        };
         env.entry("GWT_PROJECT_ROOT".to_string())
             .or_insert_with(|| worktree.display().to_string());
         install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Host)?;
@@ -200,6 +206,113 @@ pub(crate) fn build_shell_process_launch(
         env,
         cwd: Some(worktree),
     })
+}
+
+pub(crate) const WINDOWS_HOST_SHELL_EXPRESSION_ENV: &str = "GWT_WINDOWS_HOST_SHELL_EXPRESSION";
+
+pub(crate) fn windows_shell_process_command(shell: gwt_agent::WindowsShellKind) -> &'static str {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => "cmd.exe",
+        gwt_agent::WindowsShellKind::WindowsPowerShell => "powershell",
+        gwt_agent::WindowsShellKind::PowerShell7 => "pwsh",
+    }
+}
+
+fn interactive_windows_shell_args(shell: gwt_agent::WindowsShellKind) -> Vec<String> {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => Vec::new(),
+        gwt_agent::WindowsShellKind::WindowsPowerShell
+        | gwt_agent::WindowsShellKind::PowerShell7 => vec!["-NoLogo".to_string()],
+    }
+}
+
+pub(crate) fn apply_windows_host_shell_wrapper(
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<(), String> {
+    if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
+        return Ok(());
+    }
+    let Some(shell) = config.windows_shell else {
+        return Ok(());
+    };
+
+    let (command, args) =
+        wrap_windows_host_shell_command(shell, &config.command, &config.args, &mut config.env_vars);
+    config.command = command;
+    config.args = args;
+    Ok(())
+}
+
+fn wrap_windows_host_shell_command(
+    shell: gwt_agent::WindowsShellKind,
+    command: &str,
+    args: &[String],
+    env: &mut HashMap<String, String>,
+) -> (String, Vec<String>) {
+    match shell {
+        gwt_agent::WindowsShellKind::CommandPrompt => {
+            let expression = format!("{} & exit", build_cmd_command_expression(command, args));
+            env.insert(WINDOWS_HOST_SHELL_EXPRESSION_ENV.to_string(), expression);
+            (
+                windows_shell_process_command(shell).to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/k".to_string(),
+                    format!("%{WINDOWS_HOST_SHELL_EXPRESSION_ENV}%"),
+                ],
+            )
+        }
+        gwt_agent::WindowsShellKind::WindowsPowerShell
+        | gwt_agent::WindowsShellKind::PowerShell7 => (
+            windows_shell_process_command(shell).to_string(),
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                build_powershell_command_script(command, args),
+            ],
+        ),
+    }
+}
+
+fn escape_cmd_double_quoted(value: &str) -> String {
+    value.replace('"', "\"\"")
+}
+
+fn quote_cmd_token_if_needed(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(c, '&' | '|' | '<' | '>' | '(' | ')' | '^' | '%' | '!' | '"')
+        });
+
+    if needs_quotes {
+        format!("\"{}\"", escape_cmd_double_quoted(value))
+    } else {
+        value.to_string()
+    }
+}
+
+fn build_cmd_command_expression(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 2);
+    parts.push("call".to_string());
+    parts.push(quote_cmd_token_if_needed(command));
+    parts.extend(args.iter().map(|arg| quote_cmd_token_if_needed(arg)));
+    parts.join(" ")
+}
+
+fn quote_powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn build_powershell_command_script(command: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(quote_powershell_literal(command));
+    parts.extend(args.iter().map(|arg| quote_powershell_literal(arg)));
+    format!(
+        "& {}; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; if (-not $?) {{ exit 1 }}",
+        parts.join(" ")
+    )
 }
 
 pub(crate) fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {

@@ -254,6 +254,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_project_bar_renders_index_status_badge() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains("id=\"index-status\""),
+            "expected project bar to expose project index status badge",
+        );
+        assert!(
+            html.contains(".index-status.ready") && html.contains(".index-status.error"),
+            "expected embedded css to define index health states",
+        );
+        assert!(
+            js.contains("function setIndexStatus(status)")
+                && js.contains("case \"project_index_status\""),
+            "expected frontend to consume project_index_status events",
+        );
+    }
+
+    #[test]
     fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separates_geometry() {
         let js = app_js();
 
@@ -636,6 +656,15 @@ mod tests {
             "expected knowledge bridge refresh affordance to describe cache-backed reloads",
         );
         assert!(
+            html.contains("data-knowledge-scope=\"open\"")
+                && html.contains("data-knowledge-scope=\"closed\""),
+            "expected issue knowledge bridge surface to expose open and closed cache tabs",
+        );
+        assert!(
+            html.contains("list_scope"),
+            "expected knowledge bridge requests to carry the active issue list scope",
+        );
+        assert!(
             html.contains("Loading cache-backed data"),
             "expected knowledge bridge loading copy to describe cache-backed reads",
         );
@@ -668,6 +697,92 @@ mod tests {
         assert!(
             html.contains("runtime_hook_event") && html.contains("coordination_event"),
             "expected Board surface to react to live coordination hook events",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_surface_owns_plain_wheel_routing() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains(".board-scroll-surface"),
+            "expected Board scroll containers to be registered as native wheel surfaces",
+        );
+        let function_start = html
+            .find("function findNativeWheelScrollSurface")
+            .expect("expected named native wheel scroll helper");
+        let function_body = &html[function_start..];
+        let closest_start = function_body
+            .find("element.closest(")
+            .expect("expected native wheel helper to use closest allowlist");
+        let closest_call =
+            &function_body[closest_start..function_body.len().min(closest_start + 160)];
+        for selector in [
+            ".branch-scroll",
+            ".file-tree-scroll",
+            ".board-scroll-surface",
+        ] {
+            assert!(
+                closest_call.contains(selector),
+                "expected native wheel allowlist to include {selector}, got: {closest_call}",
+            );
+        }
+        assert!(
+            html.contains("board-textarea board-scroll-surface"),
+            "expected Board composer textarea wheel input to stay inside the Board instead of falling through to canvas pan",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_surface_uses_chat_first_layout() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("board-chat-shell")
+                && html.contains("board-timeline-scroll")
+                && html.contains("board-composer-bar"),
+            "expected Board scaffold to be a chat timeline with a bottom-fixed composer",
+        );
+        assert!(
+            html.contains("board-message user")
+                && html.contains("board-message agent")
+                && html.contains("board-message system"),
+            "expected Board entries to render through user/agent/system chat message classes",
+        );
+        assert!(
+            !html.contains("board-side-pane"),
+            "expected Board v1 GUI to avoid the old dashboard sidebar",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_composer_is_body_first_and_resets_after_post() {
+        let html = frontend_bundle_source();
+        let anchor = html
+            .find("Share a Board update")
+            .expect("expected Board composer anchor copy");
+        let composer_start = anchor.saturating_sub(500);
+        let composer_end = html.len().min(anchor + 1_500);
+        let composer_snippet = &html[composer_start..composer_end];
+
+        assert!(
+            composer_snippet.contains("Share a Board update"),
+            "expected Board composer to expose body-first posting copy",
+        );
+        assert!(
+            html.contains("pendingSubmit: null")
+                && html.contains("existingEntryIds: new Set")
+                && html.contains("const completedSubmit = Boolean(state.pendingSubmit")
+                && html.contains("!state.pendingSubmit.existingEntryIds.has(entry.id)")
+                && html.contains("state.composerBody = \"\";")
+                && html.contains("state.pendingSubmit = null;"),
+            "expected Board post success to clear drafts only after matching submitted entry appears",
+        );
+        assert!(
+            !composer_snippet.contains("Post update")
+                && !composer_snippet.contains("Topics</span>")
+                && !composer_snippet.contains("Owners</span>"),
+            "expected Board composer to keep kind/topics/owners out of the primary posting path",
         );
     }
 
