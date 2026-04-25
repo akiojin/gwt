@@ -254,8 +254,7 @@ mod tests {
 
     fn add_origin(path: &Path, url: &str) {
         let mut cmd = std::process::Command::new("git");
-        cmd.args(["remote", "add", "origin", url])
-            .current_dir(path);
+        cmd.args(["remote", "add", "origin", url]).current_dir(path);
         scrub_git_env(&mut cmd);
         let output = cmd.output().expect("git remote add origin");
         assert!(
