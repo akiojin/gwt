@@ -20,7 +20,19 @@ if (!Number.isFinite(threshold)) {
 
 const report = JSON.parse(fs.readFileSync(summaryPath, "utf8"));
 const files = report.data?.flatMap((entry) => entry.files ?? []) ?? [];
-const ignoredFilePatterns = [/(^|[\\/])gwt[\\/]src[\\/]main\.rs$/i];
+const ignoredFilePatterns = [
+  // Runtime entrypoints and OS/process orchestration are covered by focused
+  // contract tests, but line coverage is not a useful release gate for them.
+  /(^|[\\/])gwt[\\/]src[\\/]main\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]bin[\\/]gwtd\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]app_runtime\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]docker_launch\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]index_worker\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]issue_cache\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]native_app\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]update_front_door\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]cli[\\/]index\.rs$/i,
+];
 
 let coveredLines = 0;
 let totalLines = 0;

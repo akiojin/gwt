@@ -49,6 +49,7 @@ All notable changes to this project will be documented in this file.
 
 - Harden macos path-dependent verification
 - **update:** Cover unsupported installer fallback
+- **coverage:** Keep release threshold focused on domain/helper surfaces
 
 ## [9.8.2] - 2026-04-23
 
