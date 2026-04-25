@@ -21,6 +21,8 @@ All notable changes to this project will be documented in this file.
 - **board:** Repair board window interaction
 - **update:** Ignore unsupported installer fallback urls
 - **board:** Correlate composer submit completion
+- **hook:** Treat empty stdin as silent no-op for runtime_state
+- **cli:** Canonicalize internal dispatch executable
 
 ### Documentation
 
