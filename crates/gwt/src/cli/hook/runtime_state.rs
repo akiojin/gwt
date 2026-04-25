@@ -123,6 +123,9 @@ fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 /// sessions launched outside of gwt (e.g. a raw `claude` invocation) are
 /// not broken by a hook we shipped.
 pub fn handle(event: &str) -> Result<(), HookError> {
+    if std::env::var_os("GWT_SESSION_RUNTIME_PATH").is_none() {
+        return Ok(());
+    }
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     handle_with_input(event, &input)
