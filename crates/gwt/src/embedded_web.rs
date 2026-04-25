@@ -727,6 +727,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_waits_for_initial_cache_load_before_semantic_search() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("state.loading && state.baseEntries.length === 0"),
+            "expected semantic search scheduling to wait for initial cache load before sending",
+        );
+        assert!(
+            html.contains("const queuedQuery = state.query.trim();")
+                && html.contains("if (queuedQuery)")
+                && html.contains("frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch("),
+            "expected knowledge entries response to resume queued semantic search after cache load",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 
