@@ -1,4 +1,4 @@
-//! `gwt hook coordination-event <event>` — append meaningful coordination
+//! `gwtd hook coordination-event <event>` — append meaningful coordination
 //! summaries to the shared Board timeline.
 
 use std::{

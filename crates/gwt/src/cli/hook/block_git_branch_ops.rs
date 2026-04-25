@@ -1,4 +1,4 @@
-//! `gwt hook block-git-branch-ops` — PreToolUse hook that forbids
+//! `gwtd hook block-git-branch-ops` — PreToolUse hook that forbids
 //! branch-altering git commands inside a worktree.
 //!
 //! Ported 1:1 from the retired external branch-policy hook.

@@ -1,4 +1,4 @@
-//! `gwt plan <start|phase|complete|abort> --spec <n> [...]`
+//! `gwtd plan <start|phase|complete|abort> --spec <n> [...]`
 //!
 //! Exit CLI for the `gwt-plan-spec` skill (SPEC-1935 FR-014q). Writes
 //! `.gwt/skill-state/plan-spec.json` via [`gwt_core::skill_state`].

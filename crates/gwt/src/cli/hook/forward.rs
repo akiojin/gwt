@@ -1,4 +1,4 @@
-//! `gwt hook forward` payload parser.
+//! `gwtd hook forward` payload parser.
 //!
 //! The public CLI surface stays fail-open and only drains/parses the hook
 //! payload. Runtime fanout to the daemon-owned live event bridge is layered in

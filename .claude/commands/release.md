@@ -286,7 +286,7 @@ Closes #456
 まず現在の develop 向け PR を確認：
 
 ```bash
-GWT_BIN="${GWT_BIN_PATH:-gwt}"
+GWT_BIN="${GWT_BIN_PATH:-gwtd}"
 "$GWT_BIN" pr current
 ```
 
@@ -337,7 +337,7 @@ PR bodyには以下を含めてください：
 まず、ステップ10の直後に `"$GWT_BIN" pr current` を再実行し、出力 1 行目の `#<number>` から PR 番号を取得する：
 
 ```bash
-GWT_BIN="${GWT_BIN_PATH:-gwt}"
+GWT_BIN="${GWT_BIN_PATH:-gwtd}"
 PR_CURRENT=$("$GWT_BIN" pr current)
 PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head -1)
 ```
@@ -345,7 +345,7 @@ PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head
 各 Issue にコメントを追記：
 
 ```bash
-GWT_BIN="${GWT_BIN_PATH:-gwt}"
+GWT_BIN="${GWT_BIN_PATH:-gwtd}"
 COMMENT_FILE=$(mktemp)
 printf 'Included in release v%s (#%s)\n' "{NEW_VERSION}" "$PR_NUMBER" > "$COMMENT_FILE"
 

@@ -11,8 +11,8 @@
    - `git status --porcelain`
    - Report as context only; do not mutate files.
 3. Fetch latest remote refs: `git fetch origin`
-4. Resolve the current branch PR with `gwt pr current`.
-   - Use `gwt pr view <number>` for detailed inspection when a PR exists.
+4. Resolve the current branch PR with `gwtd pr current`.
+   - Use `gwtd pr view <number>` for detailed inspection when a PR exists.
    - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
    - If the PR reports `mergeable: CONFLICTING`, `DIRTY`, or `BEHIND`, route to `FIX` immediately.
    - Treat any lower-level GitHub REST lookup as internal transport, not the normal path.
@@ -88,7 +88,7 @@ if [ -n "$(git status --porcelain)" ]; then dirty=1; fi
 git fetch origin
 
 commit_count="$(git rev-list --count "origin/$base..HEAD")"
-pr_summary="$(gwt pr current 2>/tmp/gwt-pr-current.err || true)"
+pr_summary="$(gwtd pr current 2>/tmp/gwt-pr-current.err || true)"
 merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
 if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then
@@ -102,8 +102,8 @@ else
 fi
 
 # For checks/reviews/threads, continue with:
-# gwt pr view <number>
-# gwt pr checks <number>
-# gwt pr reviews <number>
-# gwt pr review-threads <number>
+# gwtd pr view <number>
+# gwtd pr checks <number>
+# gwtd pr reviews <number>
+# gwtd pr review-threads <number>
 ```

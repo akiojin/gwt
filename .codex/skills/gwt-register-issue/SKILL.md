@@ -24,11 +24,11 @@ Do not use this for an existing Issue. Use `gwt-fix-issue` instead.
 
 ## Workflow
 
-1. Verify that `gwt issue ...` can access GitHub. If auth fails, stop and ask the user to refresh GitHub authentication.
+1. Verify that `gwtd issue ...` can access GitHub. If auth fails, stop and ask the user to refresh GitHub authentication.
 2. Normalize the request into summary, background, expected outcome, and constraints.
 3. Run duplicate search before creating anything. Search both open Issues and existing SPEC owners, using the visible `gwt-search` surface when possible.
 4. Decide the registration outcome with the `Spec Status` contract below before creating any new owner.
-5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with `gwt issue create --title ... -f ...`.
+5. When the request is a narrow bug, docs, chore, or investigation item and the `Spec Status` allows a plain Issue, create it with `gwtd issue create --title ... -f ...`.
 6. When the request reveals a missing or unclear owner SPEC, stop plain-Issue creation and hand off to `gwt-discussion`.
 7. Return the chosen owner and next step in the current user's language.
 
@@ -45,7 +45,7 @@ If duplicate search finds an existing owner SPEC, treat that SPEC as the decisio
 
 ## Guardrails
 
-- Agent-facing Issue workflow must use `gwt issue ...` as the canonical CLI surface.
+- Agent-facing Issue workflow must use `gwtd issue ...` as the canonical CLI surface.
 - Direct `gh issue ...` commands are not part of the normal path.
 - Do not create both a plain Issue and a SPEC for the same request.
 - Plain Issue creation is valid only for `ALIGNED` or `IMPLEMENTATION-GAP`.

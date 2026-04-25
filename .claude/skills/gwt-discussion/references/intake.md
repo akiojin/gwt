@@ -16,7 +16,7 @@ Run these before any creation or routing decision:
 3. **Local SPEC listing** if ownership is still unclear:
 
 ```bash
-gwt issue spec list
+gwtd issue spec list
 ```
 
 ### Search evaluation

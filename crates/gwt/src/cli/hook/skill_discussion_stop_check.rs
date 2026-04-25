@@ -1,4 +1,4 @@
-//! `gwt hook skill-discussion-stop-check` — Stop-block handler for the
+//! `gwtd hook skill-discussion-stop-check` — Stop-block handler for the
 //! `gwt-discussion` skill (SPEC-1935 Phase 10, FR-014p).
 //!
 //! Reads `.gwt/discussion.md` in the current worktree and, when an
@@ -48,7 +48,7 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
         "Discussion is still [active] on proposal \"{title}\".\n\
          Next question: {question}\n\
          Continue the gwt-discussion workflow (investigate → ask the user → update Discussion TODO), \
-         or call `gwt discuss resolve|park|reject --proposal \"{label}\"` to exit the discussion explicitly.",
+         or call `gwtd discuss resolve|park|reject --proposal \"{label}\"` to exit the discussion explicitly.",
         title = pending.proposal_title,
         question = question,
         label = pending.proposal_label,
@@ -108,7 +108,7 @@ mod tests {
             &[
                 "Hook-driven resume",
                 "Should SessionStart or UserPromptSubmit surface the resume proposal?",
-                "gwt discuss resolve",
+                "gwtd discuss resolve",
                 "Proposal A",
             ],
         );

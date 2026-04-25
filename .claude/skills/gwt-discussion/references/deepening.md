@@ -24,7 +24,7 @@ break down coarse tasks through a two-phase interactive workshop.
 ### Read all SPEC artifacts
 
 ```bash
-gwt issue spec <Issue番号>
+gwtd issue spec <Issue番号>
 ```
 
 Read spec.md, plan.md, and tasks.md (whichever exist).
@@ -117,13 +117,13 @@ Show the diff or new section text.
 Update the artifact:
 
 ```bash
-gwt issue spec <Issue番号> --edit spec -f /tmp/spec.md
+gwtd issue spec <Issue番号> --edit spec -f /tmp/spec.md
 ```
 
 Or for tasks.md:
 
 ```bash
-gwt issue spec <Issue番号> --edit tasks -f /tmp/tasks.md
+gwtd issue spec <Issue番号> --edit tasks -f /tmp/tasks.md
 ```
 
 ### Step 6: Move to next point

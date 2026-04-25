@@ -60,7 +60,7 @@ pub fn park_pending_resume(worktree: &Path, pending: &PendingDiscussionResume) -
 /// label (e.g. `Proposal A`). Returns `Ok(true)` when the proposal was
 /// found in an `[active]` state and rewritten; `Ok(false)` otherwise.
 ///
-/// Used by the `gwt discuss resolve|park|reject` CLI to let the LLM
+/// Used by the `gwtd discuss resolve|park|reject` CLI to let the LLM
 /// explicitly exit the `gwt-discussion` skill so the Stop-block handler
 /// (SPEC-1935 FR-014p) stays silent.
 pub fn set_proposal_status_by_label(

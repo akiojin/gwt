@@ -1,4 +1,4 @@
-//! Integration tests for the `gwt issue spec` CLI dispatch (SPEC-12 Phase 6).
+//! Integration tests for the `gwtd issue spec` CLI dispatch (SPEC-12 Phase 6).
 
 use gwt::cli::{
     dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli, CliCommand,
@@ -154,7 +154,7 @@ fn dispatch_hook_runtime_state_without_env_is_silent_ok() {
     assert_eq!(
         env.internal_command_call_log[0].args,
         argv(&[
-            "gwt",
+            "gwtd",
             "__internal",
             "daemon-hook",
             "runtime-state",
@@ -391,7 +391,7 @@ fn red_104a_parse_pr_create() {
         s("--head"),
         s("feature/hooks"),
         s("--title"),
-        s("feat(hooks): canonical gwt pr create"),
+        s("feat(hooks): canonical gwtd pr create"),
         s("-f"),
         s("/tmp/pr-body.md"),
         s("--label"),
@@ -404,7 +404,7 @@ fn red_104a_parse_pr_create() {
         CliCommand::PrCreate {
             base: "develop".into(),
             head: Some("feature/hooks".into()),
-            title: "feat(hooks): canonical gwt pr create".into(),
+            title: "feat(hooks): canonical gwtd pr create".into(),
             file: "/tmp/pr-body.md".into(),
             labels: vec!["release".into()],
             draft: true,
@@ -827,7 +827,7 @@ fn red_88_dispatch_spec_create_help_prints_json_schema() {
     assert_eq!(code, 0);
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("gwt issue spec create --json"));
+    assert!(out.contains("gwtd issue spec create --json"));
     assert!(out.contains("\"background\""));
     assert!(out.contains("\"user_stories\""));
     assert!(out.contains("\"functional_requirements\""));
