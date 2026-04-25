@@ -970,11 +970,12 @@ fn choose_apply_plan(
     if platform.os == "windows" {
         if let (Some(current_exe), Some(url)) = (current_exe, installer_url) {
             if windows_should_prefer_installer(current_exe) {
-                let kind = installer_kind_for_url(platform, url)?;
-                return Some(ApplyPlan::Installer {
-                    url: url.to_string(),
-                    kind,
-                });
+                if let Some(kind) = installer_kind_for_url(platform, url) {
+                    return Some(ApplyPlan::Installer {
+                        url: url.to_string(),
+                        kind,
+                    });
+                }
             }
         }
     }
@@ -1006,11 +1007,12 @@ fn choose_apply_plan_with_writable(
     if platform.os == "macos" {
         if running_from_app_bundle {
             if let Some(url) = installer_url {
-                let kind = installer_kind_for_url(platform, url)?;
-                return Some(ApplyPlan::Installer {
-                    url: url.to_string(),
-                    kind,
-                });
+                if let Some(kind) = installer_kind_for_url(platform, url) {
+                    return Some(ApplyPlan::Installer {
+                        url: url.to_string(),
+                        kind,
+                    });
+                }
             }
         } else if writable {
             if let Some(url) = portable_url {
@@ -1024,11 +1026,12 @@ fn choose_apply_plan_with_writable(
     // If we cannot replace in-place, prefer installer when available.
     if !writable {
         if let Some(url) = installer_url {
-            let kind = installer_kind_for_url(platform, url)?;
-            return Some(ApplyPlan::Installer {
-                url: url.to_string(),
-                kind,
-            });
+            if let Some(kind) = installer_kind_for_url(platform, url) {
+                return Some(ApplyPlan::Installer {
+                    url: url.to_string(),
+                    kind,
+                });
+            }
         }
         return None;
     }
@@ -1040,11 +1043,12 @@ fn choose_apply_plan_with_writable(
     }
 
     if let Some(url) = installer_url {
-        let kind = installer_kind_for_url(platform, url)?;
-        return Some(ApplyPlan::Installer {
-            url: url.to_string(),
-            kind,
-        });
+        if let Some(kind) = installer_kind_for_url(platform, url) {
+            return Some(ApplyPlan::Installer {
+                url: url.to_string(),
+                kind,
+            });
+        }
     }
 
     None
@@ -2084,6 +2088,8 @@ mod tests {
 
     #[test]
     fn choose_apply_plan_prefers_portable_for_macos_cli_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let current_exe = temp.path().join("gwt");
         let platform = Platform {
             os: "macos".to_string(),
             arch: "aarch64".to_string(),
@@ -2091,7 +2097,7 @@ mod tests {
 
         let plan = choose_apply_plan(
             &platform,
-            Some(Path::new("/usr/local/bin/gwt")),
+            Some(&current_exe),
             Some("https://example.com/gwt-macos-arm64.tar.gz"),
             Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
         );
