@@ -320,33 +320,35 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let output = std::process::Command::new("git")
-            .args(["init", path.to_str().unwrap()])
-            .output()
-            .expect("git init");
+        let mut init_cmd = std::process::Command::new("git");
+        init_cmd.args(["init", path.to_str().unwrap()]);
+        crate::process::scrub_git_env(&mut init_cmd);
+        let output = init_cmd.output().expect("git init");
         assert!(output.status.success(), "git init failed");
 
-        let email = std::process::Command::new("git")
+        let mut email_cmd = std::process::Command::new("git");
+        email_cmd
             .args(["config", "user.email", "test@example.com"])
-            .current_dir(path)
-            .output()
-            .expect("git config user.email");
+            .current_dir(path);
+        crate::process::scrub_git_env(&mut email_cmd);
+        let email = email_cmd.output().expect("git config user.email");
         assert!(email.status.success(), "git config user.email failed");
 
-        let name = std::process::Command::new("git")
+        let mut name_cmd = std::process::Command::new("git");
+        name_cmd
             .args(["config", "user.name", "Test User"])
-            .current_dir(path)
-            .output()
-            .expect("git config user.name");
+            .current_dir(path);
+        crate::process::scrub_git_env(&mut name_cmd);
+        let name = name_cmd.output().expect("git config user.name");
         assert!(name.status.success(), "git config user.name failed");
     }
 
     fn add_origin(path: &Path, url: &str) {
-        let output = std::process::Command::new("git")
-            .args(["remote", "add", "origin", url])
-            .current_dir(path)
-            .output()
-            .expect("git remote add origin");
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["remote", "add", "origin", url])
+            .current_dir(path);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git remote add origin");
         assert!(
             output.status.success(),
             "git remote add origin failed: {}",
@@ -356,18 +358,16 @@ mod tests {
 
     fn commit_file(path: &Path, name: &str, body: &str) {
         std::fs::write(path.join(name), body).unwrap();
-        let add = std::process::Command::new("git")
-            .args(["add", name])
-            .current_dir(path)
-            .output()
-            .expect("git add");
+        let mut add_cmd = std::process::Command::new("git");
+        add_cmd.args(["add", name]).current_dir(path);
+        crate::process::scrub_git_env(&mut add_cmd);
+        let add = add_cmd.output().expect("git add");
         assert!(add.status.success(), "git add failed");
 
-        let commit = std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .expect("git commit");
+        let mut commit_cmd = std::process::Command::new("git");
+        commit_cmd.args(["commit", "-m", "init"]).current_dir(path);
+        crate::process::scrub_git_env(&mut commit_cmd);
+        let commit = commit_cmd.output().expect("git commit");
         assert!(
             commit.status.success(),
             "git commit failed: {}",
@@ -553,7 +553,8 @@ mod tests {
         add_origin(&repo, "https://github.com/example/project.git");
         commit_file(&repo, "README.md", "# repo\n");
 
-        let output = std::process::Command::new("git")
+        let mut wt_cmd = std::process::Command::new("git");
+        wt_cmd
             .args([
                 "worktree",
                 "add",
@@ -561,9 +562,9 @@ mod tests {
                 "feature/shared",
                 worktree.to_str().unwrap(),
             ])
-            .current_dir(&repo)
-            .output()
-            .expect("git worktree add");
+            .current_dir(&repo);
+        crate::process::scrub_git_env(&mut wt_cmd);
+        let output = wt_cmd.output().expect("git worktree add");
         assert!(
             output.status.success(),
             "git worktree add failed: {}",

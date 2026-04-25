@@ -2089,9 +2089,10 @@ mod tests {
             arch: "aarch64".to_string(),
         };
 
-        let plan = choose_apply_plan(
+        let plan = choose_apply_plan_with_writable(
             &platform,
-            Some(Path::new("/usr/local/bin/gwt")),
+            false,
+            true,
             Some("https://example.com/gwt-macos-arm64.tar.gz"),
             Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
         );
@@ -2484,7 +2485,11 @@ mod tests {
             asset_url: Some("https://example.com/gwt-legacy.zip".to_string()),
             ..missing
         };
-        match mgr.state_from_cache(&newer, None) {
+        let exe_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let exe_path = exe_dir.join("gwt");
+        std::fs::write(&exe_path, b"").unwrap();
+        match mgr.state_from_cache(&newer, Some(&exe_path)) {
             UpdateState::Available {
                 current,
                 latest,
