@@ -679,6 +679,36 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("search_knowledge_bridge"),
+            "expected knowledge bridge search input to call the semantic search backend",
+        );
+        assert!(
+            html.contains("knowledge_search_results"),
+            "expected frontend to handle semantic search result events",
+        );
+        assert!(
+            html.contains("request_id"),
+            "expected semantic search requests to carry request ids for stale-response guards",
+        );
+        assert!(
+            html.contains("Searching semantic index"),
+            "expected semantic search to expose an in-progress state",
+        );
+        assert!(
+            html.contains("% match"),
+            "expected semantic search result rows to show percentage similarity",
+        );
+        assert!(
+            !html.contains("No matching cached items"),
+            "expected semantic search to stop presenting substring-filter empty copy",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 

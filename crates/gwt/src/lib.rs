@@ -36,8 +36,8 @@ pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::ProjectIndexStatusView;
 pub use knowledge_bridge::{
-    load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
-    KnowledgeKind, KnowledgeListItem, KnowledgeListScope,
+    load_knowledge_bridge, search_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection,
+    KnowledgeDetailView, KnowledgeKind, KnowledgeListItem, KnowledgeListScope,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
