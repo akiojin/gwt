@@ -1669,6 +1669,13 @@
           renderKnowledgeBridge(windowId);
           return;
         }
+        if (state.loading && state.baseEntries.length === 0) {
+          state.searching = true;
+          state.entries = [];
+          state.emptyMessage = "";
+          renderKnowledgeBridge(windowId);
+          return;
+        }
         state.searching = true;
         state.entries = [];
         state.emptyMessage = "";
@@ -5663,9 +5670,10 @@
               event.id,
               event.knowledge_kind,
             );
+            const queuedQuery = state.query.trim();
             state.baseEntries = event.entries || [];
             state.baseEmptyMessage = event.empty_message || "";
-            if (!state.query.trim()) {
+            if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
               state.emptyMessage = state.baseEmptyMessage;
               state.searching = false;
@@ -5674,6 +5682,13 @@
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.loading = false;
             state.error = "";
+            if (queuedQuery) {
+              frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                event.id,
+                event.knowledge_kind,
+              );
+              break;
+            }
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
           }
