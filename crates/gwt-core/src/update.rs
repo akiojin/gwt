@@ -2172,6 +2172,43 @@ mod tests {
     }
 
     #[test]
+    fn choose_apply_plan_windows_installer_preference_falls_back_to_portable_when_installer_url_is_unsupported(
+    ) {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let local_app_data = temp.path().join("AppData").join("Local");
+        let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
+        fs::create_dir_all(current_exe.parent().unwrap()).unwrap();
+
+        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", &local_app_data);
+
+        let plan = choose_apply_plan(
+            &Platform {
+                os: "windows".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            Some(&current_exe),
+            Some("https://example.com/gwt-windows-x86_64.zip"),
+            Some("https://example.com/gwt_7.1.0_aarch64.dmg"),
+        );
+
+        match old_local_app_data {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+
+        assert_eq!(
+            plan,
+            Some(ApplyPlan::Portable {
+                url: "https://example.com/gwt-windows-x86_64.zip".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn choose_apply_plan_prefers_installer_for_legacy_program_files_windows_install() {
         let temp = tempfile::tempdir().unwrap();
         let current_exe = temp
