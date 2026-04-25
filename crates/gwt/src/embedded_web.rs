@@ -701,6 +701,62 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_surface_owns_plain_wheel_routing() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains(".board-scroll-surface"),
+            "expected Board scroll containers to be registered as native wheel surfaces",
+        );
+        assert!(
+            html.contains(
+                "return element.closest(\".branch-scroll, .file-tree-scroll, .board-scroll-surface\");",
+            ),
+            "expected Board wheel input to stay inside the window instead of falling through to canvas pan",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_surface_uses_chat_first_layout() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("board-chat-shell")
+                && html.contains("board-timeline-scroll")
+                && html.contains("board-composer-bar"),
+            "expected Board scaffold to be a chat timeline with a bottom-fixed composer",
+        );
+        assert!(
+            html.contains("board-message user")
+                && html.contains("board-message agent")
+                && html.contains("board-message system"),
+            "expected Board entries to render through user/agent/system chat message classes",
+        );
+        assert!(
+            !html.contains("board-side-pane"),
+            "expected Board v1 GUI to avoid the old dashboard sidebar",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_composer_is_body_first_and_resets_after_post() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("Share a Board update")
+                && html.contains("state.composerBody = \"\";")
+                && html.contains("state.replyParentId = null;"),
+            "expected Board post success to clear body-first draft state",
+        );
+        assert!(
+            !html.contains("Post update")
+                && !html.contains("Topics</span>")
+                && !html.contains("Owners</span>"),
+            "expected Board composer to keep kind/topics/owners out of the primary posting path",
+        );
+    }
+
+    #[test]
     fn embedded_web_memo_surface_uses_repo_scoped_notes_contract() {
         let html = frontend_bundle_source();
 
