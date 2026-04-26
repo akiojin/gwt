@@ -743,6 +743,25 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("searchInFlight") && html.contains("inFlightSearchRequestId"),
+            "expected semantic search state to track the single in-flight backend request",
+        );
+        assert!(
+            html.contains("queuedSearchQuery")
+                && html.contains("const nextQuery = state.queuedSearchQuery;"),
+            "expected semantic search state to coalesce additional input to the latest query",
+        );
+        assert!(
+            !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
+            "expected semantic search scheduling to preserve visible entries while searching",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 

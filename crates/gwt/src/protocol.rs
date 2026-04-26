@@ -119,6 +119,8 @@ pub enum FrontendEvent {
     LoadKnowledgeBridge {
         id: String,
         knowledge_kind: KnowledgeKind,
+        #[serde(default)]
+        request_id: Option<u64>,
         selected_number: Option<u64>,
         refresh: bool,
         list_scope: Option<KnowledgeListScope>,
@@ -357,6 +359,8 @@ pub enum BackendEvent {
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
+        request_id: Option<u64>,
+        list_scope: Option<KnowledgeListScope>,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
@@ -367,6 +371,7 @@ pub enum BackendEvent {
         knowledge_kind: KnowledgeKind,
         query: String,
         request_id: u64,
+        list_scope: Option<KnowledgeListScope>,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
@@ -375,6 +380,8 @@ pub enum BackendEvent {
     KnowledgeDetail {
         id: String,
         knowledge_kind: KnowledgeKind,
+        request_id: Option<u64>,
+        list_scope: Option<KnowledgeListScope>,
         detail: KnowledgeDetailView,
     },
     BranchCleanupResult {
@@ -404,6 +411,9 @@ pub enum BackendEvent {
     KnowledgeError {
         id: String,
         knowledge_kind: KnowledgeKind,
+        request_id: Option<u64>,
+        query: Option<String>,
+        list_scope: Option<KnowledgeListScope>,
         message: String,
     },
     ProjectOpenError {
