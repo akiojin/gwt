@@ -1647,6 +1647,7 @@
         }
         const requestId = nextKnowledgeLoadRequestId++;
         state.loadRequestId = requestId;
+        state.detailRequestId = 0;
         state.loading = true;
         state.refreshing = Boolean(refresh);
         state.searching = false;
@@ -5824,8 +5825,6 @@
             state.selectedNumber = event.selected_number ?? null;
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.loading = false;
-            state.refreshing = false;
             state.error = "";
             const nextQuery = state.queuedSearchQuery;
             state.queuedSearchQuery = "";
@@ -5973,7 +5972,7 @@
             }
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
-            if (matchesLoadRequest || isSearchError) {
+            if (matchesLoadRequest) {
               state.loading = false;
               state.refreshing = false;
             }

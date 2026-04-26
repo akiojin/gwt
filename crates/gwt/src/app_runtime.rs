@@ -4140,8 +4140,8 @@ mod tests {
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeLoadRequest, KnowledgeSearchRequest, LaunchWizardSession, OutboundEvent,
-        ProjectTabRuntime, UserEvent, WindowRuntime,
+        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardSession,
+        OutboundEvent, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
 
@@ -4169,6 +4169,11 @@ mod tests {
     }
 
     fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fake_gh_test_lock() -> &'static Mutex<()> {
         static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -4249,6 +4254,7 @@ mod tests {
         .expect("write link store");
     }
 
+    #[cfg(unix)]
     fn write_fake_project_index_runtime(home: &Path) {
         let python = home
             .join(".gwt")
@@ -4293,6 +4299,59 @@ exit 1
             fs::set_permissions(&python, fs::Permissions::from_mode(0o755))
                 .expect("chmod fake python");
         }
+    }
+
+    fn write_fake_gh_issue_list(temp_root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let fake_gh = temp_root.join("gh.cmd");
+            fs::write(
+                &fake_gh,
+                "@echo off\r\n\
+if not \"%GWT_FAKE_GH_MARKER%\"==\"\" echo called>>\"%GWT_FAKE_GH_MARKER%\"\r\n\
+if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
+  >&2 echo gh refresh failed\r\n\
+  exit /b 1\r\n\
+)\r\n\
+echo [{\"number\":43,\"title\":\"Refreshed issue\",\"body\":\"Fresh body\",\"labels\":[{\"name\":\"bug\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
+exit /b 0\r\n",
+            )
+            .expect("write fake gh");
+            fake_gh
+        }
+        #[cfg(not(windows))]
+        {
+            let fake_gh = temp_root.join("gh");
+            fs::write(
+                &fake_gh,
+                r#"#!/bin/sh
+if [ -n "$GWT_FAKE_GH_MARKER" ]; then
+  touch "$GWT_FAKE_GH_MARKER"
+fi
+if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
+  printf '%s\n' 'gh refresh failed' >&2
+  exit 1
+fi
+printf '%s\n' '[{"number":43,"title":"Refreshed issue","body":"Fresh body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-04-20T00:00:00Z"}]'
+exit 0
+"#,
+            )
+            .expect("write fake gh");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+            fake_gh
+        }
+    }
+
+    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
+        let parent = fake_gh.parent().expect("fake gh parent");
+        let mut paths = vec![parent.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        ScopedEnvVar::set("PATH", joined)
     }
 
     fn canvas_bounds() -> WindowGeometry {
@@ -5189,6 +5248,7 @@ exit 1
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn app_runtime_knowledge_search_replies_through_async_dispatch() {
         let _lock = env_test_lock()
@@ -5270,6 +5330,240 @@ exit 1
                 )
             })
         });
+    }
+
+    #[test]
+    fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo,
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadKnowledgeBridge {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(31),
+                selected_number: Some(43),
+                refresh: true,
+                list_scope: Some(gwt::KnowledgeListScope::Open),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "manual refresh must not block the frontend event loop"
+        );
+        wait_for_recorded_event("manual knowledge refresh dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.target,
+                                DispatchTarget::Client(client_id) if client_id == "client-1"
+                            ) && matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeEntries {
+                                    id,
+                                    knowledge_kind,
+                                    request_id,
+                                    entries,
+                                    selected_number,
+                                    ..
+                                } if id == &window_id
+                                    && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                    && *request_id == Some(31)
+                                    && *selected_number == Some(43)
+                                    && entries.len() == 1
+                                    && entries[0].number == 43
+                            )
+                        }) && dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeDetail {
+                                    id,
+                                    request_id,
+                                    detail,
+                                    ..
+                                } if id == &window_id
+                                    && *request_id == Some(31)
+                                    && detail.number == Some(43)
+                            )
+                        })
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn app_runtime_manual_knowledge_refresh_error_preserves_request_context() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo,
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadKnowledgeBridge {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(32),
+                selected_number: None,
+                refresh: true,
+                list_scope: Some(gwt::KnowledgeListScope::Closed),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "manual refresh errors must be reported asynchronously"
+        );
+        wait_for_recorded_event("manual knowledge refresh error", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeError {
+                                    id,
+                                    knowledge_kind,
+                                    request_id,
+                                    list_scope,
+                                    message,
+                                    ..
+                                } if id == &window_id
+                                    && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                    && *request_id == Some(32)
+                                    && *list_scope == Some(gwt::KnowledgeListScope::Closed)
+                                    && message.contains("gh refresh failed")
+                            )
+                        })
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let marker = temp.path().join("fake-gh-called");
+        let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &marker);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo.clone(),
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let mode_guard = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+        runtime.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
+            client_id: "client-1".to_string(),
+            id: window_id.clone(),
+            project_root: repo.clone(),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(33),
+            selected_number: None,
+            force: false,
+            list_scope: gwt::KnowledgeListScope::Open,
+        });
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            events.lock().expect("event log").is_empty(),
+            "background refresh errors should not overwrite the current cache view"
+        );
+        assert!(
+            marker.exists(),
+            "expected fake gh to be invoked for stale cache"
+        );
+
+        fs::remove_file(&marker).expect("remove marker");
+        drop(mode_guard);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        runtime.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
+            client_id: "client-1".to_string(),
+            id: window_id,
+            project_root: temp.path().join("missing-repo"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(34),
+            selected_number: Some(43),
+            force: false,
+            list_scope: gwt::KnowledgeListScope::Open,
+        });
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            events.lock().expect("event log").is_empty(),
+            "noop background refresh should return silently without dispatch"
+        );
     }
 
     #[test]

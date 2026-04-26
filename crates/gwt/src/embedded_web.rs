@@ -829,8 +829,22 @@ mod tests {
             "expected select_knowledge_bridge_entry requests to carry the detail request id",
         );
         assert!(
+            html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
+            "expected new cache loads to invalidate older detail response ids",
+        );
+        assert!(
             html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
             "expected detail responses to avoid clearing refresh loading for detail-only replies",
+        );
+        let search_block = html
+            .split("case \"knowledge_search_results\":")
+            .nth(1)
+            .and_then(|tail| tail.split("case \"knowledge_detail\":").next())
+            .expect("knowledge search results block");
+        assert!(
+            !search_block.contains("state.loading = false;")
+                && !search_block.contains("state.refreshing = false;"),
+            "expected search results to leave active refresh loading state untouched",
         );
     }
 
