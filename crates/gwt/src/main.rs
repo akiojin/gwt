@@ -196,7 +196,7 @@ enum UserEvent {
     },
     LaunchWizardHydrated {
         wizard_id: String,
-        result: Result<LaunchWizardHydration, String>,
+        result: Box<Result<LaunchWizardHydration, String>>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
@@ -1983,6 +1983,7 @@ mod tests {
                 docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                 agent_options: sample_wizard_agent_options(),
                 quick_start_entries: vec![sample_wizard_quick_start_entry(None)],
+                previous_profile: None,
             }),
         );
         assert_eq!(hydration_ok.len(), 1);
@@ -4006,7 +4007,7 @@ fn main() -> wry::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardHydrated { wizard_id, result }) => {
-                let events = app.handle_launch_wizard_hydrated(wizard_id, result);
+                let events = app.handle_launch_wizard_hydrated(wizard_id, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {

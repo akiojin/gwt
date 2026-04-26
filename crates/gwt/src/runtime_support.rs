@@ -208,6 +208,8 @@ pub(crate) fn resolve_launch_wizard_hydration(
         sessions_dir,
         &normalized_branch_name,
     );
+    let previous_profile =
+        gwt::launch_wizard::load_previous_launch_profile(&quick_start_root, sessions_dir);
     let (docker_context, docker_service_status) =
         detect_wizard_docker_context_and_status(&quick_start_root);
 
@@ -220,6 +222,7 @@ pub(crate) fn resolve_launch_wizard_hydration(
         docker_service_status,
         agent_options,
         quick_start_entries,
+        previous_profile,
     })
 }
 
