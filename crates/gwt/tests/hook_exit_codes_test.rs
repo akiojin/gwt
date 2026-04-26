@@ -162,3 +162,40 @@ fn delegated_block_hook_preserves_block_json_contract() {
         "legacy stopReason output must not be emitted, got: {stdout}"
     );
 }
+
+#[test]
+fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "gh issue view 123"
+        }
+    })
+    .to_string();
+
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "__internal", "daemon-hook", "event", "PreToolUse"]),
+    );
+
+    assert_eq!(code, 2, "blocked PreToolUse event must exit 2");
+    let stdout = String::from_utf8(env.stdout).unwrap();
+    assert!(
+        stdout.contains("\"hookSpecificOutput\""),
+        "stdout must emit hookSpecificOutput wrapper, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"hookEventName\":\"PreToolUse\""),
+        "stdout must declare PreToolUse event, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "stdout must deny the tool, got: {stdout}"
+    );
+    assert!(
+        stdout.lines().count() == 1,
+        "event dispatcher must emit exactly one JSON line, got: {stdout}"
+    );
+}
