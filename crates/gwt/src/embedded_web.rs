@@ -762,6 +762,24 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_refresh() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("detailRequestId") && html.contains("knowledgeDetailRequestMatches"),
+            "expected entry selection to use a separate detail request correlation id",
+        );
+        assert!(
+            html.contains("request_id: requestId,\n          number,"),
+            "expected select_knowledge_bridge_entry requests to carry the detail request id",
+        );
+        assert!(
+            html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
+            "expected detail responses to avoid clearing refresh loading for detail-only replies",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 

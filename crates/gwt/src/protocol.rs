@@ -136,6 +136,8 @@ pub enum FrontendEvent {
     SelectKnowledgeBridgeEntry {
         id: String,
         knowledge_kind: KnowledgeKind,
+        #[serde(default)]
+        request_id: Option<u64>,
         number: u64,
         list_scope: Option<KnowledgeListScope>,
     },

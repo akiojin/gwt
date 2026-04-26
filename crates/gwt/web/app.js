@@ -1459,6 +1459,7 @@
             detailLoading: false,
             pendingSearchTimer: null,
             loadRequestId: 0,
+            detailRequestId: 0,
             searchRequestId: 0,
             inFlightSearchRequestId: 0,
             searchInFlight: false,
@@ -1487,6 +1488,7 @@
           state.queuedSearchQuery = "";
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
+          state.detailRequestId = 0;
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
@@ -1680,6 +1682,14 @@
         );
       }
 
+      function knowledgeDetailRequestMatches(state, event) {
+        return (
+          !event.request_id ||
+          event.request_id === state.loadRequestId ||
+          event.request_id === state.detailRequestId
+        );
+      }
+
       function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         const effectiveKind = knowledgeKind || state.kind;
@@ -1756,11 +1766,14 @@
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         state.selectedNumber = number;
         state.detailLoading = true;
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.detailRequestId = requestId;
         const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
           knowledge_kind: effectiveKind,
+          request_id: requestId,
           number,
           list_scope:
             effectiveKind === "issue" ? state.listScope || "open" : null,
@@ -5548,6 +5561,7 @@
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeEventScopeMatches,
+        knowledgeDetailRequestMatches,
         switchKnowledgeListScope,
         renderKnowledgeBridge,
         renderSettingsWindow,
@@ -5740,14 +5754,20 @@
               break;
             }
             const queuedQuery = state.query.trim();
-            state.baseEntries = event.entries || [];
+            const incomingEntries = event.entries || [];
+            const keepSelectedNumber =
+              state.selectedNumber &&
+              incomingEntries.some((entry) => entry.number === state.selectedNumber);
+            state.baseEntries = incomingEntries;
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
               state.emptyMessage = state.baseEmptyMessage;
               state.searching = false;
             }
-            state.selectedNumber = event.selected_number ?? null;
+            state.selectedNumber = keepSelectedNumber
+              ? state.selectedNumber
+              : event.selected_number ?? null;
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.loading = false;
             state.refreshing = false;
@@ -5828,15 +5848,19 @@
               event.knowledge_kind,
             );
             if (
-              (event.request_id && event.request_id !== state.loadRequestId) ||
+              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
               !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
             ) {
               break;
             }
+            const matchesLoadRequest =
+              !event.request_id || event.request_id === state.loadRequestId;
             state.detail = event.detail;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
-            state.loading = false;
-            state.refreshing = false;
+            if (matchesLoadRequest) {
+              state.loading = false;
+              state.refreshing = false;
+            }
             state.detailLoading = false;
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
@@ -5934,13 +5958,17 @@
             }
             if (
               !isSearchError &&
-              ((event.request_id && event.request_id !== state.loadRequestId) ||
+              (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
                 !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
             ) {
               break;
             }
-            state.loading = false;
-            state.refreshing = false;
+            const matchesLoadRequest =
+              !event.request_id || event.request_id === state.loadRequestId;
+            if (matchesLoadRequest || isSearchError) {
+              state.loading = false;
+              state.refreshing = false;
+            }
             state.searching = false;
             state.searchInFlight = false;
             state.inFlightSearchRequestId = 0;

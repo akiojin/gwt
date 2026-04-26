@@ -564,6 +564,7 @@ impl AppRuntime {
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
+                request_id,
                 number,
                 list_scope,
             } => self.load_knowledge_bridge_events(
@@ -571,7 +572,7 @@ impl AppRuntime {
                 KnowledgeLoadRequest {
                     id: &id,
                     kind: knowledge_kind,
-                    request_id: None,
+                    request_id,
                     selected_number: Some(number),
                     refresh: false,
                     list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),

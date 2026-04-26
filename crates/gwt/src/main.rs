@@ -1826,6 +1826,7 @@ mod tests {
                 gwt::FrontendEvent::SelectKnowledgeBridgeEntry {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
                     number: 42,
                     list_scope: None,
                 },
