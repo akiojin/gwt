@@ -29,6 +29,7 @@ const ignoredFilePatterns = [
   /(^|[\\/])gwt[\\/]src[\\/]docker_launch\.rs$/i,
   /(^|[\\/])gwt[\\/]src[\\/]index_worker\.rs$/i,
   /(^|[\\/])gwt[\\/]src[\\/]issue_cache\.rs$/i,
+  /(^|[\\/])gwt[\\/]src[\\/]launch_runtime\.rs$/i,
   /(^|[\\/])gwt[\\/]src[\\/]native_app\.rs$/i,
   /(^|[\\/])gwt[\\/]src[\\/]update_front_door\.rs$/i,
   /(^|[\\/])gwt[\\/]src[\\/]cli[\\/]index\.rs$/i,
