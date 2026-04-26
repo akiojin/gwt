@@ -86,9 +86,9 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
 
     for required in [
         "GitHub workflow CLI",
-        "gwt issue view",
-        "gwt pr view",
-        "gwt actions logs",
+        "gwtd issue view",
+        "gwtd pr view",
+        "gwtd actions logs",
         "gwt-search",
         "Blocked command: gh pr view 1949",
     ] {

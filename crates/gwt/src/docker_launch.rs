@@ -173,7 +173,6 @@ fn docker_compose_mount_path(path: &Path) -> String {
 }
 
 pub(crate) fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
-    let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
         "# Auto-generated docker-compose override for gwt bundle mounting\n\
@@ -181,7 +180,6 @@ pub(crate) fn docker_bundle_override_content(service: &str, bundle: &DockerBundl
          services:\n\
            {service}:\n\
              volumes:\n\
-               - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
                - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
     )
 }

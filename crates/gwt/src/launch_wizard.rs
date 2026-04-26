@@ -161,6 +161,21 @@ pub struct QuickStartEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchWizardPreviousProfile {
+    pub agent_id: String,
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+    pub version: Option<String>,
+    pub session_mode: gwt_agent::SessionMode,
+    pub skip_permissions: bool,
+    pub codex_fast_mode: bool,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub docker_service: Option<String>,
+    pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    pub windows_shell: Option<gwt_agent::WindowsShellKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLaunchConfig {
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
@@ -200,6 +215,73 @@ impl QuickStartEntry {
     }
 }
 
+pub fn load_previous_launch_profile(
+    repo_path: &Path,
+    sessions_dir: &Path,
+) -> Option<LaunchWizardPreviousProfile> {
+    let entries = std::fs::read_dir(sessions_dir).ok()?;
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
+        })
+        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+        .filter(|session| same_launch_profile_repo(repo_path, &session.worktree_path))
+        .max_by(|left, right| {
+            left.updated_at
+                .cmp(&right.updated_at)
+                .then_with(|| left.created_at.cmp(&right.created_at))
+        })
+        .map(previous_profile_from_session)
+}
+
+fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
+    LaunchWizardPreviousProfile {
+        agent_id: session.agent_id.command().to_string(),
+        model: session.model,
+        reasoning: session.reasoning_level,
+        version: session.tool_version.or_else(|| {
+            session
+                .agent_id
+                .package_name()
+                .map(|_| "installed".to_string())
+        }),
+        session_mode: session.session_mode,
+        skip_permissions: session.skip_permissions,
+        codex_fast_mode: session.codex_fast_mode,
+        runtime_target: session.runtime_target,
+        docker_service: session.docker_service,
+        docker_lifecycle_intent: session.docker_lifecycle_intent,
+        windows_shell: session.windows_shell,
+    }
+}
+
+fn same_launch_profile_repo(repo_path: &Path, session_worktree_path: &Path) -> bool {
+    if same_path_or_exact(repo_path, session_worktree_path) {
+        return true;
+    }
+
+    let Ok(repo_root) = gwt_git::worktree::main_worktree_root(repo_path) else {
+        return false;
+    };
+    let Ok(session_root) = gwt_git::worktree::main_worktree_root(session_worktree_path) else {
+        return false;
+    };
+    same_path_or_exact(&repo_root, &session_root)
+}
+
+fn same_path_or_exact(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DockerWizardContext {
     pub services: Vec<String>,
@@ -228,6 +310,7 @@ pub struct LaunchWizardHydration {
     pub docker_service_status: gwt_docker::ComposeServiceStatus,
     pub agent_options: Vec<AgentOption>,
     pub quick_start_entries: Vec<QuickStartEntry>,
+    pub previous_profile: Option<LaunchWizardPreviousProfile>,
 }
 
 #[derive(Debug, Clone)]
@@ -367,6 +450,7 @@ impl LaunchWizardState {
         context: LaunchWizardContext,
         agent_options: Vec<AgentOption>,
         mut quick_start_entries: Vec<QuickStartEntry>,
+        previous_profile: Option<LaunchWizardPreviousProfile>,
         is_hydrating: bool,
     ) -> Self {
         Self::hydrate_live_window_ids(&context, &mut quick_start_entries);
@@ -418,6 +502,9 @@ impl LaunchWizardState {
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
+        if let Some(previous_profile) = previous_profile {
+            state.apply_previous_profile(previous_profile);
+        }
         state.selected = step_default_selection(state.step, &state);
         state
     }
@@ -427,11 +514,26 @@ impl LaunchWizardState {
         agent_options: Vec<AgentOption>,
         quick_start_entries: Vec<QuickStartEntry>,
     ) -> Self {
-        Self::new_with(context, agent_options, quick_start_entries, false)
+        Self::new_with(context, agent_options, quick_start_entries, None, false)
+    }
+
+    pub fn open_with_previous_profile(
+        context: LaunchWizardContext,
+        agent_options: Vec<AgentOption>,
+        quick_start_entries: Vec<QuickStartEntry>,
+        previous_profile: Option<LaunchWizardPreviousProfile>,
+    ) -> Self {
+        Self::new_with(
+            context,
+            agent_options,
+            quick_start_entries,
+            previous_profile,
+            false,
+        )
     }
 
     pub fn open_loading(context: LaunchWizardContext, agent_options: Vec<AgentOption>) -> Self {
-        Self::new_with(context, agent_options, Vec::new(), true)
+        Self::new_with(context, agent_options, Vec::new(), None, true)
     }
 
     pub fn open(context: LaunchWizardContext, sessions_dir: &Path, cache_path: &Path) -> Self {
@@ -441,7 +543,14 @@ impl LaunchWizardState {
             sessions_dir,
             &context.normalized_branch_name,
         );
-        Self::open_with(context, agent_options, quick_start_entries)
+        let previous_profile =
+            load_previous_launch_profile(&context.quick_start_root, sessions_dir);
+        Self::open_with_previous_profile(
+            context,
+            agent_options,
+            quick_start_entries,
+            previous_profile,
+        )
     }
 
     pub fn view(&self) -> LaunchWizardView {
@@ -513,6 +622,7 @@ impl LaunchWizardState {
             docker_service_status,
             agent_options,
             mut quick_start_entries,
+            previous_profile,
         } = hydration;
         if let Some(selected_branch) = selected_branch {
             self.context.selected_branch = selected_branch;
@@ -542,7 +652,11 @@ impl LaunchWizardState {
             self.docker_service = None;
         }
         self.sync_selected_agent_options();
-        self.sync_docker_lifecycle_default();
+        if let Some(previous_profile) = previous_profile {
+            self.apply_previous_profile(previous_profile);
+        } else {
+            self.sync_docker_lifecycle_default();
+        }
         self.selected = self
             .selected
             .min(self.current_options().len().saturating_sub(1));
@@ -996,6 +1110,81 @@ impl LaunchWizardState {
                 }
             }
         }
+    }
+
+    fn apply_previous_profile(&mut self, profile: LaunchWizardPreviousProfile) {
+        let Some(agent) = self
+            .detected_agents
+            .iter()
+            .find(|candidate| candidate.id == profile.agent_id && candidate.available)
+        else {
+            return;
+        };
+
+        self.launch_target = LaunchTargetKind::Agent;
+        self.agent_id = agent.id.clone();
+        self.sync_selected_agent_options();
+        self.apply_saved_model(profile.model.as_deref());
+        if let Some(reasoning) = profile.reasoning.as_deref() {
+            if self
+                .current_reasoning_options()
+                .iter()
+                .any(|option| option.stored_value == reasoning)
+            {
+                self.reasoning = reasoning.to_string();
+            }
+        }
+        self.sync_reasoning_state();
+        if let Some(version) = profile.version.as_deref() {
+            if self
+                .current_version_options()
+                .iter()
+                .any(|option| option.value == version)
+            {
+                self.version = version.to_string();
+            }
+        }
+        self.mode = execution_mode_value_from_session_mode(profile.session_mode).to_string();
+        self.resume_session_id = None;
+        self.skip_permissions = profile.skip_permissions;
+        self.codex_fast_mode = profile.codex_fast_mode && self.agent_is_codex();
+        self.apply_previous_runtime_profile(
+            profile.runtime_target,
+            profile.docker_service.as_deref(),
+            profile.docker_lifecycle_intent,
+        );
+        if let Some(windows_shell) = profile.windows_shell {
+            self.windows_shell = windows_shell;
+        }
+    }
+
+    fn apply_previous_runtime_profile(
+        &mut self,
+        runtime_target: gwt_agent::LaunchRuntimeTarget,
+        docker_service: Option<&str>,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
+    ) {
+        if runtime_target != gwt_agent::LaunchRuntimeTarget::Docker || !self.has_docker_workflow() {
+            self.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
+            self.docker_service = None;
+            self.sync_docker_lifecycle_default();
+            return;
+        }
+
+        self.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        let services = self.docker_service_options();
+        self.docker_service = docker_service
+            .filter(|service| services.iter().any(|candidate| candidate == service))
+            .map(str::to_string)
+            .or_else(|| {
+                self.context
+                    .docker_context
+                    .as_ref()
+                    .and_then(|ctx| ctx.suggested_service.clone())
+            })
+            .or_else(|| services.first().cloned());
+        self.docker_lifecycle_intent = docker_lifecycle_intent;
+        self.sync_docker_lifecycle_default();
     }
 
     fn focus_existing_session(&mut self, index: usize) {
@@ -1502,7 +1691,8 @@ impl LaunchWizardState {
     }
 
     fn windows_shell_for_launch(&self) -> Option<gwt_agent::WindowsShellKind> {
-        (self.runtime_target == gwt_agent::LaunchRuntimeTarget::Host).then_some(self.windows_shell)
+        (cfg!(windows) && self.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
+            .then_some(self.windows_shell)
     }
 
     fn docker_service_prompt_required(&self) -> bool {
@@ -2620,6 +2810,13 @@ fn execution_mode_options_view() -> Vec<LaunchWizardOptionView> {
         .collect()
 }
 
+fn execution_mode_value_from_session_mode(mode: gwt_agent::SessionMode) -> &'static str {
+    match mode {
+        gwt_agent::SessionMode::Normal => "normal",
+        gwt_agent::SessionMode::Continue | gwt_agent::SessionMode::Resume => "continue",
+    }
+}
+
 fn launch_target_value(target: LaunchTargetKind) -> &'static str {
     match target {
         LaunchTargetKind::Agent => "agent",
@@ -3270,6 +3467,52 @@ mod tests {
     }
 
     #[test]
+    fn load_previous_launch_profile_uses_latest_session_for_repo_without_reusing_branch() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let mut older = sample_session_record(
+            "feature/old",
+            &worktree,
+            gwt_agent::AgentId::ClaudeCode,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            None,
+        );
+        older.session_mode = gwt_agent::SessionMode::Normal;
+        older.save(dir.path()).expect("save older session");
+
+        let mut newer = sample_session_record(
+            "feature/previous",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            Some("resume-ignored"),
+        );
+        newer.tool_version = Some("0.110.0".to_string());
+        newer.model = Some("gpt-5.5".to_string());
+        newer.reasoning_level = Some("high".to_string());
+        newer.session_mode = gwt_agent::SessionMode::Continue;
+        newer.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        newer.docker_service = Some("gwt".to_string());
+        newer.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        newer.save(dir.path()).expect("save newer session");
+
+        let profile =
+            load_previous_launch_profile(&worktree, dir.path()).expect("previous profile");
+
+        assert_eq!(profile.agent_id, "codex");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(profile.reasoning.as_deref(), Some("high"));
+        assert_eq!(profile.version.as_deref(), Some("0.110.0"));
+        assert_eq!(profile.session_mode, gwt_agent::SessionMode::Continue);
+        assert_eq!(
+            profile.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(profile.docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
     fn branch_action_create_new_from_selected_sets_base_branch() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -3521,6 +3764,112 @@ mod tests {
 
         let view = state.view();
         assert!(view.quick_start_entries[0].reuse_action_label.is_none());
+    }
+
+    #[test]
+    fn open_with_previous_profile_restores_full_profile_without_reusing_branch() {
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "gwt".to_string()],
+            suggested_service: Some("api".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let state = LaunchWizardState::open_with_previous_profile(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Continue,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                windows_shell: None,
+            }),
+        );
+
+        let view = state.view();
+        assert_eq!(view.branch_name, "feature/current");
+        assert_eq!(view.selected_agent_id, "codex");
+        assert_eq!(view.selected_model, "gpt-5.5");
+        assert_eq!(view.selected_reasoning, "high");
+        assert_eq!(view.selected_version, "0.110.0");
+        assert_eq!(view.selected_execution_mode, "continue");
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("gwt"));
+        assert_eq!(view.selected_docker_lifecycle, "restart");
+        assert!(view.skip_permissions);
+        assert!(view.codex_fast_mode);
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.branch.as_deref(), Some("feature/current"));
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+        assert!(config.resume_session_id.is_none());
+        assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn previous_profile_docker_service_falls_back_to_current_suggestion() {
+        let mut ctx = context(branch("feature/current"), "feature/current");
+        ctx.docker_context = Some(DockerWizardContext {
+            services: vec!["api".to_string(), "worker".to_string()],
+            suggested_service: Some("worker".to_string()),
+        });
+        ctx.docker_service_status = gwt_docker::ComposeServiceStatus::Running;
+        let state = LaunchWizardState::open_with_previous_profile(
+            ctx,
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                docker_service: Some("missing".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                windows_shell: None,
+            }),
+        );
+
+        let view = state.view();
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("worker"));
+    }
+
+    #[test]
+    fn previous_profile_docker_runtime_falls_back_to_host_without_context() {
+        let state = LaunchWizardState::open_with_previous_profile(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
+                docker_service: Some("gwt".to_string()),
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
+                windows_shell: None,
+            }),
+        );
+
+        let view = state.view();
+        assert_eq!(view.selected_runtime_target, "host");
+        assert!(view.selected_docker_service.is_none());
+        assert!(!view.show_docker_lifecycle);
     }
 
     #[test]
@@ -3915,25 +4264,33 @@ mod tests {
         });
 
         let view = state.view();
-        assert_eq!(
-            view.selected_windows_shell.as_deref(),
-            Some("power_shell_7")
-        );
         assert_eq!(view.windows_shell_options.len(), 3);
         assert!(view
             .windows_shell_options
             .iter()
             .any(|option| option.label == "PowerShell 7"));
-        assert!(view
-            .launch_summary
-            .iter()
-            .any(|item| item.label == "Shell" && item.value == "PowerShell 7"));
+        if cfg!(windows) {
+            assert_eq!(
+                view.selected_windows_shell.as_deref(),
+                Some("power_shell_7")
+            );
+            assert!(view
+                .launch_summary
+                .iter()
+                .any(|item| item.label == "Shell" && item.value == "PowerShell 7"));
+        } else {
+            assert_eq!(view.selected_windows_shell.as_deref(), None);
+        }
 
         let config = state.build_launch_config().expect("agent config");
-        assert_eq!(
-            config.windows_shell,
-            Some(gwt_agent::WindowsShellKind::PowerShell7)
-        );
+        if cfg!(windows) {
+            assert_eq!(
+                config.windows_shell,
+                Some(gwt_agent::WindowsShellKind::PowerShell7)
+            );
+        } else {
+            assert_eq!(config.windows_shell, None);
+        }
 
         state.apply(LaunchWizardAction::SetLaunchTarget {
             target: LaunchTargetKind::Shell,
@@ -3941,10 +4298,14 @@ mod tests {
 
         match state.build_launch_request().expect("shell request") {
             LaunchWizardLaunchRequest::Shell(config) => {
-                assert_eq!(
-                    config.windows_shell,
-                    Some(gwt_agent::WindowsShellKind::PowerShell7)
-                );
+                if cfg!(windows) {
+                    assert_eq!(
+                        config.windows_shell,
+                        Some(gwt_agent::WindowsShellKind::PowerShell7)
+                    );
+                } else {
+                    assert_eq!(config.windows_shell, None);
+                }
             }
             other => panic!("expected shell launch request, got {other:?}"),
         }
@@ -4361,6 +4722,7 @@ mod tests {
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             }],
+            previous_profile: None,
         });
 
         let view = state.view();

@@ -1,4 +1,4 @@
-//! `gwt hook runtime-state <event>` — write a tiny JSON state file that
+//! `gwtd hook runtime-state <event>` — write a tiny JSON state file that
 //! tells the Branches tab whether the agent session is currently running
 //! or waiting for user input.
 //!

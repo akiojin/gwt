@@ -1,4 +1,4 @@
-//! CLI dispatch for `gwt issue spec ...` subcommands.
+//! CLI dispatch for `gwtd issue spec ...` subcommands.
 //!
 //! SPEC-12 Phase 6: when the gwt binary is invoked with arguments starting
 //! with `issue`, we treat it as a CLI call rather than a GUI launch. This
@@ -7,17 +7,17 @@
 //!
 //! Supported commands:
 //!
-//! - `gwt issue spec <n>` — print every section for an issue
-//! - `gwt issue spec <n> --section <name>` — print one section only
-//! - `gwt issue spec <n> --edit <name> -f <file>` — replace one section
+//! - `gwtd issue spec <n>` — print every section for an issue
+//! - `gwtd issue spec <n> --section <name>` — print one section only
+//! - `gwtd issue spec <n> --edit <name> -f <file>` — replace one section
 //!   from a file (`-` means stdin)
-//! - `gwt issue spec <n> --edit spec --json [-f <file>] [--replace]` —
+//! - `gwtd issue spec <n> --edit spec --json [-f <file>] [--replace]` —
 //!   structured JSON update for the spec section
-//! - `gwt issue spec list [--phase <name>] [--state open|closed]` —
+//! - `gwtd issue spec list [--phase <name>] [--state open|closed]` —
 //!   list SPEC-labeled issues
-//! - `gwt issue spec create --json --title <t> [-f <file>]` —
+//! - `gwtd issue spec create --json --title <t> [-f <file>]` —
 //!   create a SPEC from structured JSON
-//! - `gwt issue spec <n> --rename <title>` — rename the Issue title
+//! - `gwtd issue spec <n> --rename <title>` — rename the Issue title
 
 mod actions;
 mod board;
@@ -50,7 +50,7 @@ use gwt_github::{
 };
 pub(crate) use index::parse as parse_index_args;
 
-/// Compact linked PR summary used by `gwt issue linked-prs`.
+/// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkedPrSummary {
     pub number: u64,
@@ -59,7 +59,7 @@ pub struct LinkedPrSummary {
     pub url: String,
 }
 
-/// Compact PR check entry used by `gwt pr checks`.
+/// Compact PR check entry used by `gwtd pr checks`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrCheckItem {
     pub name: String,
@@ -71,7 +71,7 @@ pub struct PrCheckItem {
     pub workflow: String,
 }
 
-/// Render-friendly aggregate used by `gwt pr checks`.
+/// Render-friendly aggregate used by `gwtd pr checks`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrChecksSummary {
     pub summary: String,
@@ -81,7 +81,7 @@ pub struct PrChecksSummary {
     pub checks: Vec<PrCheckItem>,
 }
 
-/// PR review summary used by `gwt pr reviews`.
+/// PR review summary used by `gwtd pr reviews`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrReview {
     pub id: String,
@@ -101,7 +101,7 @@ pub struct PrReviewThreadComment {
     pub author: String,
 }
 
-/// Review thread snapshot used by `gwt pr review-threads`.
+/// Review thread snapshot used by `gwtd pr review-threads`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrReviewThread {
     pub id: String,
@@ -112,7 +112,7 @@ pub struct PrReviewThread {
     pub comments: Vec<PrReviewThreadComment>,
 }
 
-/// Test-visible log entry for `gwt pr create`.
+/// Test-visible log entry for `gwtd pr create`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrCreateCall {
     pub base: String,
@@ -123,7 +123,7 @@ pub struct PrCreateCall {
     pub draft: bool,
 }
 
-/// Test-visible log entry for `gwt pr edit`.
+/// Test-visible log entry for `gwtd pr edit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrEditCall {
     pub number: u64,
@@ -135,65 +135,65 @@ pub struct PrEditCall {
 /// Top-level argv parse result for the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
-    /// `gwt issue spec <n>` — print all sections.
+    /// `gwtd issue spec <n>` — print all sections.
     SpecReadAll { number: u64 },
-    /// `gwt issue spec <n> --section <name>` — print a single section.
+    /// `gwtd issue spec <n> --section <name>` — print a single section.
     SpecReadSection { number: u64, section: String },
-    /// `gwt issue spec <n> --edit <name> -f <file>` — replace a section.
+    /// `gwtd issue spec <n> --edit <name> -f <file>` — replace a section.
     SpecEditSection {
         number: u64,
         section: String,
         file: String,
     },
-    /// `gwt issue spec <n> --edit spec --json [-f <file>] [--replace]`.
+    /// `gwtd issue spec <n> --edit spec --json [-f <file>] [--replace]`.
     SpecEditSectionJson {
         number: u64,
         section: String,
         file: Option<String>,
         replace: bool,
     },
-    /// `gwt issue spec list [--phase <name>] [--state open|closed]`.
+    /// `gwtd issue spec list [--phase <name>] [--state open|closed]`.
     SpecList {
         phase: Option<String>,
         state: Option<String>,
     },
-    /// `gwt issue spec create --title <t> -f <body_file> [--label <l>]*`.
+    /// `gwtd issue spec create --title <t> -f <body_file> [--label <l>]*`.
     SpecCreate {
         title: String,
         file: String,
         labels: Vec<String>,
     },
-    /// `gwt issue spec create --json --title <t> [-f <file>] [--label <l>]*`.
+    /// `gwtd issue spec create --json --title <t> [-f <file>] [--label <l>]*`.
     SpecCreateJson {
         title: String,
         file: Option<String>,
         labels: Vec<String>,
     },
-    /// `gwt issue spec create --help`.
+    /// `gwtd issue spec create --help`.
     SpecCreateHelp,
-    /// `gwt issue spec pull [--all | <n>...]` — refresh cache from server.
+    /// `gwtd issue spec pull [--all | <n>...]` — refresh cache from server.
     SpecPull { all: bool, numbers: Vec<u64> },
-    /// `gwt issue spec repair <n>` — clear cache and re-fetch from server.
+    /// `gwtd issue spec repair <n>` — clear cache and re-fetch from server.
     SpecRepair { number: u64 },
-    /// `gwt issue spec <n> --rename <title>` — update the Issue title.
+    /// `gwtd issue spec <n> --rename <title>` — update the Issue title.
     SpecRename { number: u64, title: String },
-    /// `gwt issue view <n> [--refresh]` — print a plain issue from cache/live.
+    /// `gwtd issue view <n> [--refresh]` — print a plain issue from cache/live.
     IssueView { number: u64, refresh: bool },
-    /// `gwt issue comments <n> [--refresh]` — print issue comments.
+    /// `gwtd issue comments <n> [--refresh]` — print issue comments.
     IssueComments { number: u64, refresh: bool },
-    /// `gwt issue linked-prs <n> [--refresh]` — print linked PR summaries.
+    /// `gwtd issue linked-prs <n> [--refresh]` — print linked PR summaries.
     IssueLinkedPrs { number: u64, refresh: bool },
-    /// `gwt issue create --title <t> -f <body_file> [--label <l>]*`.
+    /// `gwtd issue create --title <t> -f <body_file> [--label <l>]*`.
     IssueCreate {
         title: String,
         file: String,
         labels: Vec<String>,
     },
-    /// `gwt issue comment <n> -f <body_file>` — create a plain issue comment.
+    /// `gwtd issue comment <n> -f <body_file>` — create a plain issue comment.
     IssueComment { number: u64, file: String },
-    /// `gwt pr current` — print the PR associated with the current branch.
+    /// `gwtd pr current` — print the PR associated with the current branch.
     PrCurrent,
-    /// `gwt pr create --base <branch> [--head <branch>] --title <t> -f <body_file>`.
+    /// `gwtd pr create --base <branch> [--head <branch>] --title <t> -f <body_file>`.
     PrCreate {
         base: String,
         head: Option<String>,
@@ -202,32 +202,32 @@ pub enum CliCommand {
         labels: Vec<String>,
         draft: bool,
     },
-    /// `gwt pr edit <n> [--title <t>] [-f <body_file>] [--add-label <label>]*`.
+    /// `gwtd pr edit <n> [--title <t>] [-f <body_file>] [--add-label <label>]*`.
     PrEdit {
         number: u64,
         title: Option<String>,
         file: Option<String>,
         add_labels: Vec<String>,
     },
-    /// `gwt pr view <n>` — print a PR by number.
+    /// `gwtd pr view <n>` — print a PR by number.
     PrView { number: u64 },
-    /// `gwt pr comment <n> -f <body_file>` — create a PR issue comment.
+    /// `gwtd pr comment <n> -f <body_file>` — create a PR issue comment.
     PrComment { number: u64, file: String },
-    /// `gwt pr reviews <n>` — print PR review summaries.
+    /// `gwtd pr reviews <n>` — print PR review summaries.
     PrReviews { number: u64 },
-    /// `gwt pr review-threads <n>` — print review thread snapshots.
+    /// `gwtd pr review-threads <n>` — print review thread snapshots.
     PrReviewThreads { number: u64 },
-    /// `gwt pr review-threads reply-and-resolve <n> -f <body_file>`.
+    /// `gwtd pr review-threads reply-and-resolve <n> -f <body_file>`.
     PrReviewThreadsReplyAndResolve { number: u64, file: String },
-    /// `gwt pr checks <n>` — print PR checks and summary.
+    /// `gwtd pr checks <n>` — print PR checks and summary.
     PrChecks { number: u64 },
-    /// `gwt actions logs --run <id>` — print raw GitHub Actions run logs.
+    /// `gwtd actions logs --run <id>` — print raw GitHub Actions run logs.
     ActionsLogs { run_id: u64 },
-    /// `gwt actions job-logs --job <id>` — print raw GitHub Actions job logs.
+    /// `gwtd actions job-logs --job <id>` — print raw GitHub Actions job logs.
     ActionsJobLogs { job_id: u64 },
-    /// `gwt board show [--json]`.
+    /// `gwtd board show [--json]`.
     BoardShow { json: bool },
-    /// `gwt board post --kind <kind> (--body <text> | -f <file>)`.
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)`.
     BoardPost {
         kind: String,
         body: Option<String>,
@@ -236,28 +236,28 @@ pub enum CliCommand {
         topics: Vec<String>,
         owners: Vec<String>,
     },
-    /// `gwt index status`.
+    /// `gwtd index status`.
     IndexStatus,
-    /// `gwt index rebuild [--scope <scope>]`.
+    /// `gwtd index rebuild [--scope <scope>]`.
     IndexRebuild { scope: IndexScope },
-    /// `gwt hook <name> [args...]` — dispatch to an in-binary hook handler.
+    /// `gwtd hook <name> [args...]` — dispatch to an in-binary hook handler.
     ///
     /// See SPEC #1942 (CORE-CLI) — replaces retired external hook scripts
     /// and inline shell hooks in `.claude/settings.local.json`.
     Hook { name: String, rest: Vec<String> },
-    /// `gwt update [--check]` — check for a new gwt release and optionally apply it.
+    /// `gwtd update [--check]` — check for a new gwt release and optionally apply it.
     Update { check_only: bool },
-    /// `gwt __internal apply-update ...` — internal helper: replace the binary then restart.
+    /// `gwtd __internal apply-update ...` — internal helper: replace the binary then restart.
     InternalApplyUpdate { rest: Vec<String> },
-    /// `gwt __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
+    /// `gwtd __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
     InternalRunInstaller { rest: Vec<String> },
-    /// `gwt __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
+    /// `gwtd __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
     InternalDaemonHook { name: String, rest: Vec<String> },
-    /// `gwt discuss <resolve|park|reject|clear-next-question> --proposal <label>`.
+    /// `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`.
     Discuss(DiscussAction),
-    /// `gwt plan <start|phase|complete|abort> --spec <n> [...]`.
+    /// `gwtd plan <start|phase|complete|abort> --spec <n> [...]`.
     Plan(SkillStateAction),
-    /// `gwt build <start|phase|complete|abort> --spec <n> [...]`.
+    /// `gwtd build <start|phase|complete|abort> --spec <n> [...]`.
     Build(SkillStateAction),
 }
 
@@ -270,7 +270,7 @@ pub enum IndexScope {
     FilesDocs,
 }
 
-/// Sub-action for `gwt discuss ...` (SPEC-1935 FR-014p).
+/// Sub-action for `gwtd discuss ...` (SPEC-1935 FR-014p).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscussAction {
     Resolve { proposal: String },
@@ -279,7 +279,7 @@ pub enum DiscussAction {
     ClearNextQuestion { proposal: String },
 }
 
-/// Sub-action for `gwt plan ...` / `gwt build ...` (SPEC-1935 FR-014q/r).
+/// Sub-action for `gwtd plan ...` / `gwtd build ...` (SPEC-1935 FR-014q/r).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillStateAction {
     Start { spec: u64 },
@@ -302,7 +302,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwt issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwt issue spec list [--phase <p>] [--state open|closed] | gwt issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwt issue view|comments|linked-prs <n> [--refresh] | gwt issue create --title <t> -f <file> [--label <l>]* | gwt issue comment <n> -f <file> | gwt pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwt actions logs --run <id> | gwt actions job-logs --job <id> | gwt board show [--json] | gwt board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwt index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -347,12 +347,12 @@ pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     issue::parse(args)
 }
 
-/// Parse an argv slice into a `gwt pr ...` [`CliCommand`].
+/// Parse an argv slice into a `gwtd pr ...` [`CliCommand`].
 pub fn parse_pr_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     pr::parse(args)
 }
 
-/// Parse an argv slice into a `gwt actions ...` [`CliCommand`].
+/// Parse an argv slice into a `gwtd actions ...` [`CliCommand`].
 pub fn parse_actions_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     actions::parse(args)
 }
@@ -381,9 +381,9 @@ fn ensure_no_remaining_args<'a>(
     Ok(())
 }
 
-/// Parse the tail of a `gwt hook ...` argv slice into a [`CliCommand::Hook`].
+/// Parse the tail of a `gwtd hook ...` argv slice into a [`CliCommand::Hook`].
 ///
-/// SPEC #1942 (CORE-CLI): `gwt hook <name> [args...]` is the single entry
+/// SPEC #1942 (CORE-CLI): `gwtd hook <name> [args...]` is the single entry
 /// point for every in-binary hook handler. The known hook names are:
 ///
 /// - `runtime-state <event>`
@@ -401,7 +401,7 @@ pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     })
 }
 
-/// Parse `gwt discuss <action> --proposal <label>` (SPEC-1935 FR-014p).
+/// Parse `gwtd discuss <action> --proposal <label>` (SPEC-1935 FR-014p).
 pub fn parse_discuss_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     let proposal = parse_named_string(rest, "--proposal")?;
@@ -415,12 +415,12 @@ pub fn parse_discuss_args(args: &[String]) -> Result<CliCommand, CliParseError> 
     Ok(CliCommand::Discuss(action))
 }
 
-/// Parse `gwt plan <action> --spec <n> [...]` (SPEC-1935 FR-014q).
+/// Parse `gwtd plan <action> --spec <n> [...]` (SPEC-1935 FR-014q).
 pub fn parse_plan_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Plan)
 }
 
-/// Parse `gwt build <action> --spec <n> [...]` (SPEC-1935 FR-014r).
+/// Parse `gwtd build <action> --spec <n> [...]` (SPEC-1935 FR-014r).
 pub fn parse_build_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Build)
 }
@@ -1514,15 +1514,15 @@ fn fetch_actions_job_log_via_gh(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Dispatch a `gwt hook <name> [args...]` invocation.
+/// Dispatch a `gwtd hook <name> [args...]` invocation.
 ///
-/// SPEC-2077 Phase 2: `gwt hook ...` remains the outward-facing surface, but
-/// the front door now relays to the hidden `gwt __internal daemon-hook ...`
+/// SPEC-2077 Phase 2: `gwtd hook ...` remains the outward-facing surface, but
+/// the front door now relays to the hidden `gwtd __internal daemon-hook ...`
 /// helper so runtime evolution stays behind the same operator-facing binary.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::HookKind;
     let Some(_kind) = HookKind::from_name(name) else {
-        let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
+        let _ = writeln!(env.stderr(), "gwtd hook: unknown hook '{name}'");
         return Ok(2);
     };
 
@@ -1536,7 +1536,7 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
 
 fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
     let mut argv = vec![
-        "gwt".to_string(),
+        "gwtd".to_string(),
         "__internal".to_string(),
         "daemon-hook".to_string(),
         name.to_string(),
@@ -1611,7 +1611,7 @@ pub fn run_daemon_hook<E: CliEnv>(
     };
 
     let Some(kind) = HookKind::from_name(name) else {
-        let _ = writeln!(env.stderr(), "gwt hook: unknown hook '{name}'");
+        let _ = writeln!(env.stderr(), "gwtd hook: unknown hook '{name}'");
         return Ok(2);
     };
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
@@ -1620,13 +1620,13 @@ pub fn run_daemon_hook<E: CliEnv>(
         match output.serialize_to(env.stdout()) {
             Ok(()) => output.exit_code(),
             Err(err) => {
-                let _ = writeln!(env.stderr(), "gwt hook: failed to serialize output: {err}");
+                let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
                 1
             }
         }
     }
     fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let _ = writeln!(env.stderr(), "gwt hook {name}: {err}");
+        let _ = writeln!(env.stderr(), "gwtd hook {name}: {err}");
         1
     }
 
@@ -1635,7 +1635,7 @@ pub fn run_daemon_hook<E: CliEnv>(
             let Some(event) = rest.first() else {
                 let _ = writeln!(
                     env.stderr(),
-                    "gwt hook runtime-state: missing <event> argument"
+                    "gwtd hook runtime-state: missing <event> argument"
                 );
                 return Ok(2);
             };
@@ -1648,7 +1648,7 @@ pub fn run_daemon_hook<E: CliEnv>(
             let Some(event) = rest.first() else {
                 let _ = writeln!(
                     env.stderr(),
-                    "gwt hook coordination-event: missing <event> argument"
+                    "gwtd hook coordination-event: missing <event> argument"
                 );
                 return Ok(2);
             };
@@ -1661,7 +1661,7 @@ pub fn run_daemon_hook<E: CliEnv>(
             let Some(event) = rest.first() else {
                 let _ = writeln!(
                     env.stderr(),
-                    "gwt hook board-reminder: missing <event> argument"
+                    "gwtd hook board-reminder: missing <event> argument"
                 );
                 return Ok(2);
             };
@@ -2154,7 +2154,7 @@ fn main() -> ExitCode {
         assert_eq!(
             argv,
             vec![
-                "gwt".to_string(),
+                "gwtd".to_string(),
                 "__internal".to_string(),
                 "daemon-hook".to_string(),
                 "runtime-state".to_string(),

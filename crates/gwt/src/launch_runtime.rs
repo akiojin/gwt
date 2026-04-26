@@ -159,7 +159,12 @@ pub(crate) fn build_shell_process_launch(
     env.extend(config.env_vars.clone());
 
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        let shell = match config.windows_shell {
+        let windows_shell = if cfg!(windows) {
+            config.windows_shell
+        } else {
+            None
+        };
+        let shell = match windows_shell {
             Some(windows_shell) => gwt::ShellProgram {
                 command: windows_shell_process_command(windows_shell).to_string(),
                 args: interactive_windows_shell_args(windows_shell),
@@ -485,7 +490,7 @@ pub(crate) fn install_launch_gwt_bin_env_with_lookup(
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> Result<(), String> {
     let gwt_bin = match runtime_target {
-        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWT_BIN_PATH.to_string(),
+        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWTD_BIN_PATH.to_string(),
         gwt_agent::LaunchRuntimeTarget::Host => {
             gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
                 .to_string_lossy()
@@ -503,4 +508,40 @@ pub(crate) fn install_launch_gwt_bin_env_with_lookup(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_shell_process_command_maps_all_variants() {
+        assert_eq!(
+            windows_shell_process_command(gwt_agent::WindowsShellKind::CommandPrompt),
+            "cmd.exe"
+        );
+        assert_eq!(
+            windows_shell_process_command(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            "powershell"
+        );
+        assert_eq!(
+            windows_shell_process_command(gwt_agent::WindowsShellKind::PowerShell7),
+            "pwsh"
+        );
+    }
+
+    #[test]
+    fn interactive_windows_shell_args_returns_expected_flags() {
+        assert!(
+            interactive_windows_shell_args(gwt_agent::WindowsShellKind::CommandPrompt).is_empty()
+        );
+        assert_eq!(
+            interactive_windows_shell_args(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            vec!["-NoLogo"]
+        );
+        assert_eq!(
+            interactive_windows_shell_args(gwt_agent::WindowsShellKind::PowerShell7),
+            vec!["-NoLogo"]
+        );
+    }
 }

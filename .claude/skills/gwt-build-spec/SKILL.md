@@ -33,11 +33,11 @@ SPEC-1935 FR-014r routes Stop through `skill-build-spec-stop-check`, which
 reads `.gwt/skill-state/build-spec.json` and blocks Stop while the skill is
 active. Register the skill lifecycle with the exit CLI:
 
-- `gwt build start --spec <n>` when the skill starts an implementation pass
-- `gwt build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
+- `gwtd build start --spec <n>` when the skill starts an implementation pass
+- `gwtd build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
   TDD milestone (logging only)
-- `gwt build complete --spec <n>` once the PR is open and verification passed
-- `gwt build abort --spec <n> --reason '<text>'` when implementation cannot
+- `gwtd build complete --spec <n>` once the PR is open and verification passed
+- `gwtd build abort --spec <n> --reason '<text>'` when implementation cannot
   proceed without a product decision or blocking merge conflict
 
 The Stop-block handler honours Claude Code / Codex's built-in
@@ -49,18 +49,18 @@ continuation; a genuinely stuck turn still terminates normally.
 Determine the mode at entry:
 
 - **SPEC mode** if a SPEC ID is provided or discoverable from the current branch/context, AND
-  `gwt issue spec <N> --section tasks` で tasks セクションが取得できる
+  `gwtd issue spec <N> --section tasks` で tasks セクションが取得できる
 - **Standalone mode** otherwise
 
 ## Phase 1: Context Load
 
 ### SPEC mode
 
-1. `gwt issue spec <N>` で SPEC の全セクション（spec, plan, tasks）を読み込む。
+1. `gwtd issue spec <N>` で SPEC の全セクション（spec, plan, tasks）を読み込む。
 2. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-3. SPEC セクションの読み書きは `gwt issue spec <N> --section <name>` / `gwt issue spec <N> --edit <name> -f <file>` を使用する。
+3. SPEC セクションの読み書きは `gwtd issue spec <N> --section <name>` / `gwtd issue spec <N> --edit <name> -f <file>` を使用する。
 
 ### Standalone mode
 
@@ -152,7 +152,7 @@ Required checks:
 Update execution tracking:
 
 - Mark completed tasks in `tasks.md`
-- tasks セクションのチェックボックスを `gwt issue spec <N> --edit tasks -f <file>` で更新する
+- tasks セクションのチェックボックスを `gwtd issue spec <N> --edit tasks -f <file>` で更新する
 
 ### Standalone mode
 

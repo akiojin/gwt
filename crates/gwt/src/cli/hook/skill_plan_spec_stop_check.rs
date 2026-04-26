@@ -1,4 +1,4 @@
-//! `gwt hook skill-plan-spec-stop-check` — Stop-block handler for the
+//! `gwtd hook skill-plan-spec-stop-check` — Stop-block handler for the
 //! `gwt-plan-spec` skill (SPEC-1935 Phase 10, FR-014q).
 //!
 //! Reads `.gwt/skill-state/plan-spec.json` in the current worktree. When
@@ -85,8 +85,8 @@ pub(crate) fn decide(
 
     HookOutput::stop_block(format!(
         "{skill} for {spec} is still active{phase}.\n\
-         Continue the {skill} workflow, or call `gwt {verb} complete --spec <n>` when the artifacts are ready, \
-         or `gwt {verb} abort --spec <n> --reason '<text>'` to abandon.",
+         Continue the {skill} workflow, or call `gwtd {verb} complete --spec <n>` when the artifacts are ready, \
+         or `gwtd {verb} abort --spec <n> --reason '<text>'` to abandon.",
         skill = skill_display,
         spec = spec_clause,
         phase = phase_clause,
@@ -142,7 +142,7 @@ mod tests {
             &[
                 "gwt-plan-spec for SPEC-1935",
                 "phase: plan-draft",
-                "gwt plan complete",
+                "gwtd plan complete",
             ],
         );
     }

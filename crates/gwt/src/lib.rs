@@ -6,6 +6,7 @@ pub mod custom_agents_service;
 pub mod daemon_runtime;
 mod discussion_resume;
 pub mod file_tree;
+pub mod gui_single_instance;
 pub mod index_worker;
 mod issue_cache;
 pub mod knowledge_bridge;
@@ -18,6 +19,12 @@ pub mod profile_dispatch;
 pub mod protocol;
 pub mod window_state;
 pub mod workspace;
+
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
 
 pub use branch_cleanup::{
     cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
@@ -44,9 +51,9 @@ pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
     LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
-    LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardQuickStartView,
-    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
-    LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardPreviousProfile,
+    LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
+    LaunchWizardView, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]

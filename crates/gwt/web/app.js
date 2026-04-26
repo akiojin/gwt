@@ -1,5 +1,5 @@
-      import { Terminal } from "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm";
-      import { FitAddon } from "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm";
+      import { Terminal } from "/assets/xterm/xterm.mjs";
+      import { FitAddon } from "/assets/xterm/addon-fit.mjs";
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -856,8 +856,16 @@
           if (!canRefreshTerminalViewport(windowId)) {
             return;
           }
-          fitTerminal(windowId, false);
+          refreshTerminalViewport(windowId);
         });
+      }
+
+      function refreshTerminalViewport(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || !canRefreshTerminalViewport(windowId)) {
+          return;
+        }
+        runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
 
       function sendGeometry(windowId, cols, rows) {

@@ -1,5 +1,5 @@
 //! Shared `start|phase|complete|abort` implementation for the
-//! `gwt plan ...` and `gwt build ...` exit CLIs (SPEC-1935 FR-014q/r).
+//! `gwtd plan ...` and `gwtd build ...` exit CLIs (SPEC-1935 FR-014q/r).
 //!
 //! Both CLIs persist a small JSON state file under
 //! `<worktree>/.gwt/skill-state/<skill>.json` via

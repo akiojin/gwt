@@ -1,4 +1,4 @@
-//! `gwt hook workflow-policy` — hook-driven workflow gating.
+//! `gwtd hook workflow-policy` — hook-driven workflow gating.
 //!
 //! v1 keeps the policy deliberately narrow:
 //!
@@ -324,6 +324,9 @@ Coverage requirements.
 
     #[test]
     fn resolve_workflow_context_uses_session_cache_and_linkage_store() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _lock = crate::cli::fake_gh_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -11,6 +11,18 @@ pub(crate) fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
+pub(crate) fn xterm_js() -> &'static str {
+    include_str!("../web/vendor/xterm/xterm.mjs")
+}
+
+pub(crate) fn xterm_fit_js() -> &'static str {
+    include_str!("../web/vendor/xterm/addon-fit.mjs")
+}
+
+pub(crate) fn xterm_css() -> &'static str {
+    include_str!("../web/vendor/xterm/xterm.css")
+}
+
 pub(crate) async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
@@ -19,6 +31,27 @@ pub(crate) async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
+    )
+}
+
+pub(crate) async fn xterm_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        xterm_js(),
+    )
+}
+
+pub(crate) async fn xterm_fit_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        xterm_fit_js(),
+    )
+}
+
+pub(crate) async fn xterm_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        xterm_css(),
     )
 }
 
@@ -104,8 +137,8 @@ mod tests {
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
         .expect("valid regex");
-        let hidden_geometry_sync = regex::Regex::new(
-            r"if\s*\(\s*!canRefreshTerminalViewport\(windowId\)\s*\)\s*\{\s*if\s*\(\s*persist\s*\)\s*\{\s*sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\);\s*\}\s*return;\s*\}",
+        let refresh_call = regex::Regex::new(
+            r"runtime\.terminal\.refresh\(0,\s*runtime\.terminal\.rows\s*-\s*1\);",
         )
         .expect("valid regex");
 
@@ -135,12 +168,13 @@ mod tests {
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
-                && html.contains("!workspaceWindowById(windowId)?.minimized"),
+                && html.contains("!workspaceWindowById(windowId)?.minimized")
+                && refresh_call.is_match(html),
             "expected terminal viewport refresh to skip minimized windows",
         );
         assert!(
-            hidden_geometry_sync.is_match(html),
-            "expected persisted terminal fit to sync geometry even while hidden",
+            !html.contains("fitTerminal(windowId, false);"),
+            "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
         assert!(
             html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
@@ -149,6 +183,27 @@ mod tests {
                 )
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
             "expected restored terminals to persist fitted geometry after becoming visible",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_assets_are_local_and_pinned() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            index_html().contains(r#"href="/assets/xterm/xterm.css""#),
+            "expected xterm stylesheet to be served from the embedded local asset route",
+        );
+        assert!(
+            app_js().contains(r#"from "/assets/xterm/xterm.mjs""#)
+                && app_js().contains(r#"from "/assets/xterm/addon-fit.mjs""#),
+            "expected xterm modules to be served from embedded local asset routes",
+        );
+        assert!(
+            !html.contains("cdn.jsdelivr.net")
+                && !html.contains("unpkg.com")
+                && !html.contains("cdnjs.cloudflare.com"),
+            "expected embedded terminal assets to avoid CDN/runtime network dependencies",
         );
     }
 
