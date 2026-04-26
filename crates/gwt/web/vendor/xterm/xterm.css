@@ -236,10 +236,8 @@
 
 .xterm .xterm-scrollable-element > .visible {
 	opacity: 1;
-
 	/* Background rule added for IE9 - to allow clicks on dom node */
 	background:rgba(0,0,0,0);
-
 	transition: opacity 100ms linear;
 	/* In front of peek view */
 	z-index: 11;
