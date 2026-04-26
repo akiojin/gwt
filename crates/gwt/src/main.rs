@@ -2610,8 +2610,15 @@ mod tests {
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
 
-        assert_eq!(launch.command, "powershell");
-        assert_eq!(launch.args, vec!["-NoLogo".to_string()]);
+        if cfg!(windows) {
+            assert_eq!(launch.command, "powershell");
+            assert_eq!(launch.args, vec!["-NoLogo".to_string()]);
+        } else {
+            // On non-Windows, the defensive platform guard ignores windows_shell
+            // and falls back to detect_shell_program().
+            assert_ne!(launch.command, "powershell");
+            assert_ne!(launch.command, "cmd.exe");
+        }
     }
 
     #[test]
