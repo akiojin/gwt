@@ -44,9 +44,9 @@ pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
     LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
-    LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardQuickStartView,
-    LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView, LaunchWizardView,
-    LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardPreviousProfile,
+    LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
+    LaunchWizardView, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]
