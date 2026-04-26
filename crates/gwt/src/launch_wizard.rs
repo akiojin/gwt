@@ -1502,7 +1502,8 @@ impl LaunchWizardState {
     }
 
     fn windows_shell_for_launch(&self) -> Option<gwt_agent::WindowsShellKind> {
-        (self.runtime_target == gwt_agent::LaunchRuntimeTarget::Host).then_some(self.windows_shell)
+        (cfg!(windows) && self.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
+            .then_some(self.windows_shell)
     }
 
     fn docker_service_prompt_required(&self) -> bool {
@@ -3915,25 +3916,35 @@ mod tests {
         });
 
         let view = state.view();
-        assert_eq!(
-            view.selected_windows_shell.as_deref(),
-            Some("power_shell_7")
-        );
-        assert_eq!(view.windows_shell_options.len(), 3);
-        assert!(view
-            .windows_shell_options
-            .iter()
-            .any(|option| option.label == "PowerShell 7"));
-        assert!(view
-            .launch_summary
-            .iter()
-            .any(|item| item.label == "Shell" && item.value == "PowerShell 7"));
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                view.selected_windows_shell.as_deref(),
+                Some("power_shell_7")
+            );
+            assert_eq!(view.windows_shell_options.len(), 3);
+            assert!(view
+                .windows_shell_options
+                .iter()
+                .any(|option| option.label == "PowerShell 7"));
+            assert!(view
+                .launch_summary
+                .iter()
+                .any(|item| item.label == "Shell" && item.value == "PowerShell 7"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(view.selected_windows_shell.as_deref(), None);
+        }
 
         let config = state.build_launch_config().expect("agent config");
+        #[cfg(windows)]
         assert_eq!(
             config.windows_shell,
             Some(gwt_agent::WindowsShellKind::PowerShell7)
         );
+        #[cfg(not(windows))]
+        assert_eq!(config.windows_shell, None);
 
         state.apply(LaunchWizardAction::SetLaunchTarget {
             target: LaunchTargetKind::Shell,
@@ -3941,10 +3952,13 @@ mod tests {
 
         match state.build_launch_request().expect("shell request") {
             LaunchWizardLaunchRequest::Shell(config) => {
+                #[cfg(windows)]
                 assert_eq!(
                     config.windows_shell,
                     Some(gwt_agent::WindowsShellKind::PowerShell7)
                 );
+                #[cfg(not(windows))]
+                assert_eq!(config.windows_shell, None);
             }
             other => panic!("expected shell launch request, got {other:?}"),
         }
