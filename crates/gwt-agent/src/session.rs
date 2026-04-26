@@ -39,6 +39,8 @@ pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 pub struct Session {
     pub id: String,
     pub worktree_path: PathBuf,
+    #[serde(default)]
+    pub repo_hash: Option<String>,
     pub branch: String,
     pub agent_id: AgentId,
     pub agent_session_id: Option<String>,
@@ -113,11 +115,15 @@ impl Session {
         branch: impl Into<String>,
         agent_id: AgentId,
     ) -> Self {
+        let worktree_path = worktree_path.into();
         let now = Utc::now();
         let display_name = agent_id.display_name().to_string();
+        let repo_hash = gwt_core::repo_hash::detect_repo_hash(&worktree_path)
+            .map(|hash| hash.as_str().to_string());
         Self {
             id: Uuid::new_v4().to_string(),
-            worktree_path: worktree_path.into(),
+            worktree_path,
+            repo_hash,
             branch: branch.into(),
             agent_id,
             agent_session_id: None,

@@ -227,7 +227,7 @@ pub fn load_previous_launch_profile(
             (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
         })
         .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .filter(|session| same_launch_profile_repo(repo_path, &session.worktree_path))
+        .filter(|session| same_launch_profile_repo(repo_path, session))
         .max_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)
@@ -257,9 +257,19 @@ fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPre
     }
 }
 
-fn same_launch_profile_repo(repo_path: &Path, session_worktree_path: &Path) -> bool {
+fn same_launch_profile_repo(repo_path: &Path, session: &gwt_agent::Session) -> bool {
+    let session_worktree_path = &session.worktree_path;
     if same_path_or_exact(repo_path, session_worktree_path) {
         return true;
+    }
+
+    if let (Some(current_repo_hash), Some(session_repo_hash)) = (
+        repo_hash_for_existing_path(repo_path),
+        session.repo_hash.as_deref(),
+    ) {
+        if current_repo_hash == session_repo_hash {
+            return true;
+        }
     }
 
     let Ok(repo_root) = gwt_git::worktree::main_worktree_root(repo_path) else {
@@ -269,6 +279,16 @@ fn same_launch_profile_repo(repo_path: &Path, session_worktree_path: &Path) -> b
         return false;
     };
     same_path_or_exact(&repo_root, &session_root)
+}
+
+fn repo_hash_for_existing_path(path: &Path) -> Option<String> {
+    gwt_core::repo_hash::detect_repo_hash(path)
+        .or_else(|| {
+            gwt_git::worktree::main_worktree_root(path)
+                .ok()
+                .and_then(|root| gwt_core::repo_hash::detect_repo_hash(&root))
+        })
+        .map(|hash| hash.as_str().to_string())
 }
 
 fn same_path_or_exact(left: &Path, right: &Path) -> bool {
@@ -502,8 +522,11 @@ impl LaunchWizardState {
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
-        if let Some(previous_profile) = previous_profile {
-            state.apply_previous_profile(previous_profile);
+        let previous_profile_applied = previous_profile
+            .map(|profile| state.apply_previous_profile(profile))
+            .unwrap_or(false);
+        if !previous_profile_applied {
+            state.sync_docker_lifecycle_default();
         }
         state.selected = step_default_selection(state.step, &state);
         state
@@ -652,9 +675,10 @@ impl LaunchWizardState {
             self.docker_service = None;
         }
         self.sync_selected_agent_options();
-        if let Some(previous_profile) = previous_profile {
-            self.apply_previous_profile(previous_profile);
-        } else {
+        let previous_profile_applied = previous_profile
+            .map(|profile| self.apply_previous_profile(profile))
+            .unwrap_or(false);
+        if !previous_profile_applied {
             self.sync_docker_lifecycle_default();
         }
         self.selected = self
@@ -1112,13 +1136,13 @@ impl LaunchWizardState {
         }
     }
 
-    fn apply_previous_profile(&mut self, profile: LaunchWizardPreviousProfile) {
+    fn apply_previous_profile(&mut self, profile: LaunchWizardPreviousProfile) -> bool {
         let Some(agent) = self
             .detected_agents
             .iter()
-            .find(|candidate| candidate.id == profile.agent_id && candidate.available)
+            .find(|candidate| candidate.id == profile.agent_id)
         else {
-            return;
+            return false;
         };
 
         self.launch_target = LaunchTargetKind::Agent;
@@ -1156,6 +1180,7 @@ impl LaunchWizardState {
         if let Some(windows_shell) = profile.windows_shell {
             self.windows_shell = windows_shell;
         }
+        true
     }
 
     fn apply_previous_runtime_profile(
@@ -3012,7 +3037,7 @@ pub fn build_builtin_agent_options(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, process::Command};
 
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
@@ -3226,6 +3251,22 @@ mod tests {
         session.updated_at = updated_at;
         session.last_activity_at = updated_at;
         session
+    }
+
+    fn init_repo_with_origin(path: &Path, origin: &str) {
+        std::fs::create_dir_all(path).expect("repo dir");
+        let status = Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+        let status = Command::new("git")
+            .args(["remote", "add", "origin", origin])
+            .current_dir(path)
+            .status()
+            .expect("git remote add");
+        assert!(status.success(), "git remote add failed");
     }
 
     fn quick_start_entry(
@@ -3510,6 +3551,35 @@ mod tests {
             gwt_agent::LaunchRuntimeTarget::Docker
         );
         assert_eq!(profile.docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
+    fn load_previous_launch_profile_matches_deleted_worktree_by_persisted_repo_hash() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let origin = "https://github.com/example/project.git";
+        init_repo_with_origin(&repo, origin);
+        let removed_worktree = dir.path().join("removed-worktree");
+        let mut session = sample_session_record(
+            "feature/removed",
+            &removed_worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            None,
+        );
+        session.repo_hash = Some(
+            gwt_core::repo_hash::compute_repo_hash(origin)
+                .as_str()
+                .to_string(),
+        );
+        session
+            .save(dir.path())
+            .expect("save removed worktree session");
+
+        let profile = load_previous_launch_profile(&repo, dir.path())
+            .expect("profile should match persisted repo identity");
+
+        assert_eq!(profile.agent_id, "codex");
     }
 
     #[test]
@@ -3870,6 +3940,79 @@ mod tests {
         assert_eq!(view.selected_runtime_target, "host");
         assert!(view.selected_docker_service.is_none());
         assert!(!view.show_docker_lifecycle);
+    }
+
+    #[test]
+    fn previous_profile_restores_unavailable_agent_and_blocks_launch() {
+        let mut options = sample_agent_options();
+        options
+            .iter_mut()
+            .find(|option| option.id == "codex")
+            .expect("codex option")
+            .available = false;
+        let state = LaunchWizardState::open_with_previous_profile(
+            context(branch("feature/current"), "feature/current"),
+            options,
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                windows_shell: None,
+            }),
+        );
+
+        assert_eq!(state.view().selected_agent_id, "codex");
+        assert_eq!(
+            state.build_launch_config().unwrap_err(),
+            "Agent option is unavailable"
+        );
+    }
+
+    #[test]
+    fn hydration_syncs_docker_lifecycle_when_previous_profile_is_not_applicable() {
+        let mut state = LaunchWizardState::open_loading(
+            context(branch("feature/gui"), "feature/gui"),
+            Vec::new(),
+        );
+        state.apply_hydration(LaunchWizardHydration {
+            selected_branch: Some(branch("origin/feature/gui")),
+            normalized_branch_name: "feature/gui".to_string(),
+            worktree_path: Some(PathBuf::from("/tmp/repo-feature")),
+            quick_start_root: PathBuf::from("/tmp/repo-feature"),
+            docker_context: Some(DockerWizardContext {
+                services: vec!["app".to_string()],
+                suggested_service: Some("app".to_string()),
+            }),
+            docker_service_status: gwt_docker::ComposeServiceStatus::Running,
+            agent_options: sample_agent_options(),
+            quick_start_entries: Vec::new(),
+            previous_profile: Some(LaunchWizardPreviousProfile {
+                agent_id: "missing-agent".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::CreateAndStart,
+                windows_shell: None,
+            }),
+        });
+
+        assert_eq!(
+            state.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Connect
+        );
     }
 
     #[test]
