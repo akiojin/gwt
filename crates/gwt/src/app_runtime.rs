@@ -84,6 +84,10 @@ pub(crate) struct WindowRuntime {
     /// Taken and joined during `stop_window_runtime` so the reader releases
     /// its Arc clone of `pane` before the runtime is fully torn down.
     output_thread: Option<JoinHandle<()>>,
+    /// Handle to the process status watcher. It is independent from PTY EOF
+    /// because some agent exits can leave the terminal reader waiting even
+    /// after the direct child has finished.
+    status_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2962,6 +2966,7 @@ impl AppRuntime {
         let pane = Arc::new(Mutex::new(pane));
 
         let output_thread = self.spawn_output_thread(id.to_string(), pane.clone());
+        let status_thread = self.spawn_status_thread(id.to_string(), pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.window_pty_statuses
                 .insert(id.to_string(), WindowProcessStatus::Running);
@@ -2984,6 +2989,7 @@ impl AppRuntime {
             WindowRuntime {
                 pane,
                 output_thread: Some(output_thread),
+                status_thread: Some(status_thread),
             },
         );
         Ok(())
@@ -3358,6 +3364,14 @@ impl AppRuntime {
                 });
                 let _ = rx.recv_timeout(Duration::from_millis(500));
             }
+            if let Some(handle) = runtime.status_thread.take() {
+                let (tx, rx) = std_mpsc::channel();
+                thread::spawn(move || {
+                    let _ = handle.join();
+                    let _ = tx.send(());
+                });
+                let _ = rx.recv_timeout(Duration::from_millis(500));
+            }
         }
         self.window_details.remove(window_id);
     }
@@ -3446,41 +3460,9 @@ impl AppRuntime {
                 });
 
             match status {
-                Ok(PaneStatus::Running) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Running,
-                        ),
-                        detail: None,
-                    });
-                }
-                Ok(PaneStatus::Completed(0)) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Completed(0),
-                        ),
-                        detail: Some("Process exited".to_string()),
-                    });
-                }
-                Ok(PaneStatus::Completed(code)) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Completed(code),
-                        ),
-                        detail: Some(format!("Process exited with status {code}")),
-                    });
-                }
-                Ok(PaneStatus::Error(message)) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Error(message.clone()),
-                        ),
-                        detail: Some(message),
-                    });
+                Ok(status) => {
+                    let (status, detail) = Self::runtime_status_from_pane_status(&status);
+                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
                 }
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
@@ -3491,6 +3473,63 @@ impl AppRuntime {
                 }
             }
         })
+    }
+
+    pub(crate) fn spawn_status_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
+        let proxy = self.proxy.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            let status = pane
+                .lock()
+                .map_err(|error| error.to_string())
+                .and_then(|mut pane| {
+                    pane.check_status()
+                        .cloned()
+                        .map_err(|error| error.to_string())
+                });
+
+            match status {
+                Ok(PaneStatus::Running) => continue,
+                Ok(status) => {
+                    if matches!(status, PaneStatus::Completed(_)) {
+                        if let Ok(pane) = pane.lock() {
+                            let _ = pane.kill();
+                        }
+                    }
+                    let (status, detail) = Self::runtime_status_from_pane_status(&status);
+                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
+                    break;
+                }
+                Err(error) => {
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(error),
+                    });
+                    break;
+                }
+            }
+        })
+    }
+
+    fn runtime_status_from_pane_status(
+        status: &PaneStatus,
+    ) -> (WindowProcessStatus, Option<String>) {
+        match status {
+            PaneStatus::Running => (WindowProcessStatus::Running, None),
+            PaneStatus::Completed(0) => (
+                gwt::window_state::window_state_from_pane_status(status),
+                Some("Process exited".to_string()),
+            ),
+            PaneStatus::Completed(code) => (
+                gwt::window_state::window_state_from_pane_status(status),
+                Some(format!("Process exited with status {code}")),
+            ),
+            PaneStatus::Error(message) => (
+                gwt::window_state::window_state_from_pane_status(status),
+                Some(message.clone()),
+            ),
+        }
     }
 
     pub(crate) fn app_state_view(&self) -> gwt::AppStateView {
@@ -3845,6 +3884,8 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::{Arc, Mutex, RwLock},
+        thread,
+        time::{Duration, Instant},
     };
 
     use tempfile::tempdir;
@@ -3873,7 +3914,7 @@ mod tests {
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeSearchRequest, LaunchWizardSession, OutboundEvent, ProjectTabRuntime,
+        KnowledgeSearchRequest, LaunchWizardSession, OutboundEvent, ProjectTabRuntime, UserEvent,
         WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
@@ -4228,6 +4269,7 @@ mod tests {
             WindowRuntime {
                 pane: Arc::new(Mutex::new(pane)),
                 output_thread: None,
+                status_thread: None,
             },
         );
 
@@ -4329,6 +4371,106 @@ mod tests {
                     && *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
         ));
+    }
+
+    #[test]
+    fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = runtime.handle_runtime_status(
+            window_id.clone(),
+            WindowProcessStatus::Stopped,
+            Some("Process exited".to_string()),
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    }
+
+    #[test]
+    fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        );
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let captured_events = match &runtime.proxy {
+            AppEventProxy::Stub(events) => events.clone(),
+            AppEventProxy::Real(_) => panic!("sample runtime must use stub proxy"),
+        };
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "exit 0".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+        let pane = Arc::new(Mutex::new(
+            Pane::new(
+                window_id.clone(),
+                command,
+                args,
+                80,
+                24,
+                HashMap::new(),
+                None,
+            )
+            .expect("pane"),
+        ));
+        let status_thread = runtime.spawn_status_thread(window_id.clone(), pane.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut observed_status = None;
+        while Instant::now() < deadline {
+            if let Ok(events) = captured_events.lock() {
+                observed_status = events.iter().find_map(|event| match event {
+                    UserEvent::RuntimeStatus { id, status, detail }
+                        if id == &window_id && *status == WindowProcessStatus::Stopped =>
+                    {
+                        Some(detail.clone())
+                    }
+                    _ => None,
+                });
+            }
+            if observed_status.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        if observed_status.is_none() {
+            if let Ok(pane) = pane.lock() {
+                let _ = pane.kill();
+            }
+        }
+        let _ = status_thread.join();
+
+        assert_eq!(observed_status.flatten().as_deref(), Some("Process exited"));
     }
 
     #[test]
