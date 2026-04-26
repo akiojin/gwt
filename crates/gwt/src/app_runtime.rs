@@ -2397,7 +2397,10 @@ impl AppRuntime {
                 &active_session_branches,
                 &sessions_dir,
             );
-            proxy.send(UserEvent::LaunchWizardHydrated { wizard_id, result });
+            proxy.send(UserEvent::LaunchWizardHydrated {
+                wizard_id,
+                result: Box::new(result),
+            });
         });
 
         Ok(())
@@ -3166,6 +3169,7 @@ impl AppRuntime {
             session.tool_version = config.tool_version.clone();
             session.model = config.model.clone();
             session.reasoning_level = config.reasoning_level.clone();
+            session.session_mode = config.session_mode;
             session.skip_permissions = config.skip_permissions;
             session.codex_fast_mode = config.codex_fast_mode;
             session.runtime_target = config.runtime_target;
