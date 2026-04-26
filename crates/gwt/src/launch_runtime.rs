@@ -504,3 +504,39 @@ pub(crate) fn install_launch_gwt_bin_env_with_lookup(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_shell_process_command_maps_all_variants() {
+        assert_eq!(
+            windows_shell_process_command(gwt_agent::WindowsShellKind::CommandPrompt),
+            "cmd.exe"
+        );
+        assert_eq!(
+            windows_shell_process_command(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            "powershell"
+        );
+        assert_eq!(
+            windows_shell_process_command(gwt_agent::WindowsShellKind::PowerShell7),
+            "pwsh"
+        );
+    }
+
+    #[test]
+    fn interactive_windows_shell_args_returns_expected_flags() {
+        assert!(
+            interactive_windows_shell_args(gwt_agent::WindowsShellKind::CommandPrompt).is_empty()
+        );
+        assert_eq!(
+            interactive_windows_shell_args(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            vec!["-NoLogo"]
+        );
+        assert_eq!(
+            interactive_windows_shell_args(gwt_agent::WindowsShellKind::PowerShell7),
+            vec!["-NoLogo"]
+        );
+    }
+}
