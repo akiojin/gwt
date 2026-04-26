@@ -1,4 +1,4 @@
-//! `gwt hook runtime-state <event>` — write a tiny JSON state file that
+//! `gwtd hook runtime-state <event>` — write a tiny JSON state file that
 //! tells the Branches tab whether the agent session is currently running
 //! or waiting for user input.
 //!
@@ -123,13 +123,20 @@ fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 /// sessions launched outside of gwt (e.g. a raw `claude` invocation) are
 /// not broken by a hook we shipped.
 pub fn handle(event: &str) -> Result<(), HookError> {
+    if std::env::var_os("GWT_SESSION_RUNTIME_PATH").is_none() {
+        return Ok(());
+    }
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     handle_with_input(event, &input)
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
-    let hook_event = HookEvent::read_from_str(input)?;
+    let hook_event = if input.trim().is_empty() {
+        None
+    } else {
+        HookEvent::read_from_str(input)?
+    };
     let sessions_dir = sessions_dir_for_current_runtime();
     let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
     let agent_session_id = hook_event

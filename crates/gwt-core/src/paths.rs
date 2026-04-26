@@ -395,10 +395,10 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let output = std::process::Command::new("git")
-            .args(["init", path.to_str().unwrap()])
-            .output()
-            .expect("git init");
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["init", path.to_str().unwrap()]);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git init");
         assert!(
             output.status.success(),
             "git init failed: {}",
@@ -407,11 +407,10 @@ mod tests {
     }
 
     fn add_origin(path: &Path, url: &str) {
-        let output = std::process::Command::new("git")
-            .args(["remote", "add", "origin", url])
-            .current_dir(path)
-            .output()
-            .expect("git remote add origin");
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["remote", "add", "origin", url]).current_dir(path);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git remote add origin");
         assert!(
             output.status.success(),
             "git remote add origin failed: {}",

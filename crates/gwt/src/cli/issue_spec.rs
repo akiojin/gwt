@@ -17,7 +17,7 @@ const CANONICAL_SECTION_HEADINGS: [&str; 6] = [
     "Non-Functional Requirements",
     "Success Criteria",
 ];
-const SPEC_CREATE_HELP: &str = r#"gwt issue spec create --json --title "SPEC: <short title>" [-f <input.json>]
+const SPEC_CREATE_HELP: &str = r#"gwtd issue spec create --json --title "SPEC: <short title>" [-f <input.json>]
 
 Structured SPEC input is owned by the CLI. Use this help output as the
 single source of truth for the JSON shape and the generated Markdown format.
@@ -53,10 +53,10 @@ Field notes:
 - "success_criteria": rendered as `SC-001`, `SC-002`, ...
 
 Examples:
-gwt issue spec create --json --title "SPEC: Launch agents from GUI" < spec.json
-gwt issue spec create --json --title "SPEC: Launch agents from GUI" -f spec.json
-gwt issue spec 1942 --edit spec --json -f update.json
-gwt issue spec 1942 --edit spec --json --replace -f replacement.json
+gwtd issue spec create --json --title "SPEC: Launch agents from GUI" < spec.json
+gwtd issue spec create --json --title "SPEC: Launch agents from GUI" -f spec.json
+gwtd issue spec 1942 --edit spec --json -f update.json
+gwtd issue spec 1942 --edit spec --json --replace -f replacement.json
 "#;
 
 #[derive(Debug, Clone, Deserialize)]

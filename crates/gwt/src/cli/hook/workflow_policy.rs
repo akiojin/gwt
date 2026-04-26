@@ -1,4 +1,4 @@
-//! `gwt hook workflow-policy` — hook-driven workflow gating.
+//! `gwtd hook workflow-policy` — hook-driven workflow gating.
 //!
 //! v1 keeps the policy deliberately narrow:
 //!
@@ -231,30 +231,31 @@ mod tests {
 
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo).expect("create repo");
-        let init = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repo)
-            .output()
-            .expect("git init");
+        let mut init_cmd = std::process::Command::new("git");
+        init_cmd.args(["init", "--quiet"]).current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut init_cmd);
+        let init = init_cmd.output().expect("git init");
         assert!(init.status.success(), "git init failed");
 
-        let remote = std::process::Command::new("git")
+        let mut remote_cmd = std::process::Command::new("git");
+        remote_cmd
             .args([
                 "remote",
                 "add",
                 "origin",
                 "https://github.com/example/repo.git",
             ])
-            .current_dir(repo)
-            .output()
-            .expect("git remote add");
+            .current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut remote_cmd);
+        let remote = remote_cmd.output().expect("git remote add");
         assert!(remote.status.success(), "git remote add failed");
 
-        let branch = std::process::Command::new("git")
+        let mut branch_cmd = std::process::Command::new("git");
+        branch_cmd
             .args(["checkout", "-b", "feature/coverage"])
-            .current_dir(repo)
-            .output()
-            .expect("git checkout");
+            .current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut branch_cmd);
+        let branch = branch_cmd.output().expect("git checkout");
         assert!(branch.status.success(), "git checkout failed");
     }
 

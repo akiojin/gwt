@@ -6,6 +6,7 @@ pub mod custom_agents_service;
 pub mod daemon_runtime;
 mod discussion_resume;
 pub mod file_tree;
+pub mod gui_single_instance;
 pub mod index_worker;
 mod issue_cache;
 pub mod knowledge_bridge;
@@ -36,8 +37,8 @@ pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::ProjectIndexStatusView;
 pub use knowledge_bridge::{
-    load_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
-    KnowledgeKind, KnowledgeListItem, KnowledgeListScope,
+    load_knowledge_bridge, search_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection,
+    KnowledgeDetailView, KnowledgeKind, KnowledgeListItem, KnowledgeListScope,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,

@@ -339,11 +339,11 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(worktree_root)
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--show-toplevel"])
+        .current_dir(worktree_root);
+    crate::process::scrub_git_env(&mut cmd);
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -361,10 +361,11 @@ fn coordination_migration_marker_path(project_dir: &Path) -> PathBuf {
 }
 
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(worktree_root)
-        .output();
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["worktree", "list", "--porcelain"])
+        .current_dir(worktree_root);
+    crate::process::scrub_git_env(&mut cmd);
+    let output = cmd.output();
     let mut dirs = match output {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -812,11 +813,10 @@ mod tests {
 
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let output = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
+        let mut init_cmd = std::process::Command::new("git");
+        init_cmd.args(["init", "--quiet"]).current_dir(&repo);
+        crate::process::scrub_git_env(&mut init_cmd);
+        let output = init_cmd.output().unwrap();
         assert!(
             output.status.success(),
             "git init failed: {}",

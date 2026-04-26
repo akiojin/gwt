@@ -203,7 +203,7 @@ fn canonicalize_path(path: PathBuf) -> PathBuf {
     dunce::canonicalize(&path).unwrap_or(path)
 }
 
-fn project_index_python_path() -> PathBuf {
+pub(crate) fn project_index_python_path() -> PathBuf {
     let venv = gwt_project_index_venv_dir();
     if cfg!(windows) {
         venv.join("Scripts").join("python.exe")

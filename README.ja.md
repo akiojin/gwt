@@ -12,7 +12,7 @@ gwt は Git worktree の管理と、`Claude Code` / `Codex` / `Gemini` /
 
 - GUI 向けの主配布物: `gwt-macos-universal.dmg`
 - マウントした DMG から `GWT.app` を開くとネイティブ GUI をそのまま起動できます
-- `PATH` に `gwt` を入れたい場合は install script を使います
+- `PATH` に `gwtd` CLI を入れたい場合は install script を使います
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -70,17 +70,17 @@ gwt
 `http://127.0.0.1:<port>/` のような URL を出力します。ネイティブアプリの起動中は、
 同じ URL を通常のブラウザでも開けます。
 
-CLI サブコマンドは同じ `gwt` バイナリで処理され、GUI は起動しません。
+CLI サブコマンドは `gwtd` で処理され、GUI は起動しません。
 
 ```bash
-gwt issue spec 1784 --section plan
-gwt pr current
-gwt board show
-gwt hook workflow-policy
+gwtd issue spec 1784 --section plan
+gwtd pr current
+gwtd board show
+gwtd hook workflow-policy
 ```
 
-managed hook と runtime 委譲の入口も引き続き `gwt` です。利用者が別の daemon
-コマンドを手動起動する必要はありません。
+managed hook と runtime 委譲は `gwtd` を使います。利用者が別の daemon
+プロセスを手動起動する必要はありません。
 
 ## 基本フロー
 
@@ -134,13 +134,13 @@ Docker 起動では引き続きコンテナ内のシェルを使います。
 - SPEC 全体を読む:
 
 ```bash
-gwt issue spec <number>
+gwtd issue spec <number>
 ```
 
 - セクション単位で読む:
 
 ```bash
-gwt issue spec <number> --section spec|plan|tasks
+gwtd issue spec <number> --section spec|plan|tasks
 ```
 
 ## ログ
@@ -223,7 +223,7 @@ cargo fmt
 ## SPEC
 
 詳細仕様は `gwt-spec` ラベル付き GitHub Issue にあります。ローカルキャッシュ経由で
-`gwt issue spec <n>` を使って確認できます。
+`gwtd issue spec <n>` を使って確認できます。
 
 ## ライセンス
 

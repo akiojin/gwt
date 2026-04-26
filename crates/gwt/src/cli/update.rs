@@ -1,4 +1,4 @@
-//! `gwt update` — manual update check and apply.
+//! `gwtd update` — manual update check and apply.
 
 use std::{
     io::{self, BufRead, Write},
@@ -7,7 +7,7 @@ use std::{
 
 use gwt_core::update::{is_ci, InstallerKind, PreparedPayload, UpdateManager, UpdateState};
 
-/// Parsed form of `gwt update` arguments.
+/// Parsed form of `gwtd update` arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCommand {
     /// Only check and report; do not download or apply.
@@ -141,7 +141,7 @@ impl UpdateCliOps for RealUpdateCliOps {
     }
 }
 
-/// Parse `gwt update [--check]` arguments.
+/// Parse `gwtd update [--check]` arguments.
 pub fn parse_args(args: &[String]) -> UpdateCommand {
     if args.iter().any(|a| a == "--check") {
         UpdateCommand::CheckOnly
@@ -156,7 +156,7 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateCommand) -> RunOutcome {
         return RunOutcome::Code(0);
     }
 
-    let force = true; // `gwt update` always ignores the TTL cache
+    let force = true; // `gwtd update` always ignores the TTL cache
     let current_exe = ops.current_exe().ok();
     let state = ops.check_for_executable(force, current_exe.as_deref());
 
@@ -289,7 +289,7 @@ pub fn run(cmd: UpdateCommand) -> i32 {
     }
 }
 
-/// Parse `gwt __internal apply-update` arguments and execute the internal update helper.
+/// Parse `gwtd __internal apply-update` arguments and execute the internal update helper.
 ///
 /// argv format: `--old-pid <pid> --target <path> --source <path> --args-file <path>`
 pub fn run_internal_apply_update(args: &[String]) -> i32 {
@@ -301,7 +301,7 @@ pub fn run_internal_apply_update(args: &[String]) -> i32 {
     let (Some(old_pid), Some(target), Some(source), Some(args_file)) =
         (old_pid, target, source, args_file)
     else {
-        eprintln!("gwt __internal apply-update: missing required arguments");
+        eprintln!("gwtd __internal apply-update: missing required arguments");
         eprintln!("  Usage: --old-pid <pid> --target <path> --source <path> --args-file <path>");
         return 1;
     };
@@ -315,7 +315,7 @@ pub fn run_internal_apply_update(args: &[String]) -> i32 {
     }
 }
 
-/// Parse `gwt __internal run-installer` arguments and execute the installer helper.
+/// Parse `gwtd __internal run-installer` arguments and execute the installer helper.
 ///
 /// argv format: `--old-pid <pid> --target <path> --installer <path> --installer-kind <kind> --args-file <path>`
 pub fn run_internal_run_installer(args: &[String]) -> i32 {
@@ -338,7 +338,7 @@ pub fn run_internal_run_installer(args: &[String]) -> i32 {
     let (Some(old_pid), Some(target), Some(installer), Some(args_file)) =
         (old_pid, target, installer, args_file)
     else {
-        eprintln!("gwt __internal run-installer: missing required arguments");
+        eprintln!("gwtd __internal run-installer: missing required arguments");
         return 1;
     };
 

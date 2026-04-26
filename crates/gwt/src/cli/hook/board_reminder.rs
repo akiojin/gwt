@@ -1,4 +1,4 @@
-//! `gwt hook board-reminder <event>` — intent-boundary reminder and
+//! `gwtd hook board-reminder <event>` — intent-boundary reminder and
 //! cross-agent Board read injection for SPEC-1974 Phase 8 (US-6 / US-7).
 //!
 //! SessionStart and UserPromptSubmit emit Claude Code / Codex
@@ -63,7 +63,7 @@ Post to the shared Board when you cross a reasoning milestone:\n\
 Do NOT post tool-level reports (e.g., \"running gcc\", \"opening file X\", \"ran test Y\"). \
 Anything already visible in the diff or log does not need a Board entry.\n\
 \n\
-Use: gwt board post --kind status --body '<your reasoning>'\n";
+Use: gwtd board post --kind status --body '<your reasoning>'\n";
 
 const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
@@ -75,7 +75,7 @@ You posted to the Board recently. Post again only if a new reasoning milestone \
 // Phrasing is therefore user-oriented rather than agent-oriented.
 const STOP_REMINDER: &str = "Board Post Reminder (Stop): the agent is stopping. If you \
 expect a final handoff, prompt the agent to post what it completed to the shared Board \
-with `gwt board post --kind status` before handing off.";
+with `gwtd board post --kind status` before handing off.";
 
 const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the agent posted to the \
 Board recently; no additional completed-status post is required before stopping.";
@@ -445,7 +445,7 @@ mod tests {
         assert!(text.contains("Stop"));
         assert!(text.contains("completed"));
         assert!(text.contains("Board"));
-        assert!(text.contains("gwt board post"));
+        assert!(text.contains("gwtd board post"));
     }
 
     #[test]

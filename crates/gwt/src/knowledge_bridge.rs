@@ -1,8 +1,13 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::Command,
+};
 
 use gwt_core::paths::gwt_cache_dir;
 use gwt_github::{Cache, CacheEntry, IssueState, SectionName};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::issue_cache::{
     issue_cache_has_entries, issue_cache_root_for_repo_path,
@@ -11,6 +16,7 @@ use crate::issue_cache::{
 };
 
 const SPEC_LABEL: &str = "gwt-spec";
+const KNOWLEDGE_SEARCH_RESULT_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +41,7 @@ pub struct KnowledgeListItem {
     pub meta: String,
     pub labels: Vec<String>,
     pub linked_branch_count: usize,
+    pub match_score: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +71,100 @@ pub struct KnowledgeBridgeView {
     pub detail: KnowledgeDetailView,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticSearchHit {
+    pub number: u64,
+    pub distance: Option<f64>,
+}
+
+pub trait SemanticSearchClient {
+    fn search(
+        &self,
+        repo_path: &Path,
+        kind: KnowledgeKind,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSearchHit>, String>;
+}
+
+#[derive(Debug, Default)]
+struct RunnerSemanticSearchClient;
+
+impl SemanticSearchClient for RunnerSemanticSearchClient {
+    fn search(
+        &self,
+        repo_path: &Path,
+        kind: KnowledgeKind,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticSearchHit>, String> {
+        let action = match kind {
+            KnowledgeKind::Issue => "search-issues",
+            KnowledgeKind::Spec => "search-specs",
+            KnowledgeKind::Pr => return Ok(Vec::new()),
+        };
+        let repo_hash = crate::index_worker::detect_repo_hash(repo_path)
+            .ok_or_else(|| "semantic search requires a git origin remote".to_string())?;
+        gwt_core::runtime::ensure_project_index_runtime().map_err(|error| error.to_string())?;
+        let output = Command::new(crate::index_worker::project_index_python_path())
+            .arg(gwt_core::paths::gwt_runtime_runner_path())
+            .arg("--action")
+            .arg(action)
+            .arg("--repo-hash")
+            .arg(repo_hash.as_str())
+            .arg("--project-root")
+            .arg(repo_path)
+            .arg("--query")
+            .arg(query)
+            .arg("--n-results")
+            .arg(limit.to_string())
+            .current_dir(repo_path)
+            .output()
+            .map_err(|error| format!("run semantic search: {error}"))?;
+        if !output.status.success() {
+            return Err(format_runner_failure(&output));
+        }
+        let payload: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("parse semantic search result: {error}"))?;
+        if !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(payload_error(&payload));
+        }
+        Ok(match kind {
+            KnowledgeKind::Issue => payload
+                .get("issueResults")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some(SemanticSearchHit {
+                                number: value_u64(item.get("number")?)?,
+                                distance: item.get("distance").and_then(Value::as_f64),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            KnowledgeKind::Spec => payload
+                .get("specResults")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some(SemanticSearchHit {
+                                number: value_u64(item.get("spec_id")?)?,
+                                distance: item.get("distance").and_then(Value::as_f64),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            KnowledgeKind::Pr => Vec::new(),
+        })
+    }
+}
+
 pub fn load_knowledge_bridge(
     repo_path: &Path,
     kind: KnowledgeKind,
@@ -86,6 +187,123 @@ pub fn load_knowledge_bridge(
         return Ok(non_repo_view(kind));
     }
 
+    let entries = load_cache_entries_for_repo(repo_path, refresh)?;
+    let linked_branches = load_linked_branches(repo_path);
+    Ok(match kind {
+        KnowledgeKind::Issue => {
+            build_issue_view(entries, linked_branches, selected_number, list_scope)
+        }
+        KnowledgeKind::Spec => build_spec_view(entries, linked_branches, selected_number),
+        KnowledgeKind::Pr => disabled_pr_view(),
+    })
+}
+
+pub fn search_knowledge_bridge(
+    repo_path: &Path,
+    kind: KnowledgeKind,
+    query: &str,
+    selected_number: Option<u64>,
+    list_scope: KnowledgeListScope,
+) -> Result<KnowledgeBridgeView, String> {
+    search_knowledge_bridge_with_client(
+        repo_path,
+        kind,
+        query,
+        selected_number,
+        list_scope,
+        &RunnerSemanticSearchClient,
+    )
+}
+
+pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Sized>(
+    repo_path: &Path,
+    kind: KnowledgeKind,
+    query: &str,
+    selected_number: Option<u64>,
+    list_scope: KnowledgeListScope,
+    client: &C,
+) -> Result<KnowledgeBridgeView, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return load_knowledge_bridge(repo_path, kind, selected_number, false, list_scope);
+    }
+    if !repo_path.is_dir() {
+        return Err(format!(
+            "project root is not available: {}",
+            repo_path.display()
+        ));
+    }
+    if matches!(kind, KnowledgeKind::Pr) {
+        return Ok(disabled_pr_view());
+    }
+    if issue_cache_root_for_repo_path(repo_path).is_none() {
+        return Ok(non_repo_view(kind));
+    }
+
+    let mut entries = load_local_cache_entries_for_repo(repo_path)?
+        .into_iter()
+        .filter(|entry| candidate_matches_kind_and_scope(entry, kind, list_scope))
+        .collect::<Vec<_>>();
+    entries.sort_by(issue_entry_sort);
+    let linked_branches = load_linked_branches(repo_path);
+    let hits = client.search(repo_path, kind, query, KNOWLEDGE_SEARCH_RESULT_LIMIT)?;
+
+    let mut seen = HashSet::new();
+    let mut list_items = Vec::new();
+    for entry in entries
+        .iter()
+        .filter(|entry| is_exact_search_match(entry, query))
+    {
+        if seen.insert(entry.snapshot.number.0) {
+            list_items.push(list_item_for_kind(kind, entry, &linked_branches, Some(100)));
+        }
+    }
+
+    let entries_by_number = entries
+        .iter()
+        .map(|entry| (entry.snapshot.number.0, entry))
+        .collect::<HashMap<_, _>>();
+    for hit in hits {
+        if !seen.insert(hit.number) {
+            continue;
+        }
+        let Some(entry) = entries_by_number.get(&hit.number) else {
+            continue;
+        };
+        list_items.push(list_item_for_kind(
+            kind,
+            entry,
+            &linked_branches,
+            hit.distance.map(distance_to_match_score),
+        ));
+        if list_items.len() >= KNOWLEDGE_SEARCH_RESULT_LIMIT {
+            break;
+        }
+    }
+
+    let selected_number = selected_number
+        .filter(|selected| list_items.iter().any(|entry| entry.number == *selected))
+        .or_else(|| list_items.first().map(|entry| entry.number));
+    let detail = selected_number
+        .and_then(|selected| entries_by_number.get(&selected).copied())
+        .map(|entry| detail_for_kind(kind, entry, &linked_branches))
+        .unwrap_or_else(|| empty_detail(search_empty_title(kind), "No semantic matches found."));
+
+    Ok(KnowledgeBridgeView {
+        kind,
+        entries: list_items,
+        selected_number,
+        empty_message: if selected_number.is_none() {
+            Some("No semantic matches found.".to_string())
+        } else {
+            None
+        },
+        refresh_enabled: true,
+        detail,
+    })
+}
+
+fn load_cache_entries_for_repo(repo_path: &Path, refresh: bool) -> Result<Vec<CacheEntry>, String> {
     let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
     if refresh {
         sync_issue_cache_from_remote(repo_path, &cache_root)?;
@@ -98,15 +316,13 @@ pub fn load_knowledge_bridge(
     }
 
     let cache = Cache::new(cache_root);
-    let entries = load_cache_entries(&cache)?;
-    let linked_branches = load_linked_branches(repo_path);
-    Ok(match kind {
-        KnowledgeKind::Issue => {
-            build_issue_view(entries, linked_branches, selected_number, list_scope)
-        }
-        KnowledgeKind::Spec => build_spec_view(entries, linked_branches, selected_number),
-        KnowledgeKind::Pr => disabled_pr_view(),
-    })
+    load_cache_entries(&cache)
+}
+
+fn load_local_cache_entries_for_repo(repo_path: &Path) -> Result<Vec<CacheEntry>, String> {
+    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
+    let cache = Cache::new(cache_root);
+    load_cache_entries(&cache)
 }
 
 fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
@@ -134,17 +350,7 @@ fn build_issue_view(
 
     let list_items = entries
         .iter()
-        .map(|entry| KnowledgeListItem {
-            number: entry.snapshot.number.0,
-            title: entry.snapshot.title.clone(),
-            state: issue_state_label(entry.snapshot.state),
-            meta: format!("Updated {}", short_updated_at(&entry.snapshot.updated_at.0)),
-            labels: entry.snapshot.labels.clone(),
-            linked_branch_count: linked_branches
-                .get(&entry.snapshot.number.0)
-                .map(Vec::len)
-                .unwrap_or_default(),
-        })
+        .map(|entry| issue_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
     let selected_number = resolve_selected_number(&entries, selected_number);
     let detail = entries
@@ -177,17 +383,7 @@ fn build_spec_view(
 
     let list_items = entries
         .iter()
-        .map(|entry| KnowledgeListItem {
-            number: entry.snapshot.number.0,
-            title: entry.snapshot.title.clone(),
-            state: issue_state_label(entry.snapshot.state),
-            meta: spec_list_meta(entry),
-            labels: entry.snapshot.labels.clone(),
-            linked_branch_count: linked_branches
-                .get(&entry.snapshot.number.0)
-                .map(Vec::len)
-                .unwrap_or_default(),
-        })
+        .map(|entry| spec_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
     let selected_number = resolve_selected_number(&entries, selected_number);
     let detail = entries
@@ -267,6 +463,121 @@ fn empty_detail(title: &str, body: &str) -> KnowledgeDetailView {
             body: body.to_string(),
         }],
         launch_issue_number: None,
+    }
+}
+
+fn candidate_matches_kind_and_scope(
+    entry: &CacheEntry,
+    kind: KnowledgeKind,
+    list_scope: KnowledgeListScope,
+) -> bool {
+    match kind {
+        KnowledgeKind::Issue => {
+            !is_spec_entry(entry)
+                && match list_scope {
+                    KnowledgeListScope::Open => entry.snapshot.state == IssueState::Open,
+                    KnowledgeListScope::Closed => entry.snapshot.state == IssueState::Closed,
+                }
+        }
+        KnowledgeKind::Spec => is_spec_entry(entry),
+        KnowledgeKind::Pr => false,
+    }
+}
+
+fn list_item_for_kind(
+    kind: KnowledgeKind,
+    entry: &CacheEntry,
+    linked_branches: &HashMap<u64, Vec<String>>,
+    match_score: Option<u8>,
+) -> KnowledgeListItem {
+    match kind {
+        KnowledgeKind::Issue => issue_list_item(entry, linked_branches, match_score),
+        KnowledgeKind::Spec => spec_list_item(entry, linked_branches, match_score),
+        KnowledgeKind::Pr => unreachable!("PR bridge has no list items"),
+    }
+}
+
+fn issue_list_item(
+    entry: &CacheEntry,
+    linked_branches: &HashMap<u64, Vec<String>>,
+    match_score: Option<u8>,
+) -> KnowledgeListItem {
+    KnowledgeListItem {
+        number: entry.snapshot.number.0,
+        title: entry.snapshot.title.clone(),
+        state: issue_state_label(entry.snapshot.state),
+        meta: format!("Updated {}", short_updated_at(&entry.snapshot.updated_at.0)),
+        labels: entry.snapshot.labels.clone(),
+        linked_branch_count: linked_branches
+            .get(&entry.snapshot.number.0)
+            .map(Vec::len)
+            .unwrap_or_default(),
+        match_score,
+    }
+}
+
+fn spec_list_item(
+    entry: &CacheEntry,
+    linked_branches: &HashMap<u64, Vec<String>>,
+    match_score: Option<u8>,
+) -> KnowledgeListItem {
+    KnowledgeListItem {
+        number: entry.snapshot.number.0,
+        title: entry.snapshot.title.clone(),
+        state: issue_state_label(entry.snapshot.state),
+        meta: spec_list_meta(entry),
+        labels: entry.snapshot.labels.clone(),
+        linked_branch_count: linked_branches
+            .get(&entry.snapshot.number.0)
+            .map(Vec::len)
+            .unwrap_or_default(),
+        match_score,
+    }
+}
+
+fn detail_for_kind(
+    kind: KnowledgeKind,
+    entry: &CacheEntry,
+    linked_branches: &HashMap<u64, Vec<String>>,
+) -> KnowledgeDetailView {
+    match kind {
+        KnowledgeKind::Issue => {
+            issue_detail_view(entry, linked_branches.get(&entry.snapshot.number.0))
+        }
+        KnowledgeKind::Spec => spec_detail_view(entry),
+        KnowledgeKind::Pr => disabled_pr_view().detail,
+    }
+}
+
+fn is_exact_search_match(entry: &CacheEntry, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return false;
+    }
+    let query_lower = query.to_lowercase();
+    let number = entry.snapshot.number.0.to_string();
+    if query_lower.strip_prefix('#') == Some(number.as_str()) || query_lower == number {
+        return true;
+    }
+    if entry.snapshot.title.to_lowercase() == query_lower {
+        return true;
+    }
+    entry
+        .snapshot
+        .labels
+        .iter()
+        .any(|label| label.to_lowercase() == query_lower)
+}
+
+fn distance_to_match_score(distance: f64) -> u8 {
+    ((1.0 - distance) * 100.0).round().clamp(0.0, 100.0) as u8
+}
+
+fn search_empty_title(kind: KnowledgeKind) -> &'static str {
+    match kind {
+        KnowledgeKind::Issue => "Issue Search",
+        KnowledgeKind::Spec => "SPEC Search",
+        KnowledgeKind::Pr => "PR Bridge",
     }
 }
 
@@ -440,6 +751,36 @@ fn is_spec_entry(entry: &CacheEntry) -> bool {
         .any(|label| label == SPEC_LABEL)
 }
 
+fn value_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+}
+
+fn payload_error(payload: &Value) -> String {
+    payload
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("error_code").and_then(Value::as_str))
+        .unwrap_or("semantic search failed")
+        .to_string()
+}
+
+fn format_runner_failure(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        format!("semantic search runner exited with {}", output.status)
+    } else {
+        format!(
+            "semantic search runner exited with {}: {detail}",
+            output.status
+        )
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct IssueBranchLinkStore {
     #[serde(default)]
@@ -506,23 +847,23 @@ mod tests {
 
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo).expect("create repo");
-        let init = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repo)
-            .output()
-            .expect("git init");
+        let mut init_cmd = std::process::Command::new("git");
+        init_cmd.args(["init", "--quiet"]).current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut init_cmd);
+        let init = init_cmd.output().expect("git init");
         assert!(init.status.success(), "git init failed");
 
-        let remote = std::process::Command::new("git")
+        let mut remote_cmd = std::process::Command::new("git");
+        remote_cmd
             .args([
                 "remote",
                 "add",
                 "origin",
                 "https://github.com/example/repo.git",
             ])
-            .current_dir(repo)
-            .output()
-            .expect("git remote add");
+            .current_dir(repo);
+        gwt_core::process::scrub_git_env(&mut remote_cmd);
+        let remote = remote_cmd.output().expect("git remote add");
         assert!(remote.status.success(), "git remote add failed");
     }
 
@@ -735,5 +1076,208 @@ Extra context.
             .sections
             .iter()
             .any(|section| section.title == "notes"));
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeSemanticSearchClient {
+        hits: Vec<SemanticSearchHit>,
+    }
+
+    impl SemanticSearchClient for FakeSemanticSearchClient {
+        fn search(
+            &self,
+            _repo_path: &Path,
+            _kind: KnowledgeKind,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<SemanticSearchHit>, String> {
+            Ok(self.hits.clone())
+        }
+    }
+
+    #[test]
+    fn semantic_issue_search_respects_scope_filters_specs_and_scores_results() {
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                11,
+                "Open semantic issue",
+                "Need semantic search.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write open issue");
+        cache
+            .write_snapshot(&issue_snapshot(
+                12,
+                "Closed semantic issue",
+                "Already fixed.",
+                &["bug"],
+                IssueState::Closed,
+            ))
+            .expect("write closed issue");
+        cache
+            .write_snapshot(&spec_snapshot(22))
+            .expect("write spec snapshot");
+
+        let view = search_knowledge_bridge_with_client(
+            &repo,
+            KnowledgeKind::Issue,
+            "semantic search",
+            None,
+            KnowledgeListScope::Open,
+            &FakeSemanticSearchClient {
+                hits: vec![
+                    SemanticSearchHit {
+                        number: 22,
+                        distance: Some(0.01),
+                    },
+                    SemanticSearchHit {
+                        number: 12,
+                        distance: Some(0.02),
+                    },
+                    SemanticSearchHit {
+                        number: 11,
+                        distance: Some(0.2),
+                    },
+                ],
+            },
+        )
+        .expect("search view");
+
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].number, 11);
+        assert_eq!(view.entries[0].match_score, Some(80));
+        assert_eq!(view.selected_number, Some(11));
+    }
+
+    #[test]
+    fn semantic_issue_search_reads_cache_without_stale_remote_sync() {
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                11,
+                "Open semantic issue",
+                "Need semantic search.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write issue");
+
+        let marker = home.path().join("gh-was-called");
+        let fake_gh = home.path().join("fake-gh");
+        fs::write(
+            &fake_gh,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("write fake gh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+        }
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        let view = search_knowledge_bridge_with_client(
+            &repo,
+            KnowledgeKind::Issue,
+            "semantic search",
+            None,
+            KnowledgeListScope::Open,
+            &FakeSemanticSearchClient {
+                hits: vec![SemanticSearchHit {
+                    number: 11,
+                    distance: Some(0.1),
+                }],
+            },
+        )
+        .expect("search view");
+
+        assert_eq!(view.entries.len(), 1);
+        assert!(
+            !marker.exists(),
+            "interactive semantic search must not invoke stale remote cache sync"
+        );
+    }
+
+    #[test]
+    fn semantic_spec_search_prioritizes_exact_matches_and_removes_duplicates() {
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                11,
+                "Plain issue",
+                "Not a spec.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write issue");
+        cache
+            .write_snapshot(&spec_snapshot(22))
+            .expect("write spec");
+
+        let view = search_knowledge_bridge_with_client(
+            &repo,
+            KnowledgeKind::Spec,
+            "#22",
+            None,
+            KnowledgeListScope::Open,
+            &FakeSemanticSearchClient {
+                hits: vec![
+                    SemanticSearchHit {
+                        number: 11,
+                        distance: Some(0.01),
+                    },
+                    SemanticSearchHit {
+                        number: 22,
+                        distance: Some(0.18),
+                    },
+                    SemanticSearchHit {
+                        number: 22,
+                        distance: Some(0.2),
+                    },
+                ],
+            },
+        )
+        .expect("search view");
+
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].number, 22);
+        assert_eq!(view.entries[0].match_score, Some(100));
+        assert_eq!(view.selected_number, Some(22));
     }
 }

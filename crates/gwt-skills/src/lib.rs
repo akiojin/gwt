@@ -679,8 +679,8 @@ mod tests {
             let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_skill.contains("gwt issue create --title ... -f ..."),
-                "expected canonical gwt issue create guidance in {relative}"
+                issue_skill.contains("gwtd issue create --title ... -f ..."),
+                "expected canonical gwtd issue create guidance in {relative}"
             );
             assert!(
                 issue_skill
@@ -735,16 +735,16 @@ mod tests {
             let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_skill.contains("gwt issue view"),
-                "expected canonical gwt issue view guidance in {relative}"
+                issue_skill.contains("gwtd issue view"),
+                "expected canonical gwtd issue view guidance in {relative}"
             );
             assert!(
-                issue_skill.contains("gwt issue comments"),
-                "expected canonical gwt issue comments guidance in {relative}"
+                issue_skill.contains("gwtd issue comments"),
+                "expected canonical gwtd issue comments guidance in {relative}"
             );
             assert!(
-                issue_skill.contains("gwt issue comment"),
-                "expected canonical gwt issue comment guidance in {relative}"
+                issue_skill.contains("gwtd issue comment"),
+                "expected canonical gwtd issue comment guidance in {relative}"
             );
             assert!(
                 issue_skill.contains("inspect_issue.py"),
@@ -771,8 +771,8 @@ mod tests {
             let discussion_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                discussion_skill.contains("Check open SPEC Issues: `gwt issue spec list`."),
-                "expected discussion skill to use gwt issue spec list in {relative}"
+                discussion_skill.contains("Check open SPEC Issues: `gwtd issue spec list`."),
+                "expected discussion skill to use gwtd issue spec list in {relative}"
             );
             assert!(
                 discussion_skill.contains("After each answer:")
@@ -853,7 +853,7 @@ mod tests {
             let issue_search_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_search_skill.contains("before manual `gwt issue view`"),
+                issue_search_skill.contains("before manual `gwtd issue view`"),
                 "expected issue search skill to steer users away from direct issue reads in {relative}"
             );
             assert!(
@@ -956,20 +956,20 @@ mod tests {
             let pr_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                pr_skill.contains("gwt pr current"),
-                "expected canonical gwt pr current guidance in {relative}"
+                pr_skill.contains("gwtd pr current"),
+                "expected canonical gwtd pr current guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwt pr create"),
-                "expected canonical gwt pr create guidance in {relative}"
+                pr_skill.contains("gwtd pr create"),
+                "expected canonical gwtd pr create guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwt pr edit"),
-                "expected canonical gwt pr edit guidance in {relative}"
+                pr_skill.contains("gwtd pr edit"),
+                "expected canonical gwtd pr edit guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwt pr review-threads"),
-                "expected canonical gwt pr review-threads guidance in {relative}"
+                pr_skill.contains("gwtd pr review-threads"),
+                "expected canonical gwtd pr review-threads guidance in {relative}"
             );
             assert!(
                 pr_skill.contains("no current pull request"),
@@ -981,8 +981,8 @@ mod tests {
                 "expected conflict-first mergeable guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwt actions logs"),
-                "expected canonical gwt actions log guidance in {relative}"
+                pr_skill.contains("gwtd actions logs"),
+                "expected canonical gwtd actions log guidance in {relative}"
             );
             assert!(
                 pr_skill.contains("current user's language"),
@@ -1013,8 +1013,8 @@ mod tests {
             let check_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                check_flow.contains("`gwt pr current`"),
-                "expected canonical gwt pr current guidance in {relative}"
+                check_flow.contains("`gwtd pr current`"),
+                "expected canonical gwtd pr current guidance in {relative}"
             );
             assert!(
                 check_flow.contains("no current pull request"),
@@ -1042,12 +1042,12 @@ mod tests {
             let create_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                create_flow.contains("Create: `gwt pr create"),
-                "expected canonical gwt pr create guidance in {relative}"
+                create_flow.contains("Create: `gwtd pr create"),
+                "expected canonical gwtd pr create guidance in {relative}"
             );
             assert!(
-                create_flow.contains("Update: `gwt pr edit"),
-                "expected canonical gwt pr edit guidance in {relative}"
+                create_flow.contains("Update: `gwtd pr edit"),
+                "expected canonical gwtd pr edit guidance in {relative}"
             );
             assert!(
                 create_flow.contains("no current pull request"),
@@ -1077,16 +1077,16 @@ mod tests {
             let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                fix_flow.contains("`gwt pr review-threads reply-and-resolve"),
+                fix_flow.contains("`gwtd pr review-threads reply-and-resolve"),
                 "expected canonical gwt review-thread guidance in {relative}"
             );
             assert!(
-                fix_flow.contains("`gwt pr comment"),
-                "expected canonical gwt pr comment guidance in {relative}"
+                fix_flow.contains("`gwtd pr comment"),
+                "expected canonical gwtd pr comment guidance in {relative}"
             );
             assert!(
                 !fix_flow.contains("--required-only"),
-                "unexpected nonexistent gwt pr checks --required-only guidance in {relative}"
+                "unexpected nonexistent gwtd pr checks --required-only guidance in {relative}"
             );
             assert!(
                 !fix_flow.contains("Fallback: `gh pr comment`."),
@@ -1101,19 +1101,19 @@ mod tests {
         );
         assert!(
             release_command.contains("\"$GWT_BIN\" issue comment"),
-            "expected release command to use the canonical gwt issue comment via GWT_BIN"
+            "expected release command to use the canonical gwtd issue comment via GWT_BIN"
         );
         assert!(
             release_command.contains("\"$GWT_BIN\" pr current"),
-            "expected release command to use the canonical gwt pr current via GWT_BIN"
+            "expected release command to use the canonical gwtd pr current via GWT_BIN"
         );
         assert!(
             release_command.contains("\"$GWT_BIN\" pr create"),
-            "expected release command to use the canonical gwt pr create via GWT_BIN"
+            "expected release command to use the canonical gwtd pr create via GWT_BIN"
         );
         assert!(
             release_command.contains("\"$GWT_BIN\" pr edit"),
-            "expected release command to use the canonical gwt pr edit via GWT_BIN"
+            "expected release command to use the canonical gwtd pr edit via GWT_BIN"
         );
         assert!(
             !release_command.contains("gh issue comment"),

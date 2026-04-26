@@ -1,4 +1,4 @@
-//! `gwt hook block-file-ops` — PreToolUse hook that forbids file-system
+//! `gwtd hook block-file-ops` — PreToolUse hook that forbids file-system
 //! mutations outside the current worktree.
 //!
 //! Ported from the retired external file-op policy hook.

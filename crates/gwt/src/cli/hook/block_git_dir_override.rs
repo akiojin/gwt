@@ -1,4 +1,4 @@
-//! `gwt hook block-git-dir-override` — PreToolUse hook that forbids
+//! `gwtd hook block-git-dir-override` — PreToolUse hook that forbids
 //! overriding `GIT_DIR` or `GIT_WORK_TREE` via the Bash command the
 //! agent is about to run.
 //!
