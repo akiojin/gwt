@@ -756,6 +756,31 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_messages_put_user_on_right_and_agent_on_left() {
+        let html = frontend_bundle_source();
+        fn css_block<'a>(html: &'a str, selector: &str) -> &'a str {
+            let start = html.find(selector).expect("expected CSS block");
+            let rest = &html[start..];
+            let end = rest.find('}').expect("expected CSS block end");
+            &rest[..=end]
+        }
+
+        let user_block = css_block(html, ".board-message.user {");
+        assert!(
+            user_block.contains("align-self: flex-end")
+                && user_block.contains("border-bottom-right-radius"),
+            "expected user messages to render on the right, got: {user_block}",
+        );
+
+        let agent_block = css_block(html, ".board-message.agent {");
+        assert!(
+            agent_block.contains("align-self: flex-start")
+                && agent_block.contains("border-bottom-left-radius"),
+            "expected agent messages to render on the left, got: {agent_block}",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_composer_is_body_first_and_resets_after_post() {
         let html = frontend_bundle_source();
         let anchor = html
@@ -783,6 +808,24 @@ mod tests {
                 && !composer_snippet.contains("Topics</span>")
                 && !composer_snippet.contains("Owners</span>"),
             "expected Board composer to keep kind/topics/owners out of the primary posting path",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_composer_shift_enter_submits_without_ime_conflict() {
+        let html = frontend_bundle_source();
+        let keydown_start = html
+            .find("bodyInput.addEventListener(\"keydown\"")
+            .expect("expected Board composer textarea keydown handler");
+        let keydown_block = &html[keydown_start..html.len().min(keydown_start + 700)];
+
+        assert!(
+            keydown_block.contains("event.key === \"Enter\"")
+                && keydown_block.contains("event.shiftKey")
+                && keydown_block.contains("event.isComposing")
+                && keydown_block.contains("event.preventDefault()")
+                && keydown_block.contains("submitBoardEntry(windowId)"),
+            "expected Shift+Enter to submit while guarding IME composition, got: {keydown_block}",
         );
     }
 

@@ -1216,6 +1216,8 @@ dependencies = [
  "ignore",
  "image",
  "muda",
+ "notify",
+ "notify-debouncer-mini",
  "regex",
  "reqwest",
  "rfd",
