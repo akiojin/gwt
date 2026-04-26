@@ -159,7 +159,12 @@ pub(crate) fn build_shell_process_launch(
     env.extend(config.env_vars.clone());
 
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        let shell = match config.windows_shell {
+        let windows_shell = if cfg!(windows) {
+            config.windows_shell
+        } else {
+            None
+        };
+        let shell = match windows_shell {
             Some(windows_shell) => gwt::ShellProgram {
                 command: windows_shell_process_command(windows_shell).to_string(),
                 args: interactive_windows_shell_args(windows_shell),
