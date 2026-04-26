@@ -798,6 +798,57 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("searchInFlight") && html.contains("inFlightSearchRequestId"),
+            "expected semantic search state to track the single in-flight backend request",
+        );
+        assert!(
+            html.contains("queuedSearchQuery")
+                && html.contains("const nextQuery = state.queuedSearchQuery;"),
+            "expected semantic search state to coalesce additional input to the latest query",
+        );
+        assert!(
+            !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
+            "expected semantic search scheduling to preserve visible entries while searching",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_refresh() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("detailRequestId") && html.contains("knowledgeDetailRequestMatches"),
+            "expected entry selection to use a separate detail request correlation id",
+        );
+        assert!(
+            html.contains("request_id: requestId,\n          number,"),
+            "expected select_knowledge_bridge_entry requests to carry the detail request id",
+        );
+        assert!(
+            html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
+            "expected new cache loads to invalidate older detail response ids",
+        );
+        assert!(
+            html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
+            "expected detail responses to avoid clearing refresh loading for detail-only replies",
+        );
+        let search_block = html
+            .split("case \"knowledge_search_results\":")
+            .nth(1)
+            .and_then(|tail| tail.split("case \"knowledge_detail\":").next())
+            .expect("knowledge search results block");
+        assert!(
+            !search_block.contains("state.loading = false;")
+                && !search_block.contains("state.refreshing = false;"),
+            "expected search results to leave active refresh loading state untouched",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 

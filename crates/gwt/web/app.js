@@ -58,6 +58,7 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       const pendingMessages = [];
       // Phase 1B extraction map: each entry names the surface that owns the
@@ -1461,10 +1462,16 @@
             detail: null,
             query: "",
             loading: false,
+            refreshing: false,
             searching: false,
             detailLoading: false,
             pendingSearchTimer: null,
+            loadRequestId: 0,
+            detailRequestId: 0,
             searchRequestId: 0,
+            inFlightSearchRequestId: 0,
+            searchInFlight: false,
+            queuedSearchQuery: "",
             error: "",
             emptyMessage: "",
             baseEmptyMessage: "",
@@ -1484,6 +1491,12 @@
         if (state?.pendingSearchTimer) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
+        }
+        if (state) {
+          state.queuedSearchQuery = "";
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          state.detailRequestId = 0;
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
@@ -1632,14 +1645,23 @@
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.loadRequestId = requestId;
+        state.detailRequestId = 0;
         state.loading = true;
+        state.refreshing = Boolean(refresh);
         state.searching = false;
+        state.searchInFlight = false;
+        state.inFlightSearchRequestId = 0;
+        state.queuedSearchQuery = "";
+        state.searchRequestId += 1;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "load_knowledge_bridge",
           id: windowId,
           knowledge_kind: effectiveKind,
+          request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
           list_scope:
@@ -1661,6 +1683,42 @@
         }
       }
 
+      function knowledgeEventScopeMatches(state, event) {
+        return !(
+          state.kind === "issue" &&
+          event.list_scope &&
+          event.list_scope !== state.listScope
+        );
+      }
+
+      function knowledgeDetailRequestMatches(state, event) {
+        return (
+          !event.request_id ||
+          event.request_id === state.loadRequestId ||
+          event.request_id === state.detailRequestId
+        );
+      }
+
+      function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        const effectiveKind = knowledgeKind || state.kind;
+        const requestId = nextKnowledgeSearchRequestId++;
+        state.searchRequestId = requestId;
+        state.inFlightSearchRequestId = requestId;
+        state.searchInFlight = true;
+        state.searching = true;
+        send({
+          kind: "search_knowledge_bridge",
+          id: windowId,
+          knowledge_kind: effectiveKind,
+          query,
+          request_id: requestId,
+          selected_number: state.selectedNumber ?? null,
+          list_scope:
+            effectiveKind === "issue" ? state.listScope || "open" : null,
+        });
+      }
+
       function scheduleKnowledgeSearch(windowId, knowledgeKind) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         if (state.pendingSearchTimer) {
@@ -1668,42 +1726,47 @@
           state.pendingSearchTimer = null;
         }
         const query = state.query.trim();
-        const requestId = nextKnowledgeSearchRequestId++;
-        state.searchRequestId = requestId;
         state.error = "";
         if (!query) {
           state.searching = false;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          state.queuedSearchQuery = "";
+          state.searchRequestId += 1;
           restoreKnowledgeBaseEntries(state);
           renderKnowledgeBridge(windowId);
           return;
         }
         if (state.loading && state.baseEntries.length === 0) {
           state.searching = true;
-          state.entries = [];
-          state.emptyMessage = "";
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        if (state.searchInFlight) {
+          state.queuedSearchQuery = query;
+          state.searching = true;
           renderKnowledgeBridge(windowId);
           return;
         }
         state.searching = true;
-        state.entries = [];
-        state.emptyMessage = "";
         state.pendingSearchTimer = setTimeout(() => {
           state.pendingSearchTimer = null;
           if (!workspaceWindowById(windowId)) {
             return;
           }
-          send({
-            kind: "search_knowledge_bridge",
-            id: windowId,
-            knowledge_kind: knowledgeKind || state.kind,
-            query,
-            request_id: requestId,
-            selected_number: state.selectedNumber ?? null,
-            list_scope:
-              (knowledgeKind || state.kind) === "issue"
-                ? state.listScope || "open"
-                : null,
-          });
+          const latestQuery = state.query.trim();
+          if (!latestQuery) {
+            state.searching = false;
+            restoreKnowledgeBaseEntries(state);
+            renderKnowledgeBridge(windowId);
+            return;
+          }
+          if (state.searchInFlight) {
+            state.queuedSearchQuery = latestQuery;
+            renderKnowledgeBridge(windowId);
+            return;
+          }
+          sendKnowledgeSemanticSearch(windowId, knowledgeKind, latestQuery);
         }, 250);
         renderKnowledgeBridge(windowId);
       }
@@ -1712,11 +1775,14 @@
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         state.selectedNumber = number;
         state.detailLoading = true;
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.detailRequestId = requestId;
         const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
           knowledge_kind: effectiveKind,
+          request_id: requestId,
           number,
           list_scope:
             effectiveKind === "issue" ? state.listScope || "open" : null,
@@ -3905,6 +3971,11 @@
         state.detailLoading = false;
         state.query = "";
         state.searching = false;
+        state.refreshing = false;
+        state.searchInFlight = false;
+        state.inFlightSearchRequestId = 0;
+        state.queuedSearchQuery = "";
+        state.loadRequestId += 1;
         state.searchRequestId += 1;
         requestKnowledgeBridge(windowId, state.kind, false);
         renderKnowledgeBridge(windowId);
@@ -3948,6 +4019,11 @@
         } else if (state.searching) {
           status.classList.add("visible", "info");
           status.textContent = "Searching semantic index";
+        } else if (state.loading && state.entries.length > 0) {
+          status.classList.add("visible", "info");
+          status.textContent = state.refreshing
+            ? "Refreshing cached knowledge"
+            : "Loading cache-backed data";
         } else if (state.loading && state.entries.length === 0) {
           status.classList.add("visible", "info");
           status.textContent = "Loading cache-backed data";
@@ -5493,6 +5569,8 @@
         requestKnowledgeBridge,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
+        knowledgeEventScopeMatches,
+        knowledgeDetailRequestMatches,
         switchKnowledgeListScope,
         renderKnowledgeBridge,
         renderSettingsWindow,
@@ -5678,17 +5756,30 @@
               event.id,
               event.knowledge_kind,
             );
+            if (
+              (event.request_id && event.request_id !== state.loadRequestId) ||
+              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
+            ) {
+              break;
+            }
             const queuedQuery = state.query.trim();
-            state.baseEntries = event.entries || [];
+            const incomingEntries = event.entries || [];
+            const keepSelectedNumber =
+              state.selectedNumber &&
+              incomingEntries.some((entry) => entry.number === state.selectedNumber);
+            state.baseEntries = incomingEntries;
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
               state.emptyMessage = state.baseEmptyMessage;
               state.searching = false;
             }
-            state.selectedNumber = event.selected_number ?? null;
+            state.selectedNumber = keepSelectedNumber
+              ? state.selectedNumber
+              : event.selected_number ?? null;
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.loading = false;
+            state.refreshing = false;
             state.error = "";
             if (queuedQuery) {
               frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
@@ -5705,19 +5796,46 @@
               event.id,
               event.knowledge_kind,
             );
+            const isInFlightResponse =
+              event.request_id === state.inFlightSearchRequestId;
+            if (isInFlightResponse) {
+              state.searchInFlight = false;
+              state.inFlightSearchRequestId = 0;
+            }
+            if (
+              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
+            ) {
+              break;
+            }
             if (
               event.request_id !== state.searchRequestId ||
               event.query !== state.query.trim()
             ) {
+              const nextQuery = state.queuedSearchQuery || state.query.trim();
+              state.queuedSearchQuery = "";
+              if (isInFlightResponse && nextQuery) {
+                frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                  event.id,
+                  event.knowledge_kind,
+                );
+              }
               break;
             }
             state.entries = event.entries || [];
             state.selectedNumber = event.selected_number ?? null;
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.searching = false;
-            state.loading = false;
             state.error = "";
+            const nextQuery = state.queuedSearchQuery;
+            state.queuedSearchQuery = "";
+            if (nextQuery && nextQuery !== event.query) {
+              frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                event.id,
+                event.knowledge_kind,
+              );
+              break;
+            }
+            state.searching = false;
             if (state.selectedNumber) {
               state.detailLoading = true;
               frontendUnits.knowledgeSettingsSurface.requestKnowledgeDetail(
@@ -5736,9 +5854,20 @@
               event.id,
               event.knowledge_kind,
             );
+            if (
+              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
+              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
+            ) {
+              break;
+            }
+            const matchesLoadRequest =
+              !event.request_id || event.request_id === state.loadRequestId;
             state.detail = event.detail;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
-            state.loading = false;
+            if (matchesLoadRequest) {
+              state.loading = false;
+              state.refreshing = false;
+            }
             state.detailLoading = false;
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
@@ -5812,8 +5941,45 @@
               event.id,
               event.knowledge_kind,
             );
-            state.loading = false;
+            const isSearchError =
+              typeof event.request_id === "number" && typeof event.query === "string";
+            if (
+              isSearchError &&
+              (event.request_id !== state.inFlightSearchRequestId ||
+                event.query !== state.query.trim() ||
+                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+            ) {
+              if (event.request_id === state.inFlightSearchRequestId) {
+                state.searchInFlight = false;
+                state.inFlightSearchRequestId = 0;
+                const nextQuery = state.queuedSearchQuery || state.query.trim();
+                state.queuedSearchQuery = "";
+                if (nextQuery) {
+                  frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                    event.id,
+                    event.knowledge_kind,
+                  );
+                }
+              }
+              break;
+            }
+            if (
+              !isSearchError &&
+              (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
+                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+            ) {
+              break;
+            }
+            const matchesLoadRequest =
+              !event.request_id || event.request_id === state.loadRequestId;
+            if (matchesLoadRequest) {
+              state.loading = false;
+              state.refreshing = false;
+            }
             state.searching = false;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            state.queuedSearchQuery = "";
             state.detailLoading = false;
             state.error = event.message;
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);

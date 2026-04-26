@@ -128,6 +128,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Window not found".to_string(),
                 },
             )];
@@ -138,6 +141,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Project tab not found".to_string(),
                 },
             )];
@@ -148,6 +154,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Window not found".to_string(),
                 },
             )];
@@ -158,6 +167,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Window is not a knowledge bridge".to_string(),
                 },
             )];
@@ -231,6 +243,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id,
                     knowledge_kind,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Project tab not found".to_string(),
                 },
             )];
@@ -249,6 +264,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id,
                     knowledge_kind,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Issue/Knowledge window closed".to_string(),
                 },
             )];
@@ -267,6 +285,9 @@ impl AppRuntime {
                     BackendEvent::KnowledgeError {
                         id,
                         knowledge_kind,
+                        request_id: None,
+                        query: None,
+                        list_scope: None,
                         message: error,
                     },
                 )],
@@ -276,6 +297,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id,
                     knowledge_kind,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: error,
                 },
             )],

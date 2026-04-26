@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::issue_cache::{
-    issue_cache_has_entries, issue_cache_root_for_repo_path,
-    issue_cache_root_for_repo_path_or_detached, sync_issue_cache_from_remote,
-    sync_issue_cache_from_remote_if_stale, ISSUE_CACHE_TTL,
+    issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
+    sync_issue_cache_from_remote, sync_issue_cache_from_remote_if_stale, ISSUE_CACHE_TTL,
 };
 
 const SPEC_LABEL: &str = "gwt-spec";
@@ -187,7 +186,10 @@ pub fn load_knowledge_bridge(
         return Ok(non_repo_view(kind));
     }
 
-    let entries = load_cache_entries_for_repo(repo_path, refresh)?;
+    if refresh {
+        refresh_knowledge_bridge_cache(repo_path, true)?;
+    }
+    let entries = load_local_cache_entries_for_repo(repo_path)?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(match kind {
         KnowledgeKind::Issue => {
@@ -196,6 +198,19 @@ pub fn load_knowledge_bridge(
         KnowledgeKind::Spec => build_spec_view(entries, linked_branches, selected_number),
         KnowledgeKind::Pr => disabled_pr_view(),
     })
+}
+
+pub fn refresh_knowledge_bridge_cache(repo_path: &Path, force: bool) -> Result<bool, String> {
+    if !repo_path.is_dir() || issue_cache_root_for_repo_path(repo_path).is_none() {
+        return Ok(false);
+    }
+    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
+    if force {
+        sync_issue_cache_from_remote(repo_path, &cache_root)?;
+        Ok(true)
+    } else {
+        sync_issue_cache_from_remote_if_stale(repo_path, &cache_root, ISSUE_CACHE_TTL)
+    }
 }
 
 pub fn search_knowledge_bridge(
@@ -301,22 +316,6 @@ pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Siz
         refresh_enabled: true,
         detail,
     })
-}
-
-fn load_cache_entries_for_repo(repo_path: &Path, refresh: bool) -> Result<Vec<CacheEntry>, String> {
-    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
-    if refresh {
-        sync_issue_cache_from_remote(repo_path, &cache_root)?;
-    } else if let Err(error) =
-        sync_issue_cache_from_remote_if_stale(repo_path, &cache_root, ISSUE_CACHE_TTL)
-    {
-        if !issue_cache_has_entries(&cache_root) {
-            return Err(error);
-        }
-    }
-
-    let cache = Cache::new(cache_root);
-    load_cache_entries(&cache)
 }
 
 fn load_local_cache_entries_for_repo(repo_path: &Path) -> Result<Vec<CacheEntry>, String> {
@@ -972,6 +971,9 @@ Extra context.
 
     #[test]
     fn load_knowledge_bridge_builds_issue_and_spec_views_from_cache() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _lock = crate::cli::fake_gh_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1097,6 +1099,9 @@ Extra context.
 
     #[test]
     fn semantic_issue_search_respects_scope_filters_specs_and_scores_results() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _lock = crate::cli::fake_gh_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1164,6 +1169,9 @@ Extra context.
 
     #[test]
     fn semantic_issue_search_reads_cache_without_stale_remote_sync() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _lock = crate::cli::fake_gh_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1224,7 +1232,69 @@ Extra context.
     }
 
     #[test]
+    fn load_knowledge_bridge_reads_local_cache_without_stale_remote_sync() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("repo cache root");
+        let cache = Cache::new(cache_root);
+        cache
+            .write_snapshot(&issue_snapshot(
+                11,
+                "Open cache issue",
+                "Opening the bridge should read this cached entry immediately.",
+                &["bug"],
+                IssueState::Open,
+            ))
+            .expect("write issue");
+
+        let marker = home.path().join("gh-was-called");
+        let fake_gh = home.path().join("fake-gh");
+        fs::write(
+            &fake_gh,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .expect("write fake gh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+        }
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        let view = load_knowledge_bridge(
+            &repo,
+            KnowledgeKind::Issue,
+            Some(11),
+            false,
+            KnowledgeListScope::Open,
+        )
+        .expect("issue bridge");
+
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.selected_number, Some(11));
+        assert!(
+            !marker.exists(),
+            "opening a knowledge bridge must not invoke stale remote cache sync"
+        );
+    }
+
+    #[test]
     fn semantic_spec_search_prioritizes_exact_matches_and_removes_duplicates() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _lock = crate::cli::fake_gh_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

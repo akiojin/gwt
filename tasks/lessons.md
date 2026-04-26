@@ -3740,3 +3740,21 @@ PTY の `Completed(0)` 経路では閉じるが、runtime hook の `status=Stopp
    `should_auto_close_agent_window` と workspace close helper を通す。
 3. hook event の regression test では、`gwt_session_id != agent_session_id` の実 payload 形状を使い、
    status badge だけでなく workspace から window が消えることまで固定する。
+
+## 2026-04-26 — fix(ui): GUI/TUI イベントループで `gh` / Python runner を同期実行しない
+
+### 事象
+
+SPEC / Issue ウィンドウを開く、または検索文字を入力すると GUI が固まる UX になっていた。
+
+### 原因
+
+- Knowledge Bridge の初期ロードが stale cache refresh 経由で `gh issue list/view` を同期実行していた。
+- セマンティック検索が Python runner / ChromaDB をフロントエンドイベント処理中に同期実行していた。
+- 既存の検索結果を保持したまま「検索中」を表示し、追加入力を最新クエリへ畳み込む契約テストが不足していた。
+
+### 再発防止策
+
+1. GUI/TUI のユーザー入力経路では、外部プロセス・ネットワーク・重い runner を必ず background dispatch に逃がす。
+2. ウィンドウ open / scope switch / detail select はローカルキャッシュ読み取りだけで即時応答し、refresh は別応答で反映する。
+3. セマンティック検索は in-flight 1 件に制限し、追加入力は最新クエリへ coalesce する契約テストを維持する。

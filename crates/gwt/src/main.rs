@@ -41,7 +41,9 @@ mod runtime_support;
 mod update_front_door;
 
 #[cfg(test)]
-pub(crate) use app_runtime::{build_frontend_sync_events, LaunchWizardSession};
+pub(crate) use app_runtime::{
+    build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
+};
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner,
     DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
@@ -243,8 +245,8 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
-        BlockingTaskSpawner, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
-        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -1217,11 +1219,14 @@ mod tests {
 
         let knowledge_missing = runtime.load_knowledge_bridge_events(
             "client-1",
-            "missing",
-            KnowledgeKind::Issue,
-            None,
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: "missing",
+                kind: KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
         assert_eq!(knowledge_missing.len(), 1);
         assert!(matches!(
@@ -1231,11 +1236,14 @@ mod tests {
 
         let knowledge_wrong = runtime.load_knowledge_bridge_events(
             "client-1",
-            &branches_id,
-            KnowledgeKind::Issue,
-            None,
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: &branches_id,
+                kind: KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
         assert_eq!(knowledge_wrong.len(), 1);
         assert!(matches!(
@@ -1804,6 +1812,7 @@ mod tests {
                 gwt::FrontendEvent::LoadKnowledgeBridge {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
                     selected_number: None,
                     refresh: false,
                     list_scope: None,
@@ -1816,6 +1825,7 @@ mod tests {
                 gwt::FrontendEvent::SelectKnowledgeBridgeEntry {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
                     number: 42,
                     list_scope: None,
                 },

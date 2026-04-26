@@ -20,6 +20,12 @@ pub mod protocol;
 pub mod window_state;
 pub mod workspace;
 
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 pub use branch_cleanup::{
     cleanup_selected_branches, BranchCleanupResultEntry, BranchCleanupResultStatus,
 };
@@ -37,8 +43,9 @@ pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::ProjectIndexStatusView;
 pub use knowledge_bridge::{
-    load_knowledge_bridge, search_knowledge_bridge, KnowledgeBridgeView, KnowledgeDetailSection,
-    KnowledgeDetailView, KnowledgeKind, KnowledgeListItem, KnowledgeListScope,
+    load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
+    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
+    KnowledgeListItem, KnowledgeListScope,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
