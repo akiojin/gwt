@@ -153,38 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_repo_browser_scroll_surfaces_block_canvas_pan_at_edges() {
-        let html = frontend_bundle_source();
-        let scroll_gate = regex::Regex::new(
-            r"if\s*\(\s*!event\.ctrlKey\s*&&\s*!event\.metaKey\s*&&\s*nativeWheelScrollSurface\s*\)\s*\{\s*return;\s*\}",
-        )
-        .expect("valid regex");
-
-        assert!(
-            html.contains("function findNativeWheelScrollSurface"),
-            "expected embedded html to define a repo browser wheel routing helper",
-        );
-        assert!(
-            html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
-            "expected embedded html to reference repo browser scroll containers",
-        );
-        assert!(
-            html.contains(
-                "const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);",
-            ),
-            "expected plain wheel handling to route repo browser surfaces through the shared helper",
-        );
-        assert!(
-            scroll_gate.is_match(html),
-            "expected plain wheel input on repo browser surfaces to stay within the window even at scroll edges",
-        );
-        assert!(
-            !html.contains("canScrollSurfaceConsumeWheelDelta"),
-            "expected repo browser wheel routing to stop using edge fallback heuristics",
-        );
-    }
-
-    #[test]
     fn embedded_web_canvas_wheel_routing_is_installed_through_named_handler() {
         let html = frontend_bundle_source();
 
@@ -765,35 +733,16 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_board_surface_owns_plain_wheel_routing() {
-        let html = frontend_bundle_source();
+    fn embedded_web_board_composer_textarea_keeps_scroll_surface_marker() {
+        // SPEC-2008 FR-032 retired the per-class wheel whitelist; the
+        // `.board-scroll-surface` marker is now informational only but is
+        // still applied to the composer textarea so any future Board-specific
+        // styling can hang off it without reintroducing the whitelist.
+        let js = app_js();
 
         assert!(
-            html.contains(".board-scroll-surface"),
-            "expected Board scroll containers to be registered as native wheel surfaces",
-        );
-        let function_start = html
-            .find("function findNativeWheelScrollSurface")
-            .expect("expected named native wheel scroll helper");
-        let function_body = &html[function_start..];
-        let closest_start = function_body
-            .find("element.closest(")
-            .expect("expected native wheel helper to use closest allowlist");
-        let closest_call =
-            &function_body[closest_start..function_body.len().min(closest_start + 160)];
-        for selector in [
-            ".branch-scroll",
-            ".file-tree-scroll",
-            ".board-scroll-surface",
-        ] {
-            assert!(
-                closest_call.contains(selector),
-                "expected native wheel allowlist to include {selector}, got: {closest_call}",
-            );
-        }
-        assert!(
-            html.contains("board-textarea board-scroll-surface"),
-            "expected Board composer textarea wheel input to stay inside the Board instead of falling through to canvas pan",
+            js.contains("board-textarea board-scroll-surface"),
+            "expected Board composer textarea to retain its scroll surface marker class",
         );
     }
 
@@ -1092,6 +1041,77 @@ mod tests {
         assert!(
             inline_script_lines < 2_000,
             "expected Phase 1B inline module script budget under 2000 lines, got {inline_script_lines}",
+        );
+    }
+
+    /// SPEC-2008 FR-032: wheel routing must follow the opt-out model.
+    ///
+    /// Only `.surface-terminal` may consume wheel events for canvas pan or
+    /// xterm scrollback. All other surfaces (panels and modals) must let the
+    /// browser handle wheel natively. The legacy whitelist helper
+    /// `findNativeWheelScrollSurface` must be retired so newly added panel
+    /// surfaces never need to remember to register themselves.
+    #[test]
+    fn embedded_web_wheel_routing_uses_terminal_only_opt_out() {
+        let js = app_js();
+
+        assert!(
+            !js.contains("function findNativeWheelScrollSurface"),
+            "expected the per-class wheel scroll whitelist helper to be removed in favor of an opt-out model",
+        );
+        assert!(
+            !js.contains("findNativeWheelScrollSurface("),
+            "expected no remaining call sites for the retired wheel scroll whitelist helper",
+        );
+        assert!(
+            js.contains("function handleCanvasWheelEvent"),
+            "expected canvas wheel handler to remain as the single routing entrypoint",
+        );
+        assert!(
+            js.contains("targetElement.closest(\".surface-terminal\")"),
+            "expected canvas wheel handler to special-case `.surface-terminal` for the opt-out routing model",
+        );
+        assert!(
+            js.contains("targetElement.closest(\".workspace-window\")"),
+            "expected canvas wheel handler to recognize panel windows so native scroll is preserved inside them",
+        );
+    }
+
+    /// SPEC-2008 FR-033: every panel surface must share the opaque white body
+    /// background. `.surface-memo` and `.surface-profile` were missing from the
+    /// unified rule which left those panels visually transparent.
+    #[test]
+    fn embedded_web_panel_window_bodies_share_opaque_background() {
+        let html = index_html();
+
+        let body_rule_start = html.find(".surface-file-tree .window-body,").expect(
+            "expected unified `.window-body` background rule to anchor on `.surface-file-tree`",
+        );
+        let body_rule_block = &html[body_rule_start..];
+        let body_rule_end = body_rule_block
+            .find('}')
+            .expect("expected unified `.window-body` background rule to close with `}`");
+        let body_rule = &body_rule_block[..body_rule_end];
+
+        for surface in [
+            ".surface-file-tree",
+            ".surface-branches",
+            ".surface-board",
+            ".surface-logs",
+            ".surface-knowledge",
+            ".surface-mock",
+            ".surface-memo",
+            ".surface-profile",
+        ] {
+            assert!(
+                body_rule.contains(surface),
+                "expected `{surface} .window-body` to participate in the unified opaque background rule",
+            );
+        }
+
+        assert!(
+            body_rule.contains("background: #ffffff"),
+            "expected the unified panel window-body rule to set `background: #ffffff`",
         );
     }
 }

@@ -6045,20 +6045,16 @@
         return null;
       }
 
-      function findNativeWheelScrollSurface(target) {
-        const element = eventTargetElement(target);
-        if (!element) {
-          return null;
-        }
-        return element.closest(".branch-scroll, .file-tree-scroll, .board-scroll-surface");
-      }
-
       function handleCanvasWheelEvent(event) {
         const targetElement = eventTargetElement(event.target);
         if (!targetElement || !canvas.contains(targetElement)) {
           return;
         }
-        // Let terminal windows handle their own scroll (xterm.js scrollback)
+        // SPEC-2008 FR-032: terminal-only opt-out. xterm.js owns wheel inside
+        // `.surface-terminal`; every other workspace-window forwards plain
+        // wheel to the DOM so panel scroll regions (Knowledge / Memo /
+        // Profile / Logs / Board / Issue / SPEC / Settings ...) and modal
+        // content scroll natively without registering a per-class whitelist.
         if (
           !event.ctrlKey &&
           !event.metaKey &&
@@ -6066,8 +6062,11 @@
         ) {
           return;
         }
-        const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);
-        if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface) {
+        if (
+          !event.ctrlKey &&
+          !event.metaKey &&
+          targetElement.closest(".workspace-window")
+        ) {
           return;
         }
         if (event.ctrlKey || event.metaKey) {
