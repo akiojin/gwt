@@ -94,7 +94,6 @@ pub(crate) use update_front_door::{classify_startup_update_state, StartupUpdateA
 
 type ClientId = String;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
-const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
@@ -2702,7 +2701,7 @@ mod tests {
             LaunchRuntimeTarget::Host,
             &current_exe,
             |command| {
-                assert_eq!(command, "gwt");
+                assert_eq!(command, "gwtd");
                 Some(stable.clone())
             },
         )
@@ -2715,13 +2714,13 @@ mod tests {
     }
 
     #[test]
-    fn docker_bundle_override_content_mounts_front_door_and_daemon() {
+    fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
         let content = docker_bundle_override_content("app", &bundle);
 
-        assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
     }
 
@@ -3816,12 +3815,26 @@ fn main() -> wry::Result<()> {
         runtime_support::FrontDoorRoute::Gui
     ) {
         if let Err(error) = run_cli(&argv) {
-            eprintln!("gwt CLI dispatch failed: {error}");
+            eprintln!("CLI dispatch failed: {error}");
             std::process::exit(1);
         }
     }
 
     let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let _gui_instance_lock = match gwt::gui_single_instance::acquire_gui_instance_lock(
+        &gwt_core::paths::gwt_home(),
+        &startup_dir,
+    ) {
+        Ok(lock) => lock,
+        Err(error @ gwt::gui_single_instance::GuiInstanceLockError::AlreadyRunning { .. }) => {
+            eprintln!("gwt GUI startup failed: {error}");
+            std::process::exit(2);
+        }
+        Err(error) => {
+            eprintln!("gwt GUI startup failed: {error}");
+            std::process::exit(1);
+        }
+    };
     let log_dir = logging_dir_for_startup_path(&startup_dir);
 
     // Install the tracing subscriber so that `tracing::debug!/info!` lands in

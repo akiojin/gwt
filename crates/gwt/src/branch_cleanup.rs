@@ -197,6 +197,30 @@ mod tests {
     }
 
     #[test]
+    fn blocked_reason_message_covers_all_variants() {
+        assert_eq!(
+            blocked_reason_message(BranchCleanupBlockedReason::ProtectedBranch),
+            "Cannot clean up a protected branch"
+        );
+        assert_eq!(
+            blocked_reason_message(BranchCleanupBlockedReason::CurrentHead),
+            "Cannot clean up the current HEAD branch"
+        );
+        assert_eq!(
+            blocked_reason_message(BranchCleanupBlockedReason::ActiveSession),
+            "Cannot clean up a branch with an active session"
+        );
+        assert_eq!(
+            blocked_reason_message(BranchCleanupBlockedReason::RemoteTrackingWithoutLocal),
+            "Cannot clean up a remote-tracking branch without a local counterpart"
+        );
+        assert_eq!(
+            blocked_reason_message(BranchCleanupBlockedReason::Unknown),
+            "Cannot clean up this branch"
+        );
+    }
+
+    #[test]
     fn cleanup_selected_branches_preserves_blocked_execution_branch_message() {
         let repo = tempdir().expect("tempdir");
         let mut entry = sample_entry("feature/demo");

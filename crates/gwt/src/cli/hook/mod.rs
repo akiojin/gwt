@@ -1,4 +1,4 @@
-//! Shared types for the `gwt hook ...` CLI surface (SPEC #1942).
+//! Shared types for the `gwtd hook ...` CLI surface (SPEC #1942).
 //!
 //! This module defines the canonical vocabulary for hook dispatch:
 //!
@@ -34,7 +34,7 @@ use serde::Deserialize;
 
 pub use envelope::{HookOutput, IntentBoundaryEvent};
 
-/// Every hook name exposed via `gwt hook <name>`.
+/// Every hook name exposed via `gwtd hook <name>`.
 ///
 /// Adding a new variant requires updating [`HookKind::from_name`] and
 /// the dispatch match in `cli::run_hook`.

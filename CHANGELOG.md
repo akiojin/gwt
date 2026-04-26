@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.10.0] - 2026-04-26
+
+### Bug Fixes
+
+- **cli:** Route agents through gwtd and guard GUI launch
+- Harden knowledge bridge semantic search
+- Defer semantic search until cache load
+
+### Features
+
+- Add semantic search to knowledge bridge
+
+### Miscellaneous Tasks
+
+- Merge origin develop into gwt cli branch
+
 ## [9.9.0] - 2026-04-25
 
 ### Bug Fixes

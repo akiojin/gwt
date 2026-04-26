@@ -1,4 +1,4 @@
-//! `gwt hook workflow-policy` — hook-driven workflow gating.
+//! `gwtd hook workflow-policy` — hook-driven workflow gating.
 //!
 //! v1 keeps the policy deliberately narrow:
 //!

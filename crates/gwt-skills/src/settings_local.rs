@@ -9,7 +9,7 @@ use std::{
 use serde_json::{json, Map, Value};
 
 const GWT_MANAGED_RUNTIME_MARKER: &str = "GWT_MANAGED_HOOK";
-const GWT_HOOK_CLI_PREFIX: &str = "gwt hook ";
+const GWT_HOOK_CLI_PREFIX: &str = "gwtd hook ";
 const LEGACY_GWT_HOOK_SCRIPT_SEGMENT: &str = "hooks/scripts/gwt-";
 /// SPEC #1942 amendment: distinctive subcommand suffixes that mark a
 /// generated managed hook command regardless of which binary path is
@@ -237,8 +237,9 @@ fn is_gwt_managed_command(command: &str) -> bool {
 /// managed-command recogniser from which binary path is embedded at
 /// the front, so it works for:
 ///
-/// - the absolute-path form `'/Users/x/.bun/bin/gwt' hook block-*`
-/// - the legacy PATH-dependent literal `gwt hook block-*`
+/// - the legacy absolute-path form `'/Users/x/.bun/bin/gwt' hook block-*`
+/// - the absolute-path form `'/Users/x/.bun/bin/gwtd' hook block-*`
+/// - the PATH-dependent literal `gwtd hook block-*`
 /// - even the `cargo test` binary path
 ///   `'/tmp/.../deps/gwt_skills-abc' hook runtime-state PreToolUse`
 ///   that unit tests see when they call `current_exe()` indirectly.
@@ -351,7 +352,7 @@ fn forward_hook(shell: HookShell) -> Value {
 
 /// Managed Stop-hook handler that lets a skill block the Stop event
 /// until the skill reports completion via its exit CLI
-/// (`gwt discuss|plan|build ...`). See SPEC-1935 FR-014n.
+/// (`gwtd discuss|plan|build ...`). See SPEC-1935 FR-014n.
 fn skill_stop_check_hook(hook_name: &str, shell: HookShell) -> Value {
     json!({
         "matcher": "*",
@@ -397,16 +398,16 @@ const GWT_HOOK_BIN_ENV: &str = "GWT_HOOK_BIN";
 /// 1. `$GWT_HOOK_BIN` environment variable (explicit override, used
 ///    by the regenerate-settings example when it knows the gwt
 ///    binary path but its own `current_exe()` points elsewhere).
-/// 2. `std::env::current_exe()` — the running binary's path. When
-///    gwt itself calls `generate_settings_local` at startup this
-///    returns `/path/to/gwt` (or the bun symlink on macOS), which
-///    is exactly what we want.
-/// 3. Literal `"gwt"` fallback (legacy PATH-dependent behaviour).
+/// 2. The sibling `gwtd` binary when the GUI `gwt` binary calls
+///    `generate_settings_local` at startup.
+/// 3. A PATH-resolved `gwtd` when available.
+/// 4. Literal `"gwtd"` fallback (PATH-dependent behaviour).
 ///
 /// Platform notes:
 ///
-/// - macOS: `current_exe()` preserves the invocation path, so
-///   `~/.bun/bin/gwt` stays as-is and survives bun upgrades.
+/// - macOS: `current_exe()` preserves the invocation path, so a
+///   `~/.bun/bin/gwt` GUI launch resolves to the sibling
+///   `~/.bun/bin/gwtd` path and survives bun upgrades.
 /// - Linux: `/proc/self/exe` resolves to the real binary, which may
 ///   land inside bun's per-version cache. The generator is re-run on
 ///   every gwt startup so staleness self-heals on the next launch.
@@ -416,10 +417,58 @@ fn gwt_hook_bin_path() -> String {
             return v;
         }
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "gwt".to_string())
+    let current_exe = std::env::current_exe().ok();
+    gwt_hook_bin_path_with(current_exe.as_deref(), path_lookup)
+}
+
+fn gwt_hook_bin_path_with(
+    current_exe: Option<&Path>,
+    lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> String {
+    if let Some(path) = current_exe {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return lookup("gwtd")
+                .and_then(path_to_string)
+                .unwrap_or_else(|| "gwtd".to_string());
+        };
+        if is_gwtd_exe_name(file_name) {
+            return path_to_string(path.to_path_buf()).unwrap_or_else(|| "gwtd".to_string());
+        }
+        if is_gwt_gui_exe_name(file_name) {
+            let gwtd_path = path.with_file_name(gwtd_exe_name_for(file_name));
+            return path_to_string(gwtd_path).unwrap_or_else(|| "gwtd".to_string());
+        }
+    }
+    lookup("gwtd")
+        .and_then(path_to_string)
+        .unwrap_or_else(|| "gwtd".to_string())
+}
+
+fn is_gwt_gui_exe_name(file_name: &str) -> bool {
+    matches!(file_name, "gwt" | "gwt.exe")
+}
+
+fn is_gwtd_exe_name(file_name: &str) -> bool {
+    matches!(file_name, "gwtd" | "gwtd.exe")
+}
+
+fn gwtd_exe_name_for(gwt_exe_name: &str) -> &'static str {
+    if gwt_exe_name.ends_with(".exe") {
+        "gwtd.exe"
+    } else {
+        "gwtd"
+    }
+}
+
+fn path_to_string(path: PathBuf) -> Option<String> {
+    path.into_os_string().into_string().ok()
+}
+
+fn path_lookup(command: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(command))
+        .find(|candidate| candidate.is_file())
 }
 
 /// POSIX shell single-quote quoting. An embedded single quote becomes
@@ -435,9 +484,9 @@ fn powershell_quote(s: &str) -> String {
 }
 
 fn workflow_policy_hook(_target: ManagedHookTarget) -> Value {
-    // Dispatch the unified workflow gate through the absolute path of
-    // this gwt binary so launched worktrees do not depend on `gwt`
-    // being present on $PATH. `target` stays for call-site symmetry.
+    // Dispatch the unified workflow gate through the resolved gwtd
+    // path so launched worktrees do not depend on the GUI binary as a
+    // CLI. `target` stays for call-site symmetry.
     json!({
         "matcher": "*",
         "hooks": [
@@ -502,9 +551,7 @@ fn workflow_policy_hook_command_with_bin(bin: &str, shell: HookShell) -> String 
 
 /// Emit the POSIX-shell form of the runtime-state hook. The previous
 /// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
-/// by a single `gwt hook runtime-state <event>` dispatch, using the
-/// absolute path of *this* gwt binary so that `$PATH` is not
-/// consulted.
+/// by a single `gwtd hook runtime-state <event>` dispatch.
 fn posix_runtime_hook_command(event: &str) -> String {
     let bin = posix_shell_quote(&gwt_hook_bin_path());
     format!("{bin} hook runtime-state {event}")
@@ -532,8 +579,8 @@ fn posix_board_reminder_hook_command(event: &str) -> String {
 
 /// Emit the PowerShell form of the runtime-state hook. Windows Claude
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
-/// keep that wrapper, then invoke the gwt binary via `& '...'` call
-/// operator with the absolute path. PATH is not consulted.
+/// keep that wrapper, then invoke the gwtd binary via `& '...'` call
+/// operator.
 fn powershell_runtime_hook_command(event: &str) -> String {
     let bin = powershell_quote(&gwt_hook_bin_path());
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook runtime-state {event} }}\"")
@@ -811,7 +858,7 @@ mod tests {
     }
 
     // T-080 / T-082 (SPEC #1942): the Claude settings.local.json must
-    // dispatch every managed hook through the `gwt hook ...` CLI surface,
+    // dispatch every managed hook through the `gwtd hook ...` CLI surface,
     // not through retired Node hook scripts under `hooks/scripts/gwt-*`.
     #[test]
     fn managed_hooks_dispatch_through_gwt_hook_cli_not_node_scripts() {
@@ -834,7 +881,7 @@ mod tests {
 
         let value: Value = serde_json::from_str(&content).unwrap();
 
-        // T-082: runtime hooks now invoke `gwt hook runtime-state <event>`.
+        // T-082: runtime hooks now invoke `gwtd hook runtime-state <event>`.
         for event in [
             "SessionStart",
             "UserPromptSubmit",
@@ -849,7 +896,7 @@ mod tests {
                 .find(|cmd| cmd.contains(&format!(" hook runtime-state {event}")))
                 .unwrap_or_else(|| panic!("runtime command missing for event {event}"));
             // SPEC #1942 amendment: runtime hook command embeds an
-            // absolute path to gwt rather than the literal `gwt`.
+            // absolute path to gwtd rather than the literal `gwtd`.
             assert!(
                 cmd.contains(&format!(" hook runtime-state {event}")),
                 "runtime hook for {event} must end with `hook runtime-state {event}`, got: {cmd}"
@@ -867,8 +914,8 @@ mod tests {
                 "runtime hook must not shell out to printf anymore, got: {cmd}"
             );
             assert!(
-                !cmd.contains(" gwt hook "),
-                "runtime hook must not use the PATH-dependent literal `gwt`, got: {cmd}"
+                !cmd.starts_with("gwtd hook "),
+                "runtime hook must not use the PATH-dependent literal `gwtd`, got: {cmd}"
             );
 
             let forward_commands: Vec<&str> = commands
@@ -883,8 +930,8 @@ mod tests {
             );
             let forward = forward_commands[0];
             assert!(
-                !forward.contains("gwtd"),
-                "forward hook must stay on the public gwt CLI, got: {forward}"
+                forward.contains(" hook forward"),
+                "forward hook must stay on the public gwtd CLI, got: {forward}"
             );
             assert!(
                 !forward.contains("/internal/hook-live"),
@@ -899,8 +946,8 @@ mod tests {
                 "forward hook must not expose transport env names, got: {forward}"
             );
             assert!(
-                !forward.contains(" gwt hook "),
-                "forward hook must not use the PATH-dependent literal `gwt`, got: {forward}"
+                !forward.starts_with("gwtd hook "),
+                "forward hook must not use the PATH-dependent literal `gwtd`, got: {forward}"
             );
         }
 
@@ -942,8 +989,8 @@ mod tests {
             "workflow policy hook must terminate after workflow-policy, got: {actual:?}"
         );
         assert!(
-            !actual[0].starts_with("gwt hook "),
-            "workflow policy hook must not use literal `gwt hook ...`, got: {actual:?}"
+            !actual[0].starts_with("gwtd hook "),
+            "workflow policy hook must not use literal `gwtd hook ...`, got: {actual:?}"
         );
     }
 
@@ -952,7 +999,7 @@ mod tests {
     // shipped at once and this test locks all three:
     //
     // 1. Running the generator twice against a repo whose existing
-    //    settings file already contains new-form `gwt hook block-*`
+    //    settings file already contains new-form `gwtd hook block-*`
     //    commands must NOT duplicate them. `is_gwt_managed_command`
     //    has to recognise the new form as managed so the generator
     //    replaces instead of appending.
@@ -1823,33 +1870,33 @@ mod tests {
             );
         }
         assert!(commands_for_event(&value, "PreToolUse").contains(&"my-custom-hook"));
-        assert!(!content.contains("gwtd"));
+        assert!(content.contains("gwtd"));
+        assert!(!content.contains("\"gwt hook"));
     }
 
     // SPEC #1942 T-083: the inline POSIX shell JSON writer has been
-    // replaced by a single `gwt hook runtime-state <event>` CLI call.
+    // replaced by a single `gwtd hook runtime-state <event>` CLI call.
     // The sidecar-write behaviour is now covered end-to-end by
     // `crates/gwt/tests/hook_runtime_state_test.rs`, which exercises
-    // the Rust implementation directly without requiring `gwt` to be on
+    // the Rust implementation directly without requiring `gwtd` to be on
     // PATH at test time.
     #[test]
-    fn posix_runtime_hook_command_dispatches_through_gwt_hook_cli() {
+    fn posix_runtime_hook_command_dispatches_through_gwtd_hook_cli() {
         let command = posix_runtime_hook_command("SessionStart");
         assert!(
             !command.contains("GWT_MANAGED_HOOK"),
             "posix runtime hook must not keep the managed marker, got: {command}"
         );
-        // SPEC #1942 amendment: the gwt binary is dispatched via its
-        // absolute path (quoted) so `$PATH` is not consulted. The exact
-        // path is the test process's `current_exe()`, which varies by
-        // target dir, so we only assert shape invariants.
+        // SPEC #1942 amendment: the gwtd binary is dispatched via a
+        // quoted command. In unit tests this may be the literal fallback
+        // because the test process is not a release binary.
         assert!(
             command.contains(" hook runtime-state SessionStart"),
             "posix runtime hook must invoke `hook runtime-state <event>`, got: {command}"
         );
         assert!(
-            command.contains("/gwt") || command.contains("/gwt_skills-") || command.contains("\\gwt"),
-            "posix runtime hook must embed an absolute path whose tail is a gwt-like binary, got: {command}"
+            command.contains("'gwtd'") || command.contains("/gwtd") || command.contains("\\gwtd"),
+            "posix runtime hook must dispatch through gwtd, got: {command}"
         );
         assert!(
             !command.contains("sh -lc"),
@@ -1861,7 +1908,7 @@ mod tests {
         );
         // Regression: the PATH-less literal form is forbidden.
         assert!(
-            !command.contains(" gwt hook "),
+            !command.contains(" gwtd hook "),
             "posix runtime hook must not use the PATH-dependent literal `gwt`, got: {command}"
         );
     }
@@ -1891,17 +1938,51 @@ mod tests {
 
     // SPEC #1942 amendment regression tests
     #[test]
-    fn gwt_hook_bin_path_returns_absolute_or_fallback() {
+    fn gwt_hook_bin_path_returns_absolute_or_gwtd_fallback() {
         let path = gwt_hook_bin_path();
-        // Either an absolute path from current_exe or the literal
-        // fallback "gwt". Must never be empty.
+        // Either an absolute path from current_exe/PATH or the literal
+        // fallback "gwtd". Must never be empty.
         assert!(!path.is_empty());
-        if path != "gwt" {
+        assert_ne!(path, "gwt");
+        if path != "gwtd" {
             assert!(
                 std::path::Path::new(&path).is_absolute(),
-                "gwt_hook_bin_path must return an absolute path or the literal fallback, got: {path}"
+                "gwt_hook_bin_path must return an absolute path or the literal gwtd fallback, got: {path}"
             );
         }
+    }
+
+    #[test]
+    fn gwt_hook_bin_path_resolves_gui_binary_to_gwtd_sibling() {
+        assert_eq!(
+            gwt_hook_bin_path_with(Some(Path::new("/opt/gwt/bin/gwt")), |_| None),
+            "/opt/gwt/bin/gwtd"
+        );
+        assert_eq!(
+            gwt_hook_bin_path_with(Some(Path::new("C:/tools/gwt.exe")), |_| None),
+            "C:/tools/gwtd.exe"
+        );
+    }
+
+    #[test]
+    fn gwt_hook_bin_path_uses_gwtd_fallback_for_non_release_binaries() {
+        assert_eq!(
+            gwt_hook_bin_path_with(
+                Some(Path::new("/tmp/target/debug/deps/gwt_skills-abc123")),
+                |_| None
+            ),
+            "gwtd"
+        );
+        assert_eq!(
+            gwt_hook_bin_path_with(
+                Some(Path::new("/tmp/target/debug/deps/gwt_skills-abc123")),
+                |command| {
+                    assert_eq!(command, "gwtd");
+                    Some(PathBuf::from("/usr/local/bin/gwtd"))
+                }
+            ),
+            "/usr/local/bin/gwtd"
+        );
     }
 
     #[test]
@@ -1921,29 +2002,32 @@ mod tests {
     #[test]
     fn workflow_policy_hook_command_matches_shell_shape() {
         assert_eq!(
-            workflow_policy_hook_command_with_bin("gwt", HookShell::Posix),
-            "'gwt' hook workflow-policy"
+            workflow_policy_hook_command_with_bin("gwtd", HookShell::Posix),
+            "'gwtd' hook workflow-policy"
         );
         assert_eq!(
-            workflow_policy_hook_command_with_bin("gwt", HookShell::PowerShell),
-            "powershell -NoProfile -Command \"& { & 'gwt' hook workflow-policy }\""
+            workflow_policy_hook_command_with_bin("gwtd", HookShell::PowerShell),
+            "powershell -NoProfile -Command \"& { & 'gwtd' hook workflow-policy }\""
         );
     }
 
     #[test]
     fn forward_hook_command_matches_shell_shape() {
         assert_eq!(
-            forward_hook_command_with_bin("gwt", HookShell::Posix),
-            "'gwt' hook forward"
+            forward_hook_command_with_bin("gwtd", HookShell::Posix),
+            "'gwtd' hook forward"
         );
         assert_eq!(
-            forward_hook_command_with_bin("gwt", HookShell::PowerShell),
-            "powershell -NoProfile -Command \"& { & 'gwt' hook forward }\""
+            forward_hook_command_with_bin("gwtd", HookShell::PowerShell),
+            "powershell -NoProfile -Command \"& { & 'gwtd' hook forward }\""
         );
     }
 
     #[test]
     fn is_gwt_managed_command_recognizes_absolute_path_form() {
+        assert!(is_gwt_managed_command(
+            "'/Users/x/.bun/bin/gwtd' hook workflow-policy"
+        ));
         assert!(is_gwt_managed_command(
             "'/Users/x/.bun/bin/gwt' hook workflow-policy"
         ));
@@ -1973,7 +2057,7 @@ mod tests {
                             "matcher": "Bash",
                             "hooks": [
                                 {
-                                    "command": "gwt hook block-git-branch-ops",
+                                    "command": "gwtd hook block-git-branch-ops",
                                     "type": "command"
                                 }
                             ]
@@ -2004,7 +2088,7 @@ mod tests {
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(
-            !content.contains("\"gwt hook block-git-branch-ops\""),
+            !content.contains("\"gwtd hook block-git-branch-ops\""),
             "tracked PATH-less literal must be migrated away, got: {content}"
         );
         assert!(

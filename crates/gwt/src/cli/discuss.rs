@@ -1,4 +1,4 @@
-//! `gwt discuss <resolve|park|reject|clear-next-question> --proposal <label>`
+//! `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`
 //!
 //! Exit CLI for the `gwt-discussion` skill (SPEC-1935 FR-014p). The LLM
 //! invokes these commands to mutate `.gwt/discussion.md` so the

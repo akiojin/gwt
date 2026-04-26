@@ -1,4 +1,4 @@
-//! `gwt hook skill-build-spec-stop-check` — Stop-block handler for the
+//! `gwtd hook skill-build-spec-stop-check` — Stop-block handler for the
 //! `gwt-build-spec` skill (SPEC-1935 Phase 10, FR-014r).
 //!
 //! Mirrors the `skill_plan_spec_stop_check` structure but targets the
@@ -86,7 +86,7 @@ mod tests {
             &[
                 "gwt-build-spec for SPEC-1935",
                 "phase: red-green-refactor",
-                "gwt build complete",
+                "gwtd build complete",
             ],
         );
     }

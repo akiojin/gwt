@@ -14,7 +14,7 @@ Download the release asset for your platform from
 
 - GUI-first installer: `gwt-macos-universal.dmg`
 - Open `GWT.app` from the mounted DMG for the native desktop launch surface
-- Use the install script when you want the `gwt` CLI front door in your `PATH`
+- Use the install script when you want the `gwtd` CLI in your `PATH`
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash
@@ -71,17 +71,17 @@ directory. The app also starts a local HTTP/WebSocket server for the WebView
 surface and prints a URL such as `http://127.0.0.1:<port>/` to stderr. You can
 open that URL in a regular browser while the native app is running.
 
-CLI subcommands run in the same binary without opening a GUI window:
+CLI subcommands run through `gwtd` without opening a GUI window:
 
 ```bash
-gwt issue spec 1784 --section plan
-gwt pr current
-gwt board show
-gwt hook workflow-policy
+gwtd issue spec 1784 --section plan
+gwtd pr current
+gwtd board show
+gwtd hook workflow-policy
 ```
 
-Managed hooks and runtime delegation continue to enter through `gwt`. There is
-no separate operator-facing daemon command to start by hand.
+Managed hooks and runtime delegation use `gwtd`. There is no separate daemon
+process to start by hand.
 
 ## Main Workflow
 
@@ -137,13 +137,13 @@ selection. `Ctrl+C` stays mapped to the running terminal process.
 - Read a SPEC:
 
 ```bash
-gwt issue spec <number>
+gwtd issue spec <number>
 ```
 
 - Read one section:
 
 ```bash
-gwt issue spec <number> --section spec|plan|tasks
+gwtd issue spec <number> --section spec|plan|tasks
 ```
 
 ## Logs
@@ -226,7 +226,7 @@ cargo fmt
 ## Specs
 
 Detailed requirements live in GitHub Issues labeled `gwt-spec`. Use
-`gwt issue spec <n>` to inspect them locally through the cache-backed CLI.
+`gwtd issue spec <n>` to inspect them locally through the cache-backed CLI.
 
 ## License
 

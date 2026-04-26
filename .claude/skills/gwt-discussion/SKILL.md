@@ -85,10 +85,10 @@ which inspects `.gwt/discussion.md` and blocks Stop (with
 with a non-empty `Next Question:`. To let Stop succeed, mark each proposal
 explicitly using the exit CLI:
 
-- `gwt discuss resolve --proposal "Proposal A"` — active → chosen
-- `gwt discuss park --proposal "Proposal A"` — active → parked (resume later)
-- `gwt discuss reject --proposal "Proposal A"` — active → rejected
-- `gwt discuss clear-next-question --proposal "Proposal A"` — keep the
+- `gwtd discuss resolve --proposal "Proposal A"` — active → chosen
+- `gwtd discuss park --proposal "Proposal A"` — active → parked (resume later)
+- `gwtd discuss reject --proposal "Proposal A"` — active → rejected
+- `gwtd discuss clear-next-question --proposal "Proposal A"` — keep the
   proposal active but pause Stop-block (exceptional; only when waiting on a
   user answer the skill truly cannot resolve alone)
 
@@ -141,7 +141,7 @@ exception path. Keep the same one-question-at-a-time discipline.
 
 1. Understand the user's concern, idea, or implementation gap.
 2. Run `gwt-search` with 2-3 semantic queries in Japanese and English.
-3. Check open SPEC Issues: `gwt issue spec list`.
+3. Check open SPEC Issues: `gwtd issue spec list`.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.

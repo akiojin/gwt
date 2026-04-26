@@ -155,7 +155,7 @@ impl RuntimeHookEvent {
 
 fn emit_live_event_fail_open(event: RuntimeHookEvent) {
     if let Err(error) = emit_live_event(&event) {
-        eprintln!("gwt hook live event: {error}");
+        eprintln!("gwtd hook live event: {error}");
     }
 }
 
