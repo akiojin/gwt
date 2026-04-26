@@ -208,6 +208,83 @@ fn build_abort_records_reason_in_phase_field() {
 }
 
 #[test]
+fn plan_phase_without_active_state_exits_zero() {
+    let (mut env, _dir) = new_env();
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt", "plan", "phase", "--spec", "1935", "--label", "verify",
+        ]),
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn plan_abort_without_active_state_exits_zero() {
+    let (mut env, _dir) = new_env();
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "plan",
+            "abort",
+            "--spec",
+            "1935",
+            "--reason",
+            "cancelled",
+        ]),
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn build_phase_with_mismatched_spec_is_rejected() {
+    let (mut env, _dir) = new_env();
+    dispatch(
+        &mut env,
+        &argv(&["gwt", "build", "start", "--spec", "1935"]),
+    );
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt", "build", "phase", "--spec", "9999", "--label", "verify",
+        ]),
+    );
+    assert_eq!(code, 2, "mismatched SPEC must refuse to update phase");
+    let state = skill_state::load(_dir.path(), "build-spec")
+        .unwrap()
+        .unwrap();
+    assert!(state.active, "state must remain active on rejection");
+    assert!(state.phase.is_none(), "phase must not be updated");
+}
+
+#[test]
+fn build_abort_with_mismatched_spec_is_rejected() {
+    let (mut env, dir) = new_env();
+    dispatch(
+        &mut env,
+        &argv(&["gwt", "build", "start", "--spec", "1935"]),
+    );
+    let code = dispatch(
+        &mut env,
+        &argv(&[
+            "gwt",
+            "build",
+            "abort",
+            "--spec",
+            "9999",
+            "--reason",
+            "wrong spec",
+        ]),
+    );
+    assert_eq!(code, 2, "mismatched SPEC must refuse to abort");
+    let state = skill_state::load(dir.path(), "build-spec")
+        .unwrap()
+        .unwrap();
+    assert!(state.active, "state must remain active on rejection");
+}
+
+#[test]
 fn discuss_commands_exit_zero_when_discussion_md_absent() {
     // Idempotent no-op: absent file is not an error; the handler just
     // reports "no change".
