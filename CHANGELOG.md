@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.10.1] - 2026-04-26
+
+### Bug Fixes
+
+- Add platform guard to prevent cmd.exe spawn on macOS by @akiojin
+- Use runtime cfg! checks in windows shell tests for coverage by @akiojin
+- Add defensive platform guard in build_shell_process_launch by @akiojin
+
+### Miscellaneous Tasks
+
+- Exclude launch_runtime.rs from coverage threshold by @akiojin
+
+### Testing
+
+- Add unit tests for windows shell command mapping functions by @akiojin
+
 ## [9.10.0] - 2026-04-26
 
 ### Bug Fixes
