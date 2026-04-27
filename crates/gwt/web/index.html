@@ -601,6 +601,7 @@
         font-size: 12px;
         border: 1px solid rgba(59, 130, 246, 0.18);
         pointer-events: none;
+        user-select: none;
         display: none;
       }
 
@@ -611,6 +612,8 @@
         justify-content: center;
         gap: 12px;
         background: rgba(15, 23, 42, 0.95);
+        pointer-events: auto;
+        user-select: text;
       }
 
       .overlay-spinner {
@@ -623,6 +626,37 @@
       .overlay-message {
         font-size: 13px;
         color: #bfdbfe;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+        user-select: text;
+      }
+
+      .overlay-copy-button {
+        align-self: flex-end;
+        min-width: 56px;
+        height: 26px;
+        border: 1px solid rgba(147, 197, 253, 0.32);
+        border-radius: 4px;
+        background: rgba(59, 130, 246, 0.18);
+        color: #dbeafe;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+        user-select: none;
+      }
+
+      .overlay-copy-button:hover:not(:disabled) {
+        background: rgba(59, 130, 246, 0.28);
+      }
+
+      .overlay-copy-button:disabled {
+        cursor: default;
+        opacity: 0.5;
+      }
+
+      .overlay-copy-button[hidden] {
+        display: none;
       }
 
       @keyframes spin-text {
