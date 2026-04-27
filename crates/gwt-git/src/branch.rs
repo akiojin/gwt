@@ -108,8 +108,26 @@ pub fn detect_cleanable_target(
     gone_branches: &HashSet<String>,
 ) -> Result<Option<MergeTargetRef>> {
     let remote_names = list_remote_names(repo_path).unwrap_or_default();
+    detect_cleanable_target_with_remote_names(
+        repo_path,
+        branch,
+        upstream,
+        gone_branches,
+        &remote_names,
+    )
+}
+
+/// Resolves the canonical cleanup target for `branch` using remote names
+/// already discovered for the current branch-list scan.
+pub fn detect_cleanable_target_with_remote_names(
+    repo_path: &Path,
+    branch: &str,
+    upstream: Option<&str>,
+    gone_branches: &HashSet<String>,
+    remote_names: &[String],
+) -> Result<Option<MergeTargetRef>> {
     let Some(primary_remote) =
-        upstream.and_then(|reference| split_remote_ref(reference, &remote_names).0)
+        upstream.and_then(|reference| split_remote_ref(reference, remote_names).0)
     else {
         if gone_branches.contains(branch) {
             return Ok(Some(MergeTargetRef::new(MergeTarget::Gone, "")));
@@ -384,7 +402,7 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
     Ok(branches)
 }
 
-fn list_remote_names(repo_path: &Path) -> Result<Vec<String>> {
+pub fn list_remote_names(repo_path: &Path) -> Result<Vec<String>> {
     let output = std::process::Command::new("git")
         .arg("remote")
         .current_dir(repo_path)
@@ -723,6 +741,48 @@ mod tests {
         assert_eq!(
             detect_cleanable_target(repo, "feature/d", Some("origin/feature/d"), &gone).unwrap(),
             Some(MergeTargetRef::new(MergeTarget::Develop, "origin/develop"))
+        );
+    }
+
+    #[test]
+    fn detect_cleanable_target_with_remote_names_handles_slash_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        run(&["checkout", "-b", "feature/slash-remote"], repo);
+        make_commit(repo, "slash.txt", "slash\n", "feat: slash remote");
+        run(&["checkout", "develop"], repo);
+        run(
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge slash",
+                "feature/slash-remote",
+            ],
+            repo,
+        );
+        run(
+            &["update-ref", "refs/remotes/team/core/develop", "develop"],
+            repo,
+        );
+
+        let remote_names = vec!["team/core".to_string()];
+        let gone = HashSet::new();
+        assert_eq!(
+            detect_cleanable_target_with_remote_names(
+                repo,
+                "feature/slash-remote",
+                Some("team/core/feature/slash-remote"),
+                &gone,
+                &remote_names,
+            )
+            .unwrap(),
+            Some(MergeTargetRef::new(
+                MergeTarget::Develop,
+                "team/core/develop"
+            ))
         );
     }
 

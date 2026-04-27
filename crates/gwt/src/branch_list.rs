@@ -116,16 +116,18 @@ fn build_cleanup_targets(
     entries: &[BranchListEntry],
     gone_branches: &HashSet<String>,
 ) -> std::io::Result<HashMap<String, Option<gwt_git::MergeTargetRef>>> {
+    let remote_names = gwt_git::list_remote_names(repo_path).unwrap_or_default();
     let mut cleanup_targets = HashMap::new();
     for branch in entries
         .iter()
         .filter(|branch| branch.scope == BranchScope::Local)
     {
-        let target = gwt_git::detect_cleanable_target(
+        let target = gwt_git::detect_cleanable_target_with_remote_names(
             repo_path,
             &branch.name,
             branch.upstream.as_deref(),
             gone_branches,
+            &remote_names,
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
         cleanup_targets.insert(branch.name.clone(), target);
