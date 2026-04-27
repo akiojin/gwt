@@ -127,6 +127,28 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_overlay_text_is_copyable() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("className = \"overlay-copy-button\"")
+                && html.contains("Copy")
+                && html.contains("copyTerminalOverlayMessage"),
+            "expected terminal overlay to expose an explicit copy button wired to the overlay message",
+        );
+        assert!(
+            html.contains(".terminal-overlay.visible")
+                && html.contains("user-select: text")
+                && html.contains("pointer-events: auto"),
+            "expected visible terminal overlays to allow normal text selection",
+        );
+        assert!(
+            html.contains("writeClipboardText(messageEl.textContent"),
+            "expected overlay copy to reuse the shared clipboard writer",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
         let streaming_write = regex::Regex::new(
