@@ -1074,6 +1074,7 @@
         if (navigator.clipboard?.writeText) {
           try {
             await navigator.clipboard.writeText(text);
+            restoreFocus?.();
             return true;
           } catch (_error) {
             // Fall back to a temporary textarea when the async clipboard API is unavailable.

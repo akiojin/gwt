@@ -127,6 +127,20 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_clipboard_async_path_restores_focus() {
+        let html = frontend_bundle_source();
+        let async_copy = regex::Regex::new(
+            r"await\s+navigator\.clipboard\.writeText\(text\);\s*restoreFocus\?\.\(\);\s*return\s+true;",
+        )
+        .expect("valid regex");
+
+        assert!(
+            async_copy.is_match(html),
+            "expected async clipboard success path to restore terminal focus before returning",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_overlay_text_is_copyable() {
         let html = frontend_bundle_source();
 
