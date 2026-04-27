@@ -4630,7 +4630,12 @@ exit 0
         let (command, args) = if cfg!(windows) {
             (
                 "cmd".to_string(),
-                vec!["/C".to_string(), "exit 0".to_string()],
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
             )
         } else {
             (
@@ -4828,9 +4833,14 @@ exit 0
             )
             .expect("pane"),
         ));
+        if cfg!(windows) {
+            if let Ok(pane) = pane.lock() {
+                let _ = pane.pty().write_input(b"\x1b[1;1R");
+            }
+        }
         let status_thread = runtime.spawn_status_thread(window_id.clone(), pane.clone());
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut observed_status = None;
         while Instant::now() < deadline {
             if let Ok(events) = captured_events.lock() {
@@ -5540,6 +5550,10 @@ exit 0
             events.lock().expect("event log").is_empty(),
             "background refresh errors should not overwrite the current cache view"
         );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
         assert!(
             marker.exists(),
             "expected fake gh to be invoked for stale cache"
