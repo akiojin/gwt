@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -144,6 +144,103 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
     }));
 }
 
+fn board_projection_watch_key(project_root: &Path) -> PathBuf {
+    dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
+}
+
+fn ensure_board_projection_watchers(
+    app: &AppRuntime,
+    watched_roots: &mut HashSet<PathBuf>,
+    proxy: EventLoopProxy<UserEvent>,
+) {
+    for tab in &app.tabs {
+        let project_root = tab.project_root.clone();
+        let key = board_projection_watch_key(&project_root);
+        if watched_roots.insert(key) {
+            spawn_board_projection_watcher(project_root, proxy.clone());
+        }
+    }
+}
+
+fn spawn_board_projection_watcher(project_root: PathBuf, proxy: EventLoopProxy<UserEvent>) {
+    let name = format!(
+        "gwt-board-watch-{}",
+        project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("project")
+    );
+    if let Err(error) = thread::Builder::new().name(name).spawn(move || {
+        if let Err(error) = gwt_core::coordination::ensure_repo_local_files(&project_root) {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                error = %error,
+                "board projection watcher skipped"
+            );
+            return;
+        }
+
+        let projection_path =
+            gwt_core::coordination::coordination_board_projection_path(&project_root);
+        let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(projection_file_name) = projection_path.file_name().map(|name| name.to_owned())
+        else {
+            return;
+        };
+
+        let (tx, rx) = std_mpsc::channel::<Vec<PathBuf>>();
+        let mut debouncer = match notify_debouncer_mini::new_debouncer(
+            Duration::from_millis(250),
+            move |res: notify_debouncer_mini::DebounceEventResult| {
+                if let Ok(events) = res {
+                    let paths: Vec<PathBuf> = events.into_iter().map(|event| event.path).collect();
+                    if !paths.is_empty() {
+                        let _ = tx.send(paths);
+                    }
+                }
+            },
+        ) {
+            Ok(debouncer) => debouncer,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = %error,
+                    "board projection watcher init failed"
+                );
+                return;
+            }
+        };
+
+        if let Err(error) = debouncer
+            .watcher()
+            .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
+        {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                watch_dir = %watch_dir.display(),
+                error = %error,
+                "board projection watcher path failed"
+            );
+            return;
+        }
+
+        while let Ok(paths) = rx.recv() {
+            if paths
+                .iter()
+                .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
+            {
+                let _ = proxy.send_event(UserEvent::BoardProjectionChanged {
+                    project_root: project_root.clone(),
+                });
+            }
+        }
+    }) {
+        tracing::warn!(error = %error, "board projection watcher thread failed to spawn");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -179,6 +276,9 @@ enum UserEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+    },
+    BoardProjectionChanged {
+        project_root: PathBuf,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
     LaunchProgress {
@@ -3894,6 +3994,8 @@ fn main() -> wry::Result<()> {
     )
     .expect("app runtime");
     app.bootstrap();
+    let mut board_projection_watch_roots = HashSet::new();
+    ensure_board_projection_watchers(&app, &mut board_projection_watch_roots, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
             let log_proxy = proxy.clone();
@@ -3975,6 +4077,11 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let events = app.handle_frontend_event(client_id, event);
+                ensure_board_projection_watchers(
+                    &app,
+                    &mut board_projection_watch_roots,
+                    proxy.clone(),
+                );
                 clients.dispatch(events);
                 if refresh_index_status {
                     spawn_project_index_status_check(&runtime, proxy.clone());
@@ -3989,6 +4096,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
+                let events = app.handle_board_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
@@ -4037,6 +4148,11 @@ fn main() -> wry::Result<()> {
                     match command {
                         NativeMenuCommand::OpenProject => {
                             let events = app.open_project_dialog_events();
+                            ensure_board_projection_watchers(
+                                &app,
+                                &mut board_projection_watch_roots,
+                                proxy.clone(),
+                            );
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
