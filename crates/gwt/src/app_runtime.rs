@@ -4839,7 +4839,12 @@ exit 0
         let (command, args) = if cfg!(windows) {
             (
                 "cmd".to_string(),
-                vec!["/C".to_string(), "exit 0".to_string()],
+                vec![
+                    "/D".to_string(),
+                    "/S".to_string(),
+                    "/C".to_string(),
+                    "exit /B 0".to_string(),
+                ],
             )
         } else {
             (
@@ -5060,7 +5065,12 @@ exit 0
 
     #[test]
     fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         post_entry(
@@ -5108,7 +5118,12 @@ exit 0
 
     #[test]
     fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_views() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo(&repo);
@@ -5711,7 +5726,12 @@ exit 0
 
     #[test]
     fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         create_memo_note(
@@ -5903,7 +5923,12 @@ exit 0
 
     #[test]
     fn app_runtime_create_memo_note_broadcasts_repo_scoped_snapshot_to_memo_windows() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let mut persisted = empty_workspace_state();
@@ -5971,7 +5996,12 @@ exit 0
 
     #[test]
     fn app_runtime_update_memo_note_persists_repo_scoped_edits() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let created = create_memo_note(&repo, MemoNoteDraft::new("Draft", "Initial note", false))
@@ -6025,7 +6055,12 @@ exit 0
 
     #[test]
     fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let parent = post_entry(
