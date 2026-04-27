@@ -3756,6 +3756,156 @@
         }
       }
 
+      function createBranchRow(windowId, branchName) {
+        const row = document.createElement("div");
+        row.className = "branch-row";
+        row.dataset.branchName = branchName;
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "branch-cleanup-toggle";
+        toggle.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toggleBranchCleanupSelection(windowId, branchName);
+        });
+        row.appendChild(toggle);
+
+        const main = document.createElement("div");
+        main.className = "branch-main";
+
+        const nameContainer = document.createElement("div");
+        nameContainer.className = "branch-name";
+        const nameText = document.createElement("span");
+        nameText.className = "branch-name-text";
+        nameContainer.appendChild(nameText);
+        main.appendChild(nameContainer);
+
+        const upstream = document.createElement("div");
+        upstream.className = "branch-upstream";
+        main.appendChild(upstream);
+
+        const date = document.createElement("div");
+        date.className = "branch-date";
+        main.appendChild(date);
+
+        row.appendChild(main);
+
+        const meta = document.createElement("div");
+        meta.className = "branch-meta";
+        const scope = document.createElement("span");
+        scope.className = "branch-scope";
+        meta.appendChild(scope);
+        const cleanupBadge = document.createElement("span");
+        cleanupBadge.className = "branch-cleanup-badge";
+        meta.appendChild(cleanupBadge);
+        const summary = document.createElement("span");
+        summary.className = "branch-summary";
+        meta.appendChild(summary);
+        row.appendChild(meta);
+
+        row._fields = {
+          toggle,
+          main,
+          nameContainer,
+          nameText,
+          headBadge: null,
+          upstream,
+          date,
+          cleanupDetail: null,
+          scope,
+          cleanupBadge,
+          summary,
+        };
+
+        row.addEventListener("click", () => {
+          const state = ensureBranchListState(windowId);
+          state.selectedBranchName = branchName;
+          state.notice = "";
+          renderBranches(windowId);
+        });
+        row.addEventListener("dblclick", () => {
+          const state = ensureBranchListState(windowId);
+          state.selectedBranchName = branchName;
+          state.notice = "";
+          renderBranches(windowId);
+          send({
+            kind: "open_launch_wizard",
+            id: windowId,
+            branch_name: branchName,
+          });
+        });
+
+        return row;
+      }
+
+      function updateBranchRow(row, entry, state) {
+        const fields = row._fields;
+        row.classList.toggle("selected", state.selectedBranchName === entry.name);
+        row.classList.toggle("cleanup-selected", state.cleanupSelected.has(entry.name));
+
+        fields.toggle.className = `branch-cleanup-toggle ${cleanupToggleClass(entry, state)}`;
+        fields.toggle.textContent = cleanupToggleSymbol(entry, state);
+        fields.toggle.title = cleanupToggleTitle(entry, state);
+
+        fields.nameText.textContent = entry.name;
+
+        if (entry.is_head) {
+          if (!fields.headBadge) {
+            const head = document.createElement("span");
+            head.className = "branch-head";
+            head.textContent = "HEAD";
+            fields.nameContainer.appendChild(head);
+            fields.headBadge = head;
+          }
+        } else if (fields.headBadge) {
+          fields.headBadge.remove();
+          fields.headBadge = null;
+        }
+
+        fields.upstream.textContent = entry.upstream || "No upstream";
+        fields.date.textContent = entry.last_commit_date || "No commit date";
+
+        const cleanupDetail = cleanupDetailText(entry, state);
+        if (cleanupDetail) {
+          if (!fields.cleanupDetail) {
+            const detail = document.createElement("div");
+            fields.main.appendChild(detail);
+            fields.cleanupDetail = detail;
+          }
+          fields.cleanupDetail.className = `branch-cleanup-detail ${
+            cleanupAvailabilityForRender(entry, state) === "blocked" ? "blocked" : ""
+          }`.trim();
+          fields.cleanupDetail.textContent = cleanupDetail;
+        } else if (fields.cleanupDetail) {
+          fields.cleanupDetail.remove();
+          fields.cleanupDetail = null;
+        }
+
+        fields.scope.textContent = entry.scope;
+        fields.cleanupBadge.className =
+          `branch-cleanup-badge ${cleanupAvailabilityForRender(entry, state)}`;
+        fields.cleanupBadge.textContent = cleanupBadgeText(entry, state);
+        fields.summary.textContent =
+          entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced";
+      }
+
+      function setBranchListPlaceholder(list, text) {
+        let placeholder = null;
+        for (const child of Array.from(list.children)) {
+          if (!placeholder && child.classList.contains("branch-empty")) {
+            placeholder = child;
+          } else {
+            child.remove();
+          }
+        }
+        if (!placeholder) {
+          placeholder = document.createElement("div");
+          placeholder.className = "branch-empty workspace-empty-state";
+          list.appendChild(placeholder);
+        }
+        placeholder.textContent = text;
+      }
+
       function renderBranches(windowId) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -3785,129 +3935,57 @@
           notice.textContent = noticeText || "";
         }
 
-        list.innerHTML = "";
-
         if (state.error) {
-          const errorRow = document.createElement("div");
-          errorRow.className = "branch-empty workspace-empty-state";
-          errorRow.textContent = state.error;
-          list.appendChild(errorRow);
+          setBranchListPlaceholder(list, state.error);
           renderBranchCleanupModal();
           return;
         }
 
         if (state.loading && state.entries.length === 0) {
-          const loadingRow = document.createElement("div");
-          loadingRow.className = "branch-empty workspace-empty-state";
-          loadingRow.textContent = "Loading branches";
-          list.appendChild(loadingRow);
+          setBranchListPlaceholder(list, "Loading branches");
           renderBranchCleanupModal();
           return;
         }
 
         const visibleEntries = filteredBranchEntries(state);
         if (visibleEntries.length === 0) {
-          const emptyRow = document.createElement("div");
-          emptyRow.className = "branch-empty workspace-empty-state";
-          emptyRow.textContent = state.entries.length === 0 ? "No branches" : "No branches in this filter";
-          list.appendChild(emptyRow);
+          setBranchListPlaceholder(
+            list,
+            state.entries.length === 0 ? "No branches" : "No branches in this filter",
+          );
           renderBranchCleanupModal();
           return;
         }
 
+        const existingRows = new Map();
+        for (const child of Array.from(list.children)) {
+          if (child.classList.contains("branch-row") && child.dataset.branchName) {
+            existingRows.set(child.dataset.branchName, child);
+          } else {
+            child.remove();
+          }
+        }
+
+        let prevSibling = null;
+        const usedNames = new Set();
         for (const entry of visibleEntries) {
-          const row = document.createElement("div");
-          row.className = "branch-row";
-          if (state.selectedBranchName === entry.name) {
-            row.classList.add("selected");
+          let row = existingRows.get(entry.name);
+          if (!row) {
+            row = createBranchRow(windowId, entry.name);
           }
-          if (state.cleanupSelected.has(entry.name)) {
-            row.classList.add("cleanup-selected");
+          updateBranchRow(row, entry, state);
+          const targetPosition = prevSibling ? prevSibling.nextSibling : list.firstChild;
+          if (row !== targetPosition) {
+            list.insertBefore(row, targetPosition);
           }
+          prevSibling = row;
+          usedNames.add(entry.name);
+        }
 
-          const toggle = document.createElement("button");
-          toggle.type = "button";
-          toggle.className = `branch-cleanup-toggle ${cleanupToggleClass(entry, state)}`;
-          toggle.textContent = cleanupToggleSymbol(entry, state);
-          toggle.title = cleanupToggleTitle(entry, state);
-          toggle.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleBranchCleanupSelection(windowId, entry.name);
-          });
-          row.appendChild(toggle);
-
-          const main = document.createElement("div");
-          main.className = "branch-main";
-          const name = document.createElement("div");
-          name.className = "branch-name";
-          const nameText = document.createElement("span");
-          nameText.className = "branch-name-text";
-          nameText.textContent = entry.name;
-          name.appendChild(nameText);
-          if (entry.is_head) {
-            const head = document.createElement("span");
-            head.className = "branch-head";
-            head.textContent = "HEAD";
-            name.appendChild(head);
+        for (const [name, row] of existingRows) {
+          if (!usedNames.has(name)) {
+            row.remove();
           }
-          main.appendChild(name);
-
-          const upstream = document.createElement("div");
-          upstream.className = "branch-upstream";
-          upstream.textContent = entry.upstream || "No upstream";
-          main.appendChild(upstream);
-
-          const date = document.createElement("div");
-          date.className = "branch-date";
-          date.textContent = entry.last_commit_date || "No commit date";
-          main.appendChild(date);
-
-          const cleanupDetail = cleanupDetailText(entry, state);
-          if (cleanupDetail) {
-            const detail = document.createElement("div");
-            detail.className = `branch-cleanup-detail ${
-              cleanupAvailabilityForRender(entry, state) === "blocked" ? "blocked" : ""
-            }`.trim();
-            detail.textContent = cleanupDetail;
-            main.appendChild(detail);
-          }
-          row.appendChild(main);
-
-          const meta = document.createElement("div");
-          meta.className = "branch-meta";
-          const scope = document.createElement("span");
-          scope.className = "branch-scope";
-          scope.textContent = entry.scope;
-          meta.appendChild(scope);
-
-          const cleanupBadge = document.createElement("span");
-          cleanupBadge.className = `branch-cleanup-badge ${cleanupAvailabilityForRender(entry, state)}`;
-          cleanupBadge.textContent = cleanupBadgeText(entry, state);
-          meta.appendChild(cleanupBadge);
-
-          const summary = document.createElement("span");
-          summary.className = "branch-summary";
-          summary.textContent =
-            entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced";
-          meta.appendChild(summary);
-          row.appendChild(meta);
-
-          row.addEventListener("click", () => {
-            state.selectedBranchName = entry.name;
-            state.notice = "";
-            renderBranches(windowId);
-          });
-          row.addEventListener("dblclick", () => {
-            state.selectedBranchName = entry.name;
-            state.notice = "";
-            renderBranches(windowId);
-            send({
-              kind: "open_launch_wizard",
-              id: windowId,
-              branch_name: entry.name,
-            });
-          });
-          list.appendChild(row);
         }
 
         renderBranchCleanupModal();
