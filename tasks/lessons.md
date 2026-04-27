@@ -13,7 +13,7 @@ Launch Agent で Docker を選択すると `Docker error: services must be a map
 
 Rust の文字列リテラルは `\` の直後の改行 **と次行の先頭空白すべて** を削除する。
 `format!("services:\n  {svc}:\n    volumes:\n")` のような複数行を
-`\<改行>` で継続して書くと、`  `, `    ` の YAML インデントが全部消えて
+`\<改行>` で継続して書くと、2 スペース・4 スペースの YAML インデントが全部消えて
 完全フラットな YAML が生成される。同じバグが
 `crates/gwt/src/docker_launch.rs`、`crates/gwt-agent/src/prepare.rs`、
 `crates/gwt/src/docker_setup.rs` の 3 箇所にコピペされていた。
