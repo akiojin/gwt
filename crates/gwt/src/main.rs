@@ -2288,7 +2288,7 @@ mod tests {
                 index: 0,
                 mode: QuickStartLaunchMode::Resume,
             },
-            None,
+            Some(canvas_bounds()),
         );
         assert!(!missing_focus.is_empty());
 
@@ -2302,7 +2302,7 @@ mod tests {
                 index: 0,
                 mode: QuickStartLaunchMode::Resume,
             },
-            None,
+            Some(canvas_bounds()),
         );
         assert!(focus_events.len() >= 2);
         assert!(runtime.launch_wizard.is_none());

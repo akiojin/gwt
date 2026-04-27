@@ -1798,14 +1798,11 @@
       }
 
       function sendWizardAction(action) {
-        const payload = {
+        send({
           kind: "launch_wizard_action",
           action,
-        };
-        if (action.kind === "submit") {
-          payload.bounds = visibleBounds();
-        }
-        send(payload);
+          bounds: visibleBounds(),
+        });
       }
 
       function createNode(tagName, className, textContent) {
