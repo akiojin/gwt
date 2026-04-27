@@ -11,6 +11,18 @@ pub(crate) fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
+pub(crate) fn xterm_js() -> &'static str {
+    include_str!("../web/vendor/xterm/xterm.mjs")
+}
+
+pub(crate) fn xterm_fit_js() -> &'static str {
+    include_str!("../web/vendor/xterm/addon-fit.mjs")
+}
+
+pub(crate) fn xterm_css() -> &'static str {
+    include_str!("../web/vendor/xterm/xterm.css")
+}
+
 pub(crate) async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
@@ -19,6 +31,27 @@ pub(crate) async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
+    )
+}
+
+pub(crate) async fn xterm_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        xterm_js(),
+    )
+}
+
+pub(crate) async fn xterm_fit_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        xterm_fit_js(),
+    )
+}
+
+pub(crate) async fn xterm_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        xterm_css(),
     )
 }
 
@@ -104,8 +137,8 @@ mod tests {
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
         .expect("valid regex");
-        let hidden_geometry_sync = regex::Regex::new(
-            r"if\s*\(\s*!canRefreshTerminalViewport\(windowId\)\s*\)\s*\{\s*if\s*\(\s*persist\s*\)\s*\{\s*sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\);\s*\}\s*return;\s*\}",
+        let refresh_call = regex::Regex::new(
+            r"runtime\.terminal\.refresh\(0,\s*runtime\.terminal\.rows\s*-\s*1\);",
         )
         .expect("valid regex");
 
@@ -135,12 +168,13 @@ mod tests {
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
-                && html.contains("!workspaceWindowById(windowId)?.minimized"),
+                && html.contains("!workspaceWindowById(windowId)?.minimized")
+                && refresh_call.is_match(html),
             "expected terminal viewport refresh to skip minimized windows",
         );
         assert!(
-            hidden_geometry_sync.is_match(html),
-            "expected persisted terminal fit to sync geometry even while hidden",
+            !html.contains("fitTerminal(windowId, false);"),
+            "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
         assert!(
             html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
@@ -153,34 +187,23 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_repo_browser_scroll_surfaces_block_canvas_pan_at_edges() {
+    fn embedded_web_terminal_assets_are_local_and_pinned() {
         let html = frontend_bundle_source();
-        let scroll_gate = regex::Regex::new(
-            r"if\s*\(\s*!event\.ctrlKey\s*&&\s*!event\.metaKey\s*&&\s*nativeWheelScrollSurface\s*\)\s*\{\s*return;\s*\}",
-        )
-        .expect("valid regex");
 
         assert!(
-            html.contains("function findNativeWheelScrollSurface"),
-            "expected embedded html to define a repo browser wheel routing helper",
+            index_html().contains(r#"href="/assets/xterm/xterm.css""#),
+            "expected xterm stylesheet to be served from the embedded local asset route",
         );
         assert!(
-            html.contains(".branch-scroll") && html.contains(".file-tree-scroll"),
-            "expected embedded html to reference repo browser scroll containers",
+            app_js().contains(r#"from "/assets/xterm/xterm.mjs""#)
+                && app_js().contains(r#"from "/assets/xterm/addon-fit.mjs""#),
+            "expected xterm modules to be served from embedded local asset routes",
         );
         assert!(
-            html.contains(
-                "const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);",
-            ),
-            "expected plain wheel handling to route repo browser surfaces through the shared helper",
-        );
-        assert!(
-            scroll_gate.is_match(html),
-            "expected plain wheel input on repo browser surfaces to stay within the window even at scroll edges",
-        );
-        assert!(
-            !html.contains("canScrollSurfaceConsumeWheelDelta"),
-            "expected repo browser wheel routing to stop using edge fallback heuristics",
+            !html.contains("cdn.jsdelivr.net")
+                && !html.contains("unpkg.com")
+                && !html.contains("cdnjs.cloudflare.com"),
+            "expected embedded terminal assets to avoid CDN/runtime network dependencies",
         );
     }
 
@@ -743,6 +766,57 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("searchInFlight") && html.contains("inFlightSearchRequestId"),
+            "expected semantic search state to track the single in-flight backend request",
+        );
+        assert!(
+            html.contains("queuedSearchQuery")
+                && html.contains("const nextQuery = state.queuedSearchQuery;"),
+            "expected semantic search state to coalesce additional input to the latest query",
+        );
+        assert!(
+            !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
+            "expected semantic search scheduling to preserve visible entries while searching",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_refresh() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("detailRequestId") && html.contains("knowledgeDetailRequestMatches"),
+            "expected entry selection to use a separate detail request correlation id",
+        );
+        assert!(
+            html.contains("request_id: requestId,\n          number,"),
+            "expected select_knowledge_bridge_entry requests to carry the detail request id",
+        );
+        assert!(
+            html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
+            "expected new cache loads to invalidate older detail response ids",
+        );
+        assert!(
+            html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
+            "expected detail responses to avoid clearing refresh loading for detail-only replies",
+        );
+        let search_block = html
+            .split("case \"knowledge_search_results\":")
+            .nth(1)
+            .and_then(|tail| tail.split("case \"knowledge_detail\":").next())
+            .expect("knowledge search results block");
+        assert!(
+            !search_block.contains("state.loading = false;")
+                && !search_block.contains("state.refreshing = false;"),
+            "expected search results to leave active refresh loading state untouched",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_uses_cache_backed_contract() {
         let html = frontend_bundle_source();
 
@@ -765,35 +839,16 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_board_surface_owns_plain_wheel_routing() {
-        let html = frontend_bundle_source();
+    fn embedded_web_board_composer_textarea_keeps_scroll_surface_marker() {
+        // SPEC-2008 FR-032 retired the per-class wheel whitelist; the
+        // `.board-scroll-surface` marker is now informational only but is
+        // still applied to the composer textarea so any future Board-specific
+        // styling can hang off it without reintroducing the whitelist.
+        let js = app_js();
 
         assert!(
-            html.contains(".board-scroll-surface"),
-            "expected Board scroll containers to be registered as native wheel surfaces",
-        );
-        let function_start = html
-            .find("function findNativeWheelScrollSurface")
-            .expect("expected named native wheel scroll helper");
-        let function_body = &html[function_start..];
-        let closest_start = function_body
-            .find("element.closest(")
-            .expect("expected native wheel helper to use closest allowlist");
-        let closest_call =
-            &function_body[closest_start..function_body.len().min(closest_start + 160)];
-        for selector in [
-            ".branch-scroll",
-            ".file-tree-scroll",
-            ".board-scroll-surface",
-        ] {
-            assert!(
-                closest_call.contains(selector),
-                "expected native wheel allowlist to include {selector}, got: {closest_call}",
-            );
-        }
-        assert!(
-            html.contains("board-textarea board-scroll-surface"),
-            "expected Board composer textarea wheel input to stay inside the Board instead of falling through to canvas pan",
+            js.contains("board-textarea board-scroll-surface"),
+            "expected Board composer textarea to retain its scroll surface marker class",
         );
     }
 
@@ -816,6 +871,31 @@ mod tests {
         assert!(
             !html.contains("board-side-pane"),
             "expected Board v1 GUI to avoid the old dashboard sidebar",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_messages_put_user_on_right_and_agent_on_left() {
+        let html = frontend_bundle_source();
+        fn css_block<'a>(html: &'a str, selector: &str) -> &'a str {
+            let start = html.find(selector).expect("expected CSS block");
+            let rest = &html[start..];
+            let end = rest.find('}').expect("expected CSS block end");
+            &rest[..=end]
+        }
+
+        let user_block = css_block(html, ".board-message.user {");
+        assert!(
+            user_block.contains("align-self: flex-end")
+                && user_block.contains("border-bottom-right-radius"),
+            "expected user messages to render on the right, got: {user_block}",
+        );
+
+        let agent_block = css_block(html, ".board-message.agent {");
+        assert!(
+            agent_block.contains("align-self: flex-start")
+                && agent_block.contains("border-bottom-left-radius"),
+            "expected agent messages to render on the left, got: {agent_block}",
         );
     }
 
@@ -847,6 +927,24 @@ mod tests {
                 && !composer_snippet.contains("Topics</span>")
                 && !composer_snippet.contains("Owners</span>"),
             "expected Board composer to keep kind/topics/owners out of the primary posting path",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_composer_shift_enter_submits_without_ime_conflict() {
+        let html = frontend_bundle_source();
+        let keydown_start = html
+            .find("bodyInput.addEventListener(\"keydown\"")
+            .expect("expected Board composer textarea keydown handler");
+        let keydown_block = &html[keydown_start..html.len().min(keydown_start + 700)];
+
+        assert!(
+            keydown_block.contains("event.key === \"Enter\"")
+                && keydown_block.contains("event.shiftKey")
+                && keydown_block.contains("event.isComposing")
+                && keydown_block.contains("event.preventDefault()")
+                && keydown_block.contains("submitBoardEntry(windowId)"),
+            "expected Shift+Enter to submit while guarding IME composition, got: {keydown_block}",
         );
     }
 
@@ -1092,6 +1190,345 @@ mod tests {
         assert!(
             inline_script_lines < 2_000,
             "expected Phase 1B inline module script budget under 2000 lines, got {inline_script_lines}",
+        );
+    }
+
+    /// SPEC-2008 FR-032: wheel routing must follow the opt-out model.
+    ///
+    /// Only `.surface-terminal` may consume wheel events for canvas pan or
+    /// xterm scrollback. All other surfaces (panels and modals) must let the
+    /// browser handle wheel natively. The legacy whitelist helper
+    /// `findNativeWheelScrollSurface` must be retired so newly added panel
+    /// surfaces never need to remember to register themselves.
+    #[test]
+    fn embedded_web_wheel_routing_uses_terminal_only_opt_out() {
+        let js = app_js();
+
+        assert!(
+            !js.contains("function findNativeWheelScrollSurface"),
+            "expected the per-class wheel scroll whitelist helper to be removed in favor of an opt-out model",
+        );
+        assert!(
+            !js.contains("findNativeWheelScrollSurface("),
+            "expected no remaining call sites for the retired wheel scroll whitelist helper",
+        );
+        assert!(
+            js.contains("function handleCanvasWheelEvent"),
+            "expected canvas wheel handler to remain as the single routing entrypoint",
+        );
+        assert!(
+            js.contains("targetElement.closest(\".surface-terminal\")"),
+            "expected canvas wheel handler to special-case `.surface-terminal` for the opt-out routing model",
+        );
+        assert!(
+            js.contains("targetElement.closest(\".workspace-window\")"),
+            "expected canvas wheel handler to recognize panel windows so native scroll is preserved inside them",
+        );
+    }
+
+    /// SPEC-2008 FR-033: every panel surface must share the same window
+    /// background, titlebar background, and body background. Three CSS rules
+    /// participate in this unification:
+    ///
+    /// - `.workspace-window.surface-*` — the whole-window background (visible
+    ///   when minimized or behind the body)
+    /// - `.surface-* .titlebar` — the chrome at the top of the window
+    /// - `.surface-* .window-body` — the panel content surface
+    ///
+    /// `.surface-memo`, `.surface-profile`, and `.surface-knowledge` had been
+    /// missing from one or more of these rules, which left those panels
+    /// partially transparent and visually distinct from the rest.
+    #[test]
+    fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
+        let html = index_html();
+
+        let panel_surfaces = [
+            ".surface-file-tree",
+            ".surface-branches",
+            ".surface-board",
+            ".surface-logs",
+            ".surface-knowledge",
+            ".surface-mock",
+            ".surface-memo",
+            ".surface-profile",
+        ];
+
+        for (anchor, role) in [
+            (
+                ".workspace-window.surface-file-tree,",
+                "workspace-window background",
+            ),
+            (".surface-file-tree .titlebar,", "titlebar background"),
+            (".surface-file-tree .window-body,", "window-body background"),
+        ] {
+            let rule_start = html
+                .find(anchor)
+                .unwrap_or_else(|| panic!("expected unified {role} rule to anchor on `{anchor}`"));
+            let rule_block = &html[rule_start..];
+            let rule_end = rule_block
+                .find('}')
+                .unwrap_or_else(|| panic!("expected unified {role} rule to close with `}}`"));
+            let rule = &rule_block[..rule_end];
+
+            for surface in panel_surfaces {
+                let needle = match role {
+                    "workspace-window background" => format!(".workspace-window{surface}"),
+                    _ => surface.to_string(),
+                };
+                assert!(
+                    rule.contains(&needle),
+                    "expected `{needle}` to participate in the unified {role} rule",
+                );
+            }
+        }
+    }
+
+    /// SPEC-2008 FR-034: shared layout primitives must exist in CSS so panel
+    /// surfaces stop reinventing their own toolbar/scroll/split/empty-state
+    /// blocks. The four primitives below carry only the shared properties;
+    /// surface-specific deltas (grid template columns, padding) layer on top
+    /// through the surface's own class.
+    #[test]
+    fn embedded_web_workspace_layout_primitives_define_shared_contracts() {
+        let html = index_html();
+
+        let primitives: [(&str, &[&str]); 4] = [
+            (
+                ".workspace-toolbar {",
+                &[
+                    "display: flex",
+                    "align-items: center",
+                    "justify-content: space-between",
+                    "gap: 12px",
+                    "padding: 10px 12px",
+                    "border-bottom: 1px solid",
+                ],
+            ),
+            (
+                ".workspace-scroll {",
+                &["flex: 1", "min-height: 0", "overflow: auto"],
+            ),
+            (
+                ".workspace-split {",
+                &["flex: 1", "min-height: 0", "display: grid"],
+            ),
+            (
+                ".workspace-empty-state {",
+                &["padding: 16px 12px", "font-size: 12px", "color: #64748b"],
+            ),
+        ];
+
+        for (selector, expected_props) in primitives {
+            let start = html
+                .find(selector)
+                .unwrap_or_else(|| panic!("expected layout primitive `{selector}` to be defined"));
+            let block = &html[start..];
+            let end = block.find('}').unwrap_or_else(|| {
+                panic!("expected layout primitive `{selector}` to close with `}}`")
+            });
+            let body = &block[..end];
+            for prop in expected_props {
+                assert!(
+                    body.contains(prop),
+                    "expected layout primitive `{selector}` to declare `{prop}`, got: {body}",
+                );
+            }
+        }
+    }
+
+    /// SPEC-2008 FR-034: every panel surface must adopt the shared layout
+    /// primitives in its rendered HTML so paddings, scrollbars, and splits
+    /// stay in lockstep. The toolbar misnomer `.knowledge-toolbar` (which was
+    /// reused by Memo/Profile/Logs/Board as the generic toolbar block) is
+    /// retired in favour of `.workspace-toolbar`. Stacked toolbars (multi-row
+    /// content with search and filter chips) opt into the
+    /// `.workspace-toolbar.is-stacked` modifier rather than carrying a
+    /// surface-specific override.
+    #[test]
+    fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            !js.contains("knowledge-toolbar"),
+            "expected `.knowledge-toolbar` misnomer to be replaced by `.workspace-toolbar` everywhere it was used as a generic toolbar",
+        );
+        assert!(
+            !html.contains(".knowledge-toolbar"),
+            "expected `.knowledge-toolbar` CSS rules to be migrated to `.workspace-toolbar`",
+        );
+
+        // Each panel surface must reference the `.workspace-toolbar` primitive
+        // through its mountWindowBody output. Surface-specific deltas may be
+        // layered alongside (e.g. `.branch-toolbar`).
+        let toolbar_count = js.matches("class=\"workspace-toolbar").count();
+        assert!(
+            toolbar_count >= 7,
+            "expected at least 7 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
+        );
+
+        // Stacked modifier replaces the old `.knowledge-toolbar` override.
+        assert!(
+            html.contains(".workspace-toolbar.is-stacked"),
+            "expected the stacked toolbar modifier `.workspace-toolbar.is-stacked` to be defined for multi-row toolbars",
+        );
+
+        let split_adopters = [
+            "knowledge-split workspace-split",
+            "memo-layout workspace-split",
+            "profile-layout workspace-split",
+            "logs-layout workspace-split",
+        ];
+        for needle in split_adopters {
+            assert!(
+                js.contains(needle),
+                "expected mountWindowBody output to compose `{needle}` so split layouts share the primitive",
+            );
+        }
+
+        let scroll_adopters = [
+            "knowledge-detail-scroll workspace-scroll",
+            "board-timeline-scroll board-scroll-surface workspace-scroll",
+            "file-tree-scroll workspace-scroll",
+            "branch-scroll workspace-scroll",
+        ];
+        for needle in scroll_adopters {
+            assert!(
+                js.contains(needle),
+                "expected mountWindowBody output to compose `{needle}` so scroll regions share the primitive",
+            );
+        }
+    }
+
+    /// SPEC-2008 FR-035: shared modal frame primitives must exist so Launch
+    /// Wizard, Branch Cleanup, Preset modal, and any future overlay UI render
+    /// through a single chrome contract. The primitives are:
+    ///
+    /// - `.modal-backdrop` — full-window dim layer (single rule, no
+    ///   `.wizard-backdrop` parallel implementation)
+    /// - `.modal-shell` — the centered modal card surface
+    /// - `.modal-header` — title + actions row at the top of the shell
+    /// - `.modal-body` — main scrollable content region
+    /// - `.modal-footer` — bottom action bar
+    #[test]
+    fn embedded_web_modal_frame_primitives_define_shared_contracts() {
+        let html = index_html();
+
+        let primitives: [(&str, &[&str]); 5] = [
+            (
+                ".modal-backdrop {",
+                &[
+                    "position: absolute",
+                    "inset: 0",
+                    "align-items: center",
+                    "justify-content: center",
+                    "background: rgba(15, 23, 42",
+                ],
+            ),
+            (
+                ".modal-shell {",
+                &[
+                    "max-height: calc(100vh - 48px)",
+                    "overflow: auto",
+                    "border-radius: 6px",
+                    "background: #ffffff",
+                    "border: 1px solid",
+                ],
+            ),
+            (
+                ".modal-header {",
+                &["display: flex", "align-items: flex-start"],
+            ),
+            (".modal-body {", &["flex: 1", "min-height: 0"]),
+            (
+                ".modal-footer {",
+                &["display: flex", "justify-content: flex-end"],
+            ),
+        ];
+
+        for (selector, expected_props) in primitives {
+            let start = html.find(selector).unwrap_or_else(|| {
+                panic!("expected modal frame primitive `{selector}` to be defined")
+            });
+            let block = &html[start..];
+            let end = block.find('}').unwrap_or_else(|| {
+                panic!("expected modal frame primitive `{selector}` to close with `}}`")
+            });
+            let body = &block[..end];
+            for prop in expected_props {
+                assert!(
+                    body.contains(prop),
+                    "expected modal frame primitive `{selector}` to declare `{prop}`, got: {body}",
+                );
+            }
+        }
+
+        assert!(
+            !html.contains(".wizard-backdrop"),
+            "expected `.wizard-backdrop` to be unified with `.modal-backdrop`",
+        );
+    }
+
+    /// SPEC-2008 FR-036: Rust `WindowSurface` enum and JS `presetSurface()`
+    /// must agree on the panel/terminal taxonomy. The Rust side exposes
+    /// `WindowSurface::as_str()` returning the JS-compatible kebab-case
+    /// string, and the JS side returns the same set of strings. Whenever a
+    /// new panel surface is added, this test forces the backend and frontend
+    /// to be updated together.
+    #[test]
+    fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
+        use gwt::WindowSurface;
+
+        let js = app_js();
+
+        let pairs: &[(WindowSurface, &str)] = &[
+            (WindowSurface::Terminal, "terminal"),
+            (WindowSurface::FileTree, "file-tree"),
+            (WindowSurface::Branches, "branches"),
+            (WindowSurface::Memo, "memo"),
+            (WindowSurface::Profile, "profile"),
+            (WindowSurface::Board, "board"),
+            (WindowSurface::Logs, "logs"),
+            (WindowSurface::Knowledge, "knowledge"),
+            (WindowSurface::Mock, "mock"),
+        ];
+
+        for (variant, expected) in pairs {
+            assert_eq!(
+                variant.as_str(),
+                *expected,
+                "expected `{variant:?}.as_str()` to return `{expected}` so the JS contract stays aligned",
+            );
+            let return_pattern = format!("return \"{expected}\";");
+            assert!(
+                js.contains(&return_pattern),
+                "expected JS `presetSurface()` to return `\"{expected}\"` for the corresponding preset cluster",
+            );
+        }
+    }
+
+    /// SPEC-2008 FR-035: every existing modal must mount through the shared
+    /// `.modal-shell` primitive (with optional size modifier such as
+    /// `.modal-shell.is-wizard`). The `.modal` and `.wizard-modal` legacy
+    /// classes are retired.
+    #[test]
+    fn embedded_web_existing_modals_compose_with_modal_shell_primitive() {
+        let html = index_html();
+
+        assert!(
+            !html.contains("class=\"wizard-modal\"") && !html.contains("class=\"wizard-backdrop\""),
+            "expected Launch Wizard markup to migrate to `.modal-shell` / `.modal-backdrop`",
+        );
+        assert!(
+            !html.contains("<div class=\"modal\">"),
+            "expected legacy `.modal` class to be retired in favor of `.modal-shell`",
+        );
+
+        // Each modal entrypoint must declare `.modal-shell` on its card root.
+        let shell_count = html.matches("class=\"modal-shell").count();
+        assert!(
+            shell_count >= 3,
+            "expected at least 3 modals (preset / branch-cleanup / launch-wizard) to mount through `.modal-shell`, found {shell_count}",
         );
     }
 }

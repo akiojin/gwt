@@ -1,5 +1,54 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(board): GUI watcher は hot path で同期せず lifecycle owner を持つ
+
+### 事象
+
+Board projection watcher を `UserEvent::Frontend` ごとに同期していたため、
+terminal input など高頻度イベントのたびに project root の canonicalize と watcher
+lookup が走る設計になっていた。さらに watcher thread は stop signal / join handle を
+持たず、tab を閉じたあとも watch registration が残り得た。
+
+### 原因
+
+初回登録の重複防止を `HashSet<PathBuf>` だけで表現し、watcher の lifecycle owner を
+持たせなかった。tab set が変わるイベントと通常 frontend event を分離せず、
+「念のため同期」を hot path に置いてしまった。
+
+### 再発防止策
+
+1. GUI の filesystem watcher / background thread は registry 型で所有し、stop signal と
+   join handle を持たせる。
+2. watcher 同期は startup / open project / close tab など tab set が変わる境界だけで行い、
+   terminal input や board post など高頻度 event から filesystem work を外す。
+3. review comment が auto-merge 後に出た場合も、valid な lifecycle / hot path 指摘は
+   follow-up PR で解消する。
+
+## 2026-04-27 — test(async): background thread の完了確認に固定 sleep を使わない
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` の full suite で、
+`app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch` が断続的に
+`expected fake gh to be invoked for stale cache` で失敗した。単体実行では通るため、
+full suite の負荷で background thread が 250ms 以内に fake gh marker を作れない
+タイミング依存だった。
+
+### 原因
+
+テストが background refresh の完了を `thread::sleep(Duration::from_millis(250))`
+で推測していた。実際に確認したい状態は「fake gh が呼ばれたこと」なので、
+固定時間ではなく marker file という positive signal を待つべきだった。
+
+### 再発防止策
+
+1. background thread / async dispatch のテストでは、固定 sleep だけで完了扱いにせず、
+   event log、marker file、channel など観測可能な positive signal を待つ。
+2. full suite でだけ落ちるテストは、production logic より先に test wait condition を疑い、
+   単体実行と full 実行の差を確認する。
+3. no-op / silent path のテストでも、可能な限り「処理がその分岐まで到達した」ことを
+   別 signal で固定してから副作用なしを検証する。
+
 ## 2026-04-25 — fix(board): canvas wheel routing の allowlist に新しい scroll surface を必ず登録する
 
 ### 事象
@@ -3740,3 +3789,41 @@ PTY の `Completed(0)` 経路では閉じるが、runtime hook の `status=Stopp
    `should_auto_close_agent_window` と workspace close helper を通す。
 3. hook event の regression test では、`gwt_session_id != agent_session_id` の実 payload 形状を使い、
    status badge だけでなく workspace から window が消えることまで固定する。
+
+## 2026-04-26 — fix(ui): GUI/TUI イベントループで `gh` / Python runner を同期実行しない
+
+### 事象
+
+SPEC / Issue ウィンドウを開く、または検索文字を入力すると GUI が固まる UX になっていた。
+
+### 原因
+
+- Knowledge Bridge の初期ロードが stale cache refresh 経由で `gh issue list/view` を同期実行していた。
+- セマンティック検索が Python runner / ChromaDB をフロントエンドイベント処理中に同期実行していた。
+- 既存の検索結果を保持したまま「検索中」を表示し、追加入力を最新クエリへ畳み込む契約テストが不足していた。
+
+### 再発防止策
+
+1. GUI/TUI のユーザー入力経路では、外部プロセス・ネットワーク・重い runner を必ず background dispatch に逃がす。
+2. ウィンドウ open / scope switch / detail select はローカルキャッシュ読み取りだけで即時応答し、refresh は別応答で反映する。
+3. セマンティック検索は in-flight 1 件に制限し、追加入力は最新クエリへ coalesce する契約テストを維持する。
+
+## 2026-04-27 — test: `HOME` / `USERPROFILE` 差し替えテストは gwt home 利用テストも同じロックで守る
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` の既定並列実行で、`app_runtime` の Knowledge Bridge / Memo / Board 系テストが
+一時的に別テストの `HOME` / `USERPROFILE` を参照し、cache / notes / coordination の保存先がずれて失敗した。
+
+### 原因
+
+- 一部テストは `HOME` / `USERPROFILE` を `ScopedEnvVar` で差し替えていたが、同じ `~/.gwt` 系 path を読むだけのテストは
+  `env_test_lock` を取得していなかった。
+- `gwt_core::paths::gwt_cache_dir()` / `gwt_notes_dir()` / project coordination path は process-global env に依存するため、
+  読み取り側も env mutation と同じ排他範囲に入れる必要があった。
+
+### 再発防止策
+
+1. `~/.gwt` 派生 path を使うテストは、env を変更しない場合でも `env_test_lock` を取得する。
+2. lock を取得した後に `HOME` / `USERPROFILE` をテスト専用 temp dir へ固定し、guard は lock より先に drop される順序で宣言する。
+3. `cargo test -p gwt-core -p gwt` は既定並列実行でも確認し、`--test-threads=1` だけを成功条件にしない。

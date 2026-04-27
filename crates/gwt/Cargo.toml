@@ -48,9 +48,11 @@ base64.workspace = true
 regex.workspace = true
 rfd = "0.17"
 reqwest.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-muda = "0.17"
+muda = "0.18"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 image.workspace = true

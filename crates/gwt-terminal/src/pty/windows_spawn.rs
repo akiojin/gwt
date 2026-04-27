@@ -126,6 +126,15 @@ fn resolve_path_candidate(
     remove_env: &[String],
 ) -> Option<WindowsSpawnTarget> {
     if has_executable_extension(candidate) && candidate.exists() {
+        if let Some(target) = parse_bun_pe_shim(candidate, env, remove_env) {
+            tracing::debug!(
+                target: "gwt_spawn_trace",
+                bun_pe_shim = %candidate.display(),
+                rewritten_command = %target.command,
+                "rewrote bun PE shim to JS entry to avoid Windows 16-bit loader error",
+            );
+            return Some(target);
+        }
         return Some(WindowsSpawnTarget {
             command: candidate.display().to_string(),
             args_prefix: Vec::new(),
@@ -346,6 +355,132 @@ fn windows_path_extensions(env: &HashMap<String, String>, remove_env: &[String])
         .filter(|entry| !entry.is_empty())
         .map(|entry| entry.to_ascii_lowercase())
         .collect()
+}
+
+// Detect bun's global install layout
+// (`<...>/.bun/install/global/node_modules/...`). bun emits PE32+ shims here
+// that occasionally trip Windows' PE loader and surface as a misleading
+// "supported 16-bit application" dialog (notably when the user profile path
+// contains non-ASCII characters or when bun's shim builder produces an image
+// the loader rejects). Detection is case-insensitive because Windows paths
+// are.
+fn is_bun_managed_pe_shim(candidate: &Path) -> bool {
+    let lowered: Vec<String> = candidate
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str().map(|s| s.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+
+    lowered.windows(4).any(|window| {
+        window[0] == ".bun"
+            && window[1] == "install"
+            && window[2] == "global"
+            && window[3] == "node_modules"
+    })
+}
+
+// Walk up at most 5 levels from `<bin>/<name>.exe` to find the directory that
+// owns `package.json`. Both flat (`node_modules/<pkg>/`) and scoped
+// (`node_modules/@scope/<pkg>/`) layouts settle within this limit.
+fn locate_bun_package_root(candidate: &Path) -> Option<PathBuf> {
+    let mut current = candidate.parent()?;
+    for _ in 0..5 {
+        current = current.parent()?;
+        if current.join("package.json").is_file() {
+            return Some(current.to_path_buf());
+        }
+    }
+    None
+}
+
+// Read the package's `bin` field. Accepts both string form
+// (`"bin": "cli.js"`) and object form (`"bin": {"<name>": "cli.js"}`). When
+// the object has a single entry we accept it regardless of name, matching
+// what bun's resolver does when generating shims.
+fn resolve_bin_entry_from_package_json(package_root: &Path, desired_name: &str) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(package_root.join("package.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let bin = json.get("bin")?;
+    let relative = match bin {
+        serde_json::Value::String(value) => value.as_str(),
+        serde_json::Value::Object(map) => {
+            let entry = map.get(desired_name).or_else(|| {
+                if map.len() == 1 {
+                    map.values().next()
+                } else {
+                    None
+                }
+            })?;
+            entry.as_str()?
+        }
+        _ => return None,
+    };
+    Some(PathBuf::from(relative))
+}
+
+// Locate a runtime that can execute the JS entry. Preference order:
+//   1. `bun.exe` on PATH
+//   2. `%USERPROFILE%\.bun\bin\bun.exe`
+//   3. `node.exe` on PATH
+//   4. `bun` (lets CreateProcess perform its own PATH search)
+fn locate_bun_runtime(env: &HashMap<String, String>, remove_env: &[String]) -> String {
+    if let Some(found) = find_executable_on_path("bun.exe", env, remove_env) {
+        return found;
+    }
+    if let Some(home) =
+        windows_env_value("USERPROFILE", env, remove_env).and_then(|value| value.into_string().ok())
+    {
+        let candidate = PathBuf::from(home).join(".bun").join("bin").join("bun.exe");
+        if candidate.is_file() {
+            return candidate.display().to_string();
+        }
+    }
+    if let Some(found) = find_executable_on_path("node.exe", env, remove_env) {
+        return found;
+    }
+    "bun".to_string()
+}
+
+fn find_executable_on_path(
+    name: &str,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> Option<String> {
+    let path_value = windows_env_value("PATH", env, remove_env)?;
+    for dir in std::env::split_paths(&path_value) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+    }
+    None
+}
+
+fn parse_bun_pe_shim(
+    candidate: &Path,
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+) -> Option<WindowsSpawnTarget> {
+    if !is_bun_managed_pe_shim(candidate) {
+        return None;
+    }
+    let stem = candidate.file_stem()?.to_str()?;
+    let package_root = locate_bun_package_root(candidate)?;
+    let cli_relative = resolve_bin_entry_from_package_json(&package_root, stem)?;
+    let cli_absolute = package_root.join(&cli_relative);
+    if !cli_absolute.is_file() {
+        return None;
+    }
+    let runtime = locate_bun_runtime(env, remove_env);
+    Some(WindowsSpawnTarget {
+        command: runtime,
+        args_prefix: vec![cli_absolute.display().to_string()],
+    })
 }
 
 fn has_executable_extension(path: &Path) -> bool {
@@ -759,6 +894,200 @@ mod tests {
             text.contains("GWT_QUOTED_NPX_OK --yes @anthropic-ai/claude-code@latest"),
             "expected quoted fake npx.cmd to receive forwarded args, got: {text}"
         );
+    }
+
+    /// Build a fake bun-managed package layout under `root` and return
+    /// `(bin_exe, package_root, cli_js)`. Mirrors the real bun layout:
+    /// `<root>/.bun/install/global/node_modules/<pkg>/bin/<name>.exe` plus a
+    /// sibling `cli.js` and a minimal `package.json`.
+    fn fake_bun_install(
+        root: &Path,
+        pkg: &str,
+        bin_name: &str,
+        bin_field: &str,
+        cli_relative: &str,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let pkg_root = root
+            .join(".bun")
+            .join("install")
+            .join("global")
+            .join("node_modules")
+            .join(pkg);
+        let bin_dir = pkg_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let bin_exe = bin_dir.join(format!("{bin_name}.exe"));
+        // Minimal MZ header so the file looks like a PE; the resolver should
+        // never actually execute it.
+        std::fs::write(&bin_exe, b"MZ\x00\x00bun-shim-placeholder").expect("write fake exe");
+        let cli_js = pkg_root.join(cli_relative);
+        if let Some(parent) = cli_js.parent() {
+            std::fs::create_dir_all(parent).expect("create cli parent");
+        }
+        std::fs::write(&cli_js, "console.log('cli');\n").expect("write cli.js");
+        let package_json = pkg_root.join("package.json");
+        std::fs::write(&package_json, bin_field).expect("write package.json");
+        (bin_exe, pkg_root, cli_js)
+    }
+
+    #[test]
+    fn bun_pe_shim_in_dot_bun_install_rewrites_to_bun_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_bin_exe, _pkg_root, cli_js) = fake_bun_install(
+            temp.path(),
+            "@anthropic-ai/claude-code",
+            "claude",
+            r#"{"bin":{"claude":"cli.js"}}"#,
+            "cli.js",
+        );
+        let bun_bin_dir = temp.path().join(".bun").join("bin");
+        std::fs::create_dir_all(&bun_bin_dir).expect("bun bin");
+        let bun_exe = bun_bin_dir.join("bun.exe");
+        std::fs::write(&bun_exe, b"MZ\x00\x00fake-bun").expect("bun.exe");
+        // Place a sibling shim in `.bun/bin/` so the PATH lookup hits the
+        // bun-managed PE first; resolver should reject it via the new logic.
+        let shim = bun_bin_dir.join("claude.exe");
+        std::fs::write(&shim, b"MZ\x00\x00fake-bun-shim").expect("claude shim");
+        // PATH is irrelevant once the resolver finds claude.exe in .bun/bin,
+        // but we still need to exercise the deeper `.bun/install` path. Use a
+        // fully-qualified candidate by passing the deep path directly.
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bun_bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalized_config(
+            _bin_exe.display().to_string().as_str(),
+            vec!["--help".to_string()],
+            env,
+        );
+
+        assert_eq!(
+            normalized.command,
+            bun_exe.display().to_string(),
+            "expected bun.exe to drive the rewritten command, got {:?}",
+            normalized.command,
+        );
+        assert_eq!(
+            normalized.args,
+            vec![cli_js.display().to_string(), "--help".to_string()],
+            "expected cli.js to be inserted as the first arg, got {:?}",
+            normalized.args,
+        );
+    }
+
+    #[test]
+    fn bun_pe_shim_with_string_bin_field_resolves_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bin_exe, _pkg_root, cli_js) = fake_bun_install(
+            temp.path(),
+            "claude-code",
+            "claude",
+            r#"{"bin":"cli.js"}"#,
+            "cli.js",
+        );
+        let bun_bin_dir = temp.path().join(".bun").join("bin");
+        std::fs::create_dir_all(&bun_bin_dir).expect("bun bin");
+        let bun_exe = bun_bin_dir.join("bun.exe");
+        std::fs::write(&bun_exe, b"MZ\x00").expect("bun.exe");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bun_bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalized_config(bin_exe.display().to_string().as_str(), vec![], env);
+
+        assert_eq!(normalized.command, bun_exe.display().to_string());
+        assert_eq!(normalized.args, vec![cli_js.display().to_string()]);
+    }
+
+    #[test]
+    fn bun_pe_shim_falls_back_to_node_when_bun_runtime_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (bin_exe, _pkg_root, cli_js) = fake_bun_install(
+            temp.path(),
+            "@anthropic-ai/claude-code",
+            "claude",
+            r#"{"bin":{"claude":"cli.js"}}"#,
+            "cli.js",
+        );
+        let nodejs_dir = temp.path().join("nodejs");
+        std::fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
+        let node_exe = nodejs_dir.join("node.exe");
+        std::fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+
+        // PATH contains only nodejs/, no bun.exe anywhere.
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), nodejs_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        // Force USERPROFILE elsewhere so the fallback can't surprise us.
+        env.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let normalized = normalized_config(bin_exe.display().to_string().as_str(), vec![], env);
+
+        assert_eq!(
+            normalized.command,
+            node_exe.display().to_string(),
+            "expected node.exe fallback when bun.exe is absent, got {:?}",
+            normalized.command,
+        );
+        assert_eq!(normalized.args, vec![cli_js.display().to_string()]);
+    }
+
+    #[test]
+    fn bun_pe_shim_outside_dot_bun_install_is_not_rewritten() {
+        // Regression guard: a `.exe` outside `.bun/install/global/node_modules/`
+        // must keep the existing direct-execution behavior so non-bun installs
+        // (Program Files, scoop, winget, etc.) are unaffected.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let exe = bin_dir.join("claude.exe");
+        std::fs::write(&exe, b"MZ\x00\x00not-a-bun-shim").expect("exe");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalized_config("claude", vec!["--help".to_string()], env);
+
+        assert_eq!(normalized.command, exe.display().to_string());
+        assert_eq!(normalized.args, vec!["--help".to_string()]);
+    }
+
+    #[test]
+    fn bun_pe_shim_missing_package_json_falls_back_to_exe() {
+        // Defense-in-depth: if `package.json` is missing or unreadable, the
+        // resolver must fall back to the existing `.exe` direct-execution
+        // path so a damaged install does not regress further.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pkg_root = temp
+            .path()
+            .join(".bun")
+            .join("install")
+            .join("global")
+            .join("node_modules")
+            .join("claude-code");
+        let bin_dir = pkg_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let bin_exe = bin_dir.join("claude.exe");
+        std::fs::write(&bin_exe, b"MZ\x00\x00bun-shim").expect("exe");
+        // Intentionally do NOT create package.json.
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        let normalized = normalized_config(bin_exe.display().to_string().as_str(), vec![], env);
+
+        assert_eq!(
+            normalized.command,
+            bin_exe.display().to_string(),
+            "expected fallback to .exe direct execution when package.json is missing"
+        );
+        assert!(normalized.args.is_empty());
     }
 
     #[test]

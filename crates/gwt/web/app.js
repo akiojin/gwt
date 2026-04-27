@@ -1,5 +1,5 @@
-      import { Terminal } from "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/+esm";
-      import { FitAddon } from "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/+esm";
+      import { Terminal } from "/assets/xterm/xterm.mjs";
+      import { FitAddon } from "/assets/xterm/addon-fit.mjs";
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -58,6 +58,7 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       const pendingMessages = [];
       // Phase 1B extraction map: each entry names the surface that owns the
@@ -634,7 +635,7 @@
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
           const empty = document.createElement("div");
-          empty.className = "file-tree-empty";
+          empty.className = "file-tree-empty workspace-empty-state";
           empty.textContent = "No recent projects";
           recentProjectList.appendChild(empty);
           return;
@@ -855,8 +856,16 @@
           if (!canRefreshTerminalViewport(windowId)) {
             return;
           }
-          fitTerminal(windowId, false);
+          refreshTerminalViewport(windowId);
         });
+      }
+
+      function refreshTerminalViewport(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || !canRefreshTerminalViewport(windowId)) {
+          return;
+        }
+        runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
 
       function sendGeometry(windowId, cols, rows) {
@@ -1453,10 +1462,16 @@
             detail: null,
             query: "",
             loading: false,
+            refreshing: false,
             searching: false,
             detailLoading: false,
             pendingSearchTimer: null,
+            loadRequestId: 0,
+            detailRequestId: 0,
             searchRequestId: 0,
+            inFlightSearchRequestId: 0,
+            searchInFlight: false,
+            queuedSearchQuery: "",
             error: "",
             emptyMessage: "",
             baseEmptyMessage: "",
@@ -1476,6 +1491,12 @@
         if (state?.pendingSearchTimer) {
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
+        }
+        if (state) {
+          state.queuedSearchQuery = "";
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          state.detailRequestId = 0;
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
@@ -1624,14 +1645,23 @@
           clearTimeout(state.pendingSearchTimer);
           state.pendingSearchTimer = null;
         }
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.loadRequestId = requestId;
+        state.detailRequestId = 0;
         state.loading = true;
+        state.refreshing = Boolean(refresh);
         state.searching = false;
+        state.searchInFlight = false;
+        state.inFlightSearchRequestId = 0;
+        state.queuedSearchQuery = "";
+        state.searchRequestId += 1;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "load_knowledge_bridge",
           id: windowId,
           knowledge_kind: effectiveKind,
+          request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
           list_scope:
@@ -1653,6 +1683,42 @@
         }
       }
 
+      function knowledgeEventScopeMatches(state, event) {
+        return !(
+          state.kind === "issue" &&
+          event.list_scope &&
+          event.list_scope !== state.listScope
+        );
+      }
+
+      function knowledgeDetailRequestMatches(state, event) {
+        return (
+          !event.request_id ||
+          event.request_id === state.loadRequestId ||
+          event.request_id === state.detailRequestId
+        );
+      }
+
+      function sendKnowledgeSemanticSearch(windowId, knowledgeKind, query) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        const effectiveKind = knowledgeKind || state.kind;
+        const requestId = nextKnowledgeSearchRequestId++;
+        state.searchRequestId = requestId;
+        state.inFlightSearchRequestId = requestId;
+        state.searchInFlight = true;
+        state.searching = true;
+        send({
+          kind: "search_knowledge_bridge",
+          id: windowId,
+          knowledge_kind: effectiveKind,
+          query,
+          request_id: requestId,
+          selected_number: state.selectedNumber ?? null,
+          list_scope:
+            effectiveKind === "issue" ? state.listScope || "open" : null,
+        });
+      }
+
       function scheduleKnowledgeSearch(windowId, knowledgeKind) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         if (state.pendingSearchTimer) {
@@ -1660,42 +1726,47 @@
           state.pendingSearchTimer = null;
         }
         const query = state.query.trim();
-        const requestId = nextKnowledgeSearchRequestId++;
-        state.searchRequestId = requestId;
         state.error = "";
         if (!query) {
           state.searching = false;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          state.queuedSearchQuery = "";
+          state.searchRequestId += 1;
           restoreKnowledgeBaseEntries(state);
           renderKnowledgeBridge(windowId);
           return;
         }
         if (state.loading && state.baseEntries.length === 0) {
           state.searching = true;
-          state.entries = [];
-          state.emptyMessage = "";
+          renderKnowledgeBridge(windowId);
+          return;
+        }
+        if (state.searchInFlight) {
+          state.queuedSearchQuery = query;
+          state.searching = true;
           renderKnowledgeBridge(windowId);
           return;
         }
         state.searching = true;
-        state.entries = [];
-        state.emptyMessage = "";
         state.pendingSearchTimer = setTimeout(() => {
           state.pendingSearchTimer = null;
           if (!workspaceWindowById(windowId)) {
             return;
           }
-          send({
-            kind: "search_knowledge_bridge",
-            id: windowId,
-            knowledge_kind: knowledgeKind || state.kind,
-            query,
-            request_id: requestId,
-            selected_number: state.selectedNumber ?? null,
-            list_scope:
-              (knowledgeKind || state.kind) === "issue"
-                ? state.listScope || "open"
-                : null,
-          });
+          const latestQuery = state.query.trim();
+          if (!latestQuery) {
+            state.searching = false;
+            restoreKnowledgeBaseEntries(state);
+            renderKnowledgeBridge(windowId);
+            return;
+          }
+          if (state.searchInFlight) {
+            state.queuedSearchQuery = latestQuery;
+            renderKnowledgeBridge(windowId);
+            return;
+          }
+          sendKnowledgeSemanticSearch(windowId, knowledgeKind, latestQuery);
         }, 250);
         renderKnowledgeBridge(windowId);
       }
@@ -1704,11 +1775,14 @@
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         state.selectedNumber = number;
         state.detailLoading = true;
+        const requestId = nextKnowledgeLoadRequestId++;
+        state.detailRequestId = requestId;
         const effectiveKind = knowledgeKind || state.kind;
         send({
           kind: "select_knowledge_bridge_entry",
           id: windowId,
           knowledge_kind: effectiveKind,
+          request_id: requestId,
           number,
           list_scope:
             effectiveKind === "issue" ? state.listScope || "open" : null,
@@ -1884,7 +1958,7 @@
 
         timeline.innerHTML = "";
         if (!state.loading && filteredEntries.length === 0) {
-          timeline.appendChild(createNode("div", "logs-empty", "No log entries match."));
+          timeline.appendChild(createNode("div", "logs-empty workspace-empty-state", "No log entries match."));
         }
         for (const entry of filteredEntries) {
           const row = createNode("button", "logs-entry");
@@ -1932,7 +2006,7 @@
         detailPane.innerHTML = "";
         if (!selectedEntry) {
           detailPane.appendChild(
-            createNode("div", "logs-empty", "Select a log entry to inspect details."),
+            createNode("div", "logs-empty workspace-empty-state", "Select a log entry to inspect details."),
           );
           return;
         }
@@ -2160,7 +2234,7 @@
         updateMemoStatus(windowId);
         list.innerHTML = "";
         if (!state.loading && state.notes.length === 0) {
-          const empty = createNode("div", "memo-empty");
+          const empty = createNode("div", "memo-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "No notes yet"));
           empty.appendChild(
             createNode(
@@ -2211,7 +2285,7 @@
         editor.innerHTML = "";
         editor.dataset.noteId = state.selectedNoteId || "";
         if (!selectedNote) {
-          const empty = createNode("div", "memo-empty");
+          const empty = createNode("div", "memo-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "Select or create a note"));
           empty.appendChild(
             createNode(
@@ -2523,7 +2597,7 @@
         updateProfileStatus(windowId);
         list.innerHTML = "";
         if (!state.loading && profiles.length === 0) {
-          const empty = createNode("div", "profile-empty");
+          const empty = createNode("div", "profile-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "No profiles yet"));
           empty.appendChild(
             createNode(
@@ -2576,7 +2650,7 @@
         editor.innerHTML = "";
         const selected = selectedProfileEntry(state);
         if (!selected || !state.draft) {
-          const empty = createNode("div", "profile-empty");
+          const empty = createNode("div", "profile-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "Select a profile"));
           empty.appendChild(
             createNode(
@@ -2852,7 +2926,7 @@
         timeline.innerHTML = "";
         if (!state.loading && state.entries.length === 0) {
           timeline.appendChild(
-            createNode("div", "board-empty", "No coordination entries yet."),
+            createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
           );
         }
         for (const entry of state.entries) {
@@ -2894,6 +2968,14 @@
         bodyInput.placeholder = "Share the current state, next action, or blocker";
         bodyInput.addEventListener("input", () => {
           state.composerBody = bodyInput.value;
+        });
+        bodyInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            if (!state.submitting) {
+              submitBoardEntry(windowId);
+            }
+          }
         });
         bodyField.appendChild(bodyInput);
         composer.appendChild(bodyField);
@@ -3604,14 +3686,14 @@
 
         if (state.error) {
           const errorRow = document.createElement("div");
-          errorRow.className = "file-tree-empty";
+          errorRow.className = "file-tree-empty workspace-empty-state";
           errorRow.textContent = state.error;
           list.appendChild(errorRow);
         }
 
         if (!state.loaded.has("")) {
           const loadingRow = document.createElement("div");
-          loadingRow.className = "file-tree-empty";
+          loadingRow.className = "file-tree-empty workspace-empty-state";
           loadingRow.textContent = "Loading repository";
           list.appendChild(loadingRow);
           return;
@@ -3655,7 +3737,7 @@
                 appendRows(entry.path, depth + 1);
               } else {
                 const loadingRow = document.createElement("div");
-                loadingRow.className = "file-tree-empty";
+                loadingRow.className = "file-tree-empty workspace-empty-state";
                 loadingRow.style.paddingLeft = `${30 + depth * 18}px`;
                 loadingRow.textContent = "Loading";
                 list.appendChild(loadingRow);
@@ -3668,7 +3750,7 @@
 
         if (list.childElementCount === 0) {
           const emptyRow = document.createElement("div");
-          emptyRow.className = "file-tree-empty";
+          emptyRow.className = "file-tree-empty workspace-empty-state";
           emptyRow.textContent = "No visible files";
           list.appendChild(emptyRow);
         }
@@ -3707,7 +3789,7 @@
 
         if (state.error) {
           const errorRow = document.createElement("div");
-          errorRow.className = "branch-empty";
+          errorRow.className = "branch-empty workspace-empty-state";
           errorRow.textContent = state.error;
           list.appendChild(errorRow);
           renderBranchCleanupModal();
@@ -3716,7 +3798,7 @@
 
         if (state.loading && state.entries.length === 0) {
           const loadingRow = document.createElement("div");
-          loadingRow.className = "branch-empty";
+          loadingRow.className = "branch-empty workspace-empty-state";
           loadingRow.textContent = "Loading branches";
           list.appendChild(loadingRow);
           renderBranchCleanupModal();
@@ -3726,7 +3808,7 @@
         const visibleEntries = filteredBranchEntries(state);
         if (visibleEntries.length === 0) {
           const emptyRow = document.createElement("div");
-          emptyRow.className = "branch-empty";
+          emptyRow.className = "branch-empty workspace-empty-state";
           emptyRow.textContent = state.entries.length === 0 ? "No branches" : "No branches in this filter";
           list.appendChild(emptyRow);
           renderBranchCleanupModal();
@@ -3897,6 +3979,11 @@
         state.detailLoading = false;
         state.query = "";
         state.searching = false;
+        state.refreshing = false;
+        state.searchInFlight = false;
+        state.inFlightSearchRequestId = 0;
+        state.queuedSearchQuery = "";
+        state.loadRequestId += 1;
         state.searchRequestId += 1;
         requestKnowledgeBridge(windowId, state.kind, false);
         renderKnowledgeBridge(windowId);
@@ -3940,6 +4027,11 @@
         } else if (state.searching) {
           status.classList.add("visible", "info");
           status.textContent = "Searching semantic index";
+        } else if (state.loading && state.entries.length > 0) {
+          status.classList.add("visible", "info");
+          status.textContent = state.refreshing
+            ? "Refreshing cached knowledge"
+            : "Loading cache-backed data";
         } else if (state.loading && state.entries.length === 0) {
           status.classList.add("visible", "info");
           status.textContent = "Loading cache-backed data";
@@ -3953,7 +4045,7 @@
           ? state.entries
           : filteredKnowledgeEntries(state);
         if (visibleEntries.length === 0) {
-          const empty = createNode("div", "knowledge-empty");
+          const empty = createNode("div", "knowledge-empty workspace-empty-state");
           if (state.searching) {
             empty.textContent = "Searching semantic index";
           } else if (state.entries.length === 0) {
@@ -4066,7 +4158,7 @@
         }
         detailPane.appendChild(header);
 
-        const scroll = createNode("div", "knowledge-detail-scroll");
+        const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll");
         if (state.detailLoading) {
           scroll.appendChild(
             createNode("div", "knowledge-detail-empty", "Loading detail"),
@@ -4560,11 +4652,11 @@
         if (surface === "file-tree") {
           body.innerHTML = `
             <div class="file-tree-root">
-              <div class="file-tree-toolbar">
+              <div class="file-tree-toolbar workspace-toolbar">
                 <div class="file-tree-path">Repository</div>
                 <button class="icon-button" data-action="refresh-tree" aria-label="Refresh tree">↻</button>
               </div>
-              <div class="file-tree-scroll">
+              <div class="file-tree-scroll workspace-scroll">
                 <div class="file-tree-list"></div>
               </div>
               <div class="file-tree-footer">.</div>
@@ -4604,8 +4696,8 @@
         if (surface === "branches") {
           body.innerHTML = `
             <div class="branch-list-root">
-              <div class="branch-toolbar">
-                <div class="branch-toolbar-main">
+              <div class="branch-toolbar workspace-toolbar is-stacked">
+                <div class="branch-toolbar-main workspace-toolbar-main">
                   <div class="branch-heading">Repository branches · double-click to launch</div>
                   <div class="branch-filter-group">
                     <button class="branch-filter-button" type="button" data-branch-filter="local">Local</button>
@@ -4613,13 +4705,13 @@
                     <button class="branch-filter-button" type="button" data-branch-filter="all">All</button>
                   </div>
                 </div>
-                <div class="branch-toolbar-actions">
+                <div class="branch-toolbar-actions workspace-toolbar-actions">
                   <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
                 </div>
               </div>
               <div class="branch-notice" hidden></div>
-              <div class="branch-scroll">
+              <div class="branch-scroll workspace-scroll">
                 <div class="branch-list"></div>
               </div>
             </div>
@@ -4671,17 +4763,17 @@
         if (surface === "memo") {
           body.innerHTML = `
             <div class="memo-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Repo notes</div>
                   <div class="memo-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="wizard-button" type="button" data-action="new-note">New note</button>
                   <button class="icon-button" data-action="refresh-memo" aria-label="Refresh memo">↻</button>
                 </div>
               </div>
-              <div class="memo-layout">
+              <div class="memo-layout workspace-split">
                 <div class="memo-note-list"></div>
                 <div class="memo-editor-pane"></div>
               </div>
@@ -4717,17 +4809,17 @@
         if (surface === "profile") {
           body.innerHTML = `
             <div class="profile-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Profiles</div>
                   <div class="profile-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="wizard-button" type="button" data-action="new-profile">New profile</button>
                   <button class="icon-button" data-action="refresh-profile" aria-label="Refresh profiles">↻</button>
                 </div>
               </div>
-              <div class="profile-layout">
+              <div class="profile-layout workspace-split">
                 <div class="profile-list-pane">
                   <div class="profile-list"></div>
                 </div>
@@ -4765,17 +4857,17 @@
         if (surface === "board") {
           body.innerHTML = `
             <div class="board-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Board chat</div>
                   <div class="board-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
               <div class="board-chat-shell">
-                <div class="board-timeline-scroll board-scroll-surface">
+                <div class="board-timeline-scroll board-scroll-surface workspace-scroll">
                   <div class="board-timeline"></div>
                 </div>
                 <div class="board-composer-bar">
@@ -4808,12 +4900,12 @@
         if (surface === "logs") {
           body.innerHTML = `
             <div class="logs-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Structured logs</div>
                   <div class="logs-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="text-button logs-unread-button" type="button" hidden>0 unread alerts</button>
                   <button class="icon-button" data-action="refresh-logs" aria-label="Refresh logs">↻</button>
                 </div>
@@ -4833,7 +4925,7 @@
                   <input class="logs-search-input" type="search" placeholder="Filter message, source, or fields" />
                 </label>
               </div>
-              <div class="logs-layout">
+              <div class="logs-layout workspace-split">
                 <div class="logs-timeline"></div>
                 <div class="logs-detail-pane"></div>
               </div>
@@ -4881,8 +4973,8 @@
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           body.innerHTML = `
             <div class="knowledge-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
                   ${
                     knowledgeKind === "issue"
@@ -4894,12 +4986,12 @@
                   }
                   <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached knowledge">↻</button>
                 </div>
               </div>
               <div class="knowledge-status"></div>
-              <div class="knowledge-split">
+              <div class="knowledge-split workspace-split">
                 <div class="knowledge-list-pane">
                   <div class="knowledge-list"></div>
                 </div>
@@ -5485,6 +5577,8 @@
         requestKnowledgeBridge,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
+        knowledgeEventScopeMatches,
+        knowledgeDetailRequestMatches,
         switchKnowledgeListScope,
         renderKnowledgeBridge,
         renderSettingsWindow,
@@ -5670,17 +5764,30 @@
               event.id,
               event.knowledge_kind,
             );
+            if (
+              (event.request_id && event.request_id !== state.loadRequestId) ||
+              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
+            ) {
+              break;
+            }
             const queuedQuery = state.query.trim();
-            state.baseEntries = event.entries || [];
+            const incomingEntries = event.entries || [];
+            const keepSelectedNumber =
+              state.selectedNumber &&
+              incomingEntries.some((entry) => entry.number === state.selectedNumber);
+            state.baseEntries = incomingEntries;
             state.baseEmptyMessage = event.empty_message || "";
             if (!queuedQuery) {
               state.entries = state.baseEntries.slice();
               state.emptyMessage = state.baseEmptyMessage;
               state.searching = false;
             }
-            state.selectedNumber = event.selected_number ?? null;
+            state.selectedNumber = keepSelectedNumber
+              ? state.selectedNumber
+              : event.selected_number ?? null;
             state.refreshEnabled = Boolean(event.refresh_enabled);
             state.loading = false;
+            state.refreshing = false;
             state.error = "";
             if (queuedQuery) {
               frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
@@ -5697,19 +5804,46 @@
               event.id,
               event.knowledge_kind,
             );
+            const isInFlightResponse =
+              event.request_id === state.inFlightSearchRequestId;
+            if (isInFlightResponse) {
+              state.searchInFlight = false;
+              state.inFlightSearchRequestId = 0;
+            }
+            if (
+              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
+            ) {
+              break;
+            }
             if (
               event.request_id !== state.searchRequestId ||
               event.query !== state.query.trim()
             ) {
+              const nextQuery = state.queuedSearchQuery || state.query.trim();
+              state.queuedSearchQuery = "";
+              if (isInFlightResponse && nextQuery) {
+                frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                  event.id,
+                  event.knowledge_kind,
+                );
+              }
               break;
             }
             state.entries = event.entries || [];
             state.selectedNumber = event.selected_number ?? null;
             state.emptyMessage = event.empty_message || "";
             state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.searching = false;
-            state.loading = false;
             state.error = "";
+            const nextQuery = state.queuedSearchQuery;
+            state.queuedSearchQuery = "";
+            if (nextQuery && nextQuery !== event.query) {
+              frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                event.id,
+                event.knowledge_kind,
+              );
+              break;
+            }
+            state.searching = false;
             if (state.selectedNumber) {
               state.detailLoading = true;
               frontendUnits.knowledgeSettingsSurface.requestKnowledgeDetail(
@@ -5728,9 +5862,20 @@
               event.id,
               event.knowledge_kind,
             );
+            if (
+              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
+              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
+            ) {
+              break;
+            }
+            const matchesLoadRequest =
+              !event.request_id || event.request_id === state.loadRequestId;
             state.detail = event.detail;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
-            state.loading = false;
+            if (matchesLoadRequest) {
+              state.loading = false;
+              state.refreshing = false;
+            }
             state.detailLoading = false;
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
@@ -5804,8 +5949,45 @@
               event.id,
               event.knowledge_kind,
             );
-            state.loading = false;
+            const isSearchError =
+              typeof event.request_id === "number" && typeof event.query === "string";
+            if (
+              isSearchError &&
+              (event.request_id !== state.inFlightSearchRequestId ||
+                event.query !== state.query.trim() ||
+                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+            ) {
+              if (event.request_id === state.inFlightSearchRequestId) {
+                state.searchInFlight = false;
+                state.inFlightSearchRequestId = 0;
+                const nextQuery = state.queuedSearchQuery || state.query.trim();
+                state.queuedSearchQuery = "";
+                if (nextQuery) {
+                  frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch(
+                    event.id,
+                    event.knowledge_kind,
+                  );
+                }
+              }
+              break;
+            }
+            if (
+              !isSearchError &&
+              (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
+                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+            ) {
+              break;
+            }
+            const matchesLoadRequest =
+              !event.request_id || event.request_id === state.loadRequestId;
+            if (matchesLoadRequest) {
+              state.loading = false;
+              state.refreshing = false;
+            }
             state.searching = false;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            state.queuedSearchQuery = "";
             state.detailLoading = false;
             state.error = event.message;
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
@@ -6045,20 +6227,16 @@
         return null;
       }
 
-      function findNativeWheelScrollSurface(target) {
-        const element = eventTargetElement(target);
-        if (!element) {
-          return null;
-        }
-        return element.closest(".branch-scroll, .file-tree-scroll, .board-scroll-surface");
-      }
-
       function handleCanvasWheelEvent(event) {
         const targetElement = eventTargetElement(event.target);
         if (!targetElement || !canvas.contains(targetElement)) {
           return;
         }
-        // Let terminal windows handle their own scroll (xterm.js scrollback)
+        // SPEC-2008 FR-032: terminal-only opt-out. xterm.js owns wheel inside
+        // `.surface-terminal`; every other workspace-window forwards plain
+        // wheel to the DOM so panel scroll regions (Knowledge / Memo /
+        // Profile / Logs / Board / Issue / SPEC / Settings ...) and modal
+        // content scroll natively without registering a per-class whitelist.
         if (
           !event.ctrlKey &&
           !event.metaKey &&
@@ -6066,8 +6244,11 @@
         ) {
           return;
         }
-        const nativeWheelScrollSurface = findNativeWheelScrollSurface(event.target);
-        if (!event.ctrlKey && !event.metaKey && nativeWheelScrollSurface) {
+        if (
+          !event.ctrlKey &&
+          !event.metaKey &&
+          targetElement.closest(".workspace-window")
+        ) {
           return;
         }
         if (event.ctrlKey || event.metaKey) {

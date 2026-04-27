@@ -1,6 +1,58 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.0] - 2026-04-27
+
+### Bug Fixes
+
+- **gui:** Stabilize web terminal rendering
+- **agent:** Close windows on process exit status
+- Restore launch wizard previous profile fallbacks
+- Prevent knowledge bridge search from blocking UI
+- Correlate knowledge bridge detail selection
+- Keep knowledge bridge refresh state isolated
+- **board:** Manage board watcher lifecycle
+- 共通ウィンドウ系のスクロール routing を terminal-only opt-out 化
+- Hide Windows startup console
+- **branch-list:** Pin base branches to top
+- **windows:** Bun PE shim を bun.exe + cli.js に書き換えて 16 ビットエラーを回避
+- **branch-list:** Handle slash remotes in base pinning
+- **branch-list:** Cache remote names for cleanup hydration
+- **hooks:** Consolidate managed hook events
+- **hooks:** クォート内のシェル演算子を尊重する
+- **spec-2008:** 共通ウィンドウ chrome の透過漏れも解消
+
+### Features
+
+- **board:** Add realtime board window updates
+- Restore launch agent previous profile
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into bugfix branch
+- **deps-dev:** Bump @commitlint/cli from 20.5.0 to 20.5.2
+- Merge origin develop into terminal fix
+- Merge origin/develop
+- **gui:** Normalize vendored xterm css spacing
+- Merge origin develop for css spacing pr
+- Merge origin/develop
+- Merge develop into knowledge bridge fix
+- Merge develop into bugfix/common-window-system
+- Merge develop into bugfix/16bit-app
+- Merge develop into startup console fix
+
+### Refactor
+
+- **spec-2008:** 共有 layout primitive を導入し panel 各 surface を統合
+- **spec-2008:** 共有 modal frame primitive を導入し全 modal を統合
+- **spec-2008:** Rust WindowSurface enum を JS presetSurface と整合
+
+### Testing
+
+- **gwt:** Stabilize app runtime async fixtures
+- **gwt-git:** Normalize Windows worktree path assertions
+- **hooks:** Isolate runtime hook env tests
+
 ## [9.10.1] - 2026-04-26
 
 ### Bug Fixes

@@ -20,6 +20,40 @@ fn argv(strs: &[&str]) -> Vec<String> {
     strs.iter().map(|s| s.to_string()).collect()
 }
 
+fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 #[test]
 fn unknown_hook_name_exits_two() {
     let tmp = tempfile::tempdir().unwrap();
@@ -45,25 +79,21 @@ fn runtime_state_missing_event_argument_exits_two() {
 
 #[test]
 fn runtime_state_invalid_event_exits_one() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Set GWT_SESSION_RUNTIME_PATH so `handle` gets past the silent
     // no-op branch and actually calls `write_for_event`, which in turn
     // surfaces `InvalidEvent`.
     let tmp = tempfile::tempdir().unwrap();
     let runtime_path = tmp.path().join("runtime-state.json");
-    let prev = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
-    std::env::set_var("GWT_SESSION_RUNTIME_PATH", &runtime_path);
+    let _runtime_path = ScopedEnvVar::set("GWT_SESSION_RUNTIME_PATH", &runtime_path);
 
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let code = dispatch(
         &mut env,
         &argv(&["gwt", "hook", "runtime-state", "BogusEventName"]),
     );
-
-    if let Some(v) = prev {
-        std::env::set_var("GWT_SESSION_RUNTIME_PATH", v);
-    } else {
-        std::env::remove_var("GWT_SESSION_RUNTIME_PATH");
-    }
 
     assert_eq!(code, 1, "InvalidEvent must map to exit code 1");
     let err = String::from_utf8(env.stderr).unwrap();
@@ -160,5 +190,46 @@ fn delegated_block_hook_preserves_block_json_contract() {
     assert!(
         !stdout.contains("\"stopReason\""),
         "legacy stopReason output must not be emitted, got: {stdout}"
+    );
+}
+
+#[test]
+fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "gh issue view 123"
+        }
+    })
+    .to_string();
+
+    let code = dispatch(
+        &mut env,
+        &argv(&["gwt", "__internal", "daemon-hook", "event", "PreToolUse"]),
+    );
+
+    assert_eq!(code, 2, "blocked PreToolUse event must exit 2");
+    let stdout = String::from_utf8(env.stdout).unwrap();
+    assert!(
+        stdout.contains("\"hookSpecificOutput\""),
+        "stdout must emit hookSpecificOutput wrapper, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"hookEventName\":\"PreToolUse\""),
+        "stdout must declare PreToolUse event, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "stdout must deny the tool, got: {stdout}"
+    );
+    assert!(
+        stdout.lines().count() == 1,
+        "event dispatcher must emit exactly one JSON line, got: {stdout}"
     );
 }

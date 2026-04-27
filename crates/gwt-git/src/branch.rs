@@ -107,7 +107,28 @@ pub fn detect_cleanable_target(
     upstream: Option<&str>,
     gone_branches: &HashSet<String>,
 ) -> Result<Option<MergeTargetRef>> {
-    let Some(primary_remote) = upstream.and_then(remote_name_from_tracking_ref) else {
+    let remote_names = list_remote_names(repo_path).unwrap_or_default();
+    detect_cleanable_target_with_remote_names(
+        repo_path,
+        branch,
+        upstream,
+        gone_branches,
+        &remote_names,
+    )
+}
+
+/// Resolves the canonical cleanup target for `branch` using remote names
+/// already discovered for the current branch-list scan.
+pub fn detect_cleanable_target_with_remote_names(
+    repo_path: &Path,
+    branch: &str,
+    upstream: Option<&str>,
+    gone_branches: &HashSet<String>,
+    remote_names: &[String],
+) -> Result<Option<MergeTargetRef>> {
+    let Some(primary_remote) =
+        upstream.and_then(|reference| split_remote_ref(reference, remote_names).0)
+    else {
         if gone_branches.contains(branch) {
             return Ok(Some(MergeTargetRef::new(MergeTarget::Gone, "")));
         }
@@ -115,7 +136,7 @@ pub fn detect_cleanable_target(
     };
 
     let (primary_has_bases, primary_target) =
-        detect_cleanable_target_for_remote(repo_path, branch, primary_remote)?;
+        detect_cleanable_target_for_remote(repo_path, branch, &primary_remote)?;
     if let Some(target) = primary_target {
         return Ok(Some(target));
     }
@@ -149,10 +170,6 @@ fn detect_cleanable_target_for_remote(
         }
     }
     Ok((has_canonical_base, None))
-}
-
-fn remote_name_from_tracking_ref(reference: &str) -> Option<&str> {
-    reference.split_once('/').map(|(remote, _)| remote)
 }
 
 /// Returns the set of local branch names whose upstream tracking ref is
@@ -297,6 +314,12 @@ fn parse_divergence_output(output: &str) -> Result<DivergenceInfo> {
 pub struct Branch {
     /// Branch name (e.g. "main", "origin/main").
     pub name: String,
+    /// Remote name for remote-tracking branches (e.g. "origin").
+    #[serde(default)]
+    pub remote_name: Option<String>,
+    /// Branch name without the remote prefix for remote-tracking branches.
+    #[serde(default)]
+    pub remote_branch_name: Option<String>,
     /// Whether this is a local branch.
     pub is_local: bool,
     /// Whether this is a remote-tracking branch.
@@ -335,6 +358,8 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
         }
     }
 
+    let remote_names = list_remote_names(repo_path).unwrap_or_default();
+
     // Also list remote branches
     let remote_output = std::process::Command::new("git")
         .args([
@@ -358,8 +383,11 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
                 continue;
             }
             let date = parts.get(1).map(|s| s.trim().to_string());
+            let (remote_name, remote_branch_name) = split_remote_ref(&name, &remote_names);
             branches.push(Branch {
                 name,
+                remote_name,
+                remote_branch_name,
                 is_local: false,
                 is_remote: true,
                 is_head: false,
@@ -372,6 +400,45 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
     }
 
     Ok(branches)
+}
+
+pub fn list_remote_names(repo_path: &Path) -> Result<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .arg("remote")
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| GwtError::Git(format!("remote: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(GwtError::Git(format!("remote: {stderr}")));
+    }
+
+    let mut names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    Ok(names)
+}
+
+fn split_remote_ref(name: &str, remote_names: &[String]) -> (Option<String>, Option<String>) {
+    for remote_name in remote_names {
+        let Some(branch_name) = name.strip_prefix(remote_name) else {
+            continue;
+        };
+        let Some(branch_name) = branch_name.strip_prefix('/') else {
+            continue;
+        };
+        return (Some(remote_name.clone()), Some(branch_name.to_string()));
+    }
+
+    name.split_once('/')
+        .map_or((None, None), |(remote, branch)| {
+            (Some(remote.to_string()), Some(branch.to_string()))
+        })
 }
 
 /// Parse ahead/behind from the tracking info string like "[ahead 3, behind 2]".
@@ -424,6 +491,8 @@ fn parse_branch_line(line: &str) -> Option<Branch> {
 
     Some(Branch {
         name,
+        remote_name: None,
+        remote_branch_name: None,
         is_local: true,
         is_remote: false,
         is_head,
@@ -456,6 +525,24 @@ mod tests {
     #[test]
     fn parse_ahead_behind_empty() {
         assert_eq!(parse_ahead_behind(""), (0, 0));
+    }
+
+    #[test]
+    fn split_remote_ref_prefers_longest_known_remote_name() {
+        let remote_names = vec!["team/core".to_string(), "team".to_string()];
+
+        let (remote_name, branch_name) = split_remote_ref("team/core/main", &remote_names);
+
+        assert_eq!(remote_name.as_deref(), Some("team/core"));
+        assert_eq!(branch_name.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn split_remote_ref_falls_back_to_first_path_segment() {
+        let (remote_name, branch_name) = split_remote_ref("origin/feature/main", &[]);
+
+        assert_eq!(remote_name.as_deref(), Some("origin"));
+        assert_eq!(branch_name.as_deref(), Some("feature/main"));
     }
 
     #[test]
@@ -636,14 +723,66 @@ mod tests {
         run(&["checkout", "develop"], repo);
         run(&["merge", "--no-ff", "-m", "merge d", "feature/d"], repo);
 
-        let bases = [
-            ("main", MergeTarget::Main),
-            ("develop", MergeTarget::Develop),
-        ];
+        run(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+            repo,
+        );
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+
         let gone = HashSet::new();
         assert_eq!(
-            detect_cleanable_target(repo, "feature/d", &bases, &gone).unwrap(),
-            Some(MergeTargetRef::new(MergeTarget::Develop, "develop"))
+            detect_cleanable_target(repo, "feature/d", Some("origin/feature/d"), &gone).unwrap(),
+            Some(MergeTargetRef::new(MergeTarget::Develop, "origin/develop"))
+        );
+    }
+
+    #[test]
+    fn detect_cleanable_target_with_remote_names_handles_slash_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        run(&["checkout", "-b", "feature/slash-remote"], repo);
+        make_commit(repo, "slash.txt", "slash\n", "feat: slash remote");
+        run(&["checkout", "develop"], repo);
+        run(
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge slash",
+                "feature/slash-remote",
+            ],
+            repo,
+        );
+        run(
+            &["update-ref", "refs/remotes/team/core/develop", "develop"],
+            repo,
+        );
+
+        let remote_names = vec!["team/core".to_string()];
+        let gone = HashSet::new();
+        assert_eq!(
+            detect_cleanable_target_with_remote_names(
+                repo,
+                "feature/slash-remote",
+                Some("team/core/feature/slash-remote"),
+                &gone,
+                &remote_names,
+            )
+            .unwrap(),
+            Some(MergeTargetRef::new(
+                MergeTarget::Develop,
+                "team/core/develop"
+            ))
         );
     }
 
@@ -655,10 +794,21 @@ mod tests {
         run(&["checkout", "-b", "feature/free"], repo);
         make_commit(repo, "f.txt", "f", "feat: f");
 
-        let bases = [("main", MergeTarget::Main)];
+        run(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/repo.git",
+            ],
+            repo,
+        );
+        run(&["update-ref", "refs/remotes/origin/main", "main"], repo);
+
         let gone = HashSet::new();
         assert_eq!(
-            detect_cleanable_target(repo, "feature/free", &bases, &gone).unwrap(),
+            detect_cleanable_target(repo, "feature/free", Some("origin/feature/free"), &gone)
+                .unwrap(),
             None
         );
     }
@@ -671,11 +821,10 @@ mod tests {
         run(&["checkout", "-b", "feature/abandoned"], repo);
         make_commit(repo, "a.txt", "a", "feat: a");
 
-        let bases = [("main", MergeTarget::Main)];
         let mut gone = HashSet::new();
         gone.insert("feature/abandoned".to_string());
         assert_eq!(
-            detect_cleanable_target(repo, "feature/abandoned", &bases, &gone).unwrap(),
+            detect_cleanable_target(repo, "feature/abandoned", None, &gone).unwrap(),
             Some(MergeTargetRef::new(MergeTarget::Gone, ""))
         );
     }

@@ -1,5 +1,7 @@
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -41,7 +43,9 @@ mod runtime_support;
 mod update_front_door;
 
 #[cfg(test)]
-pub(crate) use app_runtime::{build_frontend_sync_events, LaunchWizardSession};
+pub(crate) use app_runtime::{
+    build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
+};
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner,
     DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget,
@@ -75,13 +79,13 @@ pub(crate) use launch_runtime::{
     resolve_launch_worktree_request,
 };
 pub(crate) use runtime_support::{
-    app_state_view_from_parts, close_window_from_workspace, combined_window_id, current_git_branch,
-    dedupe_recent_projects, fallback_project_target, first_available_worktree_path,
-    front_door_route, geometry_to_pty_size, knowledge_kind_for_preset, local_branch_exists,
-    normalize_active_tab_id, normalize_branch_name, origin_remote_ref,
-    resolve_launch_spec_with_fallback, resolve_launch_wizard_hydration, resolve_project_target,
-    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
-    spawn_env, synthetic_branch_entry, workspace_view_for_tab,
+    app_state_view_from_parts, attach_parent_console_for_cli, close_window_from_workspace,
+    combined_window_id, current_git_branch, dedupe_recent_projects, fallback_project_target,
+    first_available_worktree_path, front_door_route, geometry_to_pty_size,
+    knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
+    origin_remote_ref, resolve_launch_spec_with_fallback, resolve_launch_wizard_hydration,
+    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
+    should_auto_start_restored_window, spawn_env, synthetic_branch_entry, workspace_view_for_tab,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -142,6 +146,164 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
     }));
 }
 
+fn board_projection_watch_key(project_root: &Path) -> PathBuf {
+    dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
+}
+
+fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
+    matches!(
+        event,
+        FrontendEvent::OpenProjectDialog
+            | FrontendEvent::ReopenRecentProject { .. }
+            | FrontendEvent::CloseProjectTab { .. }
+    )
+}
+
+enum BoardProjectionWatcherMessage {
+    Changed(Vec<PathBuf>),
+    Stop,
+}
+
+struct BoardProjectionWatcher {
+    tx: std_mpsc::Sender<BoardProjectionWatcherMessage>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for BoardProjectionWatcher {
+    fn drop(&mut self) {
+        let _ = self.tx.send(BoardProjectionWatcherMessage::Stop);
+        if let Some(join_handle) = self.join_handle.take() {
+            if let Err(error) = join_handle.join() {
+                tracing::warn!(?error, "board projection watcher thread join failed");
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct BoardProjectionWatcherRegistry {
+    watchers: HashMap<PathBuf, BoardProjectionWatcher>,
+}
+
+impl BoardProjectionWatcherRegistry {
+    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+        let mut active_roots = HashSet::new();
+        for tab in &app.tabs {
+            let project_root = tab.project_root.clone();
+            let key = board_projection_watch_key(&project_root);
+            active_roots.insert(key.clone());
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.watchers.entry(key) {
+                if let Some(watcher) = spawn_board_projection_watcher(project_root, proxy.clone()) {
+                    entry.insert(watcher);
+                }
+            }
+        }
+
+        self.watchers
+            .retain(|project_root, _| active_roots.contains(project_root));
+    }
+
+    fn shutdown(&mut self) {
+        self.watchers.clear();
+    }
+}
+
+fn spawn_board_projection_watcher(
+    project_root: PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<BoardProjectionWatcher> {
+    let name = format!(
+        "gwt-board-watch-{}",
+        project_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("project")
+    );
+    let (tx, rx) = std_mpsc::channel::<BoardProjectionWatcherMessage>();
+    let stop_tx = tx.clone();
+    let join_handle = match thread::Builder::new().name(name).spawn(move || {
+        if let Err(error) = gwt_core::coordination::ensure_repo_local_files(&project_root) {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                error = %error,
+                "board projection watcher skipped"
+            );
+            return;
+        }
+
+        let projection_path =
+            gwt_core::coordination::coordination_board_projection_path(&project_root);
+        let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(projection_file_name) = projection_path.file_name().map(|name| name.to_owned())
+        else {
+            return;
+        };
+
+        let mut debouncer = match notify_debouncer_mini::new_debouncer(
+            Duration::from_millis(250),
+            move |res: notify_debouncer_mini::DebounceEventResult| {
+                if let Ok(events) = res {
+                    let paths: Vec<PathBuf> = events.into_iter().map(|event| event.path).collect();
+                    if !paths.is_empty() {
+                        let _ = tx.send(BoardProjectionWatcherMessage::Changed(paths));
+                    }
+                }
+            },
+        ) {
+            Ok(debouncer) => debouncer,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = %error,
+                    "board projection watcher init failed"
+                );
+                return;
+            }
+        };
+
+        if let Err(error) = debouncer
+            .watcher()
+            .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
+        {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                watch_dir = %watch_dir.display(),
+                error = %error,
+                "board projection watcher path failed"
+            );
+            return;
+        }
+
+        while let Ok(message) = rx.recv() {
+            match message {
+                BoardProjectionWatcherMessage::Changed(paths) => {
+                    if paths
+                        .iter()
+                        .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
+                    {
+                        let _ = proxy.send_event(UserEvent::BoardProjectionChanged {
+                            project_root: project_root.clone(),
+                        });
+                    }
+                }
+                BoardProjectionWatcherMessage::Stop => break,
+            }
+        }
+    }) {
+        Ok(join_handle) => join_handle,
+        Err(error) => {
+            tracing::warn!(error = %error, "board projection watcher thread failed to spawn");
+            return None;
+        }
+    };
+    Some(BoardProjectionWatcher {
+        tx: stop_tx,
+        join_handle: Some(join_handle),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -178,6 +340,9 @@ enum UserEvent {
         status: WindowProcessStatus,
         detail: Option<String>,
     },
+    BoardProjectionChanged {
+        project_root: PathBuf,
+    },
     RuntimeHook(gwt::RuntimeHookEvent),
     LaunchProgress {
         window_id: String,
@@ -196,7 +361,7 @@ enum UserEvent {
     },
     LaunchWizardHydrated {
         wizard_id: String,
-        result: Result<LaunchWizardHydration, String>,
+        result: Box<Result<LaunchWizardHydration, String>>,
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
@@ -243,8 +408,8 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
-        BlockingTaskSpawner, ClientHub, DispatchTarget, LaunchWizardSession, OutboundEvent,
-        ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -254,6 +419,64 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[test]
+    fn board_projection_watcher_sync_only_for_project_tab_changes() {
+        assert!(super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::OpenProjectDialog
+        ));
+        assert!(super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::ReopenRecentProject {
+                path: "/tmp/repo".to_string()
+            }
+        ));
+        assert!(super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::CloseProjectTab {
+                tab_id: "tab-1".to_string()
+            }
+        ));
+
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::TerminalInput {
+                id: "tab-1::shell-1".to_string(),
+                data: "x".to_string(),
+            }
+        ));
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::PostBoardEntry {
+                id: "tab-1::board-1".to_string(),
+                entry_kind: gwt_core::coordination::BoardEntryKind::Status,
+                body: "done".to_string(),
+                parent_id: None,
+                topics: Vec::new(),
+                owners: Vec::new(),
+            }
+        ));
+    }
+
+    #[test]
+    fn board_projection_watcher_drop_sends_stop_to_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stopped = Arc::new(Mutex::new(false));
+        let stopped_in_thread = stopped.clone();
+        let join_handle = std::thread::spawn(move || {
+            if matches!(rx.recv(), Ok(super::BoardProjectionWatcherMessage::Stop)) {
+                *stopped_in_thread.lock().expect("stopped flag") = true;
+            }
+        });
+
+        let watcher = super::BoardProjectionWatcher {
+            tx,
+            join_handle: Some(join_handle),
+        };
+
+        drop(watcher);
+
+        assert!(
+            *stopped.lock().expect("stopped flag"),
+            "dropping a watcher must wake and join its thread"
+        );
     }
 
     fn init_git_repo(path: &Path) {
@@ -1217,11 +1440,14 @@ mod tests {
 
         let knowledge_missing = runtime.load_knowledge_bridge_events(
             "client-1",
-            "missing",
-            KnowledgeKind::Issue,
-            None,
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: "missing",
+                kind: KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
         assert_eq!(knowledge_missing.len(), 1);
         assert!(matches!(
@@ -1231,11 +1457,14 @@ mod tests {
 
         let knowledge_wrong = runtime.load_knowledge_bridge_events(
             "client-1",
-            &branches_id,
-            KnowledgeKind::Issue,
-            None,
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: &branches_id,
+                kind: KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
         assert_eq!(knowledge_wrong.len(), 1);
         assert!(matches!(
@@ -1804,6 +2033,7 @@ mod tests {
                 gwt::FrontendEvent::LoadKnowledgeBridge {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
                     selected_number: None,
                     refresh: false,
                     list_scope: None,
@@ -1816,6 +2046,7 @@ mod tests {
                 gwt::FrontendEvent::SelectKnowledgeBridgeEntry {
                     id: issue_id.clone(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
                     number: 42,
                     list_scope: None,
                 },
@@ -1983,6 +2214,7 @@ mod tests {
                 docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                 agent_options: sample_wizard_agent_options(),
                 quick_start_entries: vec![sample_wizard_quick_start_entry(None)],
+                previous_profile: None,
             }),
         );
         assert_eq!(hydration_ok.len(), 1);
@@ -3821,6 +4053,7 @@ fn main() -> wry::Result<()> {
         front_door_route(&argv),
         runtime_support::FrontDoorRoute::Gui
     ) {
+        attach_parent_console_for_cli();
         if let Err(error) = run_cli(&argv) {
             eprintln!("CLI dispatch failed: {error}");
             std::process::exit(1);
@@ -3883,6 +4116,8 @@ fn main() -> wry::Result<()> {
     )
     .expect("app runtime");
     app.bootstrap();
+    let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
+    board_projection_watchers.sync(&app, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
             let log_proxy = proxy.clone();
@@ -3958,12 +4193,17 @@ fn main() -> wry::Result<()> {
                 // Kill every PTY / agent before the event loop exits so no
                 // child process outlives the window.
                 app.stop_all_runtimes();
+                board_projection_watchers.shutdown();
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
+                let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
                 let events = app.handle_frontend_event(client_id, event);
+                if sync_board_projection_watchers {
+                    board_projection_watchers.sync(&app, proxy.clone());
+                }
                 clients.dispatch(events);
                 if refresh_index_status {
                     spawn_project_index_status_check(&runtime, proxy.clone());
@@ -3978,6 +4218,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
+                let events = app.handle_board_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
@@ -4006,7 +4250,7 @@ fn main() -> wry::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardHydrated { wizard_id, result }) => {
-                let events = app.handle_launch_wizard_hydrated(wizard_id, result);
+                let events = app.handle_launch_wizard_hydrated(wizard_id, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
@@ -4026,6 +4270,7 @@ fn main() -> wry::Result<()> {
                     match command {
                         NativeMenuCommand::OpenProject => {
                             let events = app.open_project_dialog_events();
+                            board_projection_watchers.sync(&app, proxy.clone());
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
@@ -4040,6 +4285,7 @@ fn main() -> wry::Result<()> {
                 // Belt-and-suspenders: if the event loop is torn down via a
                 // path other than CloseRequested, still release PTY children.
                 app.stop_all_runtimes();
+                board_projection_watchers.shutdown();
                 server.shutdown();
             }
             _ => {}
