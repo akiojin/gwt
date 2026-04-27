@@ -1,9 +1,18 @@
 //! Git worktree management
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Child, Command, Output, Stdio},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
+
+const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,11 +197,12 @@ impl WorktreeManager {
             .split_once('/')
             .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {normalized}")))?;
 
-        let output = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        command
             .args(["push", remote, "--delete", branch])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("push {remote} --delete {branch}: {e}")))?;
+            .current_dir(&self.repo_path);
+        let action = format!("git push {remote} --delete {branch}");
+        let output = run_command_with_timeout(&mut command, &action, REMOTE_DELETE_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -337,6 +347,123 @@ fn is_missing_worktree_error(err: &GwtError) -> bool {
         || message.contains("not a work tree")
         || message.contains("no such file or directory")
         || message.contains("does not exist")
+}
+
+fn run_command_with_timeout(
+    command: &mut Command,
+    action: &str,
+    timeout: Duration,
+) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_timeout_command(command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+    let mut stdout = child.stdout.take().map(spawn_pipe_reader);
+    let mut stderr = child.stderr.take().map(spawn_pipe_reader);
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let status = child
+                    .wait()
+                    .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+                return Ok(Output {
+                    status,
+                    stdout: join_pipe_reader(stdout.take(), action, "stdout")?,
+                    stderr: join_pipe_reader(stderr.take(), action, "stderr")?,
+                });
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                terminate_child_tree(&mut child);
+                let _ = child.wait();
+                join_pipe_reader_lossy(stdout.take());
+                join_pipe_reader_lossy(stderr.take());
+                return Err(GwtError::Git(format!(
+                    "{action} timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+            Ok(None) => std::thread::sleep(PROCESS_POLL_INTERVAL),
+            Err(error) => {
+                terminate_child_tree(&mut child);
+                let _ = child.wait();
+                join_pipe_reader_lossy(stdout.take());
+                join_pipe_reader_lossy(stderr.take());
+                return Err(GwtError::Git(format!("{action}: {error}")));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn configure_timeout_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_timeout_command(_command: &mut Command) {}
+
+fn terminate_child_tree(child: &mut Child) {
+    terminate_child_tree_platform(child.id());
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn terminate_child_tree_platform(pid: u32) {
+    let process_group = -(pid as libc::pid_t);
+    // Kill the dedicated process group so descendants that inherited pipes close them too.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_child_tree_platform(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_child_tree_platform(_pid: u32) {}
+
+fn spawn_pipe_reader<T>(mut pipe: T) -> JoinHandle<std::io::Result<Vec<u8>>>
+where
+    T: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
+
+fn join_pipe_reader(
+    reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    action: &str,
+    stream: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    match reader.join() {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => Err(GwtError::Git(format!("{action} read {stream}: {error}"))),
+        Err(_) => Err(GwtError::Git(format!(
+            "{action} read {stream}: reader thread panicked"
+        ))),
+    }
+}
+
+fn join_pipe_reader_lossy(reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
+    if let Some(reader) = reader {
+        let _ = reader.join();
+    }
 }
 
 fn normalize_remote_ref(remote_ref: &str) -> String {
@@ -500,6 +627,50 @@ mod tests {
             .output()
             .expect("git init --bare");
         assert!(output.status.success(), "git init --bare failed");
+    }
+
+    fn slow_command() -> std::process::Command {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("powershell");
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 250"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 0.25"]);
+            command
+        }
+    }
+
+    fn verbose_command() -> std::process::Command {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.Write(('x' * 200000))",
+            ]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "yes x | head -c 200000"]);
+            command
+        }
+    }
+
+    fn lingering_pipe_command() -> std::process::Command {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "$psi = [Diagnostics.ProcessStartInfo]::new('powershell'); $psi.Arguments = '-NoProfile -Command Start-Sleep -Milliseconds 3000'; $psi.UseShellExecute = $false; [Diagnostics.Process]::Start($psi) | Out-Null; Start-Sleep -Milliseconds 3000",
+            ]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "(sleep 3) & sleep 3"]);
+            command
+        }
     }
 
     fn git_clone_repo(src: &Path, dst: &Path) {
@@ -948,6 +1119,60 @@ prunable gitdir file points to non-existent location
                 .delete_remote_branch("feature/missing", None)
                 .unwrap(),
             RemoteDeleteOutcome::SkippedMissing
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_reports_timeout() {
+        let mut command = slow_command();
+        let err = run_command_with_timeout(
+            &mut command,
+            "git push origin --delete feature/slow",
+            std::time::Duration::from_millis(10),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("git push origin --delete feature/slow timed out"),
+            "unexpected timeout error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_drains_verbose_child_output() {
+        let mut command = verbose_command();
+        let output =
+            run_command_with_timeout(&mut command, "verbose child", Duration::from_secs(5))
+                .expect("verbose child should exit without filling pipe buffers");
+
+        assert!(output.status.success());
+        assert!(
+            output.stdout.len() >= 200_000,
+            "expected captured stdout, got {} bytes",
+            output.stdout.len()
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_does_not_wait_for_lingering_descendant_pipes() {
+        let mut command = lingering_pipe_command();
+        let started = Instant::now();
+        let err = run_command_with_timeout(
+            &mut command,
+            "lingering descendant",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string().contains("lingering descendant timed out"),
+            "unexpected timeout error: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "timeout path waited for descendant pipe handles for {elapsed:?}"
         );
     }
 
