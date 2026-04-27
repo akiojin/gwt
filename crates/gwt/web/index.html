@@ -4,10 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gwt</title>
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
-    />
+    <link rel="stylesheet" href="/assets/xterm/xterm.css" />
     <style>
       :root {
         color-scheme: light;
@@ -574,7 +571,9 @@
       .surface-board .window-body,
       .surface-logs .window-body,
       .surface-knowledge .window-body,
-      .surface-mock .window-body {
+      .surface-mock .window-body,
+      .surface-memo .window-body,
+      .surface-profile .window-body {
         background: #ffffff;
       }
 
@@ -1356,14 +1355,14 @@
       }
 
       .board-message.user {
-        align-self: flex-start;
-        border-bottom-left-radius: 5px;
-      }
-
-      .board-message.agent {
         align-self: flex-end;
         border-bottom-right-radius: 5px;
         background: #eff6ff;
+      }
+
+      .board-message.agent {
+        align-self: flex-start;
+        border-bottom-left-radius: 5px;
       }
 
       .board-message.system {

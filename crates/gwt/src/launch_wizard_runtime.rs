@@ -107,7 +107,10 @@ impl AppRuntime {
                 &active_session_branches,
                 &sessions_dir,
             );
-            proxy.send(UserEvent::LaunchWizardHydrated { wizard_id, result });
+            proxy.send(UserEvent::LaunchWizardHydrated {
+                wizard_id,
+                result: Box::new(result),
+            });
         });
 
         Ok(())
@@ -125,6 +128,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Window not found".to_string(),
                 },
             )];
@@ -135,6 +141,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Project tab not found".to_string(),
                 },
             )];
@@ -145,6 +154,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Window not found".to_string(),
                 },
             )];
@@ -155,6 +167,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id: id.to_string(),
                     knowledge_kind: KnowledgeKind::Issue,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Window is not a knowledge bridge".to_string(),
                 },
             )];
@@ -228,6 +243,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id,
                     knowledge_kind,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Project tab not found".to_string(),
                 },
             )];
@@ -246,6 +264,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id,
                     knowledge_kind,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: "Issue/Knowledge window closed".to_string(),
                 },
             )];
@@ -264,6 +285,9 @@ impl AppRuntime {
                     BackendEvent::KnowledgeError {
                         id,
                         knowledge_kind,
+                        request_id: None,
+                        query: None,
+                        list_scope: None,
                         message: error,
                     },
                 )],
@@ -273,6 +297,9 @@ impl AppRuntime {
                 BackendEvent::KnowledgeError {
                     id,
                     knowledge_kind,
+                    request_id: None,
+                    query: None,
+                    list_scope: None,
                     message: error,
                 },
             )],
@@ -402,6 +429,8 @@ fn resolve_launch_wizard_hydration(
         sessions_dir,
         &normalized_branch_name,
     );
+    let previous_profile =
+        gwt::launch_wizard::load_previous_launch_profile(&quick_start_root, sessions_dir);
     let (docker_context, docker_service_status) =
         detect_wizard_docker_context_and_status(&quick_start_root);
 
@@ -414,5 +443,6 @@ fn resolve_launch_wizard_hydration(
         docker_service_status,
         agent_options,
         quick_start_entries,
+        previous_profile,
     })
 }
