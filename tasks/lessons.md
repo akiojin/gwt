@@ -1,5 +1,38 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(branches): HTML class refactor must extend contract guard to JS-side selectors
+
+### 事象
+
+SPEC-2008 FR-035 (`de81fa24`) で modal shell class を `.modal` → `.modal-shell` に
+統一した際、`crates/gwt/web/app.js:41` の `branchCleanupModal.querySelector(".modal")`
+だけ移行が漏れた。結果として v9.11.0 で Branches → Cleanup を開くと
+`branchCleanupDialog` が `null` になり、`renderBranchCleanupModal` が最初の
+DOM mutation で `TypeError` を投げて終了。modal-backdrop と空の `.modal-shell`
+チャラだけが残り「タイトルだけ表示されて中身がない」状態になった。
+
+### 原因
+
+SPEC-2008 のコントラクトテスト
+`embedded_web_existing_modals_compose_with_modal_shell_primitive`
+(`crates/gwt/src/embedded_web.rs`) は HTML 側の class 移行のみを assert していた。
+JS 側に廃止クラスのセレクタが残っていないかは検査されておらず、
+`grep` で見つかる単一の取りこぼしを CI が検出できなかった。
+
+### 再発防止策
+
+1. HTML の primitive 命名 (class/id) を変更するリファクタでは、JS 側の
+   `querySelector` / `getElementById` セレクタを同じコントラクトテストで
+   guard する。SPEC-2008 系では `embedded_web_app_js_uses_modal_shell_selector`
+   を追加し、`querySelector(".modal")` の残存を assert で検出するようにした。
+2. modal や surface など共有 primitive を経由するロジックは、依存注入可能な
+   形に切り出して DOM smoke test (Node + linkedom) で本文描画まで検証する。
+   今回は `crates/gwt/web/branch-cleanup-modal.js` を抽出し
+   `crates/gwt/web/__tests__/branch-cleanup.smoke.test.mjs` で stage 別に
+   描画内容を assert している。
+3. リリース直後の hotfix ブランチでは、grep で対象クラスの残存を
+   全リポジトリ走査することを必ず行う。
+
 ## 2026-04-27 — fix(board): GUI watcher は hot path で同期せず lifecycle owner を持つ
 
 ### 事象

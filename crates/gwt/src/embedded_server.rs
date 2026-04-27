@@ -112,6 +112,10 @@ impl EmbeddedServer {
             .route("/", get(embedded_web::index_handler))
             .route("/app.js", get(embedded_web::app_js_handler))
             .route(
+                "/branch-cleanup-modal.js",
+                get(embedded_web::branch_cleanup_modal_js_handler),
+            )
+            .route(
                 "/assets/xterm/xterm.mjs",
                 get(embedded_web::xterm_js_handler),
             )

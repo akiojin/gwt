@@ -11,6 +11,10 @@ pub(crate) fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
+pub(crate) fn branch_cleanup_modal_js() -> &'static str {
+    include_str!("../web/branch-cleanup-modal.js")
+}
+
 pub(crate) fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -31,6 +35,13 @@ pub(crate) async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
+    )
+}
+
+pub(crate) async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        branch_cleanup_modal_js(),
     )
 }
 
@@ -1529,6 +1540,24 @@ mod tests {
         assert!(
             shell_count >= 3,
             "expected at least 3 modals (preset / branch-cleanup / launch-wizard) to mount through `.modal-shell`, found {shell_count}",
+        );
+    }
+
+    /// SPEC-2008 FR-035 (JS-side guard): the legacy `.modal` shell class is
+    /// retired in HTML, so any `querySelector(".modal")` left in `app.js`
+    /// resolves to `null` and silently breaks the modal it backs (this
+    /// regressed the Branch Cleanup body in v9.11.0). Lock the JS side to the
+    /// `.modal-shell` primitive.
+    #[test]
+    fn embedded_web_app_js_uses_modal_shell_selector() {
+        let js = app_js();
+        assert!(
+            !js.contains("querySelector(\".modal\")"),
+            "expected app.js to query `.modal-shell` instead of the retired `.modal` class (SPEC-2008 FR-035)",
+        );
+        assert!(
+            js.contains("querySelector(\".modal-shell\")"),
+            "expected app.js to resolve at least one modal dialog through the `.modal-shell` primitive",
         );
     }
 }
