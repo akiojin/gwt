@@ -1282,4 +1282,121 @@ mod tests {
             }
         }
     }
+
+    /// SPEC-2008 FR-034: shared layout primitives must exist in CSS so panel
+    /// surfaces stop reinventing their own toolbar/scroll/split/empty-state
+    /// blocks. The four primitives below carry only the shared properties;
+    /// surface-specific deltas (grid template columns, padding) layer on top
+    /// through the surface's own class.
+    #[test]
+    fn embedded_web_workspace_layout_primitives_define_shared_contracts() {
+        let html = index_html();
+
+        let primitives: [(&str, &[&str]); 4] = [
+            (
+                ".workspace-toolbar {",
+                &[
+                    "display: flex",
+                    "align-items: center",
+                    "justify-content: space-between",
+                    "gap: 12px",
+                    "padding: 10px 12px",
+                    "border-bottom: 1px solid",
+                ],
+            ),
+            (
+                ".workspace-scroll {",
+                &["flex: 1", "min-height: 0", "overflow: auto"],
+            ),
+            (
+                ".workspace-split {",
+                &["flex: 1", "min-height: 0", "display: grid"],
+            ),
+            (
+                ".workspace-empty-state {",
+                &["padding: 16px 12px", "font-size: 12px", "color: #64748b"],
+            ),
+        ];
+
+        for (selector, expected_props) in primitives {
+            let start = html
+                .find(selector)
+                .unwrap_or_else(|| panic!("expected layout primitive `{selector}` to be defined"));
+            let block = &html[start..];
+            let end = block.find('}').unwrap_or_else(|| {
+                panic!("expected layout primitive `{selector}` to close with `}}`")
+            });
+            let body = &block[..end];
+            for prop in expected_props {
+                assert!(
+                    body.contains(prop),
+                    "expected layout primitive `{selector}` to declare `{prop}`, got: {body}",
+                );
+            }
+        }
+    }
+
+    /// SPEC-2008 FR-034: every panel surface must adopt the shared layout
+    /// primitives in its rendered HTML so paddings, scrollbars, and splits
+    /// stay in lockstep. The toolbar misnomer `.knowledge-toolbar` (which was
+    /// reused by Memo/Profile/Logs/Board as the generic toolbar block) is
+    /// retired in favour of `.workspace-toolbar`. Stacked toolbars (multi-row
+    /// content with search and filter chips) opt into the
+    /// `.workspace-toolbar.is-stacked` modifier rather than carrying a
+    /// surface-specific override.
+    #[test]
+    fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            !js.contains("knowledge-toolbar"),
+            "expected `.knowledge-toolbar` misnomer to be replaced by `.workspace-toolbar` everywhere it was used as a generic toolbar",
+        );
+        assert!(
+            !html.contains(".knowledge-toolbar"),
+            "expected `.knowledge-toolbar` CSS rules to be migrated to `.workspace-toolbar`",
+        );
+
+        // Each panel surface must reference the `.workspace-toolbar` primitive
+        // through its mountWindowBody output. Surface-specific deltas may be
+        // layered alongside (e.g. `.branch-toolbar`).
+        let toolbar_count = js.matches("class=\"workspace-toolbar").count();
+        assert!(
+            toolbar_count >= 7,
+            "expected at least 7 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
+        );
+
+        // Stacked modifier replaces the old `.knowledge-toolbar` override.
+        assert!(
+            html.contains(".workspace-toolbar.is-stacked"),
+            "expected the stacked toolbar modifier `.workspace-toolbar.is-stacked` to be defined for multi-row toolbars",
+        );
+
+        let split_adopters = [
+            "knowledge-split workspace-split",
+            "memo-layout workspace-split",
+            "profile-layout workspace-split",
+            "logs-layout workspace-split",
+        ];
+        for needle in split_adopters {
+            assert!(
+                js.contains(needle),
+                "expected mountWindowBody output to compose `{needle}` so split layouts share the primitive",
+            );
+        }
+
+        let scroll_adopters = [
+            "knowledge-detail-scroll workspace-scroll",
+            "board-timeline-scroll board-scroll-surface workspace-scroll",
+            "file-tree-scroll workspace-scroll",
+            "branch-scroll workspace-scroll",
+        ];
+        for needle in scroll_adopters {
+            assert!(
+                js.contains(needle),
+                "expected mountWindowBody output to compose `{needle}` so scroll regions share the primitive",
+            );
+        }
+    }
 }
