@@ -62,6 +62,7 @@ winresource.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+serde_yaml.workspace = true
 
 [package.metadata.bundle]
 name = "GWT"

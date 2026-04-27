@@ -175,12 +175,17 @@ fn docker_compose_mount_path(path: &Path) -> String {
 pub(crate) fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
-        "# Auto-generated docker-compose override for gwt bundle mounting\n\
-         version: '3.8'\n\
-         services:\n\
-           {service}:\n\
-             volumes:\n\
-               - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
+        concat!(
+            "# Auto-generated docker-compose override for gwt bundle mounting\n",
+            "version: '3.8'\n",
+            "services:\n",
+            "  {service}:\n",
+            "    volumes:\n",
+            "      - \"{host_gwtd}:{path}:ro\"\n"
+        ),
+        service = service,
+        host_gwtd = host_gwtd,
+        path = DOCKER_GWTD_BIN_PATH,
     )
 }
 

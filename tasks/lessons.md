@@ -1,5 +1,37 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(docker): format! の `\<改行>` 継続は次行の先頭空白も削除する
+
+### 事象
+
+Launch Agent で Docker を選択すると `Docker error: services must be a mapping`
+が返り、エージェントが起動できなかった。`docker-compose.gwt.override.yml` を
+`format!()` で生成しているが、`services:` 配下のインデントがすべて消えており
+`services` キーが null（mapping ではない）になっていた。
+
+### 原因
+
+Rust の文字列リテラルは `\` の直後の改行 **と次行の先頭空白すべて** を削除する。
+`format!("services:\n  {svc}:\n    volumes:\n")` のような複数行を
+`\<改行>` で継続して書くと、`  `, `    ` の YAML インデントが全部消えて
+完全フラットな YAML が生成される。同じバグが
+`crates/gwt/src/docker_launch.rs`、`crates/gwt-agent/src/prepare.rs`、
+`crates/gwt/src/docker_setup.rs` の 3 箇所にコピペされていた。
+既存テストは `content.contains(...)` だけで内容文字列を確認しており、
+YAML を parse して構造検証していなかったため検出されなかった。
+
+### 再発防止策
+
+1. 複数行リテラルを組み立てるときは `\<改行>` 継続を使わず、
+   `concat!("line1\n", "line2\n", ...)` で連結するか、
+   1 行 `\n` 埋め込みに統一する。インデントが必須の format（YAML/Python等）では
+   `\<改行>` 継続を使わない。
+2. 生成 YAML / JSON のテストは `content.contains(...)` で文字列検証するだけでなく、
+   必ず `serde_yaml::from_str` / `serde_json::from_str` で parse してから
+   構造を assert する。
+3. 同一ロジックの複数コピーは構造的負債。新規バグ修正時に発見したら
+   修正範囲を 3 箇所同時にし、follow-up Issue で共通化を検討する。
+
 ## 2026-04-27 — fix(board): GUI watcher は hot path で同期せず lifecycle owner を持つ
 
 ### 事象
