@@ -1,5 +1,6 @@
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
+      import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -38,7 +39,7 @@
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const branchCleanupModal = document.getElementById("branch-cleanup-modal");
-      const branchCleanupDialog = branchCleanupModal.querySelector(".modal");
+      const branchCleanupDialog = branchCleanupModal.querySelector(".modal-shell");
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
@@ -4479,147 +4480,28 @@
 
       function renderBranchCleanupModal() {
         const windowId = branchCleanupWindowId;
-        if (!windowId) {
-          branchCleanupModal.classList.remove("open");
-          branchCleanupDialog.innerHTML = "";
-          return;
-        }
-        const state = ensureBranchListState(windowId);
-        if (!state.cleanupModal.open) {
-          branchCleanupModal.classList.remove("open");
-          branchCleanupDialog.innerHTML = "";
-          return;
-        }
-
-        const selectedEntries = selectedBranchCleanupEntries(windowId);
-        const supportsRemoteDelete = selectedEntries.some((entry) => Boolean(entry.cleanup.upstream));
-        branchCleanupModal.classList.add("open");
-        branchCleanupDialog.innerHTML = "";
-
-        if (state.cleanupModal.stage === "running") {
-          const title = createNode("h2", "", "Cleaning up branches");
-          const copy = createNode(
-            "div",
-            "branch-cleanup-running",
-            `Running cleanup for ${Math.max(selectedEntries.length, 1)} branch${Math.max(
-              selectedEntries.length,
-              1,
-            ) === 1 ? "" : "es"}.`,
-          );
-          branchCleanupDialog.appendChild(title);
-          branchCleanupDialog.appendChild(copy);
-          return;
-        }
-
-        if (state.cleanupModal.stage === "result") {
-          const title = createNode("h2", "", "Cleanup result");
-          branchCleanupDialog.appendChild(title);
-          branchCleanupDialog.appendChild(
-            createNode(
-              "div",
-              "branch-cleanup-results-summary",
-              branchCleanupResultSummary(state.cleanupModal.results),
-            ),
-          );
-          const resultList = createNode("div", "branch-cleanup-list");
-          for (const result of state.cleanupModal.results || []) {
-            const item = createNode("div", "branch-cleanup-item");
-            const header = createNode("div", "branch-cleanup-item-header");
-            header.appendChild(
-              createNode("div", "branch-cleanup-item-title", result.branch),
-            );
-            const status = createNode(
-              "span",
-              `branch-cleanup-badge ${result.status === "partial" ? "risky" : result.status === "failed" ? "blocked" : "safe"}`,
-              result.status,
-            );
-            header.appendChild(status);
-            item.appendChild(header);
-            item.appendChild(
-              createNode("div", "branch-cleanup-item-copy", result.message),
-            );
-            if (result.execution_branch && result.execution_branch !== result.branch) {
-              item.appendChild(
-                createNode(
-                  "div",
-                  "branch-cleanup-item-copy",
-                  `Executed as ${result.execution_branch}`,
-                ),
-              );
+        const state = windowId ? ensureBranchListState(windowId) : null;
+        const selectedEntries = windowId
+          ? selectedBranchCleanupEntries(windowId)
+          : [];
+        renderBranchCleanupModalView({
+          modalEl: branchCleanupModal,
+          dialogEl: branchCleanupDialog,
+          windowId,
+          state,
+          selectedEntries,
+          createNode,
+          resultSummary: branchCleanupResultSummary,
+          mergeTargetText: cleanupMergeTargetText,
+          riskLabels: cleanupRiskLabels,
+          onCancel: () => closeBranchCleanupModal(windowId),
+          onSubmit: () => runBranchCleanup(windowId),
+          onDeleteRemoteToggle: (checked) => {
+            if (state) {
+              state.cleanupModal.deleteRemote = checked;
             }
-            resultList.appendChild(item);
-          }
-          branchCleanupDialog.appendChild(resultList);
-          const footer = createNode("div", "modal-footer");
-          const close = createNode("button", "wizard-button primary", "Close");
-          close.type = "button";
-          close.addEventListener("click", () => closeBranchCleanupModal(windowId));
-          footer.appendChild(close);
-          branchCleanupDialog.appendChild(footer);
-          return;
-        }
-
-        branchCleanupDialog.appendChild(createNode("h2", "", "Clean up branches"));
-        branchCleanupDialog.appendChild(
-          createNode(
-            "div",
-            "branch-cleanup-results-summary",
-            `Delete ${selectedEntries.length} selected branch${selectedEntries.length === 1 ? "" : "es"}.`,
-          ),
-        );
-        const list = createNode("div", "branch-cleanup-list");
-        for (const entry of selectedEntries) {
-          const item = createNode("div", "branch-cleanup-item");
-          const header = createNode("div", "branch-cleanup-item-header");
-          header.appendChild(createNode("div", "branch-cleanup-item-title", entry.name));
-          header.appendChild(
-            createNode("span", `branch-cleanup-badge ${entry.cleanup.availability}`, entry.cleanup.availability),
-          );
-          item.appendChild(header);
-          const target = cleanupMergeTargetText(entry.cleanup.merge_target) || "not merged";
-          item.appendChild(createNode("div", "branch-cleanup-item-copy", target));
-          if (entry.cleanup.execution_branch && entry.cleanup.execution_branch !== entry.name) {
-            item.appendChild(
-              createNode(
-                "div",
-                "branch-cleanup-item-copy",
-                `Executed as ${entry.cleanup.execution_branch}`,
-              ),
-            );
-          }
-          const risks = cleanupRiskLabels(entry.cleanup.risks);
-          if (risks.length > 0) {
-            item.appendChild(
-              createNode("div", "branch-cleanup-item-copy", risks.join(", ")),
-            );
-          }
-          list.appendChild(item);
-        }
-        branchCleanupDialog.appendChild(list);
-        if (supportsRemoteDelete) {
-          const toggleRow = createNode("label", "branch-cleanup-toggle-row");
-          const checkbox = document.createElement("input");
-          checkbox.type = "checkbox";
-          checkbox.checked = Boolean(state.cleanupModal.deleteRemote);
-          checkbox.addEventListener("change", () => {
-            state.cleanupModal.deleteRemote = checkbox.checked;
-          });
-          toggleRow.appendChild(checkbox);
-          toggleRow.appendChild(
-            createNode("span", "", "Also delete matching remote branches"),
-          );
-          branchCleanupDialog.appendChild(toggleRow);
-        }
-        const footer = createNode("div", "modal-footer");
-        const cancel = createNode("button", "wizard-button", "Cancel");
-        cancel.type = "button";
-        cancel.addEventListener("click", () => closeBranchCleanupModal(windowId));
-        footer.appendChild(cancel);
-        const submit = createNode("button", "wizard-button primary", "Run cleanup");
-        submit.type = "button";
-        submit.addEventListener("click", () => runBranchCleanup(windowId));
-        footer.appendChild(submit);
-        branchCleanupDialog.appendChild(footer);
+          },
+        });
       }
 
       function mountWindowBody(windowData, element) {
