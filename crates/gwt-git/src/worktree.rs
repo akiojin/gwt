@@ -3,7 +3,7 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -355,6 +355,7 @@ fn run_command_with_timeout(
     timeout: Duration,
 ) -> Result<Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_timeout_command(command);
     let mut child = command
         .spawn()
         .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
@@ -375,12 +376,10 @@ fn run_command_with_timeout(
                 });
             }
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
+                terminate_child_tree(&mut child);
                 let _ = child.wait();
-                // Descendant processes can inherit these pipe handles. Joining here would
-                // let them extend the timeout/error path beyond the requested deadline.
-                drop(stdout.take());
-                drop(stderr.take());
+                join_pipe_reader_lossy(stdout.take());
+                join_pipe_reader_lossy(stderr.take());
                 return Err(GwtError::Git(format!(
                     "{action} timed out after {}ms",
                     timeout.as_millis()
@@ -388,15 +387,51 @@ fn run_command_with_timeout(
             }
             Ok(None) => std::thread::sleep(PROCESS_POLL_INTERVAL),
             Err(error) => {
-                let _ = child.kill();
+                terminate_child_tree(&mut child);
                 let _ = child.wait();
-                drop(stdout.take());
-                drop(stderr.take());
+                join_pipe_reader_lossy(stdout.take());
+                join_pipe_reader_lossy(stderr.take());
                 return Err(GwtError::Git(format!("{action}: {error}")));
             }
         }
     }
 }
+
+#[cfg(unix)]
+fn configure_timeout_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_timeout_command(_command: &mut Command) {}
+
+fn terminate_child_tree(child: &mut Child) {
+    terminate_child_tree_platform(child.id());
+    let _ = child.kill();
+}
+
+#[cfg(unix)]
+fn terminate_child_tree_platform(pid: u32) {
+    let process_group = -(pid as libc::pid_t);
+    // Kill the dedicated process group so descendants that inherited pipes close them too.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_child_tree_platform(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_child_tree_platform(_pid: u32) {}
 
 fn spawn_pipe_reader<T>(mut pipe: T) -> JoinHandle<std::io::Result<Vec<u8>>>
 where
@@ -422,6 +457,12 @@ fn join_pipe_reader(
         Err(_) => Err(GwtError::Git(format!(
             "{action} read {stream}: reader thread panicked"
         ))),
+    }
+}
+
+fn join_pipe_reader_lossy(reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
+    if let Some(reader) = reader {
+        let _ = reader.join();
     }
 }
 
