@@ -38,7 +38,7 @@
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const branchCleanupModal = document.getElementById("branch-cleanup-modal");
-      const branchCleanupDialog = branchCleanupModal.querySelector(".modal");
+      const branchCleanupDialog = branchCleanupModal.querySelector(".modal-shell");
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
