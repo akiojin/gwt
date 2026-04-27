@@ -377,8 +377,10 @@ fn run_command_with_timeout(
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                join_pipe_reader_lossy(stdout.take());
-                join_pipe_reader_lossy(stderr.take());
+                // Descendant processes can inherit these pipe handles. Joining here would
+                // let them extend the timeout/error path beyond the requested deadline.
+                drop(stdout.take());
+                drop(stderr.take());
                 return Err(GwtError::Git(format!(
                     "{action} timed out after {}ms",
                     timeout.as_millis()
@@ -388,8 +390,8 @@ fn run_command_with_timeout(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                join_pipe_reader_lossy(stdout.take());
-                join_pipe_reader_lossy(stderr.take());
+                drop(stdout.take());
+                drop(stderr.take());
                 return Err(GwtError::Git(format!("{action}: {error}")));
             }
         }
@@ -420,12 +422,6 @@ fn join_pipe_reader(
         Err(_) => Err(GwtError::Git(format!(
             "{action} read {stream}: reader thread panicked"
         ))),
-    }
-}
-
-fn join_pipe_reader_lossy(reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
-    if let Some(reader) = reader {
-        let _ = reader.join();
     }
 }
 
@@ -616,6 +612,22 @@ mod tests {
         } else {
             let mut command = std::process::Command::new("sh");
             command.args(["-c", "yes x | head -c 200000"]);
+            command
+        }
+    }
+
+    fn lingering_pipe_command() -> std::process::Command {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "$psi = [Diagnostics.ProcessStartInfo]::new('powershell'); $psi.Arguments = '-NoProfile -Command Start-Sleep -Milliseconds 3000'; $psi.UseShellExecute = $false; [Diagnostics.Process]::Start($psi) | Out-Null; Start-Sleep -Milliseconds 3000",
+            ]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "(sleep 3) & sleep 3"]);
             command
         }
     }
@@ -1098,6 +1110,28 @@ prunable gitdir file points to non-existent location
             output.stdout.len() >= 200_000,
             "expected captured stdout, got {} bytes",
             output.stdout.len()
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_does_not_wait_for_lingering_descendant_pipes() {
+        let mut command = lingering_pipe_command();
+        let started = Instant::now();
+        let err = run_command_with_timeout(
+            &mut command,
+            "lingering descendant",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string().contains("lingering descendant timed out"),
+            "unexpected timeout error: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "timeout path waited for descendant pipe handles for {elapsed:?}"
         );
     }
 
