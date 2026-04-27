@@ -1183,23 +1183,23 @@ mod tests {
         );
     }
 
-    /// SPEC-2008 FR-033: every panel surface must share the opaque white body
-    /// background. `.surface-memo` and `.surface-profile` were missing from the
-    /// unified rule which left those panels visually transparent.
+    /// SPEC-2008 FR-033: every panel surface must share the same window
+    /// background, titlebar background, and body background. Three CSS rules
+    /// participate in this unification:
+    ///
+    /// - `.workspace-window.surface-*` — the whole-window background (visible
+    ///   when minimized or behind the body)
+    /// - `.surface-* .titlebar` — the chrome at the top of the window
+    /// - `.surface-* .window-body` — the panel content surface
+    ///
+    /// `.surface-memo`, `.surface-profile`, and `.surface-knowledge` had been
+    /// missing from one or more of these rules, which left those panels
+    /// partially transparent and visually distinct from the rest.
     #[test]
-    fn embedded_web_panel_window_bodies_share_opaque_background() {
+    fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         let html = index_html();
 
-        let body_rule_start = html.find(".surface-file-tree .window-body,").expect(
-            "expected unified `.window-body` background rule to anchor on `.surface-file-tree`",
-        );
-        let body_rule_block = &html[body_rule_start..];
-        let body_rule_end = body_rule_block
-            .find('}')
-            .expect("expected unified `.window-body` background rule to close with `}`");
-        let body_rule = &body_rule_block[..body_rule_end];
-
-        for surface in [
+        let panel_surfaces = [
             ".surface-file-tree",
             ".surface-branches",
             ".surface-board",
@@ -1208,16 +1208,35 @@ mod tests {
             ".surface-mock",
             ".surface-memo",
             ".surface-profile",
-        ] {
-            assert!(
-                body_rule.contains(surface),
-                "expected `{surface} .window-body` to participate in the unified opaque background rule",
-            );
-        }
+        ];
 
-        assert!(
-            body_rule.contains("background: #ffffff"),
-            "expected the unified panel window-body rule to set `background: #ffffff`",
-        );
+        for (anchor, role) in [
+            (
+                ".workspace-window.surface-file-tree,",
+                "workspace-window background",
+            ),
+            (".surface-file-tree .titlebar,", "titlebar background"),
+            (".surface-file-tree .window-body,", "window-body background"),
+        ] {
+            let rule_start = html
+                .find(anchor)
+                .unwrap_or_else(|| panic!("expected unified {role} rule to anchor on `{anchor}`"));
+            let rule_block = &html[rule_start..];
+            let rule_end = rule_block
+                .find('}')
+                .unwrap_or_else(|| panic!("expected unified {role} rule to close with `}}`"));
+            let rule = &rule_block[..rule_end];
+
+            for surface in panel_surfaces {
+                let needle = match role {
+                    "workspace-window background" => format!(".workspace-window{surface}"),
+                    _ => surface.to_string(),
+                };
+                assert!(
+                    rule.contains(&needle),
+                    "expected `{needle}` to participate in the unified {role} rule",
+                );
+            }
+        }
     }
 }
