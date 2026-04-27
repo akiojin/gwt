@@ -928,6 +928,7 @@
           } else {
             overlay.textContent = effectiveDetail || "";
           }
+          updateTerminalOverlayCopyState(overlay);
           overlay.classList.toggle(
             "visible",
             runtimeState === "error" ||
@@ -1073,6 +1074,7 @@
         if (navigator.clipboard?.writeText) {
           try {
             await navigator.clipboard.writeText(text);
+            restoreFocus?.();
             return true;
           } catch (_error) {
             // Fall back to a temporary textarea when the async clipboard API is unavailable.
@@ -1110,6 +1112,28 @@
           return false;
         }
         return writeClipboardText(selection, () => runtime.terminal.focus());
+      }
+
+      async function copyTerminalOverlayMessage(windowId) {
+        const element = windowMap.get(windowId);
+        const messageEl = element?.querySelector(".terminal-overlay .overlay-message");
+        if (!messageEl) {
+          return false;
+        }
+        return writeClipboardText(messageEl.textContent, () => {
+          terminalMap.get(windowId)?.terminal.focus();
+        });
+      }
+
+      function updateTerminalOverlayCopyState(overlay) {
+        const button = overlay?.querySelector(".overlay-copy-button");
+        const messageEl = overlay?.querySelector(".overlay-message");
+        if (!button || !messageEl) {
+          return;
+        }
+        const hasMessage = Boolean(messageEl.textContent);
+        button.hidden = !hasMessage;
+        button.disabled = !hasMessage;
       }
 
       function installTerminalCopyHandlers(windowId, terminalRoot, terminal) {
@@ -4650,8 +4674,23 @@
           const message = document.createElement("div");
           message.className = "overlay-message";
           message.textContent = "Launching...";
+          const copyButton = document.createElement("button");
+          copyButton.type = "button";
+          copyButton.className = "overlay-copy-button";
+          copyButton.textContent = "Copy";
+          copyButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void copyTerminalOverlayMessage(windowData.id);
+          });
+          overlay.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
+          });
           overlay.appendChild(spinner);
           overlay.appendChild(message);
+          overlay.appendChild(copyButton);
+          updateTerminalOverlayCopyState(overlay);
           terminalRoot.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
             socketTransport.send({ kind: "focus_window", id: windowData.id });
@@ -5648,6 +5687,7 @@
               const messageEl = element.querySelector(".terminal-overlay .overlay-message");
               if (messageEl) {
                 messageEl.textContent = event.message;
+                updateTerminalOverlayCopyState(messageEl.closest(".terminal-overlay"));
               }
             }
             break;
