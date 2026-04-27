@@ -613,6 +613,9 @@ mod tests {
 
     #[test]
     fn workspace_state_path_uses_project_scoped_storage() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempdir().expect("tempdir");
         let path = workspace_state_path(dir.path());
         let hash = gwt_core::paths::project_scope_hash(dir.path());
@@ -621,6 +624,9 @@ mod tests {
 
     #[test]
     fn load_restored_workspace_state_pauses_process_windows() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempdir().expect("tempdir");
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project dir");
@@ -677,6 +683,9 @@ mod tests {
 
     #[test]
     fn migrate_legacy_app_state_splits_session_and_project_workspaces() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempdir().expect("tempdir");
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
@@ -744,6 +753,9 @@ mod tests {
 
     #[test]
     fn migrate_legacy_single_workspace_uses_fallback_project_target() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempdir().expect("tempdir");
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
@@ -779,6 +791,9 @@ mod tests {
 
     #[test]
     fn migrate_legacy_workspace_state_keeps_existing_new_workspace() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempdir().expect("tempdir");
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
