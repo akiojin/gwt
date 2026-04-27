@@ -51,6 +51,12 @@ fn red_70_should_dispatch_cli_when_first_arg_is_cli_verb() {
     assert!(should_dispatch_cli(&argv(&[
         "gwt",
         "hook",
+        "event",
+        "PreToolUse"
+    ])));
+    assert!(should_dispatch_cli(&argv(&[
+        "gwt",
+        "hook",
         "coordination-event",
         "SessionStart"
     ])));
@@ -112,6 +118,19 @@ fn red_92a_parse_hook_coordination_event() {
         CliCommand::Hook {
             name: "coordination-event".to_string(),
             rest: vec!["SessionStart".to_string()],
+        }
+    );
+}
+
+#[test]
+fn red_92b_parse_hook_event_dispatcher() {
+    use gwt::cli::parse_hook_args;
+    let cmd = parse_hook_args(&[s("event"), s("PreToolUse")]).unwrap();
+    assert_eq!(
+        cmd,
+        CliCommand::Hook {
+            name: "event".to_string(),
+            rest: vec!["PreToolUse".to_string()],
         }
     );
 }
@@ -186,6 +205,28 @@ fn dispatch_hook_runtime_state_missing_event_exits_2() {
     assert!(
         err_text.contains("missing <event> argument"),
         "stderr should explain the missing argument, got {err_text:?}"
+    );
+}
+
+#[test]
+fn dispatch_hook_event_forwards_to_single_internal_daemon_hook() {
+    let tmp = TempDir::new().unwrap();
+    let mut env = TestEnv::new(tmp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "tool_name": "Read",
+        "tool_input": { "file_path": "Cargo.toml" }
+    })
+    .to_string();
+
+    let code = dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"]));
+
+    assert_eq!(code, 0, "PreToolUse read event should be allowed");
+    assert_eq!(env.stdout, b"", "allowed PreToolUse must emit no stdout");
+    assert_eq!(env.stderr, b"", "hook event must not leak diagnostics");
+    assert_eq!(env.internal_command_call_log.len(), 1);
+    assert_eq!(
+        env.internal_command_call_log[0].args,
+        argv(&["gwtd", "__internal", "daemon-hook", "event", "PreToolUse"])
     );
 }
 

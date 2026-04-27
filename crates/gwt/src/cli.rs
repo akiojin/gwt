@@ -1526,7 +1526,6 @@ pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i
         return Ok(2);
     };
 
-    best_effort_prepare_daemon_front_door(env.repo_path());
     let stdin = env.read_stdin().map_err(io_as_api_error)?;
     let output = env
         .run_internal_command(&daemon_hook_argv(name, rest), &stdin)
@@ -1558,10 +1557,6 @@ fn write_internal_command_output<E: CliEnv>(
         .map_err(io_as_api_error)?;
     env.stderr().flush().map_err(io_as_api_error)?;
     Ok(output.status)
-}
-
-fn best_effort_prepare_daemon_front_door(project_root: &std::path::Path) {
-    let _ = prepare_daemon_front_door_for_path(project_root);
 }
 
 pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
@@ -1606,8 +1601,9 @@ pub fn run_daemon_hook<E: CliEnv>(
     rest: &[String],
 ) -> Result<i32, SpecOpsError> {
     use crate::cli::hook::{
-        block_bash_policy, skill_build_spec_stop_check, skill_discussion_stop_check,
-        skill_plan_spec_stop_check, workflow_policy, HookKind, HookOutput,
+        block_bash_policy, event_dispatcher, skill_build_spec_stop_check,
+        skill_discussion_stop_check, skill_plan_spec_stop_check, workflow_policy, HookKind,
+        HookOutput,
     };
 
     let Some(kind) = HookKind::from_name(name) else {
@@ -1631,6 +1627,23 @@ pub fn run_daemon_hook<E: CliEnv>(
     }
 
     match kind {
+        HookKind::Event => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(env.stderr(), "gwtd hook event: missing <event> argument");
+                return Ok(2);
+            };
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            match event_dispatcher::handle_with_input(
+                event,
+                &stdin,
+                &cwd,
+                current_session.as_deref(),
+            ) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
         HookKind::RuntimeState => {
             let Some(event) = rest.first() else {
                 let _ = writeln!(

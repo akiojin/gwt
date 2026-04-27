@@ -18,6 +18,7 @@ const LEGACY_GWT_HOOK_SCRIPT_SEGMENT: &str = "hooks/scripts/gwt-";
 /// may be `gwt`, `gwt.exe`, or even a `cargo test` binary
 /// like `gwt_skills-abc123def` during unit tests.
 const MANAGED_HOOK_SUBCMD_SUFFIXES: &[&str] = &[
+    " hook event ",
     " hook runtime-state ",
     " hook coordination-event ",
     " hook board-reminder ",
@@ -95,7 +96,6 @@ fn generate_hook_config(worktree: &Path, target: ManagedHookTarget) -> io::Resul
         "hooks".to_string(),
         Value::Object(merge_managed_and_user_hooks(
             user_hooks,
-            target,
             managed_hook_shell(),
         )),
     );
@@ -147,10 +147,9 @@ fn write_settings_atomically(path: &Path, value: &Value) -> io::Result<()> {
 
 fn merge_managed_and_user_hooks(
     user_hooks: Map<String, Value>,
-    target: ManagedHookTarget,
     shell: HookShell,
 ) -> Map<String, Value> {
-    let managed_hooks = managed_hooks(target, shell);
+    let managed_hooks = managed_hooks(shell);
     let mut merged = Map::new();
 
     for event in MANAGED_EVENT_ORDER {
@@ -253,130 +252,27 @@ fn contains_gwt_hook_subcmd(command: &str) -> bool {
         .any(|suffix| command.contains(suffix))
 }
 
-fn managed_hooks(target: ManagedHookTarget, shell: HookShell) -> Map<String, Value> {
+fn managed_hooks(shell: HookShell) -> Map<String, Value> {
     let mut hooks = Map::new();
-    hooks.insert(
-        "SessionStart".to_string(),
-        Value::Array(vec![
-            runtime_hook("SessionStart", shell),
-            forward_hook(shell),
-            coordination_hook("SessionStart", shell),
-            board_reminder_hook("SessionStart", shell),
-        ]),
-    );
-    hooks.insert(
-        "UserPromptSubmit".to_string(),
-        Value::Array(vec![
-            runtime_hook("UserPromptSubmit", shell),
-            forward_hook(shell),
-            board_reminder_hook("UserPromptSubmit", shell),
-        ]),
-    );
-    hooks.insert(
-        "PreToolUse".to_string(),
-        Value::Array(vec![
-            runtime_hook("PreToolUse", shell),
-            forward_hook(shell),
-            workflow_policy_hook(target),
-        ]),
-    );
-    hooks.insert(
-        "PostToolUse".to_string(),
-        Value::Array(vec![
-            runtime_hook("PostToolUse", shell),
-            forward_hook(shell),
-        ]),
-    );
-    hooks.insert(
-        "Stop".to_string(),
-        Value::Array(vec![
-            runtime_hook("Stop", shell),
-            forward_hook(shell),
-            coordination_hook("Stop", shell),
-            board_reminder_hook("Stop", shell),
-            skill_stop_check_hook("skill-discussion-stop-check", shell),
-            skill_stop_check_hook("skill-plan-spec-stop-check", shell),
-            skill_stop_check_hook("skill-build-spec-stop-check", shell),
-        ]),
-    );
+    for event in MANAGED_EVENT_ORDER {
+        hooks.insert(
+            event.to_string(),
+            Value::Array(vec![event_hook(event, shell)]),
+        );
+    }
     hooks
 }
 
-fn runtime_hook(event: &str, shell: HookShell) -> Value {
+fn event_hook(event: &str, shell: HookShell) -> Value {
     json!({
         "matcher": "*",
         "hooks": [
             {
-                "command": runtime_hook_command(event, shell),
+                "command": event_hook_command(event, shell),
                 "type": CLAUDE_HOOK_COMMAND_TYPE,
             }
         ]
     })
-}
-
-fn coordination_hook(event: &str, shell: HookShell) -> Value {
-    json!({
-        "matcher": "*",
-        "hooks": [
-            {
-                "command": coordination_hook_command(event, shell),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            }
-        ]
-    })
-}
-
-fn board_reminder_hook(event: &str, shell: HookShell) -> Value {
-    json!({
-        "matcher": "*",
-        "hooks": [
-            {
-                "command": board_reminder_hook_command(event, shell),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            }
-        ]
-    })
-}
-
-fn forward_hook(shell: HookShell) -> Value {
-    json!({
-        "matcher": "*",
-        "hooks": [
-            {
-                "command": forward_hook_command(shell),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            }
-        ]
-    })
-}
-
-/// Managed Stop-hook handler that lets a skill block the Stop event
-/// until the skill reports completion via its exit CLI
-/// (`gwtd discuss|plan|build ...`). See SPEC-1935 FR-014n.
-fn skill_stop_check_hook(hook_name: &str, shell: HookShell) -> Value {
-    json!({
-        "matcher": "*",
-        "hooks": [
-            {
-                "command": skill_stop_check_hook_command(hook_name, shell),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            }
-        ]
-    })
-}
-
-fn skill_stop_check_hook_command(hook_name: &str, shell: HookShell) -> String {
-    let bin = gwt_hook_bin_path();
-    match shell {
-        HookShell::Posix => {
-            let bin_quoted = posix_shell_quote(&bin);
-            format!("{bin_quoted} hook {hook_name}")
-        }
-        HookShell::PowerShell => {
-            let bin_quoted = powershell_quote(&bin);
-            format!("powershell -NoProfile -Command \"& {{ & {bin_quoted} hook {hook_name} }}\"")
-        }
-    }
 }
 
 /// Environment variable that pins the absolute path of the gwt
@@ -483,21 +379,6 @@ fn powershell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-fn workflow_policy_hook(_target: ManagedHookTarget) -> Value {
-    // Dispatch the unified workflow gate through the resolved gwtd
-    // path so launched worktrees do not depend on the GUI binary as a
-    // CLI. `target` stays for call-site symmetry.
-    json!({
-        "matcher": "*",
-        "hooks": [
-            {
-                "command": workflow_policy_hook_command(managed_hook_shell()),
-                "type": CLAUDE_HOOK_COMMAND_TYPE,
-            }
-        ]
-    })
-}
-
 fn managed_hook_shell() -> HookShell {
     if cfg!(windows) {
         HookShell::PowerShell
@@ -506,6 +387,18 @@ fn managed_hook_shell() -> HookShell {
     }
 }
 
+fn event_hook_command(event: &str, shell: HookShell) -> String {
+    event_hook_command_with_bin(&gwt_hook_bin_path(), event, shell)
+}
+
+fn event_hook_command_with_bin(bin: &str, event: &str, shell: HookShell) -> String {
+    match shell {
+        HookShell::Posix => posix_event_hook_command_with_bin(bin, event),
+        HookShell::PowerShell => powershell_event_hook_command_with_bin(bin, event),
+    }
+}
+
+#[cfg(test)]
 fn runtime_hook_command(event: &str, shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_runtime_hook_command(event),
@@ -513,6 +406,7 @@ fn runtime_hook_command(event: &str, shell: HookShell) -> String {
     }
 }
 
+#[cfg(test)]
 fn coordination_hook_command(event: &str, shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_coordination_hook_command(event),
@@ -520,17 +414,7 @@ fn coordination_hook_command(event: &str, shell: HookShell) -> String {
     }
 }
 
-fn board_reminder_hook_command(event: &str, shell: HookShell) -> String {
-    match shell {
-        HookShell::Posix => posix_board_reminder_hook_command(event),
-        HookShell::PowerShell => powershell_board_reminder_hook_command(event),
-    }
-}
-
-fn forward_hook_command(shell: HookShell) -> String {
-    forward_hook_command_with_bin(&gwt_hook_bin_path(), shell)
-}
-
+#[cfg(test)]
 fn forward_hook_command_with_bin(bin: &str, shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_forward_hook_command_with_bin(bin),
@@ -538,10 +422,12 @@ fn forward_hook_command_with_bin(bin: &str, shell: HookShell) -> String {
     }
 }
 
+#[cfg(test)]
 fn workflow_policy_hook_command(shell: HookShell) -> String {
     workflow_policy_hook_command_with_bin(&gwt_hook_bin_path(), shell)
 }
 
+#[cfg(test)]
 fn workflow_policy_hook_command_with_bin(bin: &str, shell: HookShell) -> String {
     match shell {
         HookShell::Posix => posix_workflow_policy_hook_command_with_bin(bin),
@@ -552,58 +438,66 @@ fn workflow_policy_hook_command_with_bin(bin: &str, shell: HookShell) -> String 
 /// Emit the POSIX-shell form of the runtime-state hook. The previous
 /// inline `sh -lc '...'` one-liner that wrote JSON directly is replaced
 /// by a single `gwtd hook runtime-state <event>` dispatch.
+fn posix_event_hook_command_with_bin(bin: &str, event: &str) -> String {
+    let bin = posix_shell_quote(bin);
+    format!("{bin} hook event {event}")
+}
+
+#[cfg(test)]
 fn posix_runtime_hook_command(event: &str) -> String {
     let bin = posix_shell_quote(&gwt_hook_bin_path());
     format!("{bin} hook runtime-state {event}")
 }
 
+#[cfg(test)]
 fn posix_workflow_policy_hook_command_with_bin(bin: &str) -> String {
     let bin = posix_shell_quote(bin);
     format!("{bin} hook workflow-policy")
 }
 
+#[cfg(test)]
 fn posix_forward_hook_command_with_bin(bin: &str) -> String {
     let bin = posix_shell_quote(bin);
     format!("{bin} hook forward")
 }
 
+#[cfg(test)]
 fn posix_coordination_hook_command(event: &str) -> String {
     let bin = posix_shell_quote(&gwt_hook_bin_path());
     format!("{bin} hook coordination-event {event}")
-}
-
-fn posix_board_reminder_hook_command(event: &str) -> String {
-    let bin = posix_shell_quote(&gwt_hook_bin_path());
-    format!("{bin} hook board-reminder {event}")
 }
 
 /// Emit the PowerShell form of the runtime-state hook. Windows Claude
 /// Code runs the hook through `powershell -NoProfile -Command`, so we
 /// keep that wrapper, then invoke the gwtd binary via `& '...'` call
 /// operator.
+fn powershell_event_hook_command_with_bin(bin: &str, event: &str) -> String {
+    let bin = powershell_quote(bin);
+    format!("powershell -NoProfile -Command \"& {{ & {bin} hook event {event} }}\"")
+}
+
+#[cfg(test)]
 fn powershell_runtime_hook_command(event: &str) -> String {
     let bin = powershell_quote(&gwt_hook_bin_path());
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook runtime-state {event} }}\"")
 }
 
+#[cfg(test)]
 fn powershell_workflow_policy_hook_command_with_bin(bin: &str) -> String {
     let bin = powershell_quote(bin);
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook workflow-policy }}\"")
 }
 
+#[cfg(test)]
 fn powershell_forward_hook_command_with_bin(bin: &str) -> String {
     let bin = powershell_quote(bin);
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook forward }}\"")
 }
 
+#[cfg(test)]
 fn powershell_coordination_hook_command(event: &str) -> String {
     let bin = powershell_quote(&gwt_hook_bin_path());
     format!("powershell -NoProfile -Command \"& {{ & {bin} hook coordination-event {event} }}\"")
-}
-
-fn powershell_board_reminder_hook_command(event: &str) -> String {
-    let bin = powershell_quote(&gwt_hook_bin_path());
-    format!("powershell -NoProfile -Command \"& {{ & {bin} hook board-reminder {event} }}\"")
 }
 
 #[cfg(test)]
@@ -623,28 +517,46 @@ mod tests {
     }
 
     #[test]
+    fn managed_hooks_use_one_event_dispatcher_command_per_event() {
+        let dir = tempfile::tempdir().unwrap();
+        generate_codex_hooks(dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join(".codex/hooks.json")).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        for event in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+        ] {
+            let commands = commands_for_event(&value, event);
+            assert_eq!(
+                commands.len(),
+                1,
+                "managed {event} hook must be a single dispatcher command, got: {commands:?}"
+            );
+            assert!(
+                commands[0].contains(&format!(" hook event {event}")),
+                "managed {event} command must dispatch through `hook event {event}`, got: {}",
+                commands[0]
+            );
+        }
+    }
+
+    #[test]
     fn board_reminder_registered_only_on_intent_boundary_events() {
         let dir = tempfile::tempdir().unwrap();
         generate_settings_local(dir.path()).unwrap();
         let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
 
-        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+        for event in MANAGED_EVENT_ORDER {
             let commands = commands_for_event(&value, event);
+            assert_eq!(commands.len(), 1, "{event} must use one dispatcher");
             assert!(
-                commands
-                    .iter()
-                    .any(|c| c.contains(&format!(" hook board-reminder {event}"))),
-                "board-reminder must dispatch on {event}; commands: {commands:?}"
-            );
-        }
-        for event in ["PreToolUse", "PostToolUse"] {
-            let commands = commands_for_event(&value, event);
-            assert!(
-                commands
-                    .iter()
-                    .all(|c| !c.contains(" hook board-reminder ")),
-                "board-reminder must NOT be registered on {event}; commands: {commands:?}"
+                commands[0].contains(&format!(" hook event {event}")),
+                "{event} must route through the event dispatcher; commands: {commands:?}"
             );
         }
     }
@@ -656,32 +568,11 @@ mod tests {
         let content = fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
         let stop_commands = commands_for_event(&value, "Stop");
-        let suffixes = [
-            " hook skill-discussion-stop-check",
-            " hook skill-plan-spec-stop-check",
-            " hook skill-build-spec-stop-check",
-        ];
-        for suffix in &suffixes {
-            let count = stop_commands.iter().filter(|c| c.contains(suffix)).count();
-            assert_eq!(
-                count, 1,
-                "Stop chain must include exactly one {suffix} entry; got {count}: {stop_commands:?}"
-            );
-        }
-        let board_reminder_pos = stop_commands
-            .iter()
-            .position(|c| c.contains(" hook board-reminder Stop"))
-            .expect("Stop chain must include board-reminder");
-        for suffix in &suffixes {
-            let position = stop_commands
-                .iter()
-                .position(|c| c.contains(suffix))
-                .expect("suffix present (checked above)");
-            assert!(
-                position > board_reminder_pos,
-                "{suffix} must appear after board-reminder; chain: {stop_commands:?}"
-            );
-        }
+        assert_eq!(
+            stop_commands,
+            vec!["'gwtd' hook event Stop"],
+            "Stop chain must collapse to the event dispatcher; got: {stop_commands:?}"
+        );
     }
 
     #[test]
@@ -742,9 +633,9 @@ mod tests {
             first, second,
             "settings.local.json must be byte-identical after regeneration"
         );
-        assert!(first.contains(" hook board-reminder SessionStart"));
-        assert!(first.contains(" hook board-reminder UserPromptSubmit"));
-        assert!(first.contains(" hook board-reminder Stop"));
+        assert!(first.contains(" hook event SessionStart"));
+        assert!(first.contains(" hook event UserPromptSubmit"));
+        assert!(first.contains(" hook event Stop"));
     }
 
     #[test]
@@ -786,28 +677,26 @@ mod tests {
         let content = fs::read_to_string(&settings_path).unwrap();
         let value: Value = serde_json::from_str(&content).unwrap();
 
-        // Every intent-boundary event now includes board-reminder exactly
-        // once, and the legacy runtime-state entry has been replaced (not
-        // duplicated) with the freshly generated one.
-        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+        // Every event now has exactly one dispatcher entry, and the legacy
+        // runtime-state entry has been replaced rather than duplicated.
+        for event in MANAGED_EVENT_ORDER {
             let commands = commands_for_event(&value, event);
-            let board_reminder_count = commands
-                .iter()
-                .filter(|c| c.contains(&format!(" hook board-reminder {event}")))
-                .count();
             assert_eq!(
-                board_reminder_count, 1,
-                "expected exactly one board-reminder entry on {event}, got {board_reminder_count}: {commands:?}"
+                commands.len(),
+                1,
+                "expected exactly one dispatcher entry on {event}, got: {commands:?}"
+            );
+            assert!(
+                commands[0].contains(&format!(" hook event {event}")),
+                "event must dispatch through hook event, got: {commands:?}"
             );
         }
 
         let session_start = commands_for_event(&value, "SessionStart");
-        let runtime_count = session_start
-            .iter()
-            .filter(|c| c.contains(" hook runtime-state SessionStart"))
-            .count();
-        assert_eq!(
-            runtime_count, 1,
+        assert!(
+            session_start
+                .iter()
+                .all(|c| !c.contains(" hook runtime-state ")),
             "legacy runtime-state entry must be replaced, not duplicated; got: {session_start:?}"
         );
     }
@@ -824,37 +713,15 @@ mod tests {
         let value: Value = serde_json::from_str(&content).unwrap();
 
         let user_prompt_commands = commands_for_event(&value, "UserPromptSubmit");
-        assert!(user_prompt_commands
-            .iter()
-            .any(|command| command.contains(" hook runtime-state UserPromptSubmit")));
-        assert!(user_prompt_commands
-            .iter()
-            .any(|command| command.contains(" hook forward")));
-        assert!(user_prompt_commands
-            .iter()
-            .all(|command| !command.contains("node")));
+        assert_eq!(user_prompt_commands.len(), 1);
+        assert!(user_prompt_commands[0].contains(" hook event UserPromptSubmit"));
+        assert!(user_prompt_commands[0].contains("gwtd"));
+        assert!(!user_prompt_commands[0].contains("node"));
         assert!(value["hooks"]["SessionStart"].is_array());
-        let session_start_hooks = value["hooks"]["SessionStart"]
-            .as_array()
-            .expect("SessionStart hooks");
-        assert!(
-            session_start_hooks.iter().any(|entry| {
-                entry["hooks"][0]["command"]
-                    .as_str()
-                    .is_some_and(|command| {
-                        command.contains(" hook coordination-event SessionStart")
-                    })
-            }),
-            "SessionStart must include a coordination-event hook"
-        );
         assert!(value["hooks"].get("Notification").is_none());
         let pre_tool_commands = commands_for_event(&value, "PreToolUse");
-        assert!(pre_tool_commands
-            .iter()
-            .any(|command| command.contains(" hook workflow-policy")));
-        assert!(pre_tool_commands
-            .iter()
-            .any(|command| command.contains(" hook forward")));
+        assert_eq!(pre_tool_commands.len(), 1);
+        assert!(pre_tool_commands[0].contains(" hook event PreToolUse"));
     }
 
     // T-080 / T-082 (SPEC #1942): the Claude settings.local.json must
@@ -881,7 +748,8 @@ mod tests {
 
         let value: Value = serde_json::from_str(&content).unwrap();
 
-        // T-082: runtime hooks now invoke `gwtd hook runtime-state <event>`.
+        // T-082 / event dispatcher update: managed hooks invoke
+        // `gwtd hook event <event>` exactly once per hook event.
         for event in [
             "SessionStart",
             "UserPromptSubmit",
@@ -890,108 +758,45 @@ mod tests {
             "Stop",
         ] {
             let commands = commands_for_event(&value, event);
-            let cmd = commands
-                .iter()
-                .copied()
-                .find(|cmd| cmd.contains(&format!(" hook runtime-state {event}")))
-                .unwrap_or_else(|| panic!("runtime command missing for event {event}"));
-            // SPEC #1942 amendment: runtime hook command embeds an
-            // absolute path to gwtd rather than the literal `gwtd`.
+            assert_eq!(
+                commands.len(),
+                1,
+                "managed event {event} must collapse to one command, got: {commands:?}"
+            );
+            let cmd = commands[0];
             assert!(
-                cmd.contains(&format!(" hook runtime-state {event}")),
-                "runtime hook for {event} must end with `hook runtime-state {event}`, got: {cmd}"
+                cmd.contains(&format!(" hook event {event}")),
+                "managed hook for {event} must dispatch to `hook event {event}`, got: {cmd}"
             );
             assert!(
                 !cmd.contains("GWT_MANAGED_HOOK"),
-                "runtime hook must not carry the managed marker anymore, got: {cmd}"
+                "event hook must not carry the managed marker anymore, got: {cmd}"
             );
             assert!(
                 !cmd.contains("mkdir"),
-                "runtime hook must not shell out to mkdir anymore, got: {cmd}"
+                "event hook must not shell out to mkdir anymore, got: {cmd}"
             );
             assert!(
                 !cmd.contains("printf"),
-                "runtime hook must not shell out to printf anymore, got: {cmd}"
+                "event hook must not shell out to printf anymore, got: {cmd}"
             );
             assert!(
                 !cmd.starts_with("gwtd hook "),
-                "runtime hook must not use the PATH-dependent literal `gwtd`, got: {cmd}"
-            );
-
-            let forward_commands: Vec<&str> = commands
-                .iter()
-                .copied()
-                .filter(|cmd| cmd.contains(" hook forward"))
-                .collect();
-            assert_eq!(
-                forward_commands.len(),
-                1,
-                "exactly one forward hook expected for {event}, got: {forward_commands:?}"
-            );
-            let forward = forward_commands[0];
-            assert!(
-                forward.contains(" hook forward"),
-                "forward hook must stay on the public gwtd CLI, got: {forward}"
+                "event hook must not use the PATH-dependent literal `gwtd`, got: {cmd}"
             );
             assert!(
-                !forward.contains("/internal/hook-live"),
-                "forward hook must not expose daemon endpoints, got: {forward}"
+                !cmd.contains("/internal/hook-live"),
+                "event hook must not expose daemon endpoints, got: {cmd}"
             );
             assert!(
-                !forward.contains("GWT_HOOK_FORWARD_URL"),
-                "forward hook must not expose transport env names, got: {forward}"
+                !cmd.contains("GWT_HOOK_FORWARD_URL"),
+                "event hook must not expose transport env names, got: {cmd}"
             );
             assert!(
-                !forward.contains("GWT_HOOK_FORWARD_TOKEN"),
-                "forward hook must not expose transport env names, got: {forward}"
-            );
-            assert!(
-                !forward.starts_with("gwtd hook "),
-                "forward hook must not use the PATH-dependent literal `gwtd`, got: {forward}"
+                !cmd.contains("GWT_HOOK_FORWARD_TOKEN"),
+                "event hook must not expose transport env names, got: {cmd}"
             );
         }
-
-        for event in ["SessionStart", "Stop"] {
-            let hooks = value["hooks"][event]
-                .as_array()
-                .unwrap_or_else(|| panic!("managed hooks missing for event {event}"));
-            assert!(
-                hooks.iter().any(|entry| {
-                    entry["hooks"][0]["command"]
-                        .as_str()
-                        .is_some_and(|cmd| {
-                            cmd.contains(&format!(" hook coordination-event {event}"))
-                        })
-                }),
-                "coordination hook for {event} must dispatch through `hook coordination-event {event}`"
-            );
-        }
-
-        // T-080 + SPEC #1942 amendment: workflow-policy hooks dispatch
-        // through absolute path `'<bin>' hook workflow-policy`.
-        let actual: Vec<&str> = commands_for_event(&value, "PreToolUse")
-            .into_iter()
-            .filter(|command| command.contains(" hook workflow-policy"))
-            .collect();
-        assert_eq!(
-            actual.len(),
-            1,
-            "PreToolUse must collapse to a single workflow policy hook, got: {actual:?}"
-        );
-        let marker = " hook workflow-policy";
-        let (_, suffix) = actual[0].split_once(marker).unwrap_or_else(|| {
-            panic!("workflow policy hook must dispatch to workflow-policy, got: {actual:?}")
-        });
-        assert!(
-            suffix
-                .trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '}' | ')'))
-                .is_empty(),
-            "workflow policy hook must terminate after workflow-policy, got: {actual:?}"
-        );
-        assert!(
-            !actual[0].starts_with("gwtd hook "),
-            "workflow policy hook must not use literal `gwtd hook ...`, got: {actual:?}"
-        );
     }
 
     // Regression for PR #1943 review feedback ("settings.local.json
@@ -1023,7 +828,7 @@ mod tests {
 
         let value: Value = serde_json::from_str(&second).unwrap();
         let pre_tool = value["hooks"]["PreToolUse"].as_array().unwrap();
-        let workflow_entries: Vec<_> = pre_tool
+        let event_entries: Vec<_> = pre_tool
             .iter()
             .filter(|entry| {
                 entry["hooks"]
@@ -1031,24 +836,17 @@ mod tests {
                     .into_iter()
                     .flatten()
                     .filter_map(|hook| hook["command"].as_str())
-                    .any(|command| command.contains(" hook workflow-policy"))
+                    .any(|command| command.contains(" hook event PreToolUse"))
             })
             .collect();
         assert_eq!(
-            workflow_entries.len(),
+            event_entries.len(),
             1,
-            "exactly one workflow-policy entry expected, got {}: {:?}",
-            workflow_entries.len(),
-            workflow_entries
+            "exactly one event dispatcher entry expected, got {}: {:?}",
+            event_entries.len(),
+            event_entries
         );
-        let forward_count = commands_for_event(&value, "PreToolUse")
-            .iter()
-            .filter(|command| command.contains(" hook forward"))
-            .count();
-        assert_eq!(
-            forward_count, 1,
-            "exactly one forward entry expected in PreToolUse after regeneration"
-        );
+        assert_eq!(commands_for_event(&value, "PreToolUse").len(), 1);
     }
 
     #[test]
@@ -1101,8 +899,8 @@ mod tests {
             "tracked legacy node bash blocker must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook workflow-policy"),
-            "tracked file must be migrated to the consolidated workflow-policy form, got: {content}"
+            content.contains("hook event PreToolUse"),
+            "tracked file must be migrated to the consolidated event dispatcher form, got: {content}"
         );
     }
 
@@ -1156,8 +954,8 @@ mod tests {
             "tracked block-bash-policy hook must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook workflow-policy"),
-            "tracked file must dispatch to workflow-policy after migration, got: {content}"
+            content.contains("hook event PreToolUse"),
+            "tracked file must dispatch to the event dispatcher after migration, got: {content}"
         );
     }
 
@@ -1211,8 +1009,8 @@ mod tests {
             "tracked legacy inline shell runtime hook must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook runtime-state"),
-            "tracked file must carry the new CLI form, got: {content}"
+            content.contains("hook event PreToolUse"),
+            "tracked file must carry the event dispatcher CLI form, got: {content}"
         );
         assert!(
             !content.contains("GWT_MANAGED_HOOK"),
@@ -1277,10 +1075,7 @@ mod tests {
 
         assert!(commands
             .iter()
-            .any(|command| command.contains(" hook runtime-state PreToolUse")));
-        assert!(commands
-            .iter()
-            .any(|command| command.contains(" hook workflow-policy")));
+            .any(|command| command.contains(" hook event PreToolUse")));
         assert!(commands.contains(&"my-custom-hook"));
         assert_eq!(
             value["hooks"]["CustomEvent"][0]["hooks"][0]["command"],
@@ -1339,24 +1134,20 @@ mod tests {
         let session_start_commands = commands_for_event(&value, "SessionStart");
         let pre_tool_commands = commands_for_event(&value, "PreToolUse");
 
+        assert_eq!(session_start_commands.len(), 1);
         assert!(session_start_commands
             .iter()
-            .any(|command| command.contains(" hook runtime-state SessionStart")));
-        assert!(session_start_commands
-            .iter()
-            .any(|command| command.contains(" hook forward")));
+            .any(|command| command.contains(" hook event SessionStart")));
         assert!(session_start_commands
             .iter()
             .all(|command| !command.contains("GWT_MANAGED_HOOK")));
         assert!(session_start_commands
             .iter()
             .all(|command| !command.contains("node")));
+        assert_eq!(pre_tool_commands.len(), 1);
         assert!(pre_tool_commands
             .iter()
-            .any(|command| command.contains(" hook workflow-policy")));
-        assert!(pre_tool_commands
-            .iter()
-            .any(|command| command.contains(" hook forward")));
+            .any(|command| command.contains(" hook event PreToolUse")));
     }
 
     #[test]
@@ -1403,7 +1194,7 @@ mod tests {
 
         assert!(commands
             .iter()
-            .any(|command| command.contains(" hook runtime-state SessionStart")));
+            .any(|command| command.contains(" hook event SessionStart")));
         assert!(commands.contains(&"my-custom-hook"));
     }
 
@@ -1471,10 +1262,10 @@ mod tests {
         assert!(session_start_commands.contains(&"tracked-command"));
         assert!(session_start_commands
             .iter()
-            .any(|command| command.contains(" hook runtime-state SessionStart")));
+            .any(|command| command.contains(" hook event SessionStart")));
         assert!(pre_tool_commands
             .iter()
-            .any(|command| command.contains(" hook workflow-policy")));
+            .any(|command| command.contains(" hook event PreToolUse")));
         assert_eq!(value["custom_setting"], Value::Bool(true));
     }
 
@@ -1549,7 +1340,7 @@ mod tests {
 
         assert!(session_start_commands
             .iter()
-            .any(|command| command.contains(" hook forward")));
+            .any(|command| command.contains(" hook event SessionStart")));
         assert!(session_start_commands
             .iter()
             .all(|command| !command.contains("GWT_MANAGED_HOOK")));
@@ -1560,10 +1351,7 @@ mod tests {
         assert!(pre_tool_commands.contains(&"my-custom-hook"));
         assert!(pre_tool_commands
             .iter()
-            .any(|command| command.contains(" hook forward")));
-        assert!(pre_tool_commands
-            .iter()
-            .any(|command| command.contains(" hook workflow-policy")));
+            .any(|command| command.contains(" hook event PreToolUse")));
     }
 
     #[test]
@@ -1618,7 +1406,7 @@ mod tests {
         let session_start_command = value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .expect("session start command");
-        let expected = runtime_hook_command("SessionStart", managed_hook_shell());
+        let expected = event_hook_command("SessionStart", managed_hook_shell());
         assert_eq!(session_start_command, expected);
     }
 
@@ -1741,10 +1529,10 @@ mod tests {
 
         assert!(session_start_commands
             .iter()
-            .any(|command| command.contains(" hook coordination-event SessionStart")));
+            .any(|command| command.contains(" hook event SessionStart")));
         assert!(stop_commands
             .iter()
-            .any(|command| command.contains(" hook coordination-event Stop")));
+            .any(|command| command.contains(" hook event Stop")));
         assert!(stop_commands.contains(&"my-custom-hook"));
     }
 
@@ -1860,13 +1648,13 @@ mod tests {
         let value: Value = serde_json::from_str(&content).unwrap();
         for event in MANAGED_EVENT_ORDER {
             let commands = commands_for_event(&value, event);
-            let forward_count = commands
-                .iter()
-                .filter(|command| command.contains(" hook forward"))
-                .count();
             assert_eq!(
-                forward_count, 1,
-                "migration must restore exactly one forward hook for {event}, got: {commands:?}"
+                commands
+                    .iter()
+                    .filter(|command| command.contains(&format!(" hook event {event}")))
+                    .count(),
+                1,
+                "migration must restore exactly one event dispatcher for {event}, got: {commands:?}"
             );
         }
         assert!(commands_for_event(&value, "PreToolUse").contains(&"my-custom-hook"));
@@ -2029,6 +1817,9 @@ mod tests {
             "'/Users/x/.bun/bin/gwtd' hook workflow-policy"
         ));
         assert!(is_gwt_managed_command(
+            "'/Users/x/.bun/bin/gwtd' hook event PreToolUse"
+        ));
+        assert!(is_gwt_managed_command(
             "'/Users/x/.bun/bin/gwt' hook workflow-policy"
         ));
         assert!(is_gwt_managed_command(
@@ -2092,8 +1883,8 @@ mod tests {
             "tracked PATH-less literal must be migrated away, got: {content}"
         );
         assert!(
-            content.contains("hook workflow-policy"),
-            "migrated file must dispatch to workflow-policy (via absolute path), got: {content}"
+            content.contains("hook event PreToolUse"),
+            "migrated file must dispatch through the event dispatcher, got: {content}"
         );
     }
 }
