@@ -1,8 +1,10 @@
 //! Git worktree management
 
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -356,18 +358,27 @@ fn run_command_with_timeout(
     let mut child = command
         .spawn()
         .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+    let mut stdout = child.stdout.take().map(spawn_pipe_reader);
+    let mut stderr = child.stderr.take().map(spawn_pipe_reader);
     let started = Instant::now();
 
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| GwtError::Git(format!("{action}: {error}")));
+                let status = child
+                    .wait()
+                    .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+                return Ok(Output {
+                    status,
+                    stdout: join_pipe_reader(stdout.take(), action, "stdout")?,
+                    stderr: join_pipe_reader(stderr.take(), action, "stderr")?,
+                });
             }
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
+                join_pipe_reader_lossy(stdout.take());
+                join_pipe_reader_lossy(stderr.take());
                 return Err(GwtError::Git(format!(
                     "{action} timed out after {}ms",
                     timeout.as_millis()
@@ -377,9 +388,44 @@ fn run_command_with_timeout(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                join_pipe_reader_lossy(stdout.take());
+                join_pipe_reader_lossy(stderr.take());
                 return Err(GwtError::Git(format!("{action}: {error}")));
             }
         }
+    }
+}
+
+fn spawn_pipe_reader<T>(mut pipe: T) -> JoinHandle<std::io::Result<Vec<u8>>>
+where
+    T: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
+
+fn join_pipe_reader(
+    reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    action: &str,
+    stream: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    match reader.join() {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => Err(GwtError::Git(format!("{action} read {stream}: {error}"))),
+        Err(_) => Err(GwtError::Git(format!(
+            "{action} read {stream}: reader thread panicked"
+        ))),
+    }
+}
+
+fn join_pipe_reader_lossy(reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>) {
+    if let Some(reader) = reader {
+        let _ = reader.join();
     }
 }
 
@@ -554,6 +600,22 @@ mod tests {
         } else {
             let mut command = std::process::Command::new("sh");
             command.args(["-c", "sleep 0.25"]);
+            command
+        }
+    }
+
+    fn verbose_command() -> std::process::Command {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.Write(('x' * 200000))",
+            ]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "yes x | head -c 200000"]);
             command
         }
     }
@@ -1021,6 +1083,21 @@ prunable gitdir file points to non-existent location
             err.to_string()
                 .contains("git push origin --delete feature/slow timed out"),
             "unexpected timeout error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_drains_verbose_child_output() {
+        let mut command = verbose_command();
+        let output =
+            run_command_with_timeout(&mut command, "verbose child", Duration::from_secs(5))
+                .expect("verbose child should exit without filling pipe buffers");
+
+        assert!(output.status.success());
+        assert!(
+            output.stdout.len() >= 200_000,
+            "expected captured stdout, got {} bytes",
+            output.stdout.len()
         );
     }
 
