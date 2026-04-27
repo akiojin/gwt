@@ -12,7 +12,7 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
     let _env_guard = env_lock();
-    let cli_bin = dir.path().join("bin/gwt");
+    let cli_bin = dir.path().join("bin/gwtd");
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
     let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
@@ -67,7 +67,7 @@ fn refresh_managed_gwt_assets_reports_the_failed_step() {
 }
 
 #[test]
-fn refresh_managed_gwt_assets_keeps_command_assets_on_gwt_bin_path_front_door() {
+fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);
 
@@ -80,8 +80,12 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwt_bin_path_front_door() 
         "PR command asset should tell managed sessions to use GWT_BIN_PATH, got: {manage_pr}"
     );
     assert!(
-        !manage_pr.contains("gwtd"),
-        "PR command asset must not expose gwtd, got: {manage_pr}"
+        manage_pr.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
+        "PR command asset should default managed sessions to gwtd, got: {manage_pr}"
+    );
+    assert!(
+        !manage_pr.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwt}\""),
+        "PR command asset must not default to the GUI front door, got: {manage_pr}"
     );
 
     let release = std::fs::read_to_string(dir.path().join(".claude/commands/release.md"))
@@ -91,8 +95,12 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwt_bin_path_front_door() 
         "release command asset should shell out through GWT_BIN_PATH, got: {release}"
     );
     assert!(
-        !release.contains("gwtd"),
-        "release command asset must not expose gwtd, got: {release}"
+        release.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
+        "release command asset should default managed sessions to gwtd, got: {release}"
+    );
+    assert!(
+        !release.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwt}\""),
+        "release command asset must not default to the GUI front door, got: {release}"
     );
 }
 

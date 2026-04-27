@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::{
     launch::{normalize_launch_args, LaunchConfig},
     types::{
-        AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, WindowsShellKind,
-        WorkflowBypass,
+        AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode,
+        WindowsShellKind, WorkflowBypass,
     },
 };
 
@@ -27,7 +27,7 @@ pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
 /// Environment variable injected into agent PTYs so skills can locate the
-/// gwt binary for calling gwt CLI (GitHub operations, etc.).
+/// gwt binary for calling gwtd CLI (GitHub operations, etc.).
 pub const GWT_BIN_PATH_ENV: &str = "GWT_BIN_PATH";
 /// Loopback endpoint used by daemon-owned hook live events.
 pub const GWT_HOOK_FORWARD_URL_ENV: &str = "GWT_HOOK_FORWARD_URL";
@@ -39,6 +39,8 @@ pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 pub struct Session {
     pub id: String,
     pub worktree_path: PathBuf,
+    #[serde(default)]
+    pub repo_hash: Option<String>,
     pub branch: String,
     pub agent_id: AgentId,
     pub agent_session_id: Option<String>,
@@ -47,6 +49,8 @@ pub struct Session {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_level: Option<String>,
+    #[serde(default)]
+    pub session_mode: SessionMode,
     #[serde(default)]
     pub skip_permissions: bool,
     #[serde(default)]
@@ -111,11 +115,15 @@ impl Session {
         branch: impl Into<String>,
         agent_id: AgentId,
     ) -> Self {
+        let worktree_path = worktree_path.into();
         let now = Utc::now();
         let display_name = agent_id.display_name().to_string();
+        let repo_hash = gwt_core::repo_hash::detect_repo_hash(&worktree_path)
+            .map(|hash| hash.as_str().to_string());
         Self {
             id: Uuid::new_v4().to_string(),
-            worktree_path: worktree_path.into(),
+            worktree_path,
+            repo_hash,
             branch: branch.into(),
             agent_id,
             agent_session_id: None,
@@ -123,6 +131,7 @@ impl Session {
             tool_version: None,
             model: None,
             reasoning_level: None,
+            session_mode: SessionMode::Normal,
             skip_permissions: false,
             codex_fast_mode: false,
             runtime_target: LaunchRuntimeTarget::Host,
@@ -156,6 +165,7 @@ impl Session {
         session.tool_version = config.tool_version.clone();
         session.model = config.model.clone();
         session.reasoning_level = config.reasoning_level.clone();
+        session.session_mode = config.session_mode;
         session.skip_permissions = config.skip_permissions;
         session.codex_fast_mode = config.codex_fast_mode;
         session.runtime_target = config.runtime_target;
@@ -1017,6 +1027,7 @@ mod tests {
         config.docker_service = Some("app".to_string());
         config.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
         config.linked_issue_number = Some(1921);
+        config.session_mode = crate::SessionMode::Continue;
 
         let session = Session::from_launch_config("/tmp/worktree", "feature/demo", &config);
 
@@ -1042,6 +1053,7 @@ mod tests {
             DockerLifecycleIntent::Restart
         );
         assert_eq!(session.linked_issue_number, Some(1921));
+        assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
     }
 

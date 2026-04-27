@@ -1,4 +1,4 @@
-//! `gwt hook block-cd-command` — PreToolUse hook that forbids `cd` into
+//! `gwtd hook block-cd-command` — PreToolUse hook that forbids `cd` into
 //! paths outside the current worktree root.
 //!
 //! Ported from the retired external `cd` policy hook.

@@ -11,6 +11,18 @@ pub(crate) fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
+pub(crate) fn xterm_js() -> &'static str {
+    include_str!("../web/vendor/xterm/xterm.mjs")
+}
+
+pub(crate) fn xterm_fit_js() -> &'static str {
+    include_str!("../web/vendor/xterm/addon-fit.mjs")
+}
+
+pub(crate) fn xterm_css() -> &'static str {
+    include_str!("../web/vendor/xterm/xterm.css")
+}
+
 pub(crate) async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
@@ -19,6 +31,27 @@ pub(crate) async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
+    )
+}
+
+pub(crate) async fn xterm_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        xterm_js(),
+    )
+}
+
+pub(crate) async fn xterm_fit_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        xterm_fit_js(),
+    )
+}
+
+pub(crate) async fn xterm_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        xterm_css(),
     )
 }
 
@@ -104,8 +137,8 @@ mod tests {
             r"runtime\.terminal\.write\(\s*decoder\.decode\(decodeBase64\(base64\)\),\s*\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
         )
         .expect("valid regex");
-        let hidden_geometry_sync = regex::Regex::new(
-            r"if\s*\(\s*!canRefreshTerminalViewport\(windowId\)\s*\)\s*\{\s*if\s*\(\s*persist\s*\)\s*\{\s*sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\);\s*\}\s*return;\s*\}",
+        let refresh_call = regex::Regex::new(
+            r"runtime\.terminal\.refresh\(0,\s*runtime\.terminal\.rows\s*-\s*1\);",
         )
         .expect("valid regex");
 
@@ -135,12 +168,13 @@ mod tests {
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
-                && html.contains("!workspaceWindowById(windowId)?.minimized"),
+                && html.contains("!workspaceWindowById(windowId)?.minimized")
+                && refresh_call.is_match(html),
             "expected terminal viewport refresh to skip minimized windows",
         );
         assert!(
-            hidden_geometry_sync.is_match(html),
-            "expected persisted terminal fit to sync geometry even while hidden",
+            !html.contains("fitTerminal(windowId, false);"),
+            "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
         assert!(
             html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
@@ -149,6 +183,27 @@ mod tests {
                 )
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
             "expected restored terminals to persist fitted geometry after becoming visible",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_assets_are_local_and_pinned() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            index_html().contains(r#"href="/assets/xterm/xterm.css""#),
+            "expected xterm stylesheet to be served from the embedded local asset route",
+        );
+        assert!(
+            app_js().contains(r#"from "/assets/xterm/xterm.mjs""#)
+                && app_js().contains(r#"from "/assets/xterm/addon-fit.mjs""#),
+            "expected xterm modules to be served from embedded local asset routes",
+        );
+        assert!(
+            !html.contains("cdn.jsdelivr.net")
+                && !html.contains("unpkg.com")
+                && !html.contains("cdnjs.cloudflare.com"),
+            "expected embedded terminal assets to avoid CDN/runtime network dependencies",
         );
     }
 
@@ -675,6 +730,121 @@ mod tests {
         assert!(
             !html.contains("gh issue") && !html.contains("gh pr"),
             "expected knowledge bridge guidance to avoid direct gh issue/pr commands",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_surface_uses_semantic_search_contract() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("search_knowledge_bridge"),
+            "expected knowledge bridge search input to call the semantic search backend",
+        );
+        assert!(
+            html.contains("knowledge_search_results"),
+            "expected frontend to handle semantic search result events",
+        );
+        assert!(
+            html.contains("request_id"),
+            "expected semantic search requests to carry request ids for stale-response guards",
+        );
+        assert!(
+            html.contains("Searching semantic index"),
+            "expected semantic search to expose an in-progress state",
+        );
+        assert!(
+            html.contains("% match"),
+            "expected semantic search result rows to show percentage similarity",
+        );
+        assert!(
+            !html.contains("No matching cached items"),
+            "expected semantic search to stop presenting substring-filter empty copy",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_cancels_pending_semantic_search_on_window_teardown() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function clearKnowledgeBridgeState(windowId)"),
+            "expected knowledge bridge teardown to clear pending timers before deleting state",
+        );
+        assert!(
+            html.contains("clearKnowledgeBridgeState(windowId);"),
+            "expected workspace window removal to use knowledge bridge cleanup",
+        );
+        assert!(
+            html.contains("if (!workspaceWindowById(windowId))"),
+            "expected debounced semantic search to verify the window still exists before sending",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_waits_for_initial_cache_load_before_semantic_search() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("state.loading && state.baseEntries.length === 0"),
+            "expected semantic search scheduling to wait for initial cache load before sending",
+        );
+        assert!(
+            html.contains("const queuedQuery = state.query.trim();")
+                && html.contains("if (queuedQuery)")
+                && html.contains("frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch("),
+            "expected knowledge entries response to resume queued semantic search after cache load",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("searchInFlight") && html.contains("inFlightSearchRequestId"),
+            "expected semantic search state to track the single in-flight backend request",
+        );
+        assert!(
+            html.contains("queuedSearchQuery")
+                && html.contains("const nextQuery = state.queuedSearchQuery;"),
+            "expected semantic search state to coalesce additional input to the latest query",
+        );
+        assert!(
+            !html.contains("state.entries = [];\n        state.emptyMessage = \"\";\n        state.pendingSearchTimer"),
+            "expected semantic search scheduling to preserve visible entries while searching",
+        );
+    }
+
+    #[test]
+    fn embedded_web_knowledge_bridge_correlates_detail_selection_without_resetting_refresh() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("detailRequestId") && html.contains("knowledgeDetailRequestMatches"),
+            "expected entry selection to use a separate detail request correlation id",
+        );
+        assert!(
+            html.contains("request_id: requestId,\n          number,"),
+            "expected select_knowledge_bridge_entry requests to carry the detail request id",
+        );
+        assert!(
+            html.contains("state.loadRequestId = requestId;\n        state.detailRequestId = 0;"),
+            "expected new cache loads to invalidate older detail response ids",
+        );
+        assert!(
+            html.contains("const matchesLoadRequest =") && html.contains("if (matchesLoadRequest)"),
+            "expected detail responses to avoid clearing refresh loading for detail-only replies",
+        );
+        let search_block = html
+            .split("case \"knowledge_search_results\":")
+            .nth(1)
+            .and_then(|tail| tail.split("case \"knowledge_detail\":").next())
+            .expect("knowledge search results block");
+        assert!(
+            !search_block.contains("state.loading = false;")
+                && !search_block.contains("state.refreshing = false;"),
+            "expected search results to leave active refresh loading state untouched",
         );
     }
 

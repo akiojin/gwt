@@ -111,6 +111,18 @@ impl EmbeddedServer {
         let app = Router::new()
             .route("/", get(embedded_web::index_handler))
             .route("/app.js", get(embedded_web::app_js_handler))
+            .route(
+                "/assets/xterm/xterm.mjs",
+                get(embedded_web::xterm_js_handler),
+            )
+            .route(
+                "/assets/xterm/addon-fit.mjs",
+                get(embedded_web::xterm_fit_js_handler),
+            )
+            .route(
+                "/assets/xterm/xterm.css",
+                get(embedded_web::xterm_css_handler),
+            )
             .route("/healthz", get(health_handler))
             .route("/internal/hook-live", post(hook_live_handler))
             .route("/ws", get(websocket_handler))
@@ -526,6 +538,63 @@ mod tests {
                 .expect("app.js body")
                 .contains("function websocketUrl()"),
             "expected embedded server to serve the shared frontend bundle script",
+        );
+
+        let xterm_js = client
+            .get(format!("{}assets/xterm/xterm.mjs", server.url()))
+            .send()
+            .expect("xterm module request");
+        assert_eq!(xterm_js.status(), HttpStatusCode::OK);
+        assert_eq!(
+            xterm_js
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/javascript; charset=utf-8")
+        );
+        assert!(
+            xterm_js
+                .text()
+                .expect("xterm module body")
+                .contains("Terminal"),
+            "expected embedded server to serve pinned xterm module asset",
+        );
+
+        let xterm_fit_js = client
+            .get(format!("{}assets/xterm/addon-fit.mjs", server.url()))
+            .send()
+            .expect("xterm fit module request");
+        assert_eq!(xterm_fit_js.status(), HttpStatusCode::OK);
+        assert_eq!(
+            xterm_fit_js
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/javascript; charset=utf-8")
+        );
+        assert!(
+            xterm_fit_js
+                .text()
+                .expect("xterm fit module body")
+                .contains("FitAddon"),
+            "expected embedded server to serve pinned xterm fit addon asset",
+        );
+
+        let xterm_css = client
+            .get(format!("{}assets/xterm/xterm.css", server.url()))
+            .send()
+            .expect("xterm css request");
+        assert_eq!(xterm_css.status(), HttpStatusCode::OK);
+        assert_eq!(
+            xterm_css
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/css; charset=utf-8")
+        );
+        assert!(
+            xterm_css.text().expect("xterm css body").contains(".xterm"),
+            "expected embedded server to serve pinned xterm stylesheet asset",
         );
 
         let event = RuntimeHookEvent {

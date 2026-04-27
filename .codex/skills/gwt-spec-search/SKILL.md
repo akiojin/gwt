@@ -5,7 +5,7 @@ description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cac
 
 # SPEC Search
 
-gwt maintains a vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is rebuilt from the cache. Use `gwt issue spec pull --all` to refresh the cache before searching.
+gwt maintains a vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is rebuilt from the cache. Use `gwtd issue spec pull --all` to refresh the cache before searching.
 
 ## SPEC search first for spec integration
 

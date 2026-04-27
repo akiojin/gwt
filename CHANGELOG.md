@@ -1,6 +1,89 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.10.1] - 2026-04-26
+
+### Bug Fixes
+
+- Add platform guard to prevent cmd.exe spawn on macOS by @akiojin
+- Use runtime cfg! checks in windows shell tests for coverage by @akiojin
+- Add defensive platform guard in build_shell_process_launch by @akiojin
+
+### Miscellaneous Tasks
+
+- Exclude launch_runtime.rs from coverage threshold by @akiojin
+
+### Testing
+
+- Add unit tests for windows shell command mapping functions by @akiojin
+
+## [9.10.0] - 2026-04-26
+
+### Bug Fixes
+
+- **cli:** Route agents through gwtd and guard GUI launch
+- Harden knowledge bridge semantic search
+- Defer semantic search until cache load
+
+### Features
+
+- Add semantic search to knowledge bridge
+
+### Miscellaneous Tasks
+
+- Merge origin develop into gwt cli branch
+
+## [9.9.0] - 2026-04-25
+
+### Bug Fixes
+
+- **runtime:** Force UTF-8 in chroma_index_runner to prevent cp932 decode errors on Japanese Windows
+- **codex:** 保存済み旧モデルIDをAutoへ戻す
+- **logging:** Enforce project-scoped structured logs
+- Harden knowledge bridge issue refresh
+- Harden project index lifecycle
+- Unify project index logging
+- **index:** Detect partial specs corruption
+- Handle quoted Windows npx cmd launches
+- Stabilize windows shell launch metadata
+- **index:** Use project scoped audit log
+- **repo_hash:** Scrub inherited git env vars before path-specific lookups
+- **gwt:** Scrub inherited git env in test fixtures
+- **coordination:** Scrub inherited git env in repo root and worktree probes
+- **board:** Repair board window interaction
+- **update:** Ignore unsupported installer fallback urls
+- **board:** Correlate composer submit completion
+- **hook:** Treat empty stdin as silent no-op for runtime_state
+- **cli:** Canonicalize internal dispatch executable
+- **agent:** Close window after stopped runtime hook
+
+### Documentation
+
+- **process:** SPEC検索の再発防止を記録
+- Document windows shell selection
+
+### Features
+
+- **codex:** Gpt-5.5モデル一覧に更新
+- Add windows shell selection for launches
+
+### Miscellaneous Tasks
+
+- Merge origin develop
+- Merge origin develop
+- **husky:** Unset inherited git env in test hooks
+- **husky:** Serialize llvm-cov tests in pre-push coverage gate
+
+### Styling
+
+- Cargo fmt 整形
+
+### Testing
+
+- Harden macos path-dependent verification
+- **update:** Cover unsupported installer fallback
+- **coverage:** Keep release threshold focused on domain/helper surfaces
+
 ## [9.8.2] - 2026-04-23
 
 ### Bug Fixes
@@ -19,7 +102,6 @@ All notable changes to this project will be documented in this file.
 ### Testing
 
 - Make launch wizard quick start resume deterministic
-
 
 ## [9.8.0] - 2026-04-23
 
@@ -1497,7 +1579,6 @@ All notable changes to this project will be documented in this file.
 
 - **repo:** Disable squash merges
 - Add required build workflow for PRs
-
 
 ## [8.17.2] - 2026-03-20
 

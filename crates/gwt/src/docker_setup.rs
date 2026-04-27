@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DOCKER_GWT_BIN_PATH: &str = "/usr/local/bin/gwt";
 const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
@@ -35,7 +34,7 @@ fn install_launch_gwt_bin_env_with_lookup(
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> Result<(), String> {
     let gwt_bin = match runtime_target {
-        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWT_BIN_PATH.to_string(),
+        gwt_agent::LaunchRuntimeTarget::Docker => DOCKER_GWTD_BIN_PATH.to_string(),
         gwt_agent::LaunchRuntimeTarget::Host => {
             gwt::managed_assets::resolve_public_gwt_bin_with_lookup(current_exe, lookup)
                 .to_string_lossy()
@@ -73,7 +72,6 @@ fn docker_compose_mount_path(path: &Path) -> String {
 }
 
 fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
-    let host_gwt = docker_compose_mount_path(&bundle.host_gwt);
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
         "{DOCKER_GWT_OVERRIDE_HEADER}\n\
@@ -81,7 +79,6 @@ fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) ->
          services:\n\
            {service}:\n\
              volumes:\n\
-               - \"{host_gwt}:{DOCKER_GWT_BIN_PATH}:ro\"\n\
                - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
     )
 }
@@ -222,7 +219,7 @@ mod tests {
             gwt_agent::LaunchRuntimeTarget::Host,
             &current_exe,
             |command| {
-                assert_eq!(command, "gwt");
+                assert_eq!(command, "gwtd");
                 Some(stable.clone())
             },
         )
@@ -235,13 +232,13 @@ mod tests {
     }
 
     #[test]
-    fn docker_bundle_override_content_mounts_front_door_and_daemon() {
+    fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
         let content = docker_bundle_override_content("app", &bundle);
 
-        assert!(content.contains("/home/example/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
     }
 
@@ -271,8 +268,8 @@ mod tests {
 
         let override_content = fs::read_to_string(docker_compose_override_path(repo.path()))
             .expect("override content");
-        assert!(override_content.contains("gwt-linux:/usr/local/bin/gwt:ro"));
         assert!(override_content.contains("gwtd-linux:/usr/local/bin/gwtd:ro"));
+        assert!(!override_content.contains("/usr/local/bin/gwt:ro"));
     }
 
     #[test]

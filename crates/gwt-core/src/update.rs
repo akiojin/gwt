@@ -2527,7 +2527,11 @@ mod tests {
             asset_url: Some("https://example.com/gwt-legacy.zip".to_string()),
             ..missing
         };
-        match mgr.state_from_cache(&newer, None) {
+        let exe_dir = temp.path().join("bin");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let exe_path = exe_dir.join("gwt");
+        std::fs::write(&exe_path, b"").unwrap();
+        match mgr.state_from_cache(&newer, Some(&exe_path)) {
             UpdateState::Available {
                 current,
                 latest,

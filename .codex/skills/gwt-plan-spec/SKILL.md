@@ -25,12 +25,12 @@ SPEC-1935 FR-014q routes Stop through `skill-plan-spec-stop-check`, which reads
 `.gwt/skill-state/plan-spec.json` and blocks Stop while the skill is active.
 Register the skill lifecycle explicitly with the exit CLI:
 
-- `gwt plan start --spec <n>` at the beginning of the skill invocation
-- `gwt plan phase --spec <n> --label <plan-draft|tasks-draft|quality-gate>`
+- `gwtd plan start --spec <n>` at the beginning of the skill invocation
+- `gwtd plan phase --spec <n> --label <plan-draft|tasks-draft|quality-gate>`
   at each internal milestone (logging only; does not affect blocking)
-- `gwt plan complete --spec <n>` once the quality gate verdict is `CLEAR`
+- `gwtd plan complete --spec <n>` once the quality gate verdict is `CLEAR`
   and planning artifacts are written
-- `gwt plan abort --spec <n> --reason '<text>'` when planning cannot
+- `gwtd plan abort --spec <n> --reason '<text>'` when planning cannot
   proceed (e.g. spec gap discovered mid-planning)
 
 The Stop-block handler honours Claude Code / Codex's built-in

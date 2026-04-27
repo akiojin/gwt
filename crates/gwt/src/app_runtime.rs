@@ -69,12 +69,56 @@ impl BlockingTaskSpawner {
     }
 }
 
+pub(crate) struct KnowledgeSearchRequest<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) kind: KnowledgeKind,
+    pub(crate) query: &'a str,
+    pub(crate) request_id: u64,
+    pub(crate) selected_number: Option<u64>,
+    pub(crate) list_scope: gwt::KnowledgeListScope,
+}
+
+pub(crate) struct KnowledgeLoadRequest<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) kind: KnowledgeKind,
+    pub(crate) request_id: Option<u64>,
+    pub(crate) selected_number: Option<u64>,
+    pub(crate) refresh: bool,
+    pub(crate) list_scope: gwt::KnowledgeListScope,
+}
+
+struct KnowledgeRefreshTask {
+    client_id: String,
+    id: String,
+    project_root: PathBuf,
+    kind: KnowledgeKind,
+    request_id: Option<u64>,
+    selected_number: Option<u64>,
+    force: bool,
+    list_scope: gwt::KnowledgeListScope,
+}
+
+struct KnowledgeSearchTask {
+    client_id: String,
+    id: String,
+    project_root: PathBuf,
+    kind: KnowledgeKind,
+    query: String,
+    request_id: u64,
+    selected_number: Option<u64>,
+    list_scope: gwt::KnowledgeListScope,
+}
+
 pub(crate) struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
     /// its Arc clone of `pane` before the runtime is fully torn down.
     output_thread: Option<JoinHandle<()>>,
+    /// Handle to the process status watcher. It is independent from PTY EOF
+    /// because some agent exits can leave the terminal reader waiting even
+    /// after the direct child has finished.
+    status_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +194,59 @@ impl OutboundEvent {
             event,
         }
     }
+}
+
+fn knowledge_error_event(
+    id: impl Into<String>,
+    kind: KnowledgeKind,
+    message: impl Into<String>,
+    request_id: Option<u64>,
+    query: Option<String>,
+    list_scope: Option<gwt::KnowledgeListScope>,
+) -> BackendEvent {
+    BackendEvent::KnowledgeError {
+        id: id.into(),
+        knowledge_kind: kind,
+        request_id,
+        query,
+        list_scope,
+        message: message.into(),
+    }
+}
+
+fn knowledge_view_events(
+    client_id: String,
+    id: String,
+    kind: KnowledgeKind,
+    request_id: Option<u64>,
+    list_scope: gwt::KnowledgeListScope,
+    view: gwt::KnowledgeBridgeView,
+) -> Vec<OutboundEvent> {
+    vec![
+        OutboundEvent::reply(
+            client_id.clone(),
+            BackendEvent::KnowledgeEntries {
+                id: id.clone(),
+                knowledge_kind: kind,
+                request_id,
+                list_scope: Some(list_scope),
+                entries: view.entries,
+                selected_number: view.selected_number,
+                empty_message: view.empty_message,
+                refresh_enabled: view.refresh_enabled,
+            },
+        ),
+        OutboundEvent::reply(
+            client_id,
+            BackendEvent::KnowledgeDetail {
+                id,
+                knowledge_kind: kind,
+                request_id,
+                list_scope: Some(list_scope),
+                detail: view.detail,
+            },
+        ),
+    ]
 }
 
 struct ProfileSaveRequest {
@@ -435,29 +532,55 @@ impl AppRuntime {
             FrontendEvent::LoadKnowledgeBridge {
                 id,
                 knowledge_kind,
+                request_id,
                 selected_number,
                 refresh,
                 list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
-                &id,
+                KnowledgeLoadRequest {
+                    id: &id,
+                    kind: knowledge_kind,
+                    request_id,
+                    selected_number,
+                    refresh,
+                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
+                },
+            ),
+            FrontendEvent::SearchKnowledgeBridge {
+                id,
                 knowledge_kind,
+                query,
+                request_id,
                 selected_number,
-                refresh,
-                list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
+                list_scope,
+            } => self.search_knowledge_bridge_events(
+                &client_id,
+                KnowledgeSearchRequest {
+                    id: &id,
+                    kind: knowledge_kind,
+                    query: &query,
+                    request_id,
+                    selected_number,
+                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
+                },
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
+                request_id,
                 number,
                 list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
-                &id,
-                knowledge_kind,
-                Some(number),
-                false,
-                list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
+                KnowledgeLoadRequest {
+                    id: &id,
+                    kind: knowledge_kind,
+                    request_id,
+                    selected_number: Some(number),
+                    refresh: false,
+                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
+                },
             ),
             FrontendEvent::RunBranchCleanup {
                 id,
@@ -1968,90 +2091,291 @@ impl AppRuntime {
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
-        id: &str,
-        kind: KnowledgeKind,
-        selected_number: Option<u64>,
-        refresh: bool,
-        list_scope: gwt::KnowledgeListScope,
+        request: KnowledgeLoadRequest<'_>,
     ) -> Vec<OutboundEvent> {
+        let id = request.id;
+        let kind = request.kind;
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: kind,
-                    message: "Window not found".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window not found",
+                    request.request_id,
+                    None,
+                    Some(request.list_scope),
+                ),
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: kind,
-                    message: "Project tab not found".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Project tab not found",
+                    request.request_id,
+                    None,
+                    Some(request.list_scope),
+                ),
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: kind,
-                    message: "Window not found".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window not found",
+                    request.request_id,
+                    None,
+                    Some(request.list_scope),
+                ),
             )];
         };
         if knowledge_kind_for_preset(window.preset) != Some(kind) {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: kind,
-                    message: "Window is not a knowledge bridge".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window is not a knowledge bridge",
+                    request.request_id,
+                    None,
+                    Some(request.list_scope),
+                ),
             )];
+        }
+
+        if request.refresh {
+            self.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
+                client_id: client_id.to_string(),
+                id: id.to_string(),
+                project_root: tab.project_root.clone(),
+                kind,
+                request_id: request.request_id,
+                selected_number: request.selected_number,
+                force: true,
+                list_scope: request.list_scope,
+            });
+            return Vec::new();
         }
 
         match load_knowledge_bridge(
             &tab.project_root,
             kind,
-            selected_number,
-            refresh,
-            list_scope,
+            request.selected_number,
+            false,
+            request.list_scope,
         ) {
-            Ok(view) => vec![
-                OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::KnowledgeEntries {
+            Ok(view) => {
+                if request.request_id.is_some() && view.refresh_enabled {
+                    self.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
+                        client_id: client_id.to_string(),
                         id: id.to_string(),
-                        knowledge_kind: kind,
-                        entries: view.entries,
-                        selected_number: view.selected_number,
-                        empty_message: view.empty_message,
-                        refresh_enabled: view.refresh_enabled,
-                    },
-                ),
-                OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::KnowledgeDetail {
-                        id: id.to_string(),
-                        knowledge_kind: kind,
-                        detail: view.detail,
-                    },
-                ),
-            ],
+                        project_root: tab.project_root.clone(),
+                        kind,
+                        request_id: request.request_id,
+                        selected_number: request.selected_number,
+                        force: false,
+                        list_scope: request.list_scope,
+                    });
+                }
+                knowledge_view_events(
+                    client_id.to_string(),
+                    id.to_string(),
+                    kind,
+                    request.request_id,
+                    request.list_scope,
+                    view,
+                )
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: kind,
-                    message: error,
-                },
+                knowledge_error_event(
+                    id,
+                    kind,
+                    error,
+                    request.request_id,
+                    None,
+                    Some(request.list_scope),
+                ),
             )],
         }
+    }
+
+    fn spawn_knowledge_bridge_refresh(&self, task: KnowledgeRefreshTask) {
+        let KnowledgeRefreshTask {
+            client_id,
+            id,
+            project_root,
+            kind,
+            request_id,
+            selected_number,
+            force,
+            list_scope,
+        } = task;
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let refreshed = match gwt::refresh_knowledge_bridge_cache(&project_root, force) {
+                Ok(refreshed) => refreshed,
+                Err(error) => {
+                    if force {
+                        proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                            client_id,
+                            knowledge_error_event(
+                                id,
+                                kind,
+                                error,
+                                request_id,
+                                None,
+                                Some(list_scope),
+                            ),
+                        )]));
+                    }
+                    return;
+                }
+            };
+            if !force && !refreshed {
+                return;
+            }
+            let event = match gwt::load_knowledge_bridge(
+                &project_root,
+                kind,
+                selected_number,
+                false,
+                list_scope,
+            ) {
+                Ok(view) => {
+                    knowledge_view_events(client_id, id, kind, request_id, list_scope, view)
+                }
+                Err(error) => vec![OutboundEvent::reply(
+                    client_id,
+                    knowledge_error_event(id, kind, error, request_id, None, Some(list_scope)),
+                )],
+            };
+            proxy.send(UserEvent::Dispatch(event));
+        });
+    }
+
+    pub(crate) fn search_knowledge_bridge_events(
+        &self,
+        client_id: &str,
+        request: KnowledgeSearchRequest<'_>,
+    ) -> Vec<OutboundEvent> {
+        let id = request.id;
+        let kind = request.kind;
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window not found",
+                    Some(request.request_id),
+                    Some(request.query.to_string()),
+                    Some(request.list_scope),
+                ),
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Project tab not found",
+                    Some(request.request_id),
+                    Some(request.query.to_string()),
+                    Some(request.list_scope),
+                ),
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window not found",
+                    Some(request.request_id),
+                    Some(request.query.to_string()),
+                    Some(request.list_scope),
+                ),
+            )];
+        };
+        if knowledge_kind_for_preset(window.preset) != Some(kind) {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    kind,
+                    "Window is not a knowledge bridge",
+                    Some(request.request_id),
+                    Some(request.query.to_string()),
+                    Some(request.list_scope),
+                ),
+            )];
+        }
+
+        self.spawn_knowledge_bridge_search(KnowledgeSearchTask {
+            client_id: client_id.to_string(),
+            id: id.to_string(),
+            project_root: tab.project_root.clone(),
+            kind,
+            query: request.query.to_string(),
+            request_id: request.request_id,
+            selected_number: request.selected_number,
+            list_scope: request.list_scope,
+        });
+        Vec::new()
+    }
+
+    fn spawn_knowledge_bridge_search(&self, task: KnowledgeSearchTask) {
+        let KnowledgeSearchTask {
+            client_id,
+            id,
+            project_root,
+            kind,
+            query,
+            request_id,
+            selected_number,
+            list_scope,
+        } = task;
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event = match gwt::search_knowledge_bridge(
+                &project_root,
+                kind,
+                &query,
+                selected_number,
+                list_scope,
+            ) {
+                Ok(view) => BackendEvent::KnowledgeSearchResults {
+                    id: id.clone(),
+                    knowledge_kind: kind,
+                    query: query.clone(),
+                    request_id,
+                    list_scope: Some(list_scope),
+                    entries: view.entries,
+                    selected_number: view.selected_number,
+                    empty_message: view.empty_message,
+                    refresh_enabled: view.refresh_enabled,
+                },
+                Err(error) => knowledge_error_event(
+                    id,
+                    kind,
+                    error,
+                    Some(request_id),
+                    Some(query),
+                    Some(list_scope),
+                ),
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
     }
 
     pub(crate) fn run_branch_cleanup_events(
@@ -2313,7 +2637,10 @@ impl AppRuntime {
                 &active_session_branches,
                 &sessions_dir,
             );
-            proxy.send(UserEvent::LaunchWizardHydrated { wizard_id, result });
+            proxy.send(UserEvent::LaunchWizardHydrated {
+                wizard_id,
+                result: Box::new(result),
+            });
         });
 
         Ok(())
@@ -2328,41 +2655,53 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Window not found".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Window not found",
+                    None,
+                    None,
+                    None,
+                ),
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Project tab not found".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Project tab not found",
+                    None,
+                    None,
+                    None,
+                ),
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Window not found".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Window not found",
+                    None,
+                    None,
+                    None,
+                ),
             )];
         };
         let Some(kind) = knowledge_kind_for_preset(window.preset) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::KnowledgeError {
-                    id: id.to_string(),
-                    knowledge_kind: KnowledgeKind::Issue,
-                    message: "Window is not a knowledge bridge".to_string(),
-                },
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Window is not a knowledge bridge",
+                    None,
+                    None,
+                    None,
+                ),
             )];
         };
 
@@ -2431,11 +2770,14 @@ impl AppRuntime {
         if self.tab(&tab_id).is_none() {
             return vec![OutboundEvent::reply(
                 &client_id,
-                BackendEvent::KnowledgeError {
+                knowledge_error_event(
                     id,
                     knowledge_kind,
-                    message: "Project tab not found".to_string(),
-                },
+                    "Project tab not found",
+                    None,
+                    None,
+                    None,
+                ),
             )];
         }
 
@@ -2449,20 +2791,12 @@ impl AppRuntime {
                 Ok(()) => vec![self.launch_wizard_state_outbound()],
                 Err(error) => vec![OutboundEvent::reply(
                     &client_id,
-                    BackendEvent::KnowledgeError {
-                        id,
-                        knowledge_kind,
-                        message: error,
-                    },
+                    knowledge_error_event(id, knowledge_kind, error, None, None, None),
                 )],
             },
             Err(error) => vec![OutboundEvent::reply(
                 &client_id,
-                BackendEvent::KnowledgeError {
-                    id,
-                    knowledge_kind,
-                    message: error,
-                },
+                knowledge_error_event(id, knowledge_kind, error, None, None, None),
             )],
         }
     }
@@ -2660,7 +2994,26 @@ impl AppRuntime {
         let Some(composed_state) = self.recompute_window_state(&window_id) else {
             return events;
         };
+        let should_auto_close = should_auto_close_agent_window(
+            &self.active_agent_sessions,
+            &window_id,
+            &composed_state,
+        );
         let detail = self.window_details.get(&window_id).cloned();
+        if should_auto_close {
+            self.stop_window_runtime(&window_id);
+            self.remove_window_state_tracking(&window_id);
+            if close_window_from_workspace(
+                &mut self.tabs,
+                &mut self.window_lookup,
+                &mut self.window_details,
+                &window_id,
+            ) {
+                let _ = self.persist();
+                events.push(self.workspace_state_broadcast());
+            }
+            return events;
+        }
         let _ = self.persist();
         events.push(self.workspace_state_broadcast());
         events.extend(Self::status_events(window_id, composed_state, detail));
@@ -2863,6 +3216,7 @@ impl AppRuntime {
         let pane = Arc::new(Mutex::new(pane));
 
         let output_thread = self.spawn_output_thread(id.to_string(), pane.clone());
+        let status_thread = self.spawn_status_thread(id.to_string(), pane.clone());
         if let Some(address) = self.window_lookup.get(id).cloned() {
             self.window_pty_statuses
                 .insert(id.to_string(), WindowProcessStatus::Running);
@@ -2885,6 +3239,7 @@ impl AppRuntime {
             WindowRuntime {
                 pane,
                 output_thread: Some(output_thread),
+                status_thread: Some(status_thread),
             },
         );
         Ok(())
@@ -3061,6 +3416,7 @@ impl AppRuntime {
             session.tool_version = config.tool_version.clone();
             session.model = config.model.clone();
             session.reasoning_level = config.reasoning_level.clone();
+            session.session_mode = config.session_mode;
             session.skip_permissions = config.skip_permissions;
             session.codex_fast_mode = config.codex_fast_mode;
             session.runtime_target = config.runtime_target;
@@ -3259,6 +3615,14 @@ impl AppRuntime {
                 });
                 let _ = rx.recv_timeout(Duration::from_millis(500));
             }
+            if let Some(handle) = runtime.status_thread.take() {
+                let (tx, rx) = std_mpsc::channel();
+                thread::spawn(move || {
+                    let _ = handle.join();
+                    let _ = tx.send(());
+                });
+                let _ = rx.recv_timeout(Duration::from_millis(500));
+            }
         }
         self.window_details.remove(window_id);
     }
@@ -3347,41 +3711,9 @@ impl AppRuntime {
                 });
 
             match status {
-                Ok(PaneStatus::Running) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Running,
-                        ),
-                        detail: None,
-                    });
-                }
-                Ok(PaneStatus::Completed(0)) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Completed(0),
-                        ),
-                        detail: Some("Process exited".to_string()),
-                    });
-                }
-                Ok(PaneStatus::Completed(code)) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Completed(code),
-                        ),
-                        detail: Some(format!("Process exited with status {code}")),
-                    });
-                }
-                Ok(PaneStatus::Error(message)) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        status: gwt::window_state::window_state_from_pane_status(
-                            &PaneStatus::Error(message.clone()),
-                        ),
-                        detail: Some(message),
-                    });
+                Ok(status) => {
+                    let (status, detail) = Self::runtime_status_from_pane_status(&status);
+                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
                 }
                 Err(error) => {
                     proxy.send(UserEvent::RuntimeStatus {
@@ -3392,6 +3724,63 @@ impl AppRuntime {
                 }
             }
         })
+    }
+
+    pub(crate) fn spawn_status_thread(&self, id: String, pane: Arc<Mutex<Pane>>) -> JoinHandle<()> {
+        let proxy = self.proxy.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            let status = pane
+                .lock()
+                .map_err(|error| error.to_string())
+                .and_then(|mut pane| {
+                    pane.check_status()
+                        .cloned()
+                        .map_err(|error| error.to_string())
+                });
+
+            match status {
+                Ok(PaneStatus::Running) => continue,
+                Ok(status) => {
+                    if matches!(status, PaneStatus::Completed(_)) {
+                        if let Ok(pane) = pane.lock() {
+                            let _ = pane.kill();
+                        }
+                    }
+                    let (status, detail) = Self::runtime_status_from_pane_status(&status);
+                    proxy.send(UserEvent::RuntimeStatus { id, status, detail });
+                    break;
+                }
+                Err(error) => {
+                    proxy.send(UserEvent::RuntimeStatus {
+                        id,
+                        status: WindowProcessStatus::Error,
+                        detail: Some(error),
+                    });
+                    break;
+                }
+            }
+        })
+    }
+
+    fn runtime_status_from_pane_status(
+        status: &PaneStatus,
+    ) -> (WindowProcessStatus, Option<String>) {
+        match status {
+            PaneStatus::Running => (WindowProcessStatus::Running, None),
+            PaneStatus::Completed(0) => (
+                gwt::window_state::window_state_from_pane_status(status),
+                Some("Process exited".to_string()),
+            ),
+            PaneStatus::Completed(code) => (
+                gwt::window_state::window_state_from_pane_status(status),
+                Some(format!("Process exited with status {code}")),
+            ),
+            PaneStatus::Error(message) => (
+                gwt::window_state::window_state_from_pane_status(status),
+                Some(message.clone()),
+            ),
+        }
     }
 
     pub(crate) fn app_state_view(&self) -> gwt::AppStateView {
@@ -3563,11 +3952,18 @@ impl AppRuntime {
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
-        let session_id = event.agent_session_id.as_deref()?;
-        self.active_agent_sessions
-            .iter()
-            .find(|(_, session)| session.session_id == session_id)
-            .map(|(window_id, _)| window_id.clone())
+        [
+            event.gwt_session_id.as_deref(),
+            event.agent_session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|session_id| {
+            self.active_agent_sessions
+                .iter()
+                .find(|(_, session)| session.session_id == session_id)
+                .map(|(window_id, _)| window_id.clone())
+        })
     }
 
     fn recompute_window_state(&mut self, window_id: &str) -> Option<WindowProcessStatus> {
@@ -3736,9 +4132,12 @@ fn update_issue_branch_link_with_cache_dir(
 mod tests {
     use std::{
         collections::HashMap,
+        ffi::OsString,
         fs,
         path::{Path, PathBuf},
         sync::{Arc, Mutex, RwLock},
+        thread,
+        time::{Duration, Instant},
     };
 
     use tempfile::tempdir;
@@ -3767,9 +4166,43 @@ mod tests {
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        LaunchWizardSession, OutboundEvent, ProjectTabRuntime, WindowRuntime,
+        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardSession,
+        OutboundEvent, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fake_gh_test_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn write_profile_config(path: &Path, settings: &Settings) {
         settings.save(path).expect("write profile config");
@@ -3845,6 +4278,106 @@ mod tests {
                 .expect("serialize store"),
         )
         .expect("write link store");
+    }
+
+    #[cfg(unix)]
+    fn write_fake_project_index_runtime(home: &Path) {
+        let python = home
+            .join(".gwt")
+            .join("runtime")
+            .join("chroma-venv")
+            .join("bin")
+            .join("python3");
+        fs::create_dir_all(python.parent().expect("fake python parent"))
+            .expect("create fake python dir");
+        fs::write(
+            &python,
+            r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "-c" ]; then
+    exit 0
+  fi
+done
+case "$*" in
+  *"-m pip"*)
+    exit 0
+    ;;
+  *"--action probe"*)
+    exit 0
+    ;;
+  *"--action search-issues"*)
+    printf '%s\n' '{"ok":true,"issueResults":[{"number":42,"distance":0.25}]}'
+    exit 0
+    ;;
+  *"--action search-specs"*)
+    printf '%s\n' '{"ok":true,"specResults":[{"spec_id":1930,"distance":0.4}]}'
+    exit 0
+    ;;
+esac
+printf '%s\n' '{"ok":false,"error":"unexpected fake python invocation"}'
+exit 1
+"#,
+        )
+        .expect("write fake python");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&python, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake python");
+        }
+    }
+
+    fn write_fake_gh_issue_list(temp_root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let fake_gh = temp_root.join("gh.cmd");
+            fs::write(
+                &fake_gh,
+                "@echo off\r\n\
+if not \"%GWT_FAKE_GH_MARKER%\"==\"\" echo called>>\"%GWT_FAKE_GH_MARKER%\"\r\n\
+if /I \"%GWT_FAKE_GH_MODE%\"==\"fail\" (\r\n\
+  >&2 echo gh refresh failed\r\n\
+  exit /b 1\r\n\
+)\r\n\
+echo [{\"number\":43,\"title\":\"Refreshed issue\",\"body\":\"Fresh body\",\"labels\":[{\"name\":\"bug\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
+exit /b 0\r\n",
+            )
+            .expect("write fake gh");
+            fake_gh
+        }
+        #[cfg(not(windows))]
+        {
+            let fake_gh = temp_root.join("gh");
+            fs::write(
+                &fake_gh,
+                r#"#!/bin/sh
+if [ -n "$GWT_FAKE_GH_MARKER" ]; then
+  touch "$GWT_FAKE_GH_MARKER"
+fi
+if [ "$GWT_FAKE_GH_MODE" = "fail" ]; then
+  printf '%s\n' 'gh refresh failed' >&2
+  exit 1
+fi
+printf '%s\n' '[{"number":43,"title":"Refreshed issue","body":"Fresh body","labels":[{"name":"bug"}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"2026-04-20T00:00:00Z"}]'
+exit 0
+"#,
+            )
+            .expect("write fake gh");
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_gh, fs::Permissions::from_mode(0o755))
+                .expect("chmod fake gh");
+            fake_gh
+        }
+    }
+
+    fn prepend_fake_gh_to_path(fake_gh: &Path) -> ScopedEnvVar {
+        let parent = fake_gh.parent().expect("fake gh parent");
+        let mut paths = vec![parent.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        ScopedEnvVar::set("PATH", joined)
     }
 
     fn canvas_bounds() -> WindowGeometry {
@@ -3938,11 +4471,46 @@ mod tests {
         }
     }
 
+    fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
+        ActiveAgentSession {
+            window_id: window_id.to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "feature/test".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            tab_id: tab_id.to_string(),
+        }
+    }
+
+    fn runtime_hook_state(status: &str, session_id: &str) -> gwt::RuntimeHookEvent {
+        gwt::RuntimeHookEvent {
+            kind: gwt::RuntimeHookEventKind::RuntimeState,
+            source_event: Some("Stop".to_string()),
+            gwt_session_id: Some(session_id.to_string()),
+            agent_session_id: Some("agent-session-1".to_string()),
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/test".to_string()),
+            status: Some(status.to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-04-25T00:00:00Z".to_string(),
+        }
+    }
+
     fn sample_runtime(
         temp_root: &Path,
         tabs: Vec<ProjectTabRuntime>,
         active_tab_id: Option<&str>,
     ) -> AppRuntime {
+        sample_runtime_with_events(temp_root, tabs, active_tab_id).0
+    }
+
+    fn sample_runtime_with_events(
+        temp_root: &Path,
+        tabs: Vec<ProjectTabRuntime>,
+        active_tab_id: Option<&str>,
+    ) -> (AppRuntime, Arc<Mutex<Vec<UserEvent>>>) {
         let (proxy, _events) = AppEventProxy::stub();
         let sessions_dir = temp_root.join("sessions");
         let log_dir = temp_root.join("logs");
@@ -3974,7 +4542,25 @@ mod tests {
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
-        runtime
+        (runtime, _events)
+    }
+
+    fn wait_for_recorded_event(
+        label: &str,
+        events: &Arc<Mutex<Vec<UserEvent>>>,
+        predicate: impl Fn(&[UserEvent]) -> bool,
+    ) {
+        for _ in 0..800 {
+            {
+                let events = events.lock().expect("event log");
+                if predicate(&events) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let snapshot = events.lock().expect("event log").clone();
+        panic!("timed out waiting for {label}: {snapshot:?}");
     }
 
     fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
@@ -4094,6 +4680,7 @@ mod tests {
             WindowRuntime {
                 pane: Arc::new(Mutex::new(pane)),
                 output_thread: None,
+                status_thread: None,
             },
         );
 
@@ -4195,6 +4782,161 @@ mod tests {
                     && *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
         ));
+    }
+
+    #[test]
+    fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = runtime.handle_runtime_status(
+            window_id.clone(),
+            WindowProcessStatus::Stopped,
+            Some("Process exited".to_string()),
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    }
+
+    #[test]
+    fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        );
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let captured_events = match &runtime.proxy {
+            AppEventProxy::Stub(events) => events.clone(),
+            AppEventProxy::Real(_) => panic!("sample runtime must use stub proxy"),
+        };
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "exit 0".to_string()],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+        let pane = Arc::new(Mutex::new(
+            Pane::new(
+                window_id.clone(),
+                command,
+                args,
+                80,
+                24,
+                HashMap::new(),
+                None,
+            )
+            .expect("pane"),
+        ));
+        let status_thread = runtime.spawn_status_thread(window_id.clone(), pane.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut observed_status = None;
+        while Instant::now() < deadline {
+            if let Ok(events) = captured_events.lock() {
+                observed_status = events.iter().find_map(|event| match event {
+                    UserEvent::RuntimeStatus { id, status, detail }
+                        if id == &window_id && *status == WindowProcessStatus::Stopped =>
+                    {
+                        Some(detail.clone())
+                    }
+                    _ => None,
+                });
+            }
+            if observed_status.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        if observed_status.is_none() {
+            if let Ok(pane) = pane.lock() {
+                let _ = pane.kill();
+            }
+        }
+        let _ = status_thread.join();
+
+        assert_eq!(observed_status.flatten().as_deref(), Some("Process exited"));
+    }
+
+    #[test]
+    fn app_runtime_runtime_hook_stopped_auto_closes_active_agent_window() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::RuntimeHookEvent { .. }
+        ));
+        assert!(matches!(
+            events[1].event,
+            BackendEvent::WorkspaceState { .. }
+        ));
+        assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    }
+
+    #[test]
+    fn app_runtime_runtime_hook_stopped_without_active_session_keeps_window_open() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Stopped", "session-1"));
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::RuntimeHookEvent { .. }
+        ));
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.tabs[0].workspace.window("codex-1").is_some());
     }
 
     #[test]
@@ -4422,11 +5164,14 @@ mod tests {
 
         let issue_events = runtime.load_knowledge_bridge_events(
             "client-1",
-            &combined_window_id("tab-1", "issue-1"),
-            gwt::KnowledgeKind::Issue,
-            Some(42),
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: &combined_window_id("tab-1", "issue-1"),
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: Some(42),
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
         assert_eq!(issue_events.len(), 2);
         assert!(matches!(
@@ -4454,11 +5199,14 @@ mod tests {
 
         let spec_events = runtime.load_knowledge_bridge_events(
             "client-1",
-            &combined_window_id("tab-1", "spec-1"),
-            gwt::KnowledgeKind::Spec,
-            Some(1930),
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: &combined_window_id("tab-1", "spec-1"),
+                kind: gwt::KnowledgeKind::Spec,
+                request_id: None,
+                selected_number: Some(1930),
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
         assert_eq!(spec_events.len(), 2);
         assert!(matches!(
@@ -4484,6 +5232,367 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_knowledge_search_errors_for_wrong_surface() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "shell-1",
+            repo,
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let events = runtime.search_knowledge_bridge_events(
+            "client-1",
+            KnowledgeSearchRequest {
+                id: &window_id,
+                kind: gwt::KnowledgeKind::Issue,
+                query: "semantic query",
+                request_id: 9,
+                selected_number: None,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::KnowledgeError {
+                    knowledge_kind,
+                    message,
+                    ..
+                },
+            }] if client_id == "client-1"
+                && *knowledge_kind == gwt::KnowledgeKind::Issue
+                && message == "Window is not a knowledge bridge"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_runtime_knowledge_search_replies_through_async_dispatch() {
+        let _lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        write_fake_project_index_runtime(temp.path());
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+
+        let cache = Cache::new(issue_cache_root(&repo));
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                42,
+                "Async semantic issue",
+                &["bug"],
+                "Search result body",
+                "2026-04-20T10:00:00Z",
+            ))
+            .expect("write issue snapshot");
+
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo,
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SearchKnowledgeBridge {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                query: "semantic query".to_string(),
+                request_id: 9,
+                selected_number: None,
+                list_scope: Some(gwt::KnowledgeListScope::Open),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "semantic search must not reply on the frontend event loop"
+        );
+        wait_for_recorded_event("knowledge search dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.target,
+                                DispatchTarget::Client(client_id) if client_id == "client-1"
+                            ) && matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeSearchResults {
+                                    id,
+                                    knowledge_kind,
+                                    query,
+                                    request_id,
+                                    entries,
+                                    ..
+                                } if id == &window_id
+                                    && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                    && query == "semantic query"
+                                    && *request_id == 9
+                                    && entries.len() == 1
+                                    && entries[0].number == 42
+                            )
+                        })
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo,
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadKnowledgeBridge {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(31),
+                selected_number: Some(43),
+                refresh: true,
+                list_scope: Some(gwt::KnowledgeListScope::Open),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "manual refresh must not block the frontend event loop"
+        );
+        wait_for_recorded_event("manual knowledge refresh dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.target,
+                                DispatchTarget::Client(client_id) if client_id == "client-1"
+                            ) && matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeEntries {
+                                    id,
+                                    knowledge_kind,
+                                    request_id,
+                                    entries,
+                                    selected_number,
+                                    ..
+                                } if id == &window_id
+                                    && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                    && *request_id == Some(31)
+                                    && *selected_number == Some(43)
+                                    && entries.len() == 1
+                                    && entries[0].number == 43
+                            )
+                        }) && dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeDetail {
+                                    id,
+                                    request_id,
+                                    detail,
+                                    ..
+                                } if id == &window_id
+                                    && *request_id == Some(31)
+                                    && detail.number == Some(43)
+                            )
+                        })
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn app_runtime_manual_knowledge_refresh_error_preserves_request_context() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo,
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let immediate_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadKnowledgeBridge {
+                id: window_id.clone(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(32),
+                selected_number: None,
+                refresh: true,
+                list_scope: Some(gwt::KnowledgeListScope::Closed),
+            },
+        );
+
+        assert!(
+            immediate_events.is_empty(),
+            "manual refresh errors must be reported asynchronously"
+        );
+        wait_for_recorded_event("manual knowledge refresh error", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeError {
+                                    id,
+                                    knowledge_kind,
+                                    request_id,
+                                    list_scope,
+                                    message,
+                                    ..
+                                } if id == &window_id
+                                    && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                    && *request_id == Some(32)
+                                    && *list_scope == Some(gwt::KnowledgeListScope::Closed)
+                                    && message.contains("gh refresh failed")
+                            )
+                        })
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _gh_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let fake_gh = write_fake_gh_issue_list(temp.path());
+        let _path = prepend_fake_gh_to_path(&fake_gh);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let marker = temp.path().join("fake-gh-called");
+        let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &marker);
+
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "issue-1",
+            repo.clone(),
+            WindowPreset::Issue,
+            WindowProcessStatus::Ready,
+        );
+        let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "issue-1");
+
+        let mode_guard = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+        runtime.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
+            client_id: "client-1".to_string(),
+            id: window_id.clone(),
+            project_root: repo.clone(),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(33),
+            selected_number: None,
+            force: false,
+            list_scope: gwt::KnowledgeListScope::Open,
+        });
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            events.lock().expect("event log").is_empty(),
+            "background refresh errors should not overwrite the current cache view"
+        );
+        assert!(
+            marker.exists(),
+            "expected fake gh to be invoked for stale cache"
+        );
+
+        fs::remove_file(&marker).expect("remove marker");
+        drop(mode_guard);
+        let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+        runtime.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
+            client_id: "client-1".to_string(),
+            id: window_id,
+            project_root: temp.path().join("missing-repo"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(34),
+            selected_number: Some(43),
+            force: false,
+            list_scope: gwt::KnowledgeListScope::Open,
+        });
+        thread::sleep(Duration::from_millis(250));
+        assert!(
+            events.lock().expect("event log").is_empty(),
+            "noop background refresh should return silently without dispatch"
+        );
+    }
+
+    #[test]
     fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_support_exists() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -4501,11 +5610,14 @@ mod tests {
 
         let events = runtime.load_knowledge_bridge_events(
             "client-1",
-            &combined_window_id("tab-1", "pr-1"),
-            gwt::KnowledgeKind::Pr,
-            None,
-            false,
-            gwt::KnowledgeListScope::Open,
+            KnowledgeLoadRequest {
+                id: &combined_window_id("tab-1", "pr-1"),
+                kind: gwt::KnowledgeKind::Pr,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+                list_scope: gwt::KnowledgeListScope::Open,
+            },
         );
 
         assert_eq!(events.len(), 2);

@@ -154,6 +154,302 @@ fn authenticated_handshake_accepts_matching_contract_and_rejects_mismatch() {
 }
 
 #[test]
+fn runtime_scope_rejects_empty_repo_hash() {
+    let project_root = tempdir().unwrap();
+    let err = RuntimeScope::new(
+        "",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("repo_hash"));
+}
+
+#[test]
+fn runtime_scope_rejects_empty_worktree_hash() {
+    let project_root = tempdir().unwrap();
+    let err = RuntimeScope::new(
+        "repo-scope-1234",
+        "  ",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("worktree_hash"));
+}
+
+#[test]
+fn runtime_scope_rejects_relative_project_root() {
+    let err = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        PathBuf::from("relative/path"),
+        RuntimeTarget::Host,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("absolute"));
+}
+
+#[test]
+fn daemon_endpoint_is_usable_returns_false_for_mismatched_protocol() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION + 1, |_| true));
+}
+
+#[test]
+fn daemon_endpoint_is_usable_returns_false_for_empty_bind() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "  ".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION, |_| true));
+}
+
+#[test]
+fn daemon_endpoint_is_usable_returns_false_for_empty_auth_token() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "".into(),
+        "0.1.0".into(),
+    );
+    assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION, |_| true));
+}
+
+#[test]
+fn daemon_endpoint_is_usable_returns_false_for_dead_process() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION, |_| false));
+}
+
+#[test]
+fn validate_handshake_rejects_scope_mismatch() {
+    let project_a = tempdir().unwrap();
+    let project_b = tempdir().unwrap();
+    let scope_a = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_a.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let scope_b = RuntimeScope::new(
+        "repo-scope-9999",
+        "worktree-scope-0000",
+        project_b.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope_a.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    let request = IpcHandshakeRequest {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        auth_token: "secret-token".into(),
+        scope: scope_b,
+    };
+    let response = IpcHandshakeResponse {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        daemon_version: "0.1.0".into(),
+        accepted: true,
+        rejection_reason: None,
+    };
+    assert!(validate_handshake(&endpoint, &request, &response)
+        .unwrap_err()
+        .to_string()
+        .contains("scope"));
+}
+
+#[test]
+fn validate_handshake_rejects_with_reason() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    let request = IpcHandshakeRequest {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        auth_token: "secret-token".into(),
+        scope: scope.clone(),
+    };
+    let response = IpcHandshakeResponse {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        daemon_version: "0.1.0".into(),
+        accepted: false,
+        rejection_reason: Some("version too old".into()),
+    };
+    let err = validate_handshake(&endpoint, &request, &response)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("rejected"));
+    assert!(err.contains("version too old"));
+}
+
+#[test]
+fn validate_handshake_rejects_without_reason() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    let request = IpcHandshakeRequest {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        auth_token: "secret-token".into(),
+        scope: scope.clone(),
+    };
+    let response = IpcHandshakeResponse {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        daemon_version: "0.1.0".into(),
+        accepted: false,
+        rejection_reason: None,
+    };
+    let err = validate_handshake(&endpoint, &request, &response)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown rejection"));
+}
+
+#[test]
+fn resolve_bootstrap_action_spawns_when_endpoint_file_missing() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let result =
+        resolve_bootstrap_action(gwt_home.path(), &scope, DAEMON_PROTOCOL_VERSION, |_| true)
+            .unwrap();
+    assert!(matches!(result, DaemonBootstrapAction::Spawn { .. }));
+}
+
+#[test]
+fn resolve_bootstrap_action_spawns_when_endpoint_is_malformed() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let ep_path = scope.endpoint_path(gwt_home.path());
+    std::fs::create_dir_all(ep_path.parent().unwrap()).unwrap();
+    std::fs::write(&ep_path, b"not-json").unwrap();
+
+    let result =
+        resolve_bootstrap_action(gwt_home.path(), &scope, DAEMON_PROTOCOL_VERSION, |_| true)
+            .unwrap();
+    assert!(matches!(result, DaemonBootstrapAction::Spawn { .. }));
+    assert!(!ep_path.exists());
+}
+
+#[test]
+fn persist_endpoint_round_trips_through_file_system() {
+    let gwt_home = tempdir().unwrap();
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    let path = scope.endpoint_path(gwt_home.path());
+    persist_endpoint(&path, &endpoint).unwrap();
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    let loaded: DaemonEndpoint = serde_json::from_str(&content).unwrap();
+    assert_eq!(loaded.pid, 4242);
+    assert_eq!(loaded.bind, "http://127.0.0.1:7777");
+    assert_eq!(loaded.auth_token, "secret-token");
+}
+
+#[test]
 fn hook_envelope_serializes_runtime_scope_and_payload() {
     let project_root = tempdir().unwrap();
     let scope = RuntimeScope::new(
