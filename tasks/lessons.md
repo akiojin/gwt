@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(process): timeout 付き process は pipe を実行中に drain する
+
+### 事象
+
+Branch Cleanup の remote delete timeout 対応で `git push --delete` の stdout/stderr を
+pipe したが、child 終了後にだけ `wait_with_output()` 相当の回収を行っていたため、
+remote hook などの出力が多い場合に pipe buffer が詰まり、child が終了前に block して
+false timeout になる可能性があった。
+
+### 原因
+
+`Command::output()` は実行中に pipe を drain するが、timeout polling のために
+`spawn()` + `try_wait()` へ置き換えた際、その drain 責務を移植していなかった。
+
+### 再発防止策
+
+1. timeout 付き subprocess helper で stdout/stderr を pipe する場合、child 実行中に別 thread
+   または async task で drain する。
+2. `Command::output()` から `spawn()` polling へ置き換える変更では、exit status だけでなく
+   stdout/stderr capture の同等性を回帰テストで固定する。
+3. verbose child のテストを追加し、pipe buffer 詰まりによる false timeout を検知する。
+
 ## 2026-04-27 — fix(cleanup): frontend timer で backend 実行結果を推測しない
 
 ### 事象
