@@ -1223,6 +1223,16 @@
         };
       }
 
+      function installTerminalViewportRefreshHandlers(windowId, terminal) {
+        const viewportScrollDisposable = terminal.onScroll(() => {
+          scheduleTerminalViewportRefresh(windowId);
+        });
+
+        return () => {
+          viewportScrollDisposable.dispose();
+        };
+      }
+
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
@@ -1260,7 +1270,12 @@
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
-        const cleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
+        const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
+        const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
+        const cleanup = () => {
+          copyCleanup();
+          viewportRefreshCleanup();
+        };
         terminal.onData((data) => {
           inputTraceSeq += 1;
           const wsState = socket ? socket.readyState : -1;

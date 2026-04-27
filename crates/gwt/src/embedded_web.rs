@@ -223,6 +223,33 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_scrolls_refresh_viewport_after_xterm_scroll() {
+        let html = frontend_bundle_source();
+        let scroll_listener = regex::Regex::new(
+            r"const\s+viewportScrollDisposable\s*=\s*terminal\.onScroll\(\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function installTerminalViewportRefreshHandlers(windowId, terminal)"),
+            "expected terminal viewport refresh event wiring to live in a named helper",
+        );
+        assert!(
+            scroll_listener.is_match(html),
+            "expected terminal scrollback movement to refresh the visible viewport",
+        );
+        assert!(
+            html.contains("const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);")
+                && html.contains("viewportRefreshCleanup();"),
+            "expected terminal runtime cleanup to dispose viewport refresh listeners",
+        );
+        assert!(
+            html.contains("viewportScrollDisposable.dispose();"),
+            "expected xterm scroll listener disposable to be released during cleanup",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_assets_are_local_and_pinned() {
         let html = frontend_bundle_source();
 
