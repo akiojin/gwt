@@ -214,7 +214,6 @@
       let versionState = { current: "", latest: "" };
       let indexStatusState = { state: "", detail: "" };
       let projectError = "";
-      const BRANCH_CLEANUP_TIMEOUT_MS = 30000;
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
       function renderIndexStatus() {
@@ -1451,7 +1450,6 @@
               stage: "confirm",
               deleteRemote: false,
               results: [],
-              timeoutId: null,
             },
           });
         }
@@ -4248,13 +4246,6 @@
           .filter((entry) => Boolean(entry?.cleanup_ready));
       }
 
-      function clearBranchCleanupTimeout(state) {
-        if (state.cleanupModal.timeoutId !== null) {
-          clearTimeout(state.cleanupModal.timeoutId);
-          state.cleanupModal.timeoutId = null;
-        }
-      }
-
       function branchCleanupFailureResults(state, message) {
         const selectedBranches = Array.from(state.cleanupSelected);
         if (selectedBranches.length === 0) {
@@ -4280,7 +4271,6 @@
         if (state.cleanupModal.stage !== "running") {
           return false;
         }
-        clearBranchCleanupTimeout(state);
         state.cleanupModal.open = true;
         state.cleanupModal.stage = "result";
         state.cleanupModal.results = branchCleanupFailureResults(state, message);
@@ -4435,7 +4425,6 @@
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
         state.cleanupModal.results = [];
-        clearBranchCleanupTimeout(state);
         branchCleanupWindowId = windowId;
         renderBranches(windowId);
       }
@@ -4450,7 +4439,6 @@
         if (state.cleanupModal.stage === "running") {
           return;
         }
-        clearBranchCleanupTimeout(state);
         state.cleanupModal.open = false;
         state.cleanupModal.stage = "confirm";
         state.cleanupModal.deleteRemote = false;
@@ -4472,17 +4460,6 @@
         state.notice = "";
         state.cleanupModal.stage = "running";
         state.cleanupModal.results = [];
-        clearBranchCleanupTimeout(state);
-        state.cleanupModal.timeoutId = window.setTimeout(() => {
-          if (
-            failRunningBranchCleanup(
-              windowId,
-              "Branch cleanup timed out. Check the branch list and try again.",
-            )
-          ) {
-            renderBranches(windowId);
-          }
-        }, BRANCH_CLEANUP_TIMEOUT_MS);
         renderBranchCleanupModal();
         send({
           kind: "run_branch_cleanup",
@@ -5939,7 +5916,6 @@
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
-            clearBranchCleanupTimeout(state);
             state.cleanupSelected.clear();
             state.cleanupModal.open = true;
             state.cleanupModal.stage = "result";

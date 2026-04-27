@@ -675,6 +675,14 @@ mod tests {
             !html.contains("merged to main") && !html.contains("merged to develop"),
             "expected cleanup copy to stop collapsing merge targets into abstract labels",
         );
+        assert!(
+            !html.contains("Branch cleanup timed out"),
+            "expected cleanup result handling to be driven by backend events, not a frontend timer"
+        );
+        assert!(
+            !html.contains("BRANCH_CLEANUP_TIMEOUT_MS"),
+            "expected branch cleanup to avoid a hard-coded frontend failure timeout"
+        );
     }
 
     #[test]
