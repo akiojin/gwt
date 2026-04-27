@@ -391,6 +391,14 @@ pub(crate) fn front_door_route(argv: &[String]) -> FrontDoorRoute {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn attach_parent_console_for_cli() {
+    windows_console::attach_parent_console_for_cli();
+}
+
+#[cfg(not(windows))]
+pub(crate) fn attach_parent_console_for_cli() {}
+
 pub(crate) fn run_cli(argv: &[String]) -> io::Result<()> {
     match front_door_route(argv) {
         FrontDoorRoute::RepoBackedCli => {
@@ -413,6 +421,80 @@ pub(crate) fn run_cli(argv: &[String]) -> io::Result<()> {
             std::process::exit(gwt::cli::dispatch(&mut env, argv));
         }
         FrontDoorRoute::Gui => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+mod windows_console {
+    use std::{
+        ffi::{c_void, OsStr},
+        os::windows::ffi::OsStrExt,
+        ptr,
+    };
+
+    type Handle = *mut c_void;
+
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const OPEN_EXISTING: u32 = 3;
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: *mut c_void,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: Handle,
+        ) -> Handle;
+        fn GetStdHandle(n_std_handle: u32) -> Handle;
+        fn SetStdHandle(n_std_handle: u32, h_handle: Handle) -> i32;
+    }
+
+    pub(super) fn attach_parent_console_for_cli() {
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+            restore_standard_handle(STD_INPUT_HANDLE, "CONIN$", GENERIC_READ);
+            restore_standard_handle(STD_OUTPUT_HANDLE, "CONOUT$", GENERIC_WRITE);
+            restore_standard_handle(STD_ERROR_HANDLE, "CONOUT$", GENERIC_WRITE);
+        }
+    }
+
+    unsafe fn restore_standard_handle(kind: u32, device: &str, access: u32) {
+        if !is_invalid_handle(GetStdHandle(kind)) {
+            return;
+        }
+
+        let device = wide_null(device);
+        let handle = CreateFileW(
+            device.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        );
+        if !is_invalid_handle(handle) {
+            let _ = SetStdHandle(kind, handle);
+        }
+    }
+
+    fn is_invalid_handle(handle: Handle) -> bool {
+        handle.is_null() || handle as isize == -1
+    }
+
+    fn wide_null(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain([0]).collect()
     }
 }
 
