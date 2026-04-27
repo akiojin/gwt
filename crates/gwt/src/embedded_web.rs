@@ -1469,6 +1469,44 @@ mod tests {
         );
     }
 
+    /// SPEC-2008 FR-036: Rust `WindowSurface` enum and JS `presetSurface()`
+    /// must agree on the panel/terminal taxonomy. The Rust side exposes
+    /// `WindowSurface::as_str()` returning the JS-compatible kebab-case
+    /// string, and the JS side returns the same set of strings. Whenever a
+    /// new panel surface is added, this test forces the backend and frontend
+    /// to be updated together.
+    #[test]
+    fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
+        use gwt::WindowSurface;
+
+        let js = app_js();
+
+        let pairs: &[(WindowSurface, &str)] = &[
+            (WindowSurface::Terminal, "terminal"),
+            (WindowSurface::FileTree, "file-tree"),
+            (WindowSurface::Branches, "branches"),
+            (WindowSurface::Memo, "memo"),
+            (WindowSurface::Profile, "profile"),
+            (WindowSurface::Board, "board"),
+            (WindowSurface::Logs, "logs"),
+            (WindowSurface::Knowledge, "knowledge"),
+            (WindowSurface::Mock, "mock"),
+        ];
+
+        for (variant, expected) in pairs {
+            assert_eq!(
+                variant.as_str(),
+                *expected,
+                "expected `{variant:?}.as_str()` to return `{expected}` so the JS contract stays aligned",
+            );
+            let return_pattern = format!("return \"{expected}\";");
+            assert!(
+                js.contains(&return_pattern),
+                "expected JS `presetSurface()` to return `\"{expected}\"` for the corresponding preset cluster",
+            );
+        }
+    }
+
     /// SPEC-2008 FR-035: every existing modal must mount through the shared
     /// `.modal-shell` primitive (with optional size modifier such as
     /// `.modal-shell.is-wizard`). The `.modal` and `.wizard-modal` legacy
