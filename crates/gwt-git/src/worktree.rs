@@ -466,6 +466,12 @@ fn matches_annotation(line: &str, key: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn comparable_path(path: &Path) -> String {
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .replace('\\', "/")
+    }
+
     fn init_git_repo(path: &Path) {
         let output = std::process::Command::new("git")
             .args(["init", path.to_str().unwrap()])
@@ -651,8 +657,8 @@ prunable gitdir file points to non-existent location
         );
 
         assert_eq!(
-            main_worktree_root(&linked_worktree).unwrap(),
-            std::fs::canonicalize(&repo_path).unwrap()
+            comparable_path(&main_worktree_root(&linked_worktree).unwrap()),
+            comparable_path(&std::fs::canonicalize(&repo_path).unwrap())
         );
     }
 
@@ -698,11 +704,14 @@ prunable gitdir file points to non-existent location
         );
 
         let layout_root = main_worktree_root(&linked_worktree).unwrap();
-        assert_eq!(layout_root, std::fs::canonicalize(&bare_repo_path).unwrap());
+        assert_eq!(
+            comparable_path(&layout_root),
+            comparable_path(&std::fs::canonicalize(&bare_repo_path).unwrap())
+        );
         let expected_parent = std::fs::canonicalize(tmp.path()).unwrap();
         assert_eq!(
-            sibling_worktree_path(&layout_root, "feature/banner"),
-            expected_parent.join("feature").join("banner")
+            comparable_path(&sibling_worktree_path(&layout_root, "feature/banner")),
+            comparable_path(&expected_parent.join("feature").join("banner"))
         );
     }
 

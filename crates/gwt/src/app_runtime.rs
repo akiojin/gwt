@@ -4865,6 +4865,7 @@ exit 0
             .expect("pane"),
         ));
         if cfg!(windows) {
+            // Windows ConPTY may wait for this CPR response before exposing exit state.
             if let Ok(pane) = pane.lock() {
                 let _ = pane.pty().write_input(b"\x1b[1;1R");
             }
