@@ -133,7 +133,6 @@ pub(crate) fn issue_cache_has_entries(cache_root: &Path) -> bool {
 }
 
 fn gh_executable() -> std::ffi::OsString {
-    #[cfg(test)]
     if let Some(path) = std::env::var_os("GWT_TEST_GH") {
         return path;
     }

@@ -12,8 +12,9 @@ pub mod repository;
 pub mod worktree;
 
 pub use branch::{
-    delete_local_branch, detect_cleanable_target, git_divergence, is_branch_merged_into,
-    is_protected_branch, list_gone_branches, Branch, DivergenceInfo, MergeTarget, MergeTargetRef,
+    delete_local_branch, detect_cleanable_target, detect_cleanable_target_with_remote_names,
+    git_divergence, is_branch_merged_into, is_protected_branch, list_gone_branches,
+    list_remote_names, Branch, DivergenceInfo, MergeTarget, MergeTargetRef,
 };
 pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};

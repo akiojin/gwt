@@ -3807,3 +3807,23 @@ SPEC / Issue ウィンドウを開く、または検索文字を入力すると 
 1. GUI/TUI のユーザー入力経路では、外部プロセス・ネットワーク・重い runner を必ず background dispatch に逃がす。
 2. ウィンドウ open / scope switch / detail select はローカルキャッシュ読み取りだけで即時応答し、refresh は別応答で反映する。
 3. セマンティック検索は in-flight 1 件に制限し、追加入力は最新クエリへ coalesce する契約テストを維持する。
+
+## 2026-04-27 — test: `HOME` / `USERPROFILE` 差し替えテストは gwt home 利用テストも同じロックで守る
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` の既定並列実行で、`app_runtime` の Knowledge Bridge / Memo / Board 系テストが
+一時的に別テストの `HOME` / `USERPROFILE` を参照し、cache / notes / coordination の保存先がずれて失敗した。
+
+### 原因
+
+- 一部テストは `HOME` / `USERPROFILE` を `ScopedEnvVar` で差し替えていたが、同じ `~/.gwt` 系 path を読むだけのテストは
+  `env_test_lock` を取得していなかった。
+- `gwt_core::paths::gwt_cache_dir()` / `gwt_notes_dir()` / project coordination path は process-global env に依存するため、
+  読み取り側も env mutation と同じ排他範囲に入れる必要があった。
+
+### 再発防止策
+
+1. `~/.gwt` 派生 path を使うテストは、env を変更しない場合でも `env_test_lock` を取得する。
+2. lock を取得した後に `HOME` / `USERPROFILE` をテスト専用 temp dir へ固定し、guard は lock より先に drop される順序で宣言する。
+3. `cargo test -p gwt-core -p gwt` は既定並列実行でも確認し、`--test-threads=1` だけを成功条件にしない。
