@@ -74,12 +74,18 @@ fn docker_compose_mount_path(path: &Path) -> String {
 fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
-        "{DOCKER_GWT_OVERRIDE_HEADER}\n\
-         version: '3.8'\n\
-         services:\n\
-           {service}:\n\
-             volumes:\n\
-               - \"{host_gwtd}:{DOCKER_GWTD_BIN_PATH}:ro\"\n"
+        concat!(
+            "{header}\n",
+            "version: '3.8'\n",
+            "services:\n",
+            "  {service}:\n",
+            "    volumes:\n",
+            "      - \"{host_gwtd}:{path}:ro\"\n"
+        ),
+        header = DOCKER_GWT_OVERRIDE_HEADER,
+        service = service,
+        host_gwtd = host_gwtd,
+        path = DOCKER_GWTD_BIN_PATH,
     )
 }
 
@@ -240,6 +246,22 @@ mod tests {
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&content).expect("override must parse as YAML");
+        let services = parsed
+            .get("services")
+            .and_then(|v| v.as_mapping())
+            .expect("services key must be a YAML mapping");
+        let service_def = services
+            .get(serde_yaml::Value::String("app".to_string()))
+            .and_then(|v| v.as_mapping())
+            .expect("service entry must be a mapping");
+        let volumes = service_def
+            .get(serde_yaml::Value::String("volumes".to_string()))
+            .and_then(|v| v.as_sequence())
+            .expect("volumes must be a sequence");
+        assert_eq!(volumes.len(), 1);
     }
 
     #[test]
