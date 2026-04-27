@@ -150,21 +150,68 @@ fn board_projection_watch_key(project_root: &Path) -> PathBuf {
     dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
 }
 
-fn ensure_board_projection_watchers(
-    app: &AppRuntime,
-    watched_roots: &mut HashSet<PathBuf>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
-    for tab in &app.tabs {
-        let project_root = tab.project_root.clone();
-        let key = board_projection_watch_key(&project_root);
-        if watched_roots.insert(key) {
-            spawn_board_projection_watcher(project_root, proxy.clone());
+fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
+    matches!(
+        event,
+        FrontendEvent::OpenProjectDialog
+            | FrontendEvent::ReopenRecentProject { .. }
+            | FrontendEvent::CloseProjectTab { .. }
+    )
+}
+
+enum BoardProjectionWatcherMessage {
+    Changed(Vec<PathBuf>),
+    Stop,
+}
+
+struct BoardProjectionWatcher {
+    tx: std_mpsc::Sender<BoardProjectionWatcherMessage>,
+    join_handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for BoardProjectionWatcher {
+    fn drop(&mut self) {
+        let _ = self.tx.send(BoardProjectionWatcherMessage::Stop);
+        if let Some(join_handle) = self.join_handle.take() {
+            if let Err(error) = join_handle.join() {
+                tracing::warn!(?error, "board projection watcher thread join failed");
+            }
         }
     }
 }
 
-fn spawn_board_projection_watcher(project_root: PathBuf, proxy: EventLoopProxy<UserEvent>) {
+#[derive(Default)]
+struct BoardProjectionWatcherRegistry {
+    watchers: HashMap<PathBuf, BoardProjectionWatcher>,
+}
+
+impl BoardProjectionWatcherRegistry {
+    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+        let mut active_roots = HashSet::new();
+        for tab in &app.tabs {
+            let project_root = tab.project_root.clone();
+            let key = board_projection_watch_key(&project_root);
+            active_roots.insert(key.clone());
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.watchers.entry(key) {
+                if let Some(watcher) = spawn_board_projection_watcher(project_root, proxy.clone()) {
+                    entry.insert(watcher);
+                }
+            }
+        }
+
+        self.watchers
+            .retain(|project_root, _| active_roots.contains(project_root));
+    }
+
+    fn shutdown(&mut self) {
+        self.watchers.clear();
+    }
+}
+
+fn spawn_board_projection_watcher(
+    project_root: PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<BoardProjectionWatcher> {
     let name = format!(
         "gwt-board-watch-{}",
         project_root
@@ -172,7 +219,9 @@ fn spawn_board_projection_watcher(project_root: PathBuf, proxy: EventLoopProxy<U
             .and_then(|name| name.to_str())
             .unwrap_or("project")
     );
-    if let Err(error) = thread::Builder::new().name(name).spawn(move || {
+    let (tx, rx) = std_mpsc::channel::<BoardProjectionWatcherMessage>();
+    let stop_tx = tx.clone();
+    let join_handle = match thread::Builder::new().name(name).spawn(move || {
         if let Err(error) = gwt_core::coordination::ensure_repo_local_files(&project_root) {
             tracing::warn!(
                 project_root = %project_root.display(),
@@ -192,14 +241,13 @@ fn spawn_board_projection_watcher(project_root: PathBuf, proxy: EventLoopProxy<U
             return;
         };
 
-        let (tx, rx) = std_mpsc::channel::<Vec<PathBuf>>();
         let mut debouncer = match notify_debouncer_mini::new_debouncer(
             Duration::from_millis(250),
             move |res: notify_debouncer_mini::DebounceEventResult| {
                 if let Ok(events) = res {
                     let paths: Vec<PathBuf> = events.into_iter().map(|event| event.path).collect();
                     if !paths.is_empty() {
-                        let _ = tx.send(paths);
+                        let _ = tx.send(BoardProjectionWatcherMessage::Changed(paths));
                     }
                 }
             },
@@ -228,19 +276,32 @@ fn spawn_board_projection_watcher(project_root: PathBuf, proxy: EventLoopProxy<U
             return;
         }
 
-        while let Ok(paths) = rx.recv() {
-            if paths
-                .iter()
-                .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
-            {
-                let _ = proxy.send_event(UserEvent::BoardProjectionChanged {
-                    project_root: project_root.clone(),
-                });
+        while let Ok(message) = rx.recv() {
+            match message {
+                BoardProjectionWatcherMessage::Changed(paths) => {
+                    if paths
+                        .iter()
+                        .any(|path| path.file_name() == Some(projection_file_name.as_os_str()))
+                    {
+                        let _ = proxy.send_event(UserEvent::BoardProjectionChanged {
+                            project_root: project_root.clone(),
+                        });
+                    }
+                }
+                BoardProjectionWatcherMessage::Stop => break,
             }
         }
     }) {
-        tracing::warn!(error = %error, "board projection watcher thread failed to spawn");
-    }
+        Ok(join_handle) => join_handle,
+        Err(error) => {
+            tracing::warn!(error = %error, "board projection watcher thread failed to spawn");
+            return None;
+        }
+    };
+    Some(BoardProjectionWatcher {
+        tx: stop_tx,
+        join_handle: Some(join_handle),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +419,64 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[test]
+    fn board_projection_watcher_sync_only_for_project_tab_changes() {
+        assert!(super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::OpenProjectDialog
+        ));
+        assert!(super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::ReopenRecentProject {
+                path: "/tmp/repo".to_string()
+            }
+        ));
+        assert!(super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::CloseProjectTab {
+                tab_id: "tab-1".to_string()
+            }
+        ));
+
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::TerminalInput {
+                id: "tab-1::shell-1".to_string(),
+                data: "x".to_string(),
+            }
+        ));
+        assert!(!super::frontend_event_may_change_project_tabs(
+            &gwt::FrontendEvent::PostBoardEntry {
+                id: "tab-1::board-1".to_string(),
+                entry_kind: gwt_core::coordination::BoardEntryKind::Status,
+                body: "done".to_string(),
+                parent_id: None,
+                topics: Vec::new(),
+                owners: Vec::new(),
+            }
+        ));
+    }
+
+    #[test]
+    fn board_projection_watcher_drop_sends_stop_to_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stopped = Arc::new(Mutex::new(false));
+        let stopped_in_thread = stopped.clone();
+        let join_handle = std::thread::spawn(move || {
+            if matches!(rx.recv(), Ok(super::BoardProjectionWatcherMessage::Stop)) {
+                *stopped_in_thread.lock().expect("stopped flag") = true;
+            }
+        });
+
+        let watcher = super::BoardProjectionWatcher {
+            tx,
+            join_handle: Some(join_handle),
+        };
+
+        drop(watcher);
+
+        assert!(
+            *stopped.lock().expect("stopped flag"),
+            "dropping a watcher must wake and join its thread"
+        );
     }
 
     fn init_git_repo(path: &Path) {
@@ -3997,8 +4116,8 @@ fn main() -> wry::Result<()> {
     )
     .expect("app runtime");
     app.bootstrap();
-    let mut board_projection_watch_roots = HashSet::new();
-    ensure_board_projection_watchers(&app, &mut board_projection_watch_roots, proxy.clone());
+    let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
+    board_projection_watchers.sync(&app, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
             let log_proxy = proxy.clone();
@@ -4074,17 +4193,17 @@ fn main() -> wry::Result<()> {
                 // Kill every PTY / agent before the event loop exits so no
                 // child process outlives the window.
                 app.stop_all_runtimes();
+                board_projection_watchers.shutdown();
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
+                let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
                 let events = app.handle_frontend_event(client_id, event);
-                ensure_board_projection_watchers(
-                    &app,
-                    &mut board_projection_watch_roots,
-                    proxy.clone(),
-                );
+                if sync_board_projection_watchers {
+                    board_projection_watchers.sync(&app, proxy.clone());
+                }
                 clients.dispatch(events);
                 if refresh_index_status {
                     spawn_project_index_status_check(&runtime, proxy.clone());
@@ -4151,11 +4270,7 @@ fn main() -> wry::Result<()> {
                     match command {
                         NativeMenuCommand::OpenProject => {
                             let events = app.open_project_dialog_events();
-                            ensure_board_projection_watchers(
-                                &app,
-                                &mut board_projection_watch_roots,
-                                proxy.clone(),
-                            );
+                            board_projection_watchers.sync(&app, proxy.clone());
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
@@ -4170,6 +4285,7 @@ fn main() -> wry::Result<()> {
                 // Belt-and-suspenders: if the event loop is torn down via a
                 // path other than CloseRequested, still release PTY children.
                 app.stop_all_runtimes();
+                board_projection_watchers.shutdown();
                 server.shutdown();
             }
             _ => {}

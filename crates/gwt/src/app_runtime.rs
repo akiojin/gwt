@@ -4563,6 +4563,16 @@ exit 0
         panic!("timed out waiting for {label}: {snapshot:?}");
     }
 
+    fn wait_for_path(label: &str, path: &Path) {
+        for _ in 0..800 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("timed out waiting for {label}: {}", path.display());
+    }
+
     fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
         LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -5587,18 +5597,10 @@ exit 0
             force: false,
             list_scope: gwt::KnowledgeListScope::Open,
         });
-        thread::sleep(Duration::from_millis(250));
+        wait_for_path("stale knowledge refresh gh invocation", &marker);
         assert!(
             events.lock().expect("event log").is_empty(),
             "background refresh errors should not overwrite the current cache view"
-        );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !marker.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(25));
-        }
-        assert!(
-            marker.exists(),
-            "expected fake gh to be invoked for stale cache"
         );
 
         fs::remove_file(&marker).expect("remove marker");
