@@ -14,30 +14,97 @@
 /// strip simple redirections (`> file`, `<< EOF`, ...). Empty segments
 /// are dropped.
 pub fn split_command_segments(command: &str) -> Vec<String> {
-    let mut s = command.to_string();
-
-    // `|&` and `||` must be expanded before the generic `[;|&]` pass,
-    // otherwise `||` would be split into two empty segments.
-    s = s.replace("|&", "\n");
-    s = s.replace("||", "\n");
-    s = s.replace("&&", "\n");
-
-    // Any of `;` `|` `&` by itself is a control operator in shell.
-    s = s
-        .chars()
-        .map(|c| {
-            if matches!(c, ';' | '|' | '&') {
-                '\n'
-            } else {
-                c
-            }
-        })
-        .collect();
-
-    s.split('\n')
+    split_unquoted_control_operators(command)
+        .into_iter()
         .map(normalize_segment)
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+fn split_unquoted_control_operators(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote = Quote::None;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        match quote {
+            Quote::Single => {
+                if b == b'\'' {
+                    quote = Quote::None;
+                }
+                i += 1;
+                continue;
+            }
+            Quote::Double => {
+                match b {
+                    b'\\' => escaped = true,
+                    b'"' => quote = Quote::None,
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            Quote::None => match b {
+                b'\\' => {
+                    escaped = true;
+                    i += 1;
+                    continue;
+                }
+                b'\'' => {
+                    quote = Quote::Single;
+                    i += 1;
+                    continue;
+                }
+                b'"' => {
+                    quote = Quote::Double;
+                    i += 1;
+                    continue;
+                }
+                b'&' if bytes.get(i + 1) == Some(&b'&') => {
+                    segments.push(&command[start..i]);
+                    i += 2;
+                    start = i;
+                    continue;
+                }
+                b'|' if matches!(bytes.get(i + 1), Some(b'|') | Some(b'&')) => {
+                    segments.push(&command[start..i]);
+                    i += 2;
+                    start = i;
+                    continue;
+                }
+                b';' | b'|' | b'&' => {
+                    segments.push(&command[start..i]);
+                    i += 1;
+                    start = i;
+                    continue;
+                }
+                _ => {}
+            },
+        }
+
+        i += 1;
+    }
+
+    segments.push(&command[start..]);
+    segments
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    None,
+    Single,
+    Double,
 }
 
 /// Drop everything from the first redirection operator onward, then trim.
@@ -46,7 +113,7 @@ pub fn split_command_segments(command: &str) -> Vec<String> {
 /// pattern is covered by the first pass too, but we keep the two passes
 /// separate to match the original behaviour on edge cases like `cat <<EOF`.
 fn normalize_segment(s: &str) -> String {
-    let s = match s.find(['<', '>']) {
+    let s = match first_unquoted_redirection(s) {
         Some(idx) => &s[..idx],
         None => s,
     };
@@ -58,6 +125,47 @@ fn normalize_segment(s: &str) -> String {
         None => s,
     };
     s.trim().to_string()
+}
+
+fn first_unquoted_redirection(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut quote = Quote::None;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        match quote {
+            Quote::Single => {
+                if b == b'\'' {
+                    quote = Quote::None;
+                }
+            }
+            Quote::Double => match b {
+                b'\\' => escaped = true,
+                b'"' => quote = Quote::None,
+                _ => {}
+            },
+            Quote::None => match b {
+                b'\\' => escaped = true,
+                b'\'' => quote = Quote::Single,
+                b'"' => quote = Quote::Double,
+                b'<' | b'>' => return Some(i),
+                _ => {}
+            },
+        }
+
+        i += 1;
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -77,9 +185,25 @@ mod tests {
     }
 
     #[test]
+    fn does_not_split_control_operators_inside_quotes() {
+        let segments =
+            split_command_segments(r#"rg -n "gh pr checks|gh run view|gh api graphql" .codex"#);
+        assert_eq!(
+            segments,
+            vec![r#"rg -n "gh pr checks|gh run view|gh api graphql" .codex"#]
+        );
+    }
+
+    #[test]
     fn strips_redirection_tail() {
         let segments = split_command_segments("echo hi > out.log");
         assert_eq!(segments, vec!["echo hi"]);
+    }
+
+    #[test]
+    fn keeps_redirection_like_text_inside_quotes() {
+        let segments = split_command_segments(r#"grep "a>b" file.txt > out.log"#);
+        assert_eq!(segments, vec![r#"grep "a>b" file.txt"#]);
     }
 
     #[test]
