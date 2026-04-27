@@ -1,9 +1,16 @@
 //! Git worktree management
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
+};
 
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
+
+const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,11 +195,12 @@ impl WorktreeManager {
             .split_once('/')
             .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {normalized}")))?;
 
-        let output = std::process::Command::new("git")
+        let mut command = std::process::Command::new("git");
+        command
             .args(["push", remote, "--delete", branch])
-            .current_dir(&self.repo_path)
-            .output()
-            .map_err(|e| GwtError::Git(format!("push {remote} --delete {branch}: {e}")))?;
+            .current_dir(&self.repo_path);
+        let action = format!("git push {remote} --delete {branch}");
+        let output = run_command_with_timeout(&mut command, &action, REMOTE_DELETE_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -337,6 +345,42 @@ fn is_missing_worktree_error(err: &GwtError) -> bool {
         || message.contains("not a work tree")
         || message.contains("no such file or directory")
         || message.contains("does not exist")
+}
+
+fn run_command_with_timeout(
+    command: &mut Command,
+    action: &str,
+    timeout: Duration,
+) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| GwtError::Git(format!("{action}: {error}")))?;
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| GwtError::Git(format!("{action}: {error}")));
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GwtError::Git(format!(
+                    "{action} timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+            Ok(None) => std::thread::sleep(PROCESS_POLL_INTERVAL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GwtError::Git(format!("{action}: {error}")));
+            }
+        }
+    }
 }
 
 fn normalize_remote_ref(remote_ref: &str) -> String {
@@ -500,6 +544,18 @@ mod tests {
             .output()
             .expect("git init --bare");
         assert!(output.status.success(), "git init --bare failed");
+    }
+
+    fn slow_command() -> std::process::Command {
+        if cfg!(windows) {
+            let mut command = std::process::Command::new("powershell");
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 250"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 0.25"]);
+            command
+        }
     }
 
     fn git_clone_repo(src: &Path, dst: &Path) {
@@ -948,6 +1004,23 @@ prunable gitdir file points to non-existent location
                 .delete_remote_branch("feature/missing", None)
                 .unwrap(),
             RemoteDeleteOutcome::SkippedMissing
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_reports_timeout() {
+        let mut command = slow_command();
+        let err = run_command_with_timeout(
+            &mut command,
+            "git push origin --delete feature/slow",
+            std::time::Duration::from_millis(10),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("git push origin --delete feature/slow timed out"),
+            "unexpected timeout error: {err}"
         );
     }
 

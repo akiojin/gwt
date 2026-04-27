@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(cleanup): frontend timer で backend 実行結果を推測しない
+
+### 事象
+
+Branch Cleanup で remote branch delete を有効にすると、backend の cleanup thread と
+`git push --delete` がまだ実行中でも、frontend の固定 30 秒 timer が先に
+`Branch cleanup timed out` を表示できる状態だった。
+
+### 原因
+
+結果確定の source of truth が backend の `branch_cleanup_result` ではなく、
+frontend の推測 timer にも分散していた。remote delete はネットワーク・認証・複数 branch
+処理で 30 秒を超え得るため、UI だけが failure に進む race があった。
+
+### 再発防止策
+
+1. 長時間 backend operation の UI は frontend timer で failure 確定せず、backend result
+   event または connection loss を結果確定 signal にする。
+2. remote / network を含む Git 操作の timeout は backend 側で明示的に扱い、per-branch
+   result として success / partial / failed に落とす。
+3. frontend contract test では user-facing timeout copy だけでなく、固定 timeout 定数が
+   残っていないことも確認する。
+
 ## 2026-04-27 — fix(board): GUI watcher は hot path で同期せず lifecycle owner を持つ
 
 ### 事象
