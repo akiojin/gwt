@@ -114,3 +114,8 @@ fn allows_non_workflow_github_cli_commands() {
     allow("gh api user");
     allow("gh api graphql -f query='query { viewer { login } }'");
 }
+
+#[test]
+fn allows_search_patterns_that_mention_blocked_github_commands() {
+    allow(r#"rg -n "gh pr checks|gh run view|gh api graphql" .codex"#);
+}

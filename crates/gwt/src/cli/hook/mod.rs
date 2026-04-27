@@ -19,6 +19,7 @@ pub mod block_git_dir_override;
 pub mod board_reminder;
 pub mod coordination_event;
 pub mod envelope;
+pub mod event_dispatcher;
 pub mod forward;
 pub mod runtime_state;
 pub mod segments;
@@ -40,6 +41,7 @@ pub use envelope::{HookOutput, IntentBoundaryEvent};
 /// the dispatch match in `cli::run_hook`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
+    Event,
     RuntimeState,
     CoordinationEvent,
     BoardReminder,
@@ -58,6 +60,7 @@ impl HookKind {
     /// for converting that into a [`HookError::UnknownHook`].
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            "event" => Some(Self::Event),
             "runtime-state" => Some(Self::RuntimeState),
             "coordination-event" => Some(Self::CoordinationEvent),
             "board-reminder" => Some(Self::BoardReminder),
