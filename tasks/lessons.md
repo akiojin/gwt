@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(process): timeout path で pipe reader を blocking join しない
+
+### 事象
+
+timeout 付き subprocess helper で stdout/stderr を drain thread に移したあと、
+timeout/error path でも reader thread を `join()` していたため、子孫 process が
+pipe handle を継承して生存している場合に EOF が届かず、timeout 後の return が
+さらに待たされる可能性があった。
+
+### 原因
+
+正常終了時の output capture と timeout/error 時の deadline 保証を同じ join 処理で扱い、
+timeout 後は output capture よりも caller へ戻ることを優先する必要がある点を分離していなかった。
+
+### 再発防止策
+
+1. timeout/error path では、終了を保証できない reader thread を blocking join しない。
+2. pipe drain thread は正常終了時だけ join して output を回収し、timeout/error 時は detach する。
+3. 子孫 process が pipe handle を保持する command で、timeout 後に短時間で戻ることをテストする。
+
 ## 2026-04-27 — fix(process): timeout 付き process は pipe を実行中に drain する
 
 ### 事象
