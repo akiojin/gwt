@@ -1399,4 +1399,98 @@ mod tests {
             );
         }
     }
+
+    /// SPEC-2008 FR-035: shared modal frame primitives must exist so Launch
+    /// Wizard, Branch Cleanup, Preset modal, and any future overlay UI render
+    /// through a single chrome contract. The primitives are:
+    ///
+    /// - `.modal-backdrop` — full-window dim layer (single rule, no
+    ///   `.wizard-backdrop` parallel implementation)
+    /// - `.modal-shell` — the centered modal card surface
+    /// - `.modal-header` — title + actions row at the top of the shell
+    /// - `.modal-body` — main scrollable content region
+    /// - `.modal-footer` — bottom action bar
+    #[test]
+    fn embedded_web_modal_frame_primitives_define_shared_contracts() {
+        let html = index_html();
+
+        let primitives: [(&str, &[&str]); 5] = [
+            (
+                ".modal-backdrop {",
+                &[
+                    "position: absolute",
+                    "inset: 0",
+                    "align-items: center",
+                    "justify-content: center",
+                    "background: rgba(15, 23, 42",
+                ],
+            ),
+            (
+                ".modal-shell {",
+                &[
+                    "max-height: calc(100vh - 48px)",
+                    "overflow: auto",
+                    "border-radius: 6px",
+                    "background: #ffffff",
+                    "border: 1px solid",
+                ],
+            ),
+            (
+                ".modal-header {",
+                &["display: flex", "align-items: flex-start"],
+            ),
+            (".modal-body {", &["flex: 1", "min-height: 0"]),
+            (
+                ".modal-footer {",
+                &["display: flex", "justify-content: flex-end"],
+            ),
+        ];
+
+        for (selector, expected_props) in primitives {
+            let start = html.find(selector).unwrap_or_else(|| {
+                panic!("expected modal frame primitive `{selector}` to be defined")
+            });
+            let block = &html[start..];
+            let end = block.find('}').unwrap_or_else(|| {
+                panic!("expected modal frame primitive `{selector}` to close with `}}`")
+            });
+            let body = &block[..end];
+            for prop in expected_props {
+                assert!(
+                    body.contains(prop),
+                    "expected modal frame primitive `{selector}` to declare `{prop}`, got: {body}",
+                );
+            }
+        }
+
+        assert!(
+            !html.contains(".wizard-backdrop"),
+            "expected `.wizard-backdrop` to be unified with `.modal-backdrop`",
+        );
+    }
+
+    /// SPEC-2008 FR-035: every existing modal must mount through the shared
+    /// `.modal-shell` primitive (with optional size modifier such as
+    /// `.modal-shell.is-wizard`). The `.modal` and `.wizard-modal` legacy
+    /// classes are retired.
+    #[test]
+    fn embedded_web_existing_modals_compose_with_modal_shell_primitive() {
+        let html = index_html();
+
+        assert!(
+            !html.contains("class=\"wizard-modal\"") && !html.contains("class=\"wizard-backdrop\""),
+            "expected Launch Wizard markup to migrate to `.modal-shell` / `.modal-backdrop`",
+        );
+        assert!(
+            !html.contains("<div class=\"modal\">"),
+            "expected legacy `.modal` class to be retired in favor of `.modal-shell`",
+        );
+
+        // Each modal entrypoint must declare `.modal-shell` on its card root.
+        let shell_count = html.matches("class=\"modal-shell").count();
+        assert!(
+            shell_count >= 3,
+            "expected at least 3 modals (preset / branch-cleanup / launch-wizard) to mount through `.modal-shell`, found {shell_count}",
+        );
+    }
 }
