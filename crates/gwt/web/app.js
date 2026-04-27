@@ -635,7 +635,7 @@
         const recentProjects = appState?.recent_projects || [];
         if (recentProjects.length === 0) {
           const empty = document.createElement("div");
-          empty.className = "file-tree-empty";
+          empty.className = "file-tree-empty workspace-empty-state";
           empty.textContent = "No recent projects";
           recentProjectList.appendChild(empty);
           return;
@@ -1958,7 +1958,7 @@
 
         timeline.innerHTML = "";
         if (!state.loading && filteredEntries.length === 0) {
-          timeline.appendChild(createNode("div", "logs-empty", "No log entries match."));
+          timeline.appendChild(createNode("div", "logs-empty workspace-empty-state", "No log entries match."));
         }
         for (const entry of filteredEntries) {
           const row = createNode("button", "logs-entry");
@@ -2006,7 +2006,7 @@
         detailPane.innerHTML = "";
         if (!selectedEntry) {
           detailPane.appendChild(
-            createNode("div", "logs-empty", "Select a log entry to inspect details."),
+            createNode("div", "logs-empty workspace-empty-state", "Select a log entry to inspect details."),
           );
           return;
         }
@@ -2234,7 +2234,7 @@
         updateMemoStatus(windowId);
         list.innerHTML = "";
         if (!state.loading && state.notes.length === 0) {
-          const empty = createNode("div", "memo-empty");
+          const empty = createNode("div", "memo-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "No notes yet"));
           empty.appendChild(
             createNode(
@@ -2285,7 +2285,7 @@
         editor.innerHTML = "";
         editor.dataset.noteId = state.selectedNoteId || "";
         if (!selectedNote) {
-          const empty = createNode("div", "memo-empty");
+          const empty = createNode("div", "memo-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "Select or create a note"));
           empty.appendChild(
             createNode(
@@ -2597,7 +2597,7 @@
         updateProfileStatus(windowId);
         list.innerHTML = "";
         if (!state.loading && profiles.length === 0) {
-          const empty = createNode("div", "profile-empty");
+          const empty = createNode("div", "profile-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "No profiles yet"));
           empty.appendChild(
             createNode(
@@ -2650,7 +2650,7 @@
         editor.innerHTML = "";
         const selected = selectedProfileEntry(state);
         if (!selected || !state.draft) {
-          const empty = createNode("div", "profile-empty");
+          const empty = createNode("div", "profile-empty workspace-empty-state");
           empty.appendChild(createNode("div", "mock-label", "Select a profile"));
           empty.appendChild(
             createNode(
@@ -2926,7 +2926,7 @@
         timeline.innerHTML = "";
         if (!state.loading && state.entries.length === 0) {
           timeline.appendChild(
-            createNode("div", "board-empty", "No coordination entries yet."),
+            createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
           );
         }
         for (const entry of state.entries) {
@@ -3686,14 +3686,14 @@
 
         if (state.error) {
           const errorRow = document.createElement("div");
-          errorRow.className = "file-tree-empty";
+          errorRow.className = "file-tree-empty workspace-empty-state";
           errorRow.textContent = state.error;
           list.appendChild(errorRow);
         }
 
         if (!state.loaded.has("")) {
           const loadingRow = document.createElement("div");
-          loadingRow.className = "file-tree-empty";
+          loadingRow.className = "file-tree-empty workspace-empty-state";
           loadingRow.textContent = "Loading repository";
           list.appendChild(loadingRow);
           return;
@@ -3737,7 +3737,7 @@
                 appendRows(entry.path, depth + 1);
               } else {
                 const loadingRow = document.createElement("div");
-                loadingRow.className = "file-tree-empty";
+                loadingRow.className = "file-tree-empty workspace-empty-state";
                 loadingRow.style.paddingLeft = `${30 + depth * 18}px`;
                 loadingRow.textContent = "Loading";
                 list.appendChild(loadingRow);
@@ -3750,7 +3750,7 @@
 
         if (list.childElementCount === 0) {
           const emptyRow = document.createElement("div");
-          emptyRow.className = "file-tree-empty";
+          emptyRow.className = "file-tree-empty workspace-empty-state";
           emptyRow.textContent = "No visible files";
           list.appendChild(emptyRow);
         }
@@ -3789,7 +3789,7 @@
 
         if (state.error) {
           const errorRow = document.createElement("div");
-          errorRow.className = "branch-empty";
+          errorRow.className = "branch-empty workspace-empty-state";
           errorRow.textContent = state.error;
           list.appendChild(errorRow);
           renderBranchCleanupModal();
@@ -3798,7 +3798,7 @@
 
         if (state.loading && state.entries.length === 0) {
           const loadingRow = document.createElement("div");
-          loadingRow.className = "branch-empty";
+          loadingRow.className = "branch-empty workspace-empty-state";
           loadingRow.textContent = "Loading branches";
           list.appendChild(loadingRow);
           renderBranchCleanupModal();
@@ -3808,7 +3808,7 @@
         const visibleEntries = filteredBranchEntries(state);
         if (visibleEntries.length === 0) {
           const emptyRow = document.createElement("div");
-          emptyRow.className = "branch-empty";
+          emptyRow.className = "branch-empty workspace-empty-state";
           emptyRow.textContent = state.entries.length === 0 ? "No branches" : "No branches in this filter";
           list.appendChild(emptyRow);
           renderBranchCleanupModal();
@@ -4045,7 +4045,7 @@
           ? state.entries
           : filteredKnowledgeEntries(state);
         if (visibleEntries.length === 0) {
-          const empty = createNode("div", "knowledge-empty");
+          const empty = createNode("div", "knowledge-empty workspace-empty-state");
           if (state.searching) {
             empty.textContent = "Searching semantic index";
           } else if (state.entries.length === 0) {
@@ -4158,7 +4158,7 @@
         }
         detailPane.appendChild(header);
 
-        const scroll = createNode("div", "knowledge-detail-scroll");
+        const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll");
         if (state.detailLoading) {
           scroll.appendChild(
             createNode("div", "knowledge-detail-empty", "Loading detail"),
@@ -4652,11 +4652,11 @@
         if (surface === "file-tree") {
           body.innerHTML = `
             <div class="file-tree-root">
-              <div class="file-tree-toolbar">
+              <div class="file-tree-toolbar workspace-toolbar">
                 <div class="file-tree-path">Repository</div>
                 <button class="icon-button" data-action="refresh-tree" aria-label="Refresh tree">↻</button>
               </div>
-              <div class="file-tree-scroll">
+              <div class="file-tree-scroll workspace-scroll">
                 <div class="file-tree-list"></div>
               </div>
               <div class="file-tree-footer">.</div>
@@ -4696,8 +4696,8 @@
         if (surface === "branches") {
           body.innerHTML = `
             <div class="branch-list-root">
-              <div class="branch-toolbar">
-                <div class="branch-toolbar-main">
+              <div class="branch-toolbar workspace-toolbar is-stacked">
+                <div class="branch-toolbar-main workspace-toolbar-main">
                   <div class="branch-heading">Repository branches · double-click to launch</div>
                   <div class="branch-filter-group">
                     <button class="branch-filter-button" type="button" data-branch-filter="local">Local</button>
@@ -4705,13 +4705,13 @@
                     <button class="branch-filter-button" type="button" data-branch-filter="all">All</button>
                   </div>
                 </div>
-                <div class="branch-toolbar-actions">
+                <div class="branch-toolbar-actions workspace-toolbar-actions">
                   <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
                 </div>
               </div>
               <div class="branch-notice" hidden></div>
-              <div class="branch-scroll">
+              <div class="branch-scroll workspace-scroll">
                 <div class="branch-list"></div>
               </div>
             </div>
@@ -4763,17 +4763,17 @@
         if (surface === "memo") {
           body.innerHTML = `
             <div class="memo-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Repo notes</div>
                   <div class="memo-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="wizard-button" type="button" data-action="new-note">New note</button>
                   <button class="icon-button" data-action="refresh-memo" aria-label="Refresh memo">↻</button>
                 </div>
               </div>
-              <div class="memo-layout">
+              <div class="memo-layout workspace-split">
                 <div class="memo-note-list"></div>
                 <div class="memo-editor-pane"></div>
               </div>
@@ -4809,17 +4809,17 @@
         if (surface === "profile") {
           body.innerHTML = `
             <div class="profile-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Profiles</div>
                   <div class="profile-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="wizard-button" type="button" data-action="new-profile">New profile</button>
                   <button class="icon-button" data-action="refresh-profile" aria-label="Refresh profiles">↻</button>
                 </div>
               </div>
-              <div class="profile-layout">
+              <div class="profile-layout workspace-split">
                 <div class="profile-list-pane">
                   <div class="profile-list"></div>
                 </div>
@@ -4857,17 +4857,17 @@
         if (surface === "board") {
           body.innerHTML = `
             <div class="board-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Board chat</div>
                   <div class="board-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
               <div class="board-chat-shell">
-                <div class="board-timeline-scroll board-scroll-surface">
+                <div class="board-timeline-scroll board-scroll-surface workspace-scroll">
                   <div class="board-timeline"></div>
                 </div>
                 <div class="board-composer-bar">
@@ -4900,12 +4900,12 @@
         if (surface === "logs") {
           body.innerHTML = `
             <div class="logs-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">Structured logs</div>
                   <div class="logs-status"></div>
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="text-button logs-unread-button" type="button" hidden>0 unread alerts</button>
                   <button class="icon-button" data-action="refresh-logs" aria-label="Refresh logs">↻</button>
                 </div>
@@ -4925,7 +4925,7 @@
                   <input class="logs-search-input" type="search" placeholder="Filter message, source, or fields" />
                 </label>
               </div>
-              <div class="logs-layout">
+              <div class="logs-layout workspace-split">
                 <div class="logs-timeline"></div>
                 <div class="logs-detail-pane"></div>
               </div>
@@ -4973,8 +4973,8 @@
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           body.innerHTML = `
             <div class="knowledge-root">
-              <div class="knowledge-toolbar">
-                <div class="knowledge-toolbar-main">
+              <div class="workspace-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
                   ${
                     knowledgeKind === "issue"
@@ -4986,12 +4986,12 @@
                   }
                   <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
                 </div>
-                <div class="knowledge-toolbar-actions">
+                <div class="workspace-toolbar-actions">
                   <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached knowledge">↻</button>
                 </div>
               </div>
               <div class="knowledge-status"></div>
-              <div class="knowledge-split">
+              <div class="knowledge-split workspace-split">
                 <div class="knowledge-list-pane">
                   <div class="knowledge-list"></div>
                 </div>

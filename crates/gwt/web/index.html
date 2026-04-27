@@ -420,7 +420,10 @@
       .workspace-window.surface-branches,
       .workspace-window.surface-board,
       .workspace-window.surface-logs,
-      .workspace-window.surface-mock {
+      .workspace-window.surface-mock,
+      .workspace-window.surface-knowledge,
+      .workspace-window.surface-memo,
+      .workspace-window.surface-profile {
         background: rgba(255, 255, 255, 0.98);
       }
 
@@ -444,7 +447,10 @@
       .surface-branches .titlebar,
       .surface-board .titlebar,
       .surface-logs .titlebar,
-      .surface-mock .titlebar {
+      .surface-mock .titlebar,
+      .surface-knowledge .titlebar,
+      .surface-memo .titlebar,
+      .surface-profile .titlebar {
         background: rgba(248, 250, 252, 0.98);
         color: #0f172a;
       }
@@ -642,16 +648,33 @@
         flex-direction: column;
       }
 
-      .file-tree-toolbar,
-      .branch-toolbar,
-      .knowledge-toolbar,
-      .mock-toolbar {
+      /* SPEC-2008 FR-034: shared layout primitives. Surface-specific classes
+         compose alongside these primitives and only declare deltas. */
+      .workspace-toolbar {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
         padding: 10px 12px;
         border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+      }
+
+      .workspace-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+      }
+
+      .workspace-split {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+      }
+
+      .workspace-empty-state {
+        padding: 16px 12px;
+        font-size: 12px;
+        color: #64748b;
       }
 
       .branch-toolbar {
@@ -673,18 +696,18 @@
         justify-content: flex-end;
       }
 
-      .knowledge-toolbar {
+      .workspace-toolbar.is-stacked {
         align-items: flex-start;
       }
 
-      .knowledge-toolbar-main {
+      .workspace-toolbar-main {
         min-width: 0;
         flex: 1;
         display: grid;
         gap: 8px;
       }
 
-      .knowledge-toolbar-actions {
+      .workspace-toolbar-actions {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -714,7 +737,7 @@
         color: #ffffff;
       }
 
-      .knowledge-toolbar .branch-filter-group {
+      .workspace-toolbar.is-stacked .branch-filter-group {
         flex-wrap: wrap;
       }
 
@@ -737,12 +760,8 @@
         text-overflow: ellipsis;
       }
 
-      .file-tree-scroll,
-      .branch-scroll,
-      .mock-scroll {
-        flex: 1;
-        overflow: auto;
-      }
+      /* `.file-tree-scroll`, `.branch-scroll`, and `.mock-scroll` are now
+         layered on top of `.workspace-scroll` via additive class names. */
 
       .knowledge-search {
         width: min(320px, 100%);
@@ -1846,15 +1865,7 @@
         color: #334155;
       }
 
-      .file-tree-empty,
-      .branch-empty,
-      .board-empty,
-      .logs-empty,
-      .mock-empty {
-        padding: 16px 12px;
-        font-size: 12px;
-        color: #64748b;
-      }
+      /* Empty states share `.workspace-empty-state` through additive class names. */
 
       .mock-section {
         padding: 12px;
@@ -1897,33 +1908,64 @@
           linear-gradient(135deg, transparent 0 50%, rgba(148, 163, 184, 0.5) 50% 60%, transparent 60% 70%, rgba(148, 163, 184, 0.5) 70% 80%, transparent 80%);
       }
 
+      /* SPEC-2008 FR-035: shared modal frame primitives. Surface modals
+         (preset, branch-cleanup, launch wizard) compose `.modal-backdrop` +
+         `.modal-shell` and reuse `.modal-header` / `.modal-body` /
+         `.modal-footer` for the inner regions. */
       .modal-backdrop {
         position: absolute;
         inset: 0;
         display: none;
         align-items: center;
         justify-content: center;
-        background: rgba(15, 23, 42, 0.12);
+        background: rgba(15, 23, 42, 0.5);
+        z-index: 1000;
       }
 
       .modal-backdrop.open {
         display: flex;
       }
 
-      .modal {
+      .modal-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
         width: min(520px, calc(100vw - 32px));
         max-height: calc(100vh - 48px);
         overflow: auto;
         padding: 14px;
         border-radius: 6px;
-        background: rgba(255, 255, 255, 0.98);
+        background: #ffffff;
         border: 1px solid rgba(148, 163, 184, 0.45);
         box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
       }
 
-      .modal h2 {
+      .modal-shell.is-wizard {
+        width: min(980px, calc(100vw - 32px));
+        padding: 18px;
+        gap: 12px;
+        z-index: 2000;
+        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.22);
+      }
+
+      .modal-shell h2 {
         margin: 0 0 10px;
         font-size: 16px;
+      }
+
+      .modal-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .modal-body {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
       }
 
       .preset-section + .preset-section {
@@ -1978,37 +2020,13 @@
         font-size: 12px;
       }
 
-      .wizard-backdrop {
-        position: absolute;
-        inset: 0;
-        display: none;
-        align-items: center;
-        justify-content: center;
-        background: rgba(15, 23, 42, 0.18);
-        z-index: 2000;
-      }
-
-      .wizard-backdrop.open {
-        display: flex;
-      }
-
-      .wizard-modal {
-        width: min(980px, calc(100vw - 32px));
-        max-height: calc(100vh - 48px);
-        overflow: auto;
-        padding: 18px;
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.98);
-        border: 1px solid rgba(148, 163, 184, 0.45);
-        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.22);
-      }
-
+      /* Launch Wizard backdrop and shell are unified with the shared modal
+         primitives above (`.modal-backdrop` + `.modal-shell.is-wizard`).
+         `.wizard-header` and `.wizard-footer` are layered on the
+         `.modal-header` / `.modal-footer` primitives for wizard-specific
+         deltas. */
       .wizard-header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 12px;
+        margin-bottom: 0;
       }
 
       .wizard-title {
@@ -2523,7 +2541,7 @@
         </div>
       </div>
       <div class="modal-backdrop" id="preset-modal">
-        <div class="modal">
+        <div class="modal-shell">
           <h2>Add window</h2>
           <div class="preset-section">
             <div class="preset-section-label">Terminal</div>
@@ -2592,9 +2610,9 @@
           </div>
         </div>
       </div>
-      <div class="wizard-backdrop" id="wizard-modal">
-        <div class="wizard-modal">
-          <div class="wizard-header">
+      <div class="modal-backdrop" id="wizard-modal">
+        <div class="modal-shell is-wizard">
+          <div class="modal-header wizard-header">
             <div>
               <h2 class="wizard-title">Launch Agent</h2>
               <div class="wizard-meta" id="wizard-meta"></div>
@@ -2603,8 +2621,8 @@
           </div>
           <div class="wizard-error" id="wizard-error" hidden></div>
           <div class="wizard-summary" id="wizard-summary"></div>
-          <div id="wizard-body"></div>
-          <div class="wizard-footer">
+          <div class="modal-body" id="wizard-body"></div>
+          <div class="modal-footer wizard-footer">
             <div class="wizard-actions">
               <button class="wizard-button" id="wizard-cancel-button">Cancel</button>
               <button class="wizard-button primary" id="wizard-submit-button">Launch</button>
@@ -2613,7 +2631,7 @@
         </div>
       </div>
       <div class="modal-backdrop" id="branch-cleanup-modal">
-        <div class="modal"></div>
+        <div class="modal-shell"></div>
       </div>
     </div>
 

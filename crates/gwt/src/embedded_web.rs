@@ -1226,23 +1226,23 @@ mod tests {
         );
     }
 
-    /// SPEC-2008 FR-033: every panel surface must share the opaque white body
-    /// background. `.surface-memo` and `.surface-profile` were missing from the
-    /// unified rule which left those panels visually transparent.
+    /// SPEC-2008 FR-033: every panel surface must share the same window
+    /// background, titlebar background, and body background. Three CSS rules
+    /// participate in this unification:
+    ///
+    /// - `.workspace-window.surface-*` — the whole-window background (visible
+    ///   when minimized or behind the body)
+    /// - `.surface-* .titlebar` — the chrome at the top of the window
+    /// - `.surface-* .window-body` — the panel content surface
+    ///
+    /// `.surface-memo`, `.surface-profile`, and `.surface-knowledge` had been
+    /// missing from one or more of these rules, which left those panels
+    /// partially transparent and visually distinct from the rest.
     #[test]
-    fn embedded_web_panel_window_bodies_share_opaque_background() {
+    fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         let html = index_html();
 
-        let body_rule_start = html.find(".surface-file-tree .window-body,").expect(
-            "expected unified `.window-body` background rule to anchor on `.surface-file-tree`",
-        );
-        let body_rule_block = &html[body_rule_start..];
-        let body_rule_end = body_rule_block
-            .find('}')
-            .expect("expected unified `.window-body` background rule to close with `}`");
-        let body_rule = &body_rule_block[..body_rule_end];
-
-        for surface in [
+        let panel_surfaces = [
             ".surface-file-tree",
             ".surface-branches",
             ".surface-board",
@@ -1251,16 +1251,284 @@ mod tests {
             ".surface-mock",
             ".surface-memo",
             ".surface-profile",
+        ];
+
+        for (anchor, role) in [
+            (
+                ".workspace-window.surface-file-tree,",
+                "workspace-window background",
+            ),
+            (".surface-file-tree .titlebar,", "titlebar background"),
+            (".surface-file-tree .window-body,", "window-body background"),
         ] {
+            let rule_start = html
+                .find(anchor)
+                .unwrap_or_else(|| panic!("expected unified {role} rule to anchor on `{anchor}`"));
+            let rule_block = &html[rule_start..];
+            let rule_end = rule_block
+                .find('}')
+                .unwrap_or_else(|| panic!("expected unified {role} rule to close with `}}`"));
+            let rule = &rule_block[..rule_end];
+
+            for surface in panel_surfaces {
+                let needle = match role {
+                    "workspace-window background" => format!(".workspace-window{surface}"),
+                    _ => surface.to_string(),
+                };
+                assert!(
+                    rule.contains(&needle),
+                    "expected `{needle}` to participate in the unified {role} rule",
+                );
+            }
+        }
+    }
+
+    /// SPEC-2008 FR-034: shared layout primitives must exist in CSS so panel
+    /// surfaces stop reinventing their own toolbar/scroll/split/empty-state
+    /// blocks. The four primitives below carry only the shared properties;
+    /// surface-specific deltas (grid template columns, padding) layer on top
+    /// through the surface's own class.
+    #[test]
+    fn embedded_web_workspace_layout_primitives_define_shared_contracts() {
+        let html = index_html();
+
+        let primitives: [(&str, &[&str]); 4] = [
+            (
+                ".workspace-toolbar {",
+                &[
+                    "display: flex",
+                    "align-items: center",
+                    "justify-content: space-between",
+                    "gap: 12px",
+                    "padding: 10px 12px",
+                    "border-bottom: 1px solid",
+                ],
+            ),
+            (
+                ".workspace-scroll {",
+                &["flex: 1", "min-height: 0", "overflow: auto"],
+            ),
+            (
+                ".workspace-split {",
+                &["flex: 1", "min-height: 0", "display: grid"],
+            ),
+            (
+                ".workspace-empty-state {",
+                &["padding: 16px 12px", "font-size: 12px", "color: #64748b"],
+            ),
+        ];
+
+        for (selector, expected_props) in primitives {
+            let start = html
+                .find(selector)
+                .unwrap_or_else(|| panic!("expected layout primitive `{selector}` to be defined"));
+            let block = &html[start..];
+            let end = block.find('}').unwrap_or_else(|| {
+                panic!("expected layout primitive `{selector}` to close with `}}`")
+            });
+            let body = &block[..end];
+            for prop in expected_props {
+                assert!(
+                    body.contains(prop),
+                    "expected layout primitive `{selector}` to declare `{prop}`, got: {body}",
+                );
+            }
+        }
+    }
+
+    /// SPEC-2008 FR-034: every panel surface must adopt the shared layout
+    /// primitives in its rendered HTML so paddings, scrollbars, and splits
+    /// stay in lockstep. The toolbar misnomer `.knowledge-toolbar` (which was
+    /// reused by Memo/Profile/Logs/Board as the generic toolbar block) is
+    /// retired in favour of `.workspace-toolbar`. Stacked toolbars (multi-row
+    /// content with search and filter chips) opt into the
+    /// `.workspace-toolbar.is-stacked` modifier rather than carrying a
+    /// surface-specific override.
+    #[test]
+    fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            !js.contains("knowledge-toolbar"),
+            "expected `.knowledge-toolbar` misnomer to be replaced by `.workspace-toolbar` everywhere it was used as a generic toolbar",
+        );
+        assert!(
+            !html.contains(".knowledge-toolbar"),
+            "expected `.knowledge-toolbar` CSS rules to be migrated to `.workspace-toolbar`",
+        );
+
+        // Each panel surface must reference the `.workspace-toolbar` primitive
+        // through its mountWindowBody output. Surface-specific deltas may be
+        // layered alongside (e.g. `.branch-toolbar`).
+        let toolbar_count = js.matches("class=\"workspace-toolbar").count();
+        assert!(
+            toolbar_count >= 7,
+            "expected at least 7 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
+        );
+
+        // Stacked modifier replaces the old `.knowledge-toolbar` override.
+        assert!(
+            html.contains(".workspace-toolbar.is-stacked"),
+            "expected the stacked toolbar modifier `.workspace-toolbar.is-stacked` to be defined for multi-row toolbars",
+        );
+
+        let split_adopters = [
+            "knowledge-split workspace-split",
+            "memo-layout workspace-split",
+            "profile-layout workspace-split",
+            "logs-layout workspace-split",
+        ];
+        for needle in split_adopters {
             assert!(
-                body_rule.contains(surface),
-                "expected `{surface} .window-body` to participate in the unified opaque background rule",
+                js.contains(needle),
+                "expected mountWindowBody output to compose `{needle}` so split layouts share the primitive",
             );
         }
 
+        let scroll_adopters = [
+            "knowledge-detail-scroll workspace-scroll",
+            "board-timeline-scroll board-scroll-surface workspace-scroll",
+            "file-tree-scroll workspace-scroll",
+            "branch-scroll workspace-scroll",
+        ];
+        for needle in scroll_adopters {
+            assert!(
+                js.contains(needle),
+                "expected mountWindowBody output to compose `{needle}` so scroll regions share the primitive",
+            );
+        }
+    }
+
+    /// SPEC-2008 FR-035: shared modal frame primitives must exist so Launch
+    /// Wizard, Branch Cleanup, Preset modal, and any future overlay UI render
+    /// through a single chrome contract. The primitives are:
+    ///
+    /// - `.modal-backdrop` — full-window dim layer (single rule, no
+    ///   `.wizard-backdrop` parallel implementation)
+    /// - `.modal-shell` — the centered modal card surface
+    /// - `.modal-header` — title + actions row at the top of the shell
+    /// - `.modal-body` — main scrollable content region
+    /// - `.modal-footer` — bottom action bar
+    #[test]
+    fn embedded_web_modal_frame_primitives_define_shared_contracts() {
+        let html = index_html();
+
+        let primitives: [(&str, &[&str]); 5] = [
+            (
+                ".modal-backdrop {",
+                &[
+                    "position: absolute",
+                    "inset: 0",
+                    "align-items: center",
+                    "justify-content: center",
+                    "background: rgba(15, 23, 42",
+                ],
+            ),
+            (
+                ".modal-shell {",
+                &[
+                    "max-height: calc(100vh - 48px)",
+                    "overflow: auto",
+                    "border-radius: 6px",
+                    "background: #ffffff",
+                    "border: 1px solid",
+                ],
+            ),
+            (
+                ".modal-header {",
+                &["display: flex", "align-items: flex-start"],
+            ),
+            (".modal-body {", &["flex: 1", "min-height: 0"]),
+            (
+                ".modal-footer {",
+                &["display: flex", "justify-content: flex-end"],
+            ),
+        ];
+
+        for (selector, expected_props) in primitives {
+            let start = html.find(selector).unwrap_or_else(|| {
+                panic!("expected modal frame primitive `{selector}` to be defined")
+            });
+            let block = &html[start..];
+            let end = block.find('}').unwrap_or_else(|| {
+                panic!("expected modal frame primitive `{selector}` to close with `}}`")
+            });
+            let body = &block[..end];
+            for prop in expected_props {
+                assert!(
+                    body.contains(prop),
+                    "expected modal frame primitive `{selector}` to declare `{prop}`, got: {body}",
+                );
+            }
+        }
+
         assert!(
-            body_rule.contains("background: #ffffff"),
-            "expected the unified panel window-body rule to set `background: #ffffff`",
+            !html.contains(".wizard-backdrop"),
+            "expected `.wizard-backdrop` to be unified with `.modal-backdrop`",
+        );
+    }
+
+    /// SPEC-2008 FR-036: Rust `WindowSurface` enum and JS `presetSurface()`
+    /// must agree on the panel/terminal taxonomy. The Rust side exposes
+    /// `WindowSurface::as_str()` returning the JS-compatible kebab-case
+    /// string, and the JS side returns the same set of strings. Whenever a
+    /// new panel surface is added, this test forces the backend and frontend
+    /// to be updated together.
+    #[test]
+    fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
+        use gwt::WindowSurface;
+
+        let js = app_js();
+
+        let pairs: &[(WindowSurface, &str)] = &[
+            (WindowSurface::Terminal, "terminal"),
+            (WindowSurface::FileTree, "file-tree"),
+            (WindowSurface::Branches, "branches"),
+            (WindowSurface::Memo, "memo"),
+            (WindowSurface::Profile, "profile"),
+            (WindowSurface::Board, "board"),
+            (WindowSurface::Logs, "logs"),
+            (WindowSurface::Knowledge, "knowledge"),
+            (WindowSurface::Mock, "mock"),
+        ];
+
+        for (variant, expected) in pairs {
+            assert_eq!(
+                variant.as_str(),
+                *expected,
+                "expected `{variant:?}.as_str()` to return `{expected}` so the JS contract stays aligned",
+            );
+            let return_pattern = format!("return \"{expected}\";");
+            assert!(
+                js.contains(&return_pattern),
+                "expected JS `presetSurface()` to return `\"{expected}\"` for the corresponding preset cluster",
+            );
+        }
+    }
+
+    /// SPEC-2008 FR-035: every existing modal must mount through the shared
+    /// `.modal-shell` primitive (with optional size modifier such as
+    /// `.modal-shell.is-wizard`). The `.modal` and `.wizard-modal` legacy
+    /// classes are retired.
+    #[test]
+    fn embedded_web_existing_modals_compose_with_modal_shell_primitive() {
+        let html = index_html();
+
+        assert!(
+            !html.contains("class=\"wizard-modal\"") && !html.contains("class=\"wizard-backdrop\""),
+            "expected Launch Wizard markup to migrate to `.modal-shell` / `.modal-backdrop`",
+        );
+        assert!(
+            !html.contains("<div class=\"modal\">"),
+            "expected legacy `.modal` class to be retired in favor of `.modal-shell`",
+        );
+
+        // Each modal entrypoint must declare `.modal-shell` on its card root.
+        let shell_count = html.matches("class=\"modal-shell").count();
+        assert!(
+            shell_count >= 3,
+            "expected at least 3 modals (preset / branch-cleanup / launch-wizard) to mount through `.modal-shell`, found {shell_count}",
         );
     }
 }

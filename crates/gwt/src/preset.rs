@@ -26,7 +26,32 @@ pub enum WindowSurface {
     Terminal,
     FileTree,
     Branches,
+    Memo,
+    Profile,
+    Board,
+    Logs,
+    Knowledge,
     Mock,
+}
+
+impl WindowSurface {
+    /// SPEC-2008 FR-036: kebab-case identifier shared with the JS
+    /// `presetSurface()` mapping. Whenever a variant is added, the JS
+    /// side and the contract test in `embedded_web.rs` must move in
+    /// lockstep.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::FileTree => "file-tree",
+            Self::Branches => "branches",
+            Self::Memo => "memo",
+            Self::Profile => "profile",
+            Self::Board => "board",
+            Self::Logs => "logs",
+            Self::Knowledge => "knowledge",
+            Self::Mock => "mock",
+        }
+    }
 }
 
 impl WindowPreset {
@@ -108,14 +133,12 @@ impl WindowPreset {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::FileTree => WindowSurface::FileTree,
             Self::Branches => WindowSurface::Branches,
-            Self::Settings
-            | Self::Memo
-            | Self::Profile
-            | Self::Logs
-            | Self::Issue
-            | Self::Spec
-            | Self::Board
-            | Self::Pr => WindowSurface::Mock,
+            Self::Memo => WindowSurface::Memo,
+            Self::Profile => WindowSurface::Profile,
+            Self::Logs => WindowSurface::Logs,
+            Self::Board => WindowSurface::Board,
+            Self::Issue | Self::Spec | Self::Pr => WindowSurface::Knowledge,
+            Self::Settings => WindowSurface::Mock,
         }
     }
 
@@ -128,6 +151,9 @@ impl WindowPreset {
             WindowSurface::Terminal => (720.0, 420.0),
             WindowSurface::FileTree => (420.0, 520.0),
             WindowSurface::Branches => (520.0, 420.0),
+            WindowSurface::Knowledge => (560.0, 420.0),
+            WindowSurface::Memo | WindowSurface::Profile | WindowSurface::Logs => (560.0, 420.0),
+            WindowSurface::Board => (520.0, 480.0),
             WindowSurface::Mock => (420.0, 300.0),
         }
     }
@@ -377,8 +403,15 @@ mod tests {
         assert_eq!(WindowPreset::Pr.title(), "PR");
         assert_eq!(WindowPreset::Board.id_prefix(), "board");
         assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
-        assert_eq!(WindowPreset::Memo.surface(), WindowSurface::Mock);
-        assert_eq!(WindowPreset::Logs.default_size(), (420.0, 300.0));
+        assert_eq!(WindowPreset::Memo.surface(), WindowSurface::Memo);
+        assert_eq!(WindowPreset::Profile.surface(), WindowSurface::Profile);
+        assert_eq!(WindowPreset::Board.surface(), WindowSurface::Board);
+        assert_eq!(WindowPreset::Logs.surface(), WindowSurface::Logs);
+        assert_eq!(WindowPreset::Issue.surface(), WindowSurface::Knowledge);
+        assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
+        assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
+        assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
+        assert_eq!(WindowPreset::Logs.default_size(), (560.0, 420.0));
         assert_eq!(WindowPreset::Shell.default_size(), (720.0, 420.0));
         assert_eq!(WindowPreset::FileTree.default_size(), (420.0, 520.0));
         assert_eq!(WindowPreset::Branches.default_size(), (520.0, 420.0));
@@ -471,15 +504,33 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::Branches);
                     assert!(!preset.requires_process());
                 }
-                WindowPreset::Settings
-                | WindowPreset::Memo
-                | WindowPreset::Profile
-                | WindowPreset::Logs
-                | WindowPreset::Issue
-                | WindowPreset::Spec
-                | WindowPreset::Board
-                | WindowPreset::Pr => {
+                WindowPreset::Settings => {
                     assert_eq!(preset.surface(), WindowSurface::Mock);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Memo => {
+                    assert_eq!(preset.surface(), WindowSurface::Memo);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Profile => {
+                    assert_eq!(preset.surface(), WindowSurface::Profile);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Logs => {
+                    assert_eq!(preset.surface(), WindowSurface::Logs);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Board => {
+                    assert_eq!(preset.surface(), WindowSurface::Board);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
+                WindowPreset::Issue | WindowPreset::Spec | WindowPreset::Pr => {
+                    assert_eq!(preset.surface(), WindowSurface::Knowledge);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
