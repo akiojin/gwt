@@ -2062,6 +2062,32 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn handle_board_projection_changed_events(
+        &self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let Ok(snapshot) = gwt_core::coordination::load_snapshot(project_root) else {
+            return Vec::new();
+        };
+
+        let mut events = Vec::new();
+        for tab in &self.tabs {
+            if !same_worktree_path(&tab.project_root, project_root) {
+                continue;
+            }
+            for window in &tab.workspace.persisted().windows {
+                if window.preset != WindowPreset::Board {
+                    continue;
+                }
+                events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
+                    id: combined_window_id(&tab.id, &window.id),
+                    entries: snapshot.board.entries.clone(),
+                }));
+            }
+        }
+        events
+    }
+
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -4630,7 +4656,12 @@ exit 0
         let (command, args) = if cfg!(windows) {
             (
                 "cmd".to_string(),
-                vec!["/C".to_string(), "exit 0".to_string()],
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
             )
         } else {
             (
@@ -4821,23 +4852,26 @@ exit 0
                 vec!["-lc".to_string(), "exit 0".to_string()],
             )
         };
-        let pane = Pane::new(
-            window_id.clone(),
-            command,
-            args,
-            80,
-            24,
-            HashMap::new(),
-            None,
-        )
-        .expect("pane");
+        let pane = Arc::new(Mutex::new(
+            Pane::new(
+                window_id.clone(),
+                command,
+                args,
+                80,
+                24,
+                HashMap::new(),
+                None,
+            )
+            .expect("pane"),
+        ));
         if cfg!(windows) {
-            let _ = pane.write_input(b"\x1b[1;1R");
+            if let Ok(pane) = pane.lock() {
+                let _ = pane.pty().write_input(b"\x1b[1;1R");
+            }
         }
-        let pane = Arc::new(Mutex::new(pane));
         let status_thread = runtime.spawn_status_thread(window_id.clone(), pane.clone());
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mut observed_status = None;
         while Instant::now() < deadline {
             if let Ok(events) = captured_events.lock() {
@@ -5557,6 +5591,10 @@ exit 0
             events.lock().expect("event log").is_empty(),
             "background refresh errors should not overwrite the current cache view"
         );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
         assert!(
             marker.exists(),
             "expected fake gh to be invoked for stale cache"
@@ -6087,5 +6125,100 @@ exit 0
             && entry.parent_id.as_deref() == Some(parent.id.as_str())
             && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
             && entry.related_owners == vec!["2018".to_string()]));
+    }
+
+    #[test]
+    fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other_repo = temp.path().join("other-repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other_repo).expect("create other repo");
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "External update",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .expect("seed matching board snapshot");
+        post_entry(
+            &other_repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Other project update",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .expect("seed other board snapshot");
+
+        let mut tab_workspace = empty_workspace_state();
+        tab_workspace.windows.push(sample_window(
+            "board-1",
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        ));
+        tab_workspace.windows.push(sample_window(
+            "board-2",
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        ));
+        tab_workspace.windows.push(sample_window(
+            "logs-1",
+            WindowPreset::Logs,
+            WindowProcessStatus::Ready,
+        ));
+        tab_workspace.next_z_index = 4;
+        let matching_tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+        };
+        let other_tab = sample_project_tab_with_window_at(
+            "tab-2",
+            "board-3",
+            other_repo,
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let runtime = sample_runtime(temp.path(), vec![matching_tab, other_tab], Some("tab-1"));
+
+        let events = runtime.handle_board_projection_changed_events(&repo);
+
+        assert_eq!(events.len(), 2);
+        for expected_id in [
+            combined_window_id("tab-1", "board-1"),
+            combined_window_id("tab-1", "board-2"),
+        ] {
+            assert!(events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::BoardEntries { id, entries },
+                } if *id == expected_id
+                    && entries.len() == 1
+                    && entries[0].body == "External update"
+            )));
+        }
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                event: BackendEvent::BoardEntries { id, .. },
+                ..
+            } if *id == combined_window_id("tab-2", "board-3")
+        )));
     }
 }

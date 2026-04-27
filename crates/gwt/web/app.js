@@ -2969,6 +2969,14 @@
         bodyInput.addEventListener("input", () => {
           state.composerBody = bodyInput.value;
         });
+        bodyInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && event.shiftKey && !event.isComposing) {
+            event.preventDefault();
+            if (!state.submitting) {
+              submitBoardEntry(windowId);
+            }
+          }
+        });
         bodyField.appendChild(bodyInput);
         composer.appendChild(bodyField);
 
