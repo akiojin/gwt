@@ -1108,7 +1108,7 @@ mod tests {
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action\)\s*\{\s*const payload = \{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};\s*if\s*\(\s*action\.kind === "submit"\s*\)\s*\{\s*payload\.bounds = visibleBounds\(\);\s*\}\s*send\(payload\);\s*\}"#,
+            r#"function sendWizardAction\(action\)\s*\{\s*send\(\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\}\);\s*\}"#,
         )
         .expect("valid regex");
         let close_controls = regex::Regex::new(
@@ -1131,7 +1131,7 @@ mod tests {
         );
         assert!(
             submit_bounds.is_match(html),
-            "expected wizard actions to be normalized through launch_wizard_action and attach visible bounds on submit",
+            "expected wizard actions to be normalized through launch_wizard_action and always attach visible bounds",
         );
         assert!(
             close_controls.is_match(html),

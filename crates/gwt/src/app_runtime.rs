@@ -2838,34 +2838,42 @@ impl AppRuntime {
                     self.launch_wizard_state_broadcast(None),
                 ]
             }
-            Some(LaunchWizardCompletion::Launch(config)) => match *config {
-                LaunchWizardLaunchRequest::Agent(config) => {
-                    match self.spawn_agent_window(&session.tab_id, *config, bounds) {
-                        Ok(mut events) => {
-                            events.push(self.launch_wizard_state_broadcast(None));
-                            events
+            Some(LaunchWizardCompletion::Launch(config)) => {
+                let Some(bounds) = bounds else {
+                    session.wizard.error =
+                        Some("Viewport bounds are required to launch a window".to_string());
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                match *config {
+                    LaunchWizardLaunchRequest::Agent(config) => {
+                        match self.spawn_agent_window(&session.tab_id, *config, bounds) {
+                            Ok(mut events) => {
+                                events.push(self.launch_wizard_state_broadcast(None));
+                                events
+                            }
+                            Err(error) => {
+                                session.wizard.error = Some(error);
+                                self.launch_wizard = Some(session);
+                                vec![self.launch_wizard_state_outbound()]
+                            }
                         }
-                        Err(error) => {
-                            session.wizard.error = Some(error);
-                            self.launch_wizard = Some(session);
-                            vec![self.launch_wizard_state_outbound()]
+                    }
+                    LaunchWizardLaunchRequest::Shell(config) => {
+                        match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
+                            Ok(mut events) => {
+                                events.push(self.launch_wizard_state_broadcast(None));
+                                events
+                            }
+                            Err(error) => {
+                                session.wizard.error = Some(error);
+                                self.launch_wizard = Some(session);
+                                vec![self.launch_wizard_state_outbound()]
+                            }
                         }
                     }
                 }
-                LaunchWizardLaunchRequest::Shell(config) => {
-                    match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
-                        Ok(mut events) => {
-                            events.push(self.launch_wizard_state_broadcast(None));
-                            events
-                        }
-                        Err(error) => {
-                            session.wizard.error = Some(error);
-                            self.launch_wizard = Some(session);
-                            vec![self.launch_wizard_state_outbound()]
-                        }
-                    }
-                }
-            },
+            }
             None => {
                 self.launch_wizard = Some(session);
                 vec![self.launch_wizard_state_outbound()]
@@ -3249,7 +3257,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: Option<WindowGeometry>,
+        bounds: WindowGeometry,
     ) -> Result<Vec<OutboundEvent>, String> {
         let tab = self
             .tab_mut(tab_id)
@@ -3260,18 +3268,9 @@ impl AppRuntime {
             config.display_name,
             config.branch.as_ref().unwrap_or(&"workspace".to_string())
         );
-        let default_bounds = WindowGeometry {
-            x: 100.0,
-            y: 40.0,
-            width: 1000.0,
-            height: 760.0,
-        };
-        let window = tab.workspace.add_window_with_title(
-            WindowPreset::Agent,
-            title.clone(),
-            false,
-            bounds.unwrap_or(default_bounds),
-        );
+        let window =
+            tab.workspace
+                .add_window_with_title(WindowPreset::Agent, title.clone(), false, bounds);
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
@@ -3308,7 +3307,7 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: ShellLaunchConfig,
-        bounds: Option<WindowGeometry>,
+        bounds: WindowGeometry,
     ) -> Result<Vec<OutboundEvent>, String> {
         let tab = self
             .tab_mut(tab_id)
@@ -3319,18 +3318,9 @@ impl AppRuntime {
             config.display_name,
             config.branch.as_ref().unwrap_or(&"workspace".to_string())
         );
-        let default_bounds = WindowGeometry {
-            x: 100.0,
-            y: 40.0,
-            width: 1000.0,
-            height: 760.0,
-        };
-        let window = tab.workspace.add_window_with_title(
-            WindowPreset::Shell,
-            title,
-            false,
-            bounds.unwrap_or(default_bounds),
-        );
+        let window = tab
+            .workspace
+            .add_window_with_title(WindowPreset::Shell, title, false, bounds);
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
