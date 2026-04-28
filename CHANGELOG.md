@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.1] - 2026-04-28
+
+### Bug Fixes
+
+- **branches:** Restore cleanup modal body via .modal-shell selector
+- **gui:** Refresh terminal viewport after scroll
+- **gui:** Make terminal overlay errors copyable
+- **gui:** Restore focus after overlay copy
+- **cleanup:** Avoid frontend branch cleanup timeout
+- **cleanup:** Drain remote delete command output
+- **cleanup:** Avoid timeout hang on inherited pipes
+- **cleanup:** Terminate timed-out command trees
+- **docker:** Generate compose override with correct YAML indentation
+- **workspace:** Center launched windows on viewport with cascade
+- **workspace:** Keep cascading past first ring to avoid overlap
+
+### Miscellaneous Tasks
+
+- **docs:** Avoid space-only code spans in lessons entry
+
+### Testing
+
+- **spec-2008:** Guard cleanup modal selector with contract test and DOM smoke test
+- **release-assets:** Allow split frontend-bundle syntax check
+
 ## [9.11.0] - 2026-04-27
 
 ### Bug Fixes
