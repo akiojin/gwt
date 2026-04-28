@@ -162,13 +162,44 @@ impl WorkspaceState {
         bounds: WindowGeometry,
     ) -> PersistedWindowState {
         let (width, height) = preset.default_size();
+        let center_x = bounds.x + (bounds.width - width) / 2.0;
+        let center_y = bounds.y + (bounds.height - height) / 2.0;
+
+        // Walk the cascade diagonal starting at the viewport center and pick
+        // the first slot that no visible window already occupies. The search
+        // is bounded by the visible window count so it always terminates, and
+        // we never wrap back onto an occupied slot — honoring the user's
+        // "重なりを避ける" requirement even past the first cascade ring.
+        let visible_window_count = self
+            .persisted
+            .windows
+            .iter()
+            .filter(|w| !w.minimized && !w.maximized)
+            .count();
+        let mut step = 0usize;
+        while step <= visible_window_count {
+            let candidate_x = center_x + (step as f64) * STACK_OFFSET_X;
+            let candidate_y = center_y + (step as f64) * STACK_OFFSET_Y;
+            let occupied = self.persisted.windows.iter().any(|w| {
+                !w.minimized
+                    && !w.maximized
+                    && (w.geometry.x - candidate_x).abs() < 1.0
+                    && (w.geometry.y - candidate_y).abs() < 1.0
+            });
+            if !occupied {
+                break;
+            }
+            step += 1;
+        }
+        let step = step as f64;
+
         let window = PersistedWindowState {
             id: self.next_window_id(preset),
             title: title.into(),
             preset,
             geometry: WindowGeometry {
-                x: bounds.x + (bounds.width - width) / 2.0,
-                y: bounds.y + (bounds.height - height) / 2.0,
+                x: center_x + step * STACK_OFFSET_X,
+                y: center_y + step * STACK_OFFSET_Y,
                 width,
                 height,
             },
@@ -385,7 +416,10 @@ impl WorkspaceState {
 mod tests {
     use super::*;
     use crate::{
-        persistence::{default_canvas_viewport, default_workspace_state, WindowProcessStatus},
+        persistence::{
+            default_canvas_viewport, default_workspace_state, empty_workspace_state,
+            WindowProcessStatus,
+        },
         protocol::FocusCycleDirection,
     };
 
@@ -440,6 +474,91 @@ mod tests {
         assert_eq!(window.title, "Branches");
         assert_eq!(window.preset, WindowPreset::Branches);
         assert_eq!(window.status, WindowProcessStatus::Running);
+    }
+
+    #[test]
+    fn adding_window_centers_in_bounds() {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let bounds = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 920.0,
+        };
+
+        let window = workspace.add_window(WindowPreset::Shell, bounds.clone());
+
+        // Shell preset is 720x420 so the geometry must center inside bounds.
+        assert_eq!(window.geometry.x, 360.0);
+        assert_eq!(window.geometry.y, 250.0);
+    }
+
+    #[test]
+    fn adding_multiple_windows_cascades_from_center() {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let bounds = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 920.0,
+        };
+
+        let first = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        let second = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        let third = workspace.add_window(WindowPreset::Shell, bounds.clone());
+
+        assert_eq!((first.geometry.x, first.geometry.y), (360.0, 250.0));
+        assert_eq!((second.geometry.x, second.geometry.y), (388.0, 274.0));
+        assert_eq!((third.geometry.x, third.geometry.y), (416.0, 298.0));
+    }
+
+    #[test]
+    fn adding_window_keeps_cascading_past_eight_to_avoid_overlap() {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let bounds = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 920.0,
+        };
+
+        // Fill the first cascade ring with 8 windows (steps 0..7).
+        for _ in 0..8 {
+            workspace.add_window(WindowPreset::Shell, bounds.clone());
+        }
+        // The 9th launch must keep cascading (step 8) instead of collapsing
+        // back onto the viewport center where window #1 already lives.
+        let ninth = workspace.add_window(WindowPreset::Shell, bounds.clone());
+
+        assert_eq!(
+            (ninth.geometry.x, ninth.geometry.y),
+            (360.0 + 8.0 * 28.0, 250.0 + 8.0 * 24.0),
+        );
+        // And the 10th continues from there without overlapping the 9th.
+        let tenth = workspace.add_window(WindowPreset::Shell, bounds);
+        assert_eq!(
+            (tenth.geometry.x, tenth.geometry.y),
+            (360.0 + 9.0 * 28.0, 250.0 + 9.0 * 24.0),
+        );
+    }
+
+    #[test]
+    fn adding_window_skips_minimized_collisions() {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let bounds = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 920.0,
+        };
+
+        let first = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        assert!(workspace.minimize_window(&first.id));
+
+        // A minimized window must not block the cascade slot it was created in,
+        // so the next launch lands back at the viewport center.
+        let next = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        assert_eq!((next.geometry.x, next.geometry.y), (360.0, 250.0));
     }
 
     #[test]

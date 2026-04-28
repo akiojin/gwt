@@ -11,6 +11,10 @@ pub(crate) fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
+pub(crate) fn branch_cleanup_modal_js() -> &'static str {
+    include_str!("../web/branch-cleanup-modal.js")
+}
+
 pub(crate) fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -31,6 +35,13 @@ pub(crate) async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
+    )
+}
+
+pub(crate) async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        branch_cleanup_modal_js(),
     )
 }
 
@@ -127,6 +138,42 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_clipboard_async_path_restores_focus() {
+        let html = frontend_bundle_source();
+        let async_copy = regex::Regex::new(
+            r"await\s+navigator\.clipboard\.writeText\(text\);\s*restoreFocus\?\.\(\);\s*return\s+true;",
+        )
+        .expect("valid regex");
+
+        assert!(
+            async_copy.is_match(html),
+            "expected async clipboard success path to restore terminal focus before returning",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_overlay_text_is_copyable() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("className = \"overlay-copy-button\"")
+                && html.contains("Copy")
+                && html.contains("copyTerminalOverlayMessage"),
+            "expected terminal overlay to expose an explicit copy button wired to the overlay message",
+        );
+        assert!(
+            html.contains(".terminal-overlay.visible")
+                && html.contains("user-select: text")
+                && html.contains("pointer-events: auto"),
+            "expected visible terminal overlays to allow normal text selection",
+        );
+        assert!(
+            html.contains("writeClipboardText(messageEl.textContent"),
+            "expected overlay copy to reuse the shared clipboard writer",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
         let streaming_write = regex::Regex::new(
@@ -183,6 +230,33 @@ mod tests {
                 )
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
             "expected restored terminals to persist fitted geometry after becoming visible",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_scrolls_refresh_viewport_after_xterm_scroll() {
+        let html = frontend_bundle_source();
+        let scroll_listener = regex::Regex::new(
+            r"const\s+viewportScrollDisposable\s*=\s*terminal\.onScroll\(\(\)\s*=>\s*\{\s*scheduleTerminalViewportRefresh\(windowId\);\s*\}\s*\);",
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function installTerminalViewportRefreshHandlers(windowId, terminal)"),
+            "expected terminal viewport refresh event wiring to live in a named helper",
+        );
+        assert!(
+            scroll_listener.is_match(html),
+            "expected terminal scrollback movement to refresh the visible viewport",
+        );
+        assert!(
+            html.contains("const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);")
+                && html.contains("viewportRefreshCleanup();"),
+            "expected terminal runtime cleanup to dispose viewport refresh listeners",
+        );
+        assert!(
+            html.contains("viewportScrollDisposable.dispose();"),
+            "expected xterm scroll listener disposable to be released during cleanup",
         );
     }
 
@@ -612,6 +686,14 @@ mod tests {
             !html.contains("merged to main") && !html.contains("merged to develop"),
             "expected cleanup copy to stop collapsing merge targets into abstract labels",
         );
+        assert!(
+            !html.contains("Branch cleanup timed out"),
+            "expected cleanup result handling to be driven by backend events, not a frontend timer"
+        );
+        assert!(
+            !html.contains("BRANCH_CLEANUP_TIMEOUT_MS"),
+            "expected branch cleanup to avoid a hard-coded frontend failure timeout"
+        );
     }
 
     #[test]
@@ -1026,7 +1108,7 @@ mod tests {
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action\)\s*\{\s*const payload = \{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};\s*if\s*\(\s*action\.kind === "submit"\s*\)\s*\{\s*payload\.bounds = visibleBounds\(\);\s*\}\s*send\(payload\);\s*\}"#,
+            r#"function sendWizardAction\(action\)\s*\{\s*send\(\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\}\);\s*\}"#,
         )
         .expect("valid regex");
         let close_controls = regex::Regex::new(
@@ -1049,7 +1131,7 @@ mod tests {
         );
         assert!(
             submit_bounds.is_match(html),
-            "expected wizard actions to be normalized through launch_wizard_action and attach visible bounds on submit",
+            "expected wizard actions to be normalized through launch_wizard_action and always attach visible bounds",
         );
         assert!(
             close_controls.is_match(html),
@@ -1529,6 +1611,24 @@ mod tests {
         assert!(
             shell_count >= 3,
             "expected at least 3 modals (preset / branch-cleanup / launch-wizard) to mount through `.modal-shell`, found {shell_count}",
+        );
+    }
+
+    /// SPEC-2008 FR-035 (JS-side guard): the legacy `.modal` shell class is
+    /// retired in HTML, so any `querySelector(".modal")` left in `app.js`
+    /// resolves to `null` and silently breaks the modal it backs (this
+    /// regressed the Branch Cleanup body in v9.11.0). Lock the JS side to the
+    /// `.modal-shell` primitive.
+    #[test]
+    fn embedded_web_app_js_uses_modal_shell_selector() {
+        let js = app_js();
+        assert!(
+            !js.contains("querySelector(\".modal\")"),
+            "expected app.js to query `.modal-shell` instead of the retired `.modal` class (SPEC-2008 FR-035)",
+        );
+        assert!(
+            js.contains("querySelector(\".modal-shell\")"),
+            "expected app.js to resolve at least one modal dialog through the `.modal-shell` primitive",
         );
     }
 }

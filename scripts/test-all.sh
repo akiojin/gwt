@@ -17,7 +17,11 @@ pid_rust=$!
 bash scripts/check-release-flow.sh &
 pid_release_flow=$!
 
+node --test crates/gwt/web/__tests__/branch-cleanup.smoke.test.mjs &
+pid_frontend_smoke=$!
+
 fail=0
 wait $pid_rust || fail=1
 wait $pid_release_flow || fail=1
+wait $pid_frontend_smoke || fail=1
 exit $fail

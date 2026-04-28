@@ -1,5 +1,136 @@
 # Lessons Learned
 
+## 2026-04-27 — fix(branches): HTML class refactor must extend contract guard to JS-side selectors
+
+### 事象
+
+SPEC-2008 FR-035 (`de81fa24`) で modal shell class を `.modal` → `.modal-shell` に
+統一した際、`crates/gwt/web/app.js:41` の `branchCleanupModal.querySelector(".modal")`
+だけ移行が漏れた。結果として v9.11.0 で Branches → Cleanup を開くと
+`branchCleanupDialog` が `null` になり、`renderBranchCleanupModal` が最初の
+DOM mutation で `TypeError` を投げて終了。modal-backdrop と空の `.modal-shell`
+チャラだけが残り「タイトルだけ表示されて中身がない」状態になった。
+
+### 原因
+
+SPEC-2008 のコントラクトテスト
+`embedded_web_existing_modals_compose_with_modal_shell_primitive`
+(`crates/gwt/src/embedded_web.rs`) は HTML 側の class 移行のみを assert していた。
+JS 側に廃止クラスのセレクタが残っていないかは検査されておらず、
+`grep` で見つかる単一の取りこぼしを CI が検出できなかった。
+
+### 再発防止策
+
+1. HTML の primitive 命名 (class/id) を変更するリファクタでは、JS 側の
+   `querySelector` / `getElementById` セレクタを同じコントラクトテストで
+   guard する。SPEC-2008 系では `embedded_web_app_js_uses_modal_shell_selector`
+   を追加し、`querySelector(".modal")` の残存を assert で検出するようにした。
+2. modal や surface など共有 primitive を経由するロジックは、依存注入可能な
+   形に切り出して DOM smoke test (Node + linkedom) で本文描画まで検証する。
+   今回は `crates/gwt/web/branch-cleanup-modal.js` を抽出し
+   `crates/gwt/web/__tests__/branch-cleanup.smoke.test.mjs` で stage 別に
+   描画内容を assert している。
+3. リリース直後の hotfix ブランチでは、grep で対象クラスの残存を
+   全リポジトリ走査することを必ず行う。
+
+## 2026-04-27 — fix(docker): format! の `\<改行>` 継続は次行の先頭空白も削除する
+
+### 事象
+
+Launch Agent で Docker を選択すると `Docker error: services must be a mapping`
+が返り、エージェントが起動できなかった。`docker-compose.gwt.override.yml` を
+`format!()` で生成しているが、`services:` 配下のインデントがすべて消えており
+`services` キーが null（mapping ではない）になっていた。
+
+### 原因
+
+Rust の文字列リテラルは `\` の直後の改行 **と次行の先頭空白すべて** を削除する。
+`format!("services:\n  {svc}:\n    volumes:\n")` のような複数行を
+`\<改行>` で継続して書くと、2 スペース・4 スペースの YAML インデントが全部消えて
+完全フラットな YAML が生成される。同じバグが
+`crates/gwt/src/docker_launch.rs`、`crates/gwt-agent/src/prepare.rs`、
+`crates/gwt/src/docker_setup.rs` の 3 箇所にコピペされていた。
+既存テストは `content.contains(...)` だけで内容文字列を確認しており、
+YAML を parse して構造検証していなかったため検出されなかった。
+
+### 再発防止策
+
+1. 複数行リテラルを組み立てるときは `\<改行>` 継続を使わず、
+   `concat!("line1\n", "line2\n", ...)` で連結するか、
+   1 行 `\n` 埋め込みに統一する。インデントが必須の format（YAML/Python等）では
+   `\<改行>` 継続を使わない。
+2. 生成 YAML / JSON のテストは `content.contains(...)` で文字列検証するだけでなく、
+   必ず `serde_yaml::from_str` / `serde_json::from_str` で parse してから
+   構造を assert する。
+3. 同一ロジックの複数コピーは構造的負債。新規バグ修正時に発見したら
+   修正範囲を 3 箇所同時にし、follow-up Issue で共通化を検討する。
+
+## 2026-04-27 — fix(process): timeout では process tree を閉じてから reader を join する
+
+### 事象
+
+timeout 付き subprocess helper で stdout/stderr を drain thread に移したあと、
+direct child だけを kill して reader thread を `join()` すると、子孫 process が
+pipe handle を継承して生存している場合に EOF が届かず、timeout 後の return が待たされた。
+一方で reader thread を detach するだけでは、子孫が出力を続けたときに thread と buffer が
+background に残り得る。
+
+### 原因
+
+timeout/error path で direct child、子孫 process、pipe reader の lifecycle を一体で扱わず、
+process tree を閉じる前に reader の終了保証だけを求めていた。
+
+### 再発防止策
+
+1. timeout/error path では direct child だけでなく process tree / process group を終了させる。
+2. process tree を閉じて EOF を発生させたあとに reader thread を join し、background leak を避ける。
+3. 子孫 process が pipe handle を保持する command で、timeout 後に短時間で戻ることをテストする。
+
+## 2026-04-27 — fix(process): timeout 付き process は pipe を実行中に drain する
+
+### 事象
+
+Branch Cleanup の remote delete timeout 対応で `git push --delete` の stdout/stderr を
+pipe したが、child 終了後にだけ `wait_with_output()` 相当の回収を行っていたため、
+remote hook などの出力が多い場合に pipe buffer が詰まり、child が終了前に block して
+false timeout になる可能性があった。
+
+### 原因
+
+`Command::output()` は実行中に pipe を drain するが、timeout polling のために
+`spawn()` + `try_wait()` へ置き換えた際、その drain 責務を移植していなかった。
+
+### 再発防止策
+
+1. timeout 付き subprocess helper で stdout/stderr を pipe する場合、child 実行中に別 thread
+   または async task で drain する。
+2. `Command::output()` から `spawn()` polling へ置き換える変更では、exit status だけでなく
+   stdout/stderr capture の同等性を回帰テストで固定する。
+3. verbose child のテストを追加し、pipe buffer 詰まりによる false timeout を検知する。
+
+## 2026-04-27 — fix(cleanup): frontend timer で backend 実行結果を推測しない
+
+### 事象
+
+Branch Cleanup で remote branch delete を有効にすると、backend の cleanup thread と
+`git push --delete` がまだ実行中でも、frontend の固定 30 秒 timer が先に
+`Branch cleanup timed out` を表示できる状態だった。
+
+### 原因
+
+結果確定の source of truth が backend の `branch_cleanup_result` ではなく、
+frontend の推測 timer にも分散していた。remote delete はネットワーク・認証・複数 branch
+処理で 30 秒を超え得るため、UI だけが failure に進む race があった。
+
+### 再発防止策
+
+1. 長時間 backend operation の UI は frontend timer で failure 確定せず、backend result
+   event または connection loss を結果確定 signal にする。
+2. remote / network を含む Git 操作の timeout は backend 側で明示的に扱い、per-branch
+   result として success / partial / failed に落とす。
+3. frontend contract test では user-facing timeout copy だけでなく、固定 timeout 定数が
+   残っていないことも確認する。
+
 ## 2026-04-27 — fix(board): GUI watcher は hot path で同期せず lifecycle owner を持つ
 
 ### 事象

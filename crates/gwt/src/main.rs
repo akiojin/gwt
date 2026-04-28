@@ -2288,7 +2288,7 @@ mod tests {
                 index: 0,
                 mode: QuickStartLaunchMode::Resume,
             },
-            None,
+            Some(canvas_bounds()),
         );
         assert!(!missing_focus.is_empty());
 
@@ -2302,7 +2302,7 @@ mod tests {
                 index: 0,
                 mode: QuickStartLaunchMode::Resume,
             },
-            None,
+            Some(canvas_bounds()),
         );
         assert!(focus_events.len() >= 2);
         assert!(runtime.launch_wizard.is_none());
@@ -2961,6 +2961,22 @@ mod tests {
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
         assert!(!content.contains("gwtd-linux:/usr/local/bin/gwt:ro"));
+
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&content).expect("override must parse as YAML");
+        let services = parsed
+            .get("services")
+            .and_then(|v| v.as_mapping())
+            .expect("services key must be a YAML mapping");
+        let service_def = services
+            .get(serde_yaml::Value::String("app".to_string()))
+            .and_then(|v| v.as_mapping())
+            .expect("service entry must be a mapping");
+        let volumes = service_def
+            .get(serde_yaml::Value::String("volumes".to_string()))
+            .and_then(|v| v.as_sequence())
+            .expect("volumes must be a sequence");
+        assert_eq!(volumes.len(), 1);
     }
 
     #[test]
