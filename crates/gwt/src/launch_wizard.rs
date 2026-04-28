@@ -1137,11 +1137,18 @@ impl LaunchWizardState {
     }
 
     fn apply_previous_profile(&mut self, profile: LaunchWizardPreviousProfile) -> bool {
-        let Some(agent) = self
+        let saved_agent = self
             .detected_agents
             .iter()
-            .find(|candidate| candidate.id == profile.agent_id)
-        else {
+            .find(|candidate| candidate.id == profile.agent_id);
+        let Some(agent) = (match saved_agent {
+            Some(agent) if agent.available => Some(agent),
+            Some(_) => self
+                .detected_agents
+                .iter()
+                .find(|candidate| candidate.available),
+            None => None,
+        }) else {
             return false;
         };
 
@@ -3943,7 +3950,7 @@ mod tests {
     }
 
     #[test]
-    fn previous_profile_restores_unavailable_agent_and_blocks_launch() {
+    fn previous_profile_falls_back_when_saved_agent_is_unavailable() {
         let mut options = sample_agent_options();
         options
             .iter_mut()
@@ -3969,7 +3976,36 @@ mod tests {
             }),
         );
 
-        assert_eq!(state.view().selected_agent_id, "codex");
+        assert_eq!(state.view().selected_agent_id, "claude");
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+    }
+
+    #[test]
+    fn previous_profile_still_blocks_when_no_agent_is_available() {
+        let mut options = sample_agent_options();
+        for option in &mut options {
+            option.available = false;
+        }
+        let state = LaunchWizardState::open_with_previous_profile(
+            context(branch("feature/current"), "feature/current"),
+            options,
+            Vec::new(),
+            Some(LaunchWizardPreviousProfile {
+                agent_id: "codex".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                reasoning: Some("high".to_string()),
+                version: Some("0.110.0".to_string()),
+                session_mode: gwt_agent::SessionMode::Normal,
+                skip_permissions: true,
+                codex_fast_mode: true,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+                windows_shell: None,
+            }),
+        );
+
         assert_eq!(
             state.build_launch_config().unwrap_err(),
             "Agent option is unavailable"
