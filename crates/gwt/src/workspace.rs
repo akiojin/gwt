@@ -13,9 +13,6 @@ const STACK_OFFSET_Y: f64 = 24.0;
 const STACK_START_INSET: f64 = 48.0;
 const MIN_WINDOW_WIDTH: f64 = 360.0;
 const MIN_WINDOW_HEIGHT: f64 = 260.0;
-/// Limit cascade depth so an N-th launch (N >= CASCADE_RING_LIMIT) wraps back to
-/// the viewport center instead of marching off-screen indefinitely.
-const CASCADE_RING_LIMIT: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceState {
@@ -168,11 +165,19 @@ impl WorkspaceState {
         let center_x = bounds.x + (bounds.width - width) / 2.0;
         let center_y = bounds.y + (bounds.height - height) / 2.0;
 
-        // Walk the cascade slots starting at the viewport center and pick the
-        // first one that no visible window already occupies. Hitting the ring
-        // limit wraps back to center so the window never marches off screen.
+        // Walk the cascade diagonal starting at the viewport center and pick
+        // the first slot that no visible window already occupies. The search
+        // is bounded by the visible window count so it always terminates, and
+        // we never wrap back onto an occupied slot — honoring the user's
+        // "重なりを避ける" requirement even past the first cascade ring.
+        let visible_window_count = self
+            .persisted
+            .windows
+            .iter()
+            .filter(|w| !w.minimized && !w.maximized)
+            .count();
         let mut step = 0usize;
-        while step < CASCADE_RING_LIMIT {
+        while step <= visible_window_count {
             let candidate_x = center_x + (step as f64) * STACK_OFFSET_X;
             let candidate_y = center_y + (step as f64) * STACK_OFFSET_Y;
             let occupied = self.persisted.windows.iter().any(|w| {
@@ -186,7 +191,7 @@ impl WorkspaceState {
             }
             step += 1;
         }
-        let step = (step % CASCADE_RING_LIMIT) as f64;
+        let step = step as f64;
 
         let window = PersistedWindowState {
             id: self.next_window_id(preset),
@@ -508,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_window_resets_after_cascade_ring_limit() {
+    fn adding_window_keeps_cascading_past_eight_to_avoid_overlap() {
         let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
@@ -517,15 +522,24 @@ mod tests {
             height: 920.0,
         };
 
-        // Fill the entire cascade ring (8 windows occupy steps 0..7).
+        // Fill the first cascade ring with 8 windows (steps 0..7).
         for _ in 0..8 {
             workspace.add_window(WindowPreset::Shell, bounds.clone());
         }
-        // The 9th launch must wrap back to the viewport center so windows do
-        // not march off screen indefinitely.
+        // The 9th launch must keep cascading (step 8) instead of collapsing
+        // back onto the viewport center where window #1 already lives.
         let ninth = workspace.add_window(WindowPreset::Shell, bounds.clone());
 
-        assert_eq!((ninth.geometry.x, ninth.geometry.y), (360.0, 250.0));
+        assert_eq!(
+            (ninth.geometry.x, ninth.geometry.y),
+            (360.0 + 8.0 * 28.0, 250.0 + 8.0 * 24.0),
+        );
+        // And the 10th continues from there without overlapping the 9th.
+        let tenth = workspace.add_window(WindowPreset::Shell, bounds);
+        assert_eq!(
+            (tenth.geometry.x, tenth.geometry.y),
+            (360.0 + 9.0 * 28.0, 250.0 + 9.0 * 24.0),
+        );
     }
 
     #[test]
