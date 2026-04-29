@@ -186,6 +186,7 @@ pub struct ShellLaunchConfig {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub windows_shell: Option<gwt_agent::WindowsShellKind>,
     pub env_vars: HashMap<String, String>,
+    pub remove_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -907,6 +908,7 @@ impl LaunchWizardState {
             docker_lifecycle_intent: self.docker_lifecycle_intent,
             windows_shell: self.windows_shell_for_launch(),
             env_vars,
+            remove_env: Vec::new(),
         })
     }
 

@@ -357,10 +357,9 @@ pub(crate) fn resolve_launch_spec_with_fallback(
     resolve_launch_spec(preset)
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_env() -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    env.insert("TERM".to_string(), "xterm-256color".to_string());
-    env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    let (env, _) = gwt_agent::LaunchEnvironment::from_base_env(std::env::vars()).into_parts();
     env
 }
 
