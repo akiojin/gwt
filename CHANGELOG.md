@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.11.4] - 2026-04-29
+
+### Bug Fixes
+
+- **gui:** Sync Launch Wizard agent selection
+
 ## [9.11.3] - 2026-04-29
 
 ### Bug Fixes
