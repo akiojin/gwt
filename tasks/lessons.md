@@ -1,5 +1,49 @@
 # Lessons Learned
 
+## 2026-04-29 — fix(shell): GUI shell terminal は login shell 初期化を読む必要がある
+
+### 事象
+
+`gh` を `~/.local/bin` に配置しても、gwt の Shell terminal 側では OS / user shell
+環境が反映されず、PATH 上のコマンドとして見えない可能性が残っていた。ユーザーから
+「エージェント起動時には割り当てられているが、シェルターミナル起動時には
+OS 環境変数が割り当てられていない」と指摘された。
+
+### 原因
+
+- agent 起動経路と shell terminal 起動経路を混同していた。
+- Shell terminal は `detect_shell_program()` で `/bin/zsh` などを引数なし起動しており、
+  macOS GUI / launchd 由来の最小環境から、ユーザーの login shell profile を読めていなかった。
+
+### 再発防止策
+
+1. GUI から通常 shell を起動する場合は、Terminal.app 相当の login shell 起動かを確認する。
+2. PATH 問題では、binary の配置だけでなく、起動元 process env と shell 初期化経路を分けて調査する。
+3. agent env 注入で直る問題と、plain shell terminal の OS / user env 継承問題を別経路として扱う。
+
+## 2026-04-29 — fix(hooks): timeout 原因は実測なしに単一要因へ断定しない
+
+### 事象
+
+Hook timeout 調査で、古い複数 hook 設定と `gwtd hook` の再 spawn が見つかった段階で、
+それを `Hook timed out` の直接原因として強く扱いすぎた。ユーザーから
+「本当にそれであっていますか？」と指摘され、追加実測の結果、素の handler は短時間で
+戻るため、直接原因は session 環境や state 条件を含めて未確定だと分かった。
+
+### 原因
+
+- 「確実な悪化要因」と「timeout の根本原因」を分けて説明できていなかった。
+- handler 別 duration や実際の hook command path を観測する仕組みがないまま、
+  既存コード構造から原因を推定した。
+
+### 再発防止策
+
+1. 性能問題では、実測済みの事実、強い仮説、未確定事項を分けて報告する。
+2. hot path の改善は進めても、timeout の根本原因は handler 別 timing などの
+   診断で確定してから説明する。
+3. stale config や余分な process spawn は悪化要因として直すが、それだけで
+   symptom が完全解消すると断定しない。
+
 ## 2026-04-27 — fix(branches): HTML class refactor must extend contract guard to JS-side selectors
 
 ### 事象

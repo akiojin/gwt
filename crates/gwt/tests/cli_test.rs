@@ -145,10 +145,9 @@ fn red_93_parse_hook_empty_is_usage_error() {
 #[test]
 fn dispatch_hook_runtime_state_without_env_is_silent_ok() {
     // T-025 (SPEC #1942): the old stub printed "not yet implemented"
-    // and returned 0. The real handler now delegates to
-    // `runtime_state::handle`, which returns Ok(()) as a silent no-op
-    // when `GWT_SESSION_RUNTIME_PATH` is unset. Same exit code, quieter
-    // stderr.
+    // and returned 0. The real handler now calls `runtime_state::handle`
+    // in-process, which returns Ok(()) as a silent no-op when
+    // `GWT_SESSION_RUNTIME_PATH` is unset. Same exit code, quieter stderr.
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     let prev = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
@@ -169,16 +168,9 @@ fn dispatch_hook_runtime_state_without_env_is_silent_ok() {
         err_text.is_empty(),
         "runtime-state no-op must not print to stderr, got {err_text:?}"
     );
-    assert_eq!(env.internal_command_call_log.len(), 1);
-    assert_eq!(
-        env.internal_command_call_log[0].args,
-        argv(&[
-            "gwtd",
-            "__internal",
-            "daemon-hook",
-            "runtime-state",
-            "PreToolUse"
-        ])
+    assert!(
+        env.internal_command_call_log.is_empty(),
+        "public hook dispatch must stay in-process"
     );
 }
 
@@ -209,7 +201,7 @@ fn dispatch_hook_runtime_state_missing_event_exits_2() {
 }
 
 #[test]
-fn dispatch_hook_event_forwards_to_single_internal_daemon_hook() {
+fn dispatch_hook_event_runs_in_process_without_stdout_noise() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.stdin = serde_json::json!({
@@ -223,10 +215,9 @@ fn dispatch_hook_event_forwards_to_single_internal_daemon_hook() {
     assert_eq!(code, 0, "PreToolUse read event should be allowed");
     assert_eq!(env.stdout, b"", "allowed PreToolUse must emit no stdout");
     assert_eq!(env.stderr, b"", "hook event must not leak diagnostics");
-    assert_eq!(env.internal_command_call_log.len(), 1);
-    assert_eq!(
-        env.internal_command_call_log[0].args,
-        argv(&["gwtd", "__internal", "daemon-hook", "event", "PreToolUse"])
+    assert!(
+        env.internal_command_call_log.is_empty(),
+        "public hook event dispatch must stay in-process"
     );
 }
 
