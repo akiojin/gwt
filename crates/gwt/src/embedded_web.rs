@@ -1614,6 +1614,46 @@ mod tests {
         );
     }
 
+    /// Launch Wizard hydration can add QuickStart, Docker, and Advanced form
+    /// content after the initial loading state. The footer must stay outside
+    /// that scrollable form body so the Launch button never overlaps hydrated
+    /// content.
+    #[test]
+    fn embedded_web_launch_wizard_scrolls_body_without_footer_overlap() {
+        let html = index_html();
+
+        let css_body = |selector: &str| {
+            let start = html
+                .find(selector)
+                .unwrap_or_else(|| panic!("expected `{selector}` CSS rule to exist"));
+            let block = &html[start..];
+            let end = block
+                .find('}')
+                .unwrap_or_else(|| panic!("expected `{selector}` CSS rule to close"));
+            &block[..end]
+        };
+
+        let wizard_shell = css_body(".modal-shell.is-wizard {");
+        assert!(
+            wizard_shell.contains("overflow: hidden"),
+            "expected Launch Wizard shell to hide shell-level overflow so only the form body scrolls, got: {wizard_shell}",
+        );
+
+        let wizard_body = css_body("#wizard-body {");
+        for prop in ["overflow: auto", "min-height: 0"] {
+            assert!(
+                wizard_body.contains(prop),
+                "expected #wizard-body to declare `{prop}` as the scroll container, got: {wizard_body}",
+            );
+        }
+
+        let wizard_footer = css_body(".wizard-footer {");
+        assert!(
+            wizard_footer.contains("flex: 0 0 auto"),
+            "expected wizard footer to keep a stable non-overlapping height, got: {wizard_footer}",
+        );
+    }
+
     /// SPEC-2008 FR-035 (JS-side guard): the legacy `.modal` shell class is
     /// retired in HTML, so any `querySelector(".modal")` left in `app.js`
     /// resolves to `null` and silently breaks the modal it backs (this

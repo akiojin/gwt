@@ -1978,6 +1978,7 @@
         width: min(980px, calc(100vw - 32px));
         padding: 18px;
         gap: 12px;
+        overflow: hidden;
         z-index: 2000;
         box-shadow: 0 22px 56px rgba(15, 23, 42, 0.22);
       }
@@ -2084,6 +2085,11 @@
 
       .wizard-summary:empty {
         display: none;
+      }
+
+      #wizard-body {
+        min-height: 0;
+        overflow: auto;
       }
 
       .wizard-summary-item {
@@ -2333,6 +2339,7 @@
       }
 
       .wizard-footer {
+        flex: 0 0 auto;
         display: flex;
         align-items: center;
         justify-content: space-between;
@@ -2365,7 +2372,7 @@
       }
 
       @media (max-width: 720px) {
-        .wizard-modal {
+        .modal-shell.is-wizard {
           width: calc(100vw - 16px);
           max-height: calc(100vh - 16px);
           padding: 14px;
