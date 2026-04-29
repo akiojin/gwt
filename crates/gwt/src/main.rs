@@ -995,6 +995,44 @@ mod tests {
         }]
     }
 
+    fn sample_wizard_stale_agent_options() -> Vec<AgentOption> {
+        let (command, default_args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), "echo".to_string(), "ok".to_string()],
+            )
+        } else {
+            ("/bin/echo".to_string(), vec!["ok".to_string()])
+        };
+        vec![
+            AgentOption {
+                id: "claude".to_string(),
+                name: "Claude Code".to_string(),
+                available: false,
+                installed_version: None,
+                versions: Vec::new(),
+                custom_agent: None,
+            },
+            AgentOption {
+                id: "echo-agent".to_string(),
+                name: "Echo Agent".to_string(),
+                available: true,
+                installed_version: Some("test".to_string()),
+                versions: Vec::new(),
+                custom_agent: Some(gwt_agent::CustomCodingAgent {
+                    id: "echo-agent".to_string(),
+                    display_name: "Echo Agent".to_string(),
+                    agent_type: gwt_agent::custom::CustomAgentType::Command,
+                    command,
+                    default_args,
+                    mode_args: None,
+                    skip_permissions_args: Vec::new(),
+                    env: HashMap::new(),
+                }),
+            },
+        ]
+    }
+
     fn sample_wizard_quick_start_entry(live_window_id: Option<&str>) -> QuickStartEntry {
         QuickStartEntry {
             session_id: "gwt-session-1".to_string(),
@@ -2330,6 +2368,83 @@ mod tests {
                 .linked_issue_number,
             Some(99)
         );
+    }
+
+    #[test]
+    fn launch_wizard_action_flow_launches_agent_when_selected_index_is_stale() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut runtime = sample_runtime(
+            temp.path(),
+            vec![sample_project_tab(
+                "tab-1",
+                "Repo",
+                repo.clone(),
+                ProjectKind::NonRepo,
+                &[WindowPreset::Issue],
+            )],
+            Some("tab-1"),
+        );
+        runtime.launch_wizard = Some(LaunchWizardSession {
+            tab_id: "tab-1".to_string(),
+            wizard_id: "wizard-stale-agent".to_string(),
+            wizard: LaunchWizardState::open_with(
+                LaunchWizardContext {
+                    selected_branch: sample_branch_entry("feature/demo"),
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: Some(repo.clone()),
+                    quick_start_root: repo.clone(),
+                    live_sessions: Vec::new(),
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                sample_wizard_stale_agent_options(),
+                Vec::new(),
+            ),
+        });
+        {
+            let wizard = &mut runtime.launch_wizard.as_mut().unwrap().wizard;
+            wizard.step = gwt::LaunchWizardStep::AgentSelect;
+            wizard.selected = 0;
+        }
+
+        let set_agent_events = runtime.handle_launch_wizard_action(
+            LaunchWizardAction::SetAgent {
+                agent_id: "echo-agent".to_string(),
+            },
+            Some(canvas_bounds()),
+        );
+        assert_eq!(set_agent_events.len(), 1);
+        assert_eq!(
+            runtime
+                .launch_wizard
+                .as_ref()
+                .unwrap()
+                .wizard
+                .error
+                .as_deref(),
+            None
+        );
+
+        let launch_events =
+            runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+
+        assert!(runtime.launch_wizard.is_none());
+        assert!(launch_events.iter().any(|event| {
+            matches!(
+                event.event,
+                BackendEvent::LaunchWizardState { wizard: None }
+            )
+        }));
+        let tab = runtime.tab("tab-1").expect("tab");
+        assert!(tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .any(|window| window.preset == WindowPreset::Agent));
     }
 
     #[test]

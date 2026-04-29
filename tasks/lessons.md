@@ -1,5 +1,25 @@
 # Lessons Learned
 
+## 2026-04-29 — test(gui): Launch Wizard 修正は action flow と E2E まで同時に固定する
+
+### 事象
+
+Launch Wizard の agent 選択不具合で、原因調査と unit regression だけを先行し、
+ユーザーから「テストやE2Eテストを実行していないのですか？」、
+「調査と同時にテストしてください」と指摘された。
+
+### 原因
+
+状態モデル上の `agent_id` と UI の `selected` index がずれる不具合は、
+`LaunchWizardState` 単体だけでなく `handle_launch_wizard_action` 経由の
+submit path まで確認しないと、実際の GUI launch path の再発防止にならない。
+
+### 再発防止策
+
+1. Launch Wizard の選択・submit 系修正では、state unit test と runtime action flow test を同時に追加する。
+2. ユーザー操作で起きる GUI 不具合は、調査と並行して再現テストを RED にしてから実装する。
+3. 完了前に unit / integration / frontend smoke / ignored E2E の実行結果を揃えて報告する。
+
 ## 2026-04-29 — fix(shell): GUI shell terminal は login shell 初期化を読む必要がある
 
 ### 事象

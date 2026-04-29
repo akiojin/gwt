@@ -1276,10 +1276,13 @@ impl LaunchWizardState {
         match self
             .detected_agents
             .iter()
-            .find(|candidate| candidate.id == agent_id)
+            .position(|candidate| candidate.id == agent_id)
         {
-            Some(candidate) if candidate.available => {
+            Some(index) if self.detected_agents[index].available => {
                 self.agent_id = agent_id.to_string();
+                if self.step == LaunchWizardStep::AgentSelect {
+                    self.selected = index;
+                }
                 self.sync_selected_agent_options();
             }
             _ => {
@@ -4010,6 +4013,32 @@ mod tests {
             state.build_launch_config().unwrap_err(),
             "Agent option is unavailable"
         );
+    }
+
+    #[test]
+    fn set_agent_keeps_launch_config_on_selected_agent_when_index_is_stale() {
+        let mut options = sample_agent_options();
+        options
+            .iter_mut()
+            .find(|option| option.id == "claude")
+            .expect("claude option")
+            .available = false;
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            options,
+            Vec::new(),
+        );
+        state.step = LaunchWizardStep::AgentSelect;
+        state.selected = 0;
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+
+        assert_eq!(state.error, None);
+        assert_eq!(state.agent_id, "codex");
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
     }
 
     #[test]
