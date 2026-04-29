@@ -2809,7 +2809,12 @@ impl AppRuntime {
         let Some(mut session) = self.launch_wizard.take() else {
             return Vec::new();
         };
+        let action_stage = Self::launch_wizard_action_error_stage(&action);
+        let action_label = Self::launch_wizard_action_label(&action);
         session.wizard.apply(action);
+        if let Some(error) = session.wizard.error.as_deref() {
+            Self::log_launch_wizard_error(&session, action_stage, action_label, error);
+        }
 
         match session.wizard.completion.take() {
             Some(LaunchWizardCompletion::Cancelled) => {
@@ -2817,17 +2822,23 @@ impl AppRuntime {
             }
             Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    session.wizard.error =
-                        Some("The selected session window is no longer available".to_string());
+                    let error = "The selected session window is no longer available".to_string();
+                    Self::log_launch_wizard_error(&session, "focus_window", action_label, &error);
+                    session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 };
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
-                    return Vec::new();
+                    let error = "Project tab not found".to_string();
+                    Self::log_launch_wizard_error(&session, "focus_window", action_label, &error);
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
                 };
                 if !tab.workspace.focus_window(&address.raw_id, None) {
-                    session.wizard.error =
-                        Some("The selected session window is no longer available".to_string());
+                    let error = "The selected session window is no longer available".to_string();
+                    Self::log_launch_wizard_error(&session, "focus_window", action_label, &error);
+                    session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 }
@@ -2840,8 +2851,9 @@ impl AppRuntime {
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
                 let Some(bounds) = bounds else {
-                    session.wizard.error =
-                        Some("Viewport bounds are required to launch a window".to_string());
+                    let error = "Viewport bounds are required to launch a window".to_string();
+                    Self::log_launch_wizard_error(&session, "launch_bounds", action_label, &error);
+                    session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 };
@@ -2853,6 +2865,12 @@ impl AppRuntime {
                                 events
                             }
                             Err(error) => {
+                                Self::log_launch_wizard_error(
+                                    &session,
+                                    "spawn_agent_window",
+                                    action_label,
+                                    &error,
+                                );
                                 session.wizard.error = Some(error);
                                 self.launch_wizard = Some(session);
                                 vec![self.launch_wizard_state_outbound()]
@@ -2866,6 +2884,12 @@ impl AppRuntime {
                                 events
                             }
                             Err(error) => {
+                                Self::log_launch_wizard_error(
+                                    &session,
+                                    "spawn_shell_window",
+                                    action_label,
+                                    &error,
+                                );
                                 session.wizard.error = Some(error);
                                 self.launch_wizard = Some(session);
                                 vec![self.launch_wizard_state_outbound()]
@@ -3986,7 +4010,166 @@ impl AppRuntime {
             .is_some()
     }
 
+    fn launch_wizard_action_error_stage(action: &gwt::LaunchWizardAction) -> &'static str {
+        match action {
+            gwt::LaunchWizardAction::Submit => "wizard_submit",
+            gwt::LaunchWizardAction::ApplyQuickStart { .. } => "quick_start",
+            gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
+            gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
+            gwt::LaunchWizardAction::Select { .. } => "wizard_select",
+            _ => "wizard_action",
+        }
+    }
+
+    fn launch_wizard_action_label(action: &gwt::LaunchWizardAction) -> &'static str {
+        match action {
+            gwt::LaunchWizardAction::Select { .. } => "select",
+            gwt::LaunchWizardAction::Back => "back",
+            gwt::LaunchWizardAction::Cancel => "cancel",
+            gwt::LaunchWizardAction::SubmitText { .. } => "submit_text",
+            gwt::LaunchWizardAction::ApplyQuickStart { .. } => "apply_quick_start",
+            gwt::LaunchWizardAction::FocusExistingSession { .. } => "focus_existing_session",
+            gwt::LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
+            gwt::LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
+            gwt::LaunchWizardAction::SetBranchName { .. } => "set_branch_name",
+            gwt::LaunchWizardAction::SetLaunchTarget { .. } => "set_launch_target",
+            gwt::LaunchWizardAction::SetAgent { .. } => "set_agent",
+            gwt::LaunchWizardAction::SetModel { .. } => "set_model",
+            gwt::LaunchWizardAction::SetReasoning { .. } => "set_reasoning",
+            gwt::LaunchWizardAction::SetRuntimeTarget { .. } => "set_runtime_target",
+            gwt::LaunchWizardAction::SetWindowsShell { .. } => "set_windows_shell",
+            gwt::LaunchWizardAction::SetDockerService { .. } => "set_docker_service",
+            gwt::LaunchWizardAction::SetDockerLifecycle { .. } => "set_docker_lifecycle",
+            gwt::LaunchWizardAction::SetVersion { .. } => "set_version",
+            gwt::LaunchWizardAction::SetExecutionMode { .. } => "set_execution_mode",
+            gwt::LaunchWizardAction::SetLinkedIssue { .. } => "set_linked_issue",
+            gwt::LaunchWizardAction::ClearLinkedIssue => "clear_linked_issue",
+            gwt::LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
+            gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
+            gwt::LaunchWizardAction::Submit => "submit",
+        }
+    }
+
+    fn log_launch_wizard_error(
+        session: &LaunchWizardSession,
+        stage: &'static str,
+        action: &'static str,
+        error: &str,
+    ) {
+        let view = session.wizard.view();
+        let sanitized_error = Self::sanitize_launch_log_error(error);
+        let linked_issue_number = view
+            .linked_issue_number
+            .map(|issue_number| issue_number.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        tracing::error!(
+            target: "gwt::agent_launch",
+            stage = %stage,
+            action = %action,
+            wizard_id = %session.wizard_id,
+            tab_id = %session.tab_id,
+            selected_agent_id = %view.selected_agent_id,
+            selected_launch_target = %view.selected_launch_target,
+            selected_runtime_target = %view.selected_runtime_target,
+            linked_issue_number = %linked_issue_number,
+            error = %sanitized_error,
+            "launch wizard action failed"
+        );
+    }
+
+    fn log_window_launch_error(&self, stage: &'static str, window_id: &str, error: &str) {
+        let (tab_id, raw_window_id) = self
+            .window_lookup
+            .get(window_id)
+            .map(|address| (address.tab_id.as_str(), address.raw_id.as_str()))
+            .unwrap_or(("unknown", "unknown"));
+        let session = self.active_agent_sessions.get(window_id);
+        let session_id = session
+            .map(|session| session.session_id.as_str())
+            .unwrap_or("unknown");
+        let agent_id = session
+            .map(|session| session.agent_id.as_str())
+            .unwrap_or("unknown");
+        let branch_name = session
+            .map(|session| session.branch_name.as_str())
+            .unwrap_or("unknown");
+        let sanitized_error = Self::sanitize_launch_log_error(error);
+        tracing::error!(
+            target: "gwt::agent_launch",
+            stage = %stage,
+            window_id = %window_id,
+            tab_id = %tab_id,
+            raw_window_id = %raw_window_id,
+            session_id = %session_id,
+            agent_id = %agent_id,
+            branch = %branch_name,
+            error = %sanitized_error,
+            "window launch failed"
+        );
+    }
+
+    fn sanitize_launch_log_error(error: &str) -> String {
+        let sensitive_env_keys = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GWT_HOOK_TOKEN",
+            "HOOK_TOKEN",
+        ];
+        let sensitive_flags = [
+            "--api-key",
+            "--apikey",
+            "--token",
+            "--auth-token",
+            "--hook-token",
+        ];
+
+        let mut tokens = Vec::new();
+        let mut redact_next = false;
+        for token in error.split_whitespace() {
+            if redact_next {
+                tokens.push("[REDACTED]".to_string());
+                redact_next = false;
+                continue;
+            }
+
+            let normalized = token
+                .trim_matches(|ch: char| matches!(ch, '"' | '\'' | ',' | ';'))
+                .to_ascii_lowercase();
+            if sensitive_flags.iter().any(|flag| normalized == *flag) {
+                tokens.push(token.to_string());
+                redact_next = true;
+                continue;
+            }
+            if let Some(flag) = sensitive_flags
+                .iter()
+                .find(|flag| normalized.starts_with(&format!("{flag}=")))
+            {
+                tokens.push(format!("{flag}=[REDACTED]"));
+                continue;
+            }
+            if let Some((key, _value)) = token.split_once('=') {
+                let normalized_key = key.trim_matches(|ch: char| matches!(ch, '"' | '\''));
+                if sensitive_env_keys
+                    .iter()
+                    .any(|candidate| normalized_key.eq_ignore_ascii_case(candidate))
+                {
+                    tokens.push(format!("{normalized_key}=[REDACTED]"));
+                    continue;
+                }
+            }
+
+            tokens.push(token.to_string());
+        }
+        tokens.join(" ")
+    }
+
     fn launch_error_events(&mut self, window_id: String, detail: String) -> Vec<OutboundEvent> {
+        self.log_window_launch_error("launch_complete", &window_id, &detail);
         if self.tracked_window_exists(&window_id) {
             return self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
         }
@@ -4134,10 +4317,10 @@ mod tests {
 
     use base64::Engine;
     use gwt::{
-        empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
-        BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardContext,
-        LaunchWizardState, ProfileEnvEntryView, ProjectKind, WindowGeometry, WindowPreset,
-        WindowProcessStatus, WorkspaceState,
+        empty_workspace_state, load_restored_workspace_state, load_session_state, AgentOption,
+        BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent,
+        LaunchWizardAction, LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView,
+        ProjectKind, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -4153,6 +4336,8 @@ mod tests {
         Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
     };
     use gwt_terminal::Pane;
+    use tracing::{field::Visit, Event, Level, Subscriber};
+    use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
@@ -4160,6 +4345,81 @@ mod tests {
         OutboundEvent, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
     use crate::{combined_window_id, PtyWriterRegistry};
+
+    #[derive(Debug, Clone)]
+    struct CapturedTracingEvent {
+        level: Level,
+        target: String,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct CaptureTracingLayer {
+        events: Arc<Mutex<Vec<CapturedTracingEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureTracingLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = CaptureTracingVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("captured tracing events")
+                .push(CapturedTracingEvent {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    fields: visitor.fields,
+                });
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureTracingVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl CaptureTracingVisitor {
+        fn insert(&mut self, field: &tracing::field::Field, value: impl ToString) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl Visit for CaptureTracingVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let raw = format!("{value:?}");
+            self.insert(field, raw.trim_matches('"'));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.insert(field, value);
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.insert(field, value);
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.insert(field, value);
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.insert(field, value);
+        }
+    }
+
+    fn capture_tracing_events(run: impl FnOnce()) -> Vec<CapturedTracingEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureTracingLayer {
+            events: Arc::clone(&events),
+        });
+        tracing::subscriber::with_default(subscriber, run);
+        let captured_events = events.lock().expect("captured tracing events").clone();
+        captured_events
+    }
 
     struct ScopedEnvVar {
         key: &'static str,
@@ -4593,6 +4853,47 @@ exit 0
         }
     }
 
+    fn sample_unavailable_agent_launch_wizard_session(
+        tab_id: &str,
+        project_root: &Path,
+    ) -> LaunchWizardSession {
+        LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id: "wizard-unavailable-agent".to_string(),
+            wizard: LaunchWizardState::open_with(
+                LaunchWizardContext {
+                    selected_branch: BranchListEntry {
+                        name: "feature/demo".to_string(),
+                        scope: BranchScope::Local,
+                        is_head: false,
+                        upstream: None,
+                        ahead: 0,
+                        behind: 0,
+                        last_commit_date: None,
+                        cleanup_ready: true,
+                        cleanup: BranchCleanupInfo::default(),
+                    },
+                    normalized_branch_name: "feature/demo".to_string(),
+                    worktree_path: Some(project_root.to_path_buf()),
+                    quick_start_root: project_root.to_path_buf(),
+                    live_sessions: Vec::new(),
+                    docker_context: None,
+                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    linked_issue_number: Some(42),
+                },
+                vec![AgentOption {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    available: false,
+                    installed_version: None,
+                    versions: Vec::new(),
+                    custom_agent: None,
+                }],
+                Vec::new(),
+            ),
+        }
+    }
+
     #[test]
     fn app_runtime_frontend_ready_replies_only_to_requesting_client_and_starts_with_workspace() {
         let temp = tempdir().expect("tempdir");
@@ -4787,6 +5088,140 @@ exit 0
                     && *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
         ));
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_submit_failure_emits_structured_error_log() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::NonRepo,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.launch_wizard = Some(sample_unavailable_agent_launch_wizard_session(
+            "tab-1", &repo,
+        ));
+
+        let events = capture_tracing_events(|| {
+            let _ = runtime
+                .handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+        });
+
+        let event = events
+            .iter()
+            .find(|event| {
+                event.level == Level::ERROR
+                    && event.target == "gwt::agent_launch"
+                    && event.fields.get("stage").map(String::as_str) == Some("wizard_submit")
+            })
+            .expect("launch wizard submit failure log");
+        assert_eq!(
+            event.fields.get("wizard_id").map(String::as_str),
+            Some("wizard-unavailable-agent")
+        );
+        assert_eq!(
+            event.fields.get("tab_id").map(String::as_str),
+            Some("tab-1")
+        );
+        assert_eq!(
+            event.fields.get("selected_agent_id").map(String::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            event
+                .fields
+                .get("selected_launch_target")
+                .map(String::as_str),
+            Some("agent")
+        );
+        assert_eq!(
+            event.fields.get("error").map(String::as_str),
+            Some("Agent option is unavailable")
+        );
+    }
+
+    #[test]
+    fn app_runtime_agent_launch_completion_failure_emits_structured_error_log() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+
+        let events = capture_tracing_events(|| {
+            let _ = runtime.handle_launch_complete(
+                window_id.clone(),
+                Err("launch failed before process spawn".to_string()),
+            );
+        });
+
+        let event = events
+            .iter()
+            .find(|event| {
+                event.level == Level::ERROR
+                    && event.target == "gwt::agent_launch"
+                    && event.fields.get("stage").map(String::as_str) == Some("launch_complete")
+            })
+            .expect("agent launch completion failure log");
+        assert_eq!(
+            event.fields.get("window_id").map(String::as_str),
+            Some(window_id.as_str())
+        );
+        assert_eq!(
+            event.fields.get("tab_id").map(String::as_str),
+            Some("tab-1")
+        );
+        assert_eq!(
+            event.fields.get("error").map(String::as_str),
+            Some("launch failed before process spawn")
+        );
+    }
+
+    #[test]
+    fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+
+        let events = capture_tracing_events(|| {
+            let _ = runtime.handle_launch_complete(
+                window_id,
+                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".to_string()),
+            );
+        });
+
+        let event = events
+            .iter()
+            .find(|event| {
+                event.level == Level::ERROR
+                    && event.target == "gwt::agent_launch"
+                    && event.fields.get("stage").map(String::as_str) == Some("launch_complete")
+            })
+            .expect("redacted launch completion failure log");
+        let error = event.fields.get("error").expect("error field");
+        assert!(!error.contains("sk-test"));
+        assert!(!error.contains("sk-other"));
+        assert!(!error.contains("hook-secret"));
+        assert!(!error.contains("plain-token"));
+        assert!(error.contains("OPENAI_API_KEY=[REDACTED]"));
+        assert!(error.contains("--api-key [REDACTED]"));
+        assert!(error.contains("GWT_HOOK_TOKEN=[REDACTED]"));
+        assert!(error.contains("--token [REDACTED]"));
     }
 
     #[test]

@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.11.5] - 2026-04-29
+
+### Bug Fixes
+
+- Agent起動失敗を構造化ログに記録
+
 ## [9.11.4] - 2026-04-29
 
 ### Bug Fixes

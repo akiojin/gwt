@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "axum",
  "base64",
@@ -1299,6 +1299,7 @@ dependencies = [
  "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "which",
  "winresource",
@@ -1307,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "chrono",
  "dunce",
@@ -1331,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "reqwest",
  "serde",
@@ -1341,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1350,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "dirs",
  "serde",
@@ -1362,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "chrono",
  "dirs",
@@ -1393,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1405,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "dirs",
  "gwt-core",
@@ -1417,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "fs2",
  "regex",
@@ -1431,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "chrono",
  "fs2",
@@ -1446,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1463,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.11.4"
+version = "9.11.5"
 dependencies = [
  "gwt-core",
  "tempfile",
