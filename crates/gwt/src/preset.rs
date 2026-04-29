@@ -222,7 +222,7 @@ where
             if command_exists(shell) {
                 return Ok(ShellProgram {
                     command: shell.to_string(),
-                    args: Vec::new(),
+                    args: login_shell_args(shell),
                 });
             }
         }
@@ -238,12 +238,25 @@ where
         if command_exists(candidate) {
             return Ok(ShellProgram {
                 command: (*candidate).to_string(),
-                args: Vec::new(),
+                args: login_shell_args(candidate),
             });
         }
     }
 
     Err(PresetResolveError::ShellNotFound)
+}
+
+fn login_shell_args(shell: &str) -> Vec<String> {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "fish" => vec!["--login".to_string()],
+        "bash" | "dash" | "ksh" | "sh" | "zsh" => vec!["-l".to_string()],
+        _ => Vec::new(),
+    }
 }
 
 pub fn resolve_launch_spec(preset: WindowPreset) -> Result<LaunchSpec, PresetResolveError> {
@@ -373,6 +386,27 @@ mod tests {
     }
 
     #[test]
+    fn shell_detection_uses_login_args_for_known_unix_shells() {
+        let zsh = detect_shell_program_with(Some("/bin/zsh"), false, |_| true).expect("zsh exists");
+        assert_eq!(zsh.args, vec!["-l".to_string()]);
+
+        let bash =
+            detect_shell_program_with(Some("/bin/bash"), false, |_| true).expect("bash exists");
+        assert_eq!(bash.args, vec!["-l".to_string()]);
+
+        let fish = detect_shell_program_with(Some("/opt/homebrew/bin/fish"), false, |_| true)
+            .expect("fish exists");
+        assert_eq!(fish.args, vec!["--login".to_string()]);
+
+        let custom = detect_shell_program_with(Some("/opt/tools/custom-shell"), false, |_| true)
+            .expect("custom shell exists");
+        assert!(
+            custom.args.is_empty(),
+            "unknown shells should not receive guessed login flags"
+        );
+    }
+
+    #[test]
     fn shell_detection_prefers_pwsh_on_windows() {
         let shell = detect_shell_program_with(None, true, |command| command == "pwsh")
             .expect("windows shell should resolve");
@@ -432,6 +466,7 @@ mod tests {
         })
         .expect("fallback shell");
         assert_eq!(shell.command, "/bin/bash");
+        assert_eq!(shell.args, vec!["-l".to_string()]);
 
         let error = detect_shell_program_with(None, false, |_| false)
             .expect_err("missing shell should error");

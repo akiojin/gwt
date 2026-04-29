@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-04-29 — fix(shell): GUI shell terminal は login shell 初期化を読む必要がある
+
+### 事象
+
+`gh` を `~/.local/bin` に配置しても、gwt の Shell terminal 側では OS / user shell
+環境が反映されず、PATH 上のコマンドとして見えない可能性が残っていた。ユーザーから
+「エージェント起動時には割り当てられているが、シェルターミナル起動時には
+OS 環境変数が割り当てられていない」と指摘された。
+
+### 原因
+
+- agent 起動経路と shell terminal 起動経路を混同していた。
+- Shell terminal は `detect_shell_program()` で `/bin/zsh` などを引数なし起動しており、
+  macOS GUI / launchd 由来の最小環境から、ユーザーの login shell profile を読めていなかった。
+
+### 再発防止策
+
+1. GUI から通常 shell を起動する場合は、Terminal.app 相当の login shell 起動かを確認する。
+2. PATH 問題では、binary の配置だけでなく、起動元 process env と shell 初期化経路を分けて調査する。
+3. agent env 注入で直る問題と、plain shell terminal の OS / user env 継承問題を別経路として扱う。
+
 ## 2026-04-29 — fix(hooks): timeout 原因は実測なしに単一要因へ断定しない
 
 ### 事象
