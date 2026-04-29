@@ -79,20 +79,18 @@ pub(crate) use launch_runtime::{
     resolve_launch_worktree_request,
 };
 pub(crate) use runtime_support::{
-    active_profile_launch_env, active_profile_spawn_env, app_state_view_from_parts,
-    apply_effective_spawn_env, attach_parent_console_for_cli, close_window_from_workspace,
+    app_state_view_from_parts, attach_parent_console_for_cli, close_window_from_workspace,
     combined_window_id, current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     origin_remote_ref, resolve_launch_spec_with_fallback, resolve_launch_wizard_hydration,
     resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
-    should_auto_start_restored_window, spawn_env, synthetic_branch_entry, workspace_view_for_tab,
-    EffectiveSpawnEnv,
+    should_auto_start_restored_window, synthetic_branch_entry, workspace_view_for_tab,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
-    active_profile_spawn_env_at, branch_worktree_path, parse_github_remote_url,
-    suffixed_worktree_path, worktree_path_is_occupied,
+    branch_worktree_path, parse_github_remote_url, spawn_env, suffixed_worktree_path,
+    worktree_path_is_occupied,
 };
 pub(crate) use update_front_door::{apply_update_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -4200,25 +4198,27 @@ mod tests {
             .expect("disable env");
         settings.save(&config_path).expect("save settings");
 
-        let effective = super::active_profile_spawn_env_at(
-            &config_path,
-            [
-                ("PATH".to_string(), "/os/bin".to_string()),
-                ("SECRET".to_string(), "hidden".to_string()),
-            ],
-        )
-        .expect("effective env");
+        let (effective_env, remove_env) =
+            gwt_agent::LaunchEnvironment::from_active_profile_with_base(
+                &config_path,
+                [
+                    ("PATH".to_string(), "/os/bin".to_string()),
+                    ("SECRET".to_string(), "hidden".to_string()),
+                ],
+            )
+            .expect("effective env")
+            .into_parts();
 
         assert_eq!(
-            effective.env.get("PATH").map(String::as_str),
+            effective_env.get("PATH").map(String::as_str),
             Some("/profile/bin:/usr/bin")
         );
         assert_eq!(
-            effective.env.get("PROFILE_ONLY").map(String::as_str),
+            effective_env.get("PROFILE_ONLY").map(String::as_str),
             Some("enabled")
         );
-        assert!(!effective.env.contains_key("SECRET"));
-        assert_eq!(effective.remove_env, vec!["SECRET".to_string()]);
+        assert!(!effective_env.contains_key("SECRET"));
+        assert_eq!(remove_env, vec!["SECRET".to_string()]);
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

@@ -5,6 +5,7 @@ use std::{
 };
 
 use crate::{
+    environment::LaunchEnvironment,
     launch::LaunchConfig,
     session::{
         runtime_state_path, Session, SessionRuntimeState, GWT_BIN_PATH_ENV,
@@ -163,10 +164,9 @@ where
         .working_dir
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
-    config.env_vars.insert(
-        "GWT_PROJECT_ROOT".to_string(),
-        worktree_path.display().to_string(),
-    );
+    LaunchEnvironment::empty()
+        .with_project_root(&worktree_path)
+        .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
     refresh_worktree_assets(&worktree_path)?;
 
     let used_host_package_runner_fallback = config.runtime_target == LaunchRuntimeTarget::Host

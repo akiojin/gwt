@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod custom;
 pub mod detect;
+pub mod environment;
 pub mod launch;
 pub mod prepare;
 pub mod presets;
@@ -20,6 +21,7 @@ pub use audit::{
 };
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
+pub use environment::LaunchEnvironment;
 pub use launch::{
     canonical_launch_args, normalize_launch_args, resolve_runner, AgentLaunchBuilder, LaunchConfig,
     ResolvedRunner,

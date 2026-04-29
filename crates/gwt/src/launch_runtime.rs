@@ -155,12 +155,14 @@ pub(crate) fn build_shell_process_launch(
         .working_dir
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
-    let mut env = spawn_env();
-    for key in &config.remove_env {
-        env.remove(key);
-    }
-    env.extend(config.env_vars.clone());
-    let remove_env = config.remove_env.clone();
+    let base_env = if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+        gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
+    } else {
+        gwt_agent::LaunchEnvironment::from_base_env(std::env::vars().collect::<Vec<_>>())
+    };
+    let mut env = config.env_vars.clone();
+    let mut remove_env = config.remove_env.clone();
+    base_env.apply_to_parts(&mut env, &mut remove_env);
 
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
         let windows_shell = if cfg!(windows) {

@@ -719,6 +719,8 @@ impl AgentLaunchBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::custom::{CustomAgentType, CustomCodingAgent, ModeArgs};
 
     use super::*;
