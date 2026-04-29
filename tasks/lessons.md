@@ -1,5 +1,27 @@
 # Lessons Learned
 
+## 2026-04-29 — fix(gui): Agent 起動失敗は UI エラーだけでなく構造化ログに残す
+
+### 事象
+
+Launch Wizard で `Agent option is unavailable` が表示されても、`~/.gwt/logs/`
+から同じ失敗を追跡できず、E2E/手動確認時の原因切り分けが困難になった。
+
+### 原因
+
+`handle_launch_wizard_action` と async launch completion の失敗経路が UI state
+更新だけで完結しており、wizard id / tab id / selected agent / window id などの
+調査に必要な文脈をログへ出していなかった。
+
+### 再発防止策
+
+1. Agent / Shell / Launch Wizard の起動失敗は、ユーザー向けエラー表示と同時に
+   structured error log を出す。
+2. ログ追加時は env/API key/hook token/raw command args を含めず、再現に必要な
+   id と stage のみを出す。
+3. 起動失敗の修正では、ログ出力を捕捉する regression test を RED にしてから
+   実装する。
+
 ## 2026-04-29 — test(gui): Launch Wizard 修正は action flow と E2E まで同時に固定する
 
 ### 事象
