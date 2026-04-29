@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-29 — fix(hooks): timeout 原因は実測なしに単一要因へ断定しない
+
+### 事象
+
+Hook timeout 調査で、古い複数 hook 設定と `gwtd hook` の再 spawn が見つかった段階で、
+それを `Hook timed out` の直接原因として強く扱いすぎた。ユーザーから
+「本当にそれであっていますか？」と指摘され、追加実測の結果、素の handler は短時間で
+戻るため、直接原因は session 環境や state 条件を含めて未確定だと分かった。
+
+### 原因
+
+- 「確実な悪化要因」と「timeout の根本原因」を分けて説明できていなかった。
+- handler 別 duration や実際の hook command path を観測する仕組みがないまま、
+  既存コード構造から原因を推定した。
+
+### 再発防止策
+
+1. 性能問題では、実測済みの事実、強い仮説、未確定事項を分けて報告する。
+2. hot path の改善は進めても、timeout の根本原因は handler 別 timing などの
+   診断で確定してから説明する。
+3. stale config や余分な process spawn は悪化要因として直すが、それだけで
+   symptom が完全解消すると断定しない。
+
 ## 2026-04-27 — fix(branches): HTML class refactor must extend contract guard to JS-side selectors
 
 ### 事象

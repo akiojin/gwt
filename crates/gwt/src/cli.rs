@@ -251,7 +251,7 @@ pub enum CliCommand {
     InternalApplyUpdate { rest: Vec<String> },
     /// `gwtd __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
     InternalRunInstaller { rest: Vec<String> },
-    /// `gwtd __internal daemon-hook <name> [args...]` — hidden helper used by the front door.
+    /// `gwtd __internal daemon-hook <name> [args...]` — hidden compatibility helper.
     InternalDaemonHook { name: String, rest: Vec<String> },
     /// `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`.
     Discuss(DiscussAction),
@@ -1516,23 +1516,15 @@ fn fetch_actions_job_log_via_gh(
 
 /// Dispatch a `gwtd hook <name> [args...]` invocation.
 ///
-/// SPEC-2077 Phase 2: `gwtd hook ...` remains the outward-facing surface, but
-/// the front door now relays to the hidden `gwtd __internal daemon-hook ...`
-/// helper so runtime evolution stays behind the same operator-facing binary.
+/// SPEC-2077 hot path tightening: `gwtd hook ...` remains the outward-facing
+/// surface, but dispatches in-process so every Claude/Codex hook event does not
+/// pay for a second `gwtd __internal daemon-hook ...` process spawn. The hidden
+/// internal command stays available as a compatibility route.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::HookKind;
-    let Some(_kind) = HookKind::from_name(name) else {
-        let _ = writeln!(env.stderr(), "gwtd hook: unknown hook '{name}'");
-        return Ok(2);
-    };
-
-    let stdin = env.read_stdin().map_err(io_as_api_error)?;
-    let output = env
-        .run_internal_command(&daemon_hook_argv(name, rest), &stdin)
-        .map_err(io_as_api_error)?;
-    write_internal_command_output(env, output)
+    run_daemon_hook(env, name, rest)
 }
 
+#[cfg(test)]
 fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
     let mut argv = vec![
         "gwtd".to_string(),
@@ -1544,6 +1536,7 @@ fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
     argv
 }
 
+#[cfg(test)]
 fn write_internal_command_output<E: CliEnv>(
     env: &mut E,
     output: crate::cli::env::InternalCommandOutput,
@@ -1563,6 +1556,8 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
     if !project_root.exists() {
         return Ok(());
     }
+
+    refresh_managed_assets_for_hook_front_door(project_root)?;
 
     crate::index_worker::bootstrap_project_index_for_path(project_root)?;
 
@@ -1593,6 +1588,16 @@ pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Res
     }
 
     Ok(())
+}
+
+fn refresh_managed_assets_for_hook_front_door(
+    project_root: &std::path::Path,
+) -> Result<(), String> {
+    if gwt_git::Repository::discover(project_root).is_err() {
+        return Ok(());
+    }
+    crate::managed_assets::refresh_managed_gwt_assets_for_worktree(project_root)
+        .map_err(|err| err.to_string())
 }
 
 pub fn run_daemon_hook<E: CliEnv>(
@@ -2194,6 +2199,86 @@ fn main() -> ExitCode {
     }
 
     #[test]
+    fn hook_front_door_refresh_migrates_stale_multi_hook_settings() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(temp.path())
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+
+        let hook_bin = temp.path().join("bin/gwtd");
+        fs::create_dir_all(hook_bin.parent().unwrap()).expect("create bin dir");
+        fs::write(&hook_bin, "#!/bin/sh\n").expect("write hook bin");
+        let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &hook_bin);
+
+        let settings_path = temp.path().join(".claude/settings.local.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).expect("create .claude");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/bunx-old/gwtd' hook runtime-state PreToolUse",
+                                    "type": "command"
+                                }
+                            ]
+                        },
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/bunx-old/gwtd' hook forward",
+                                    "type": "command"
+                                }
+                            ]
+                        },
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/bunx-old/gwtd' hook workflow-policy",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write stale settings");
+
+        refresh_managed_assets_for_hook_front_door(temp.path()).expect("refresh hook assets");
+
+        let content = fs::read_to_string(&settings_path).expect("read settings");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("settings json");
+        let commands = commands_for_event(&value, "PreToolUse");
+        assert_eq!(
+            commands.len(),
+            1,
+            "stale split hook entries must collapse to one dispatcher: {commands:?}"
+        );
+        assert!(
+            commands[0].contains(" hook event PreToolUse"),
+            "dispatcher command expected, got: {commands:?}"
+        );
+        assert!(
+            !content.contains("/tmp/bunx-old"),
+            "stale temporary hook binary path must be removed, got: {content}"
+        );
+    }
+
+    #[test]
     fn parse_and_guard_helpers_cover_additional_error_paths() {
         assert!(should_dispatch_cli(&[
             "gwt".to_string(),
@@ -2222,6 +2307,39 @@ fn main() -> ExitCode {
             .contains("boom"));
         assert!(edit_or_create_repo_guard("", "repo").is_err());
         assert!(edit_or_create_repo_guard("akiojin", "gwt").is_ok());
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<&'a str> {
+        value["hooks"][event]
+            .as_array()
+            .unwrap_or_else(|| panic!("hooks missing for event {event}"))
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+            .filter_map(|hook| hook["command"].as_str())
+            .collect()
     }
 
     #[test]
