@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [9.11.2] - 2026-04-29
+
+### Bug Fixes
+
+- **gui:** Launch Agentの利用不能な前回Agentからフォールバックする
+
 ## [9.11.1] - 2026-04-28
 
 ### Bug Fixes
