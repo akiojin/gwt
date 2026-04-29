@@ -3806,7 +3806,7 @@ mod tests {
         let context = context.expect("docker context");
         assert!(context.services.contains(&"app".to_string()));
         assert_eq!(context.suggested_service.as_deref(), Some("app"));
-        assert_eq!(status, gwt_docker::ComposeServiceStatus::NotFound);
+        assert_eq!(status, gwt_docker::ComposeServiceStatus::Unknown);
 
         let multi = temp.path().join("multi");
         fs::create_dir_all(&multi).expect("create multi project");
@@ -3900,6 +3900,54 @@ mod tests {
             Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
             None => std::env::remove_var("GWT_DOCKER_BIN"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wizard_docker_context_detection_does_not_spawn_docker_cli() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n",
+        )
+        .expect("write compose");
+
+        let marker = temp.path().join("docker-called");
+        let fake_docker = temp.path().join("docker");
+        fs::write(
+            &fake_docker,
+            format!(
+                "#!/bin/sh\nprintf called > '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .expect("write fake docker");
+        let mut perms = fs::metadata(&fake_docker)
+            .expect("fake docker metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake_docker, perms).expect("chmod fake docker");
+
+        let old_docker_bin = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", &fake_docker);
+        let (context, status) = super::detect_wizard_docker_context_and_status(&project);
+        match old_docker_bin {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        let context = context.expect("docker context");
+        assert_eq!(context.services, vec!["app".to_string()]);
+        assert_eq!(context.suggested_service.as_deref(), Some("app"));
+        assert_eq!(status, gwt_docker::ComposeServiceStatus::Unknown);
+        assert!(
+            !marker.exists(),
+            "wizard context detection must not block on docker CLI status probes"
+        );
     }
 
     #[test]
