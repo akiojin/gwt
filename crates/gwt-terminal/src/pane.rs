@@ -48,15 +48,24 @@ impl Pane {
         env: HashMap<String, String>,
         cwd: Option<PathBuf>,
     ) -> Result<Self, TerminalError> {
-        let config = SpawnConfig {
-            command,
-            args,
-            cols,
-            rows,
-            env,
-            remove_env: Vec::new(),
-            cwd,
-        };
+        Self::new_with_spawn_config(
+            id,
+            SpawnConfig {
+                command,
+                args,
+                cols,
+                rows,
+                env,
+                remove_env: Vec::new(),
+                cwd,
+            },
+        )
+    }
+
+    /// Create a new pane from a fully resolved PTY spawn configuration.
+    pub fn new_with_spawn_config(id: String, config: SpawnConfig) -> Result<Self, TerminalError> {
+        let rows = config.rows;
+        let cols = config.cols;
         let pty = Arc::new(PtyHandle::spawn(config)?);
         let parser = vt100::Parser::new(rows, cols, 0);
         let scrollback = ScrollbackStorage::new(ScrollbackStorage::DEFAULT_CAPACITY);

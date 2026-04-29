@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 pub(crate) fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
@@ -357,11 +358,102 @@ pub(crate) fn resolve_launch_spec_with_fallback(
     resolve_launch_spec(preset)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EffectiveSpawnEnv {
+    pub(crate) env: HashMap<String, String>,
+    pub(crate) remove_env: Vec<String>,
+}
+
 pub(crate) fn spawn_env() -> HashMap<String, String> {
-    let mut env = HashMap::new();
-    env.insert("TERM".to_string(), "xterm-256color".to_string());
-    env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    let mut env: HashMap<String, String> = std::env::vars().collect();
+    ensure_terminal_env(&mut env);
     env
+}
+
+pub(crate) fn active_profile_spawn_env_at<I>(
+    config_path: &Path,
+    base_env: I,
+) -> Result<EffectiveSpawnEnv, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut settings = if config_path.exists() {
+        gwt_config::Settings::load_from_path(config_path).map_err(|error| error.to_string())?
+    } else {
+        gwt_config::Settings::default()
+    };
+    let active_name = settings.profiles.normalize_active_profile().name;
+    let Some(profile) = settings.profiles.get(&active_name) else {
+        return Err(format!("active profile not found: {active_name}"));
+    };
+
+    let mut env = profile
+        .merged_env_pairs(base_env)
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    ensure_terminal_env(&mut env);
+
+    Ok(EffectiveSpawnEnv {
+        env,
+        remove_env: normalized_remove_env(&profile.disabled_env),
+    })
+}
+
+pub(crate) fn active_profile_spawn_env(config_path: &Path) -> Result<EffectiveSpawnEnv, String> {
+    active_profile_spawn_env_at(config_path, std::env::vars())
+}
+
+pub(crate) fn active_profile_launch_env(
+    config_path: &Path,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+) -> Result<EffectiveSpawnEnv, String> {
+    match runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => active_profile_spawn_env(config_path),
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            active_profile_spawn_env_at(config_path, std::iter::empty::<(String, String)>())
+        }
+    }
+}
+
+pub(crate) fn apply_effective_spawn_env(
+    env_vars: &mut HashMap<String, String>,
+    remove_env: &mut Vec<String>,
+    effective: EffectiveSpawnEnv,
+) {
+    let explicit_env = std::mem::take(env_vars);
+    *env_vars = effective.env;
+    env_vars.extend(explicit_env);
+    merge_remove_env(remove_env, effective.remove_env);
+}
+
+fn ensure_terminal_env(env: &mut HashMap<String, String>) {
+    env.entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env.entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
+}
+
+fn merge_remove_env(remove_env: &mut Vec<String>, additional: Vec<String>) {
+    let keys = remove_env
+        .iter()
+        .chain(additional.iter())
+        .filter_map(|key| {
+            let trimmed = key.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    *remove_env = keys.into_iter().collect();
+}
+
+fn normalized_remove_env(disabled_env: &[String]) -> Vec<String> {
+    let keys = disabled_env
+        .iter()
+        .filter_map(|key| {
+            let trimmed = key.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .collect::<BTreeSet<_>>();
+    keys.into_iter().collect()
 }
 
 pub(crate) fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {

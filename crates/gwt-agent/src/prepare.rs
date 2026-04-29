@@ -27,6 +27,7 @@ pub struct PreparedProcessLaunch {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    pub remove_env: Vec<String>,
     pub cwd: Option<PathBuf>,
 }
 
@@ -101,7 +102,7 @@ enum DockerLaunchServiceAction {
 }
 
 type PackageRunnerProbe =
-    dyn FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool;
+    dyn FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool;
 type GwtBinLookup = dyn Fn(&str) -> Option<PathBuf>;
 
 struct PrepareLaunchDeps<'a> {
@@ -122,7 +123,7 @@ where
 {
     let current_exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
     let mut probe_host_runner = probe_host_package_runner
-        as fn(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool;
+        as fn(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool;
     let lookup_gwt_bin = |command: &str| which::which(command).ok();
     prepare_agent_launch_with(
         repo_path,
@@ -162,6 +163,10 @@ where
         .working_dir
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
+    config.env_vars.insert(
+        "GWT_PROJECT_ROOT".to_string(),
+        worktree_path.display().to_string(),
+    );
     refresh_worktree_assets(&worktree_path)?;
 
     let used_host_package_runner_fallback = config.runtime_target == LaunchRuntimeTarget::Host
@@ -219,6 +224,7 @@ where
             command: config.command,
             args: config.args,
             env: config.env_vars,
+            remove_env: config.remove_env,
             cwd: config.working_dir,
         },
         session,
@@ -376,7 +382,7 @@ pub fn apply_host_package_runner_fallback_with_probe<F>(
     mut probe: F,
 ) -> bool
 where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
 {
     let Some(program) =
         resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
@@ -518,7 +524,7 @@ fn resolve_host_package_runner_with_probe<F>(
     probe: &mut F,
 ) -> Option<PackageRunnerProgram>
 where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
 {
     let version_spec = host_package_runner_version_spec(config)?;
     if !command_matches_runner(&config.command, "bunx") {
@@ -527,7 +533,13 @@ where
 
     let probe_args = vec![version_spec.clone(), "--version".to_string()];
     let cwd = config.working_dir.clone();
-    if probe(&config.command, probe_args, &config.env_vars, cwd) {
+    if probe(
+        &config.command,
+        probe_args,
+        &config.env_vars,
+        &config.remove_env,
+        cwd,
+    ) {
         return None;
     }
 
@@ -564,6 +576,7 @@ fn probe_host_package_runner(
     command: &str,
     args: Vec<String>,
     env_vars: &HashMap<String, String>,
+    remove_env: &[String],
     cwd: Option<PathBuf>,
 ) -> bool {
     let mut process = Command::new(command);
@@ -571,8 +584,11 @@ fn probe_host_package_runner(
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .envs(env_vars);
+        .stderr(Stdio::null());
+    for key in remove_env {
+        process.env_remove(key);
+    }
+    process.envs(env_vars);
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
@@ -1337,17 +1353,30 @@ mod tests {
         fs::create_dir_all(&worktree).expect("create worktree");
 
         let refresh_calls = AtomicUsize::new(0);
+        let mut config = sample_versioned_launch_config(&worktree);
+        config
+            .env_vars
+            .insert("GWT_PROJECT_ROOT".to_string(), "/stale/project".to_string());
+        let expected_project_root = worktree.display().to_string();
+        let probe_expected_project_root = expected_project_root.clone();
         let mut probe_host_runner =
-            |_command: &str,
-             _args: Vec<String>,
-             _env: &HashMap<String, String>,
-             _cwd: Option<PathBuf>| false;
+            move |_command: &str,
+                  _args: Vec<String>,
+                  env: &HashMap<String, String>,
+                  _remove_env: &[String],
+                  _cwd: Option<PathBuf>| {
+                assert_eq!(
+                    env.get("GWT_PROJECT_ROOT").map(String::as_str),
+                    Some(probe_expected_project_root.as_str())
+                );
+                false
+            };
         let lookup_gwt_bin =
             |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwtd.exe"));
         let prepared = prepare_agent_launch_with(
             &worktree,
             &sessions_dir,
-            sample_versioned_launch_config(&worktree),
+            config,
             Some(HookForwardEnv {
                 url: "http://127.0.0.1:7878/hooks".to_string(),
                 token: "secret-token".to_string(),
@@ -1373,6 +1402,14 @@ mod tests {
         assert_eq!(
             prepared.process_launch.cwd.as_deref(),
             Some(worktree.as_path())
+        );
+        assert_eq!(
+            prepared
+                .process_launch
+                .env
+                .get("GWT_PROJECT_ROOT")
+                .map(String::as_str),
+            Some(expected_project_root.as_str())
         );
         assert_eq!(
             prepared
@@ -1417,6 +1454,7 @@ mod tests {
             |_command: &str,
              _args: Vec<String>,
              _env: &HashMap<String, String>,
+             _remove_env: &[String],
              _cwd: Option<PathBuf>| false;
         let lookup_gwt_bin =
             |_command: &str| Some(PathBuf::from(r"C:\Users\Example\.bun\bin\gwt.exe"));

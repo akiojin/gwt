@@ -156,7 +156,11 @@ pub(crate) fn build_shell_process_launch(
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
     let mut env = spawn_env();
+    for key in &config.remove_env {
+        env.remove(key);
+    }
     env.extend(config.env_vars.clone());
+    let remove_env = config.remove_env.clone();
 
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
         let windows_shell = if cfg!(windows) {
@@ -171,14 +175,17 @@ pub(crate) fn build_shell_process_launch(
             },
             None => detect_shell_program().map_err(|error| error.to_string())?,
         };
-        env.entry("GWT_PROJECT_ROOT".to_string())
-            .or_insert_with(|| worktree.display().to_string());
+        env.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            worktree.display().to_string(),
+        );
         install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Host)?;
         config.env_vars = env.clone();
         return Ok(ProcessLaunch {
             command: shell.command,
             args: shell.args,
             env,
+            remove_env,
             cwd: Some(worktree),
         });
     }
@@ -209,6 +216,7 @@ pub(crate) fn build_shell_process_launch(
         command: docker_binary_for_launch(),
         args,
         env,
+        remove_env: Vec::new(),
         cwd: Some(worktree),
     })
 }
@@ -334,7 +342,7 @@ pub(crate) fn apply_host_package_runner_fallback_with_probe<F>(
     mut probe: F,
 ) -> bool
 where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
 {
     let Some(program) =
         resolve_host_package_runner_with_probe(config, fallback_executable, &mut probe)
@@ -352,7 +360,7 @@ fn resolve_host_package_runner_with_probe<F>(
     probe: &mut F,
 ) -> Option<PackageRunnerProgram>
 where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, Option<PathBuf>) -> bool,
+    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
 {
     let version_spec = host_package_runner_version_spec(config)?;
     if !command_matches_runner(&config.command, "bunx") {
@@ -361,7 +369,13 @@ where
 
     let probe_args = vec![version_spec.clone(), "--version".to_string()];
     let cwd = config.working_dir.clone();
-    if probe(&config.command, probe_args, &config.env_vars, cwd) {
+    if probe(
+        &config.command,
+        probe_args,
+        &config.env_vars,
+        &config.remove_env,
+        cwd,
+    ) {
         return None;
     }
 
@@ -398,12 +412,14 @@ fn probe_host_package_runner(
     command: &str,
     args: Vec<String>,
     env_vars: &HashMap<String, String>,
+    remove_env: &[String],
     cwd: Option<PathBuf>,
 ) -> bool {
     probe_host_package_runner_with_timeout(
         command,
         args,
         env_vars,
+        remove_env,
         cwd,
         Duration::from_secs(5),
         Duration::from_millis(50),
@@ -414,6 +430,7 @@ pub(crate) fn probe_host_package_runner_with_timeout(
     command: &str,
     args: Vec<String>,
     env_vars: &HashMap<String, String>,
+    remove_env: &[String],
     cwd: Option<PathBuf>,
     timeout: Duration,
     poll_interval: Duration,
@@ -423,8 +440,11 @@ pub(crate) fn probe_host_package_runner_with_timeout(
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .envs(env_vars);
+        .stderr(Stdio::null());
+    for key in remove_env {
+        process.env_remove(key);
+    }
+    process.envs(env_vars);
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }

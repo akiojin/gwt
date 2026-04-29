@@ -126,6 +126,7 @@ pub(crate) struct ProcessLaunch {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
     pub(crate) env: HashMap<String, String>,
+    pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
 }
 
@@ -1690,6 +1691,11 @@ impl AppRuntime {
         gwt::profile_dispatch::config_path().map_err(|error| error.to_string())
     }
 
+    fn active_profile_spawn_env(&self) -> Result<EffectiveSpawnEnv, String> {
+        let config_path = self.profile_config_path()?;
+        active_profile_spawn_env(&config_path)
+    }
+
     fn profile_snapshot_events(
         &mut self,
         tab_id: &str,
@@ -3245,13 +3251,27 @@ impl AppRuntime {
             }
         };
 
+        let mut effective_env = match self.active_profile_spawn_env() {
+            Ok(env) => env,
+            Err(error) => {
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                self.window_details.insert(window_id.clone(), error.clone());
+                return Self::status_events(window_id, WindowProcessStatus::Error, Some(error));
+            }
+        };
+        effective_env.env.insert(
+            "GWT_PROJECT_ROOT".to_string(),
+            project_root.display().to_string(),
+        );
+
         match self.spawn_process_window(
             &window_id,
             geometry,
             ProcessLaunch {
                 command: launch.command,
                 args: launch.args,
-                env: spawn_env(),
+                env: effective_env.env,
+                remove_env: effective_env.remove_env,
                 cwd: Some(project_root),
             },
         ) {
@@ -3271,14 +3291,17 @@ impl AppRuntime {
         launch: ProcessLaunch,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let pane = Pane::new(
+        let pane = Pane::new_with_spawn_config(
             id.to_string(),
-            launch.command,
-            launch.args,
-            cols,
-            rows,
-            launch.env,
-            launch.cwd,
+            gwt_terminal::pty::SpawnConfig {
+                command: launch.command,
+                args: launch.args,
+                cols,
+                rows,
+                env: launch.env,
+                remove_env: launch.remove_env,
+                cwd: launch.cwd,
+            },
         )
         .map_err(|error| error.to_string())?;
         let pane = Arc::new(Mutex::new(pane));
@@ -3348,6 +3371,7 @@ impl AppRuntime {
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
         let hook_forward_target = self.hook_forward_target.clone();
+        let profile_config_path = self.profile_config_path()?;
 
         thread::spawn(move || {
             Self::spawn_agent_window_async(
@@ -3356,6 +3380,7 @@ impl AppRuntime {
                 project_root,
                 window_id,
                 config,
+                profile_config_path,
                 hook_forward_target,
             )
         });
@@ -3396,8 +3421,15 @@ impl AppRuntime {
         ));
 
         let proxy = self.proxy.clone();
+        let profile_config_path = self.profile_config_path()?;
         thread::spawn(move || {
-            Self::spawn_wizard_shell_window_async(proxy, project_root, window_id, config)
+            Self::spawn_wizard_shell_window_async(
+                proxy,
+                project_root,
+                window_id,
+                config,
+                profile_config_path,
+            )
         });
 
         Ok(events)
@@ -3409,6 +3441,7 @@ impl AppRuntime {
         project_root: String,
         window_id: String,
         mut config: gwt_agent::LaunchConfig,
+        profile_config_path: PathBuf,
         hook_forward_target: Option<HookForwardTarget>,
     ) {
         let result = (|| {
@@ -3432,6 +3465,13 @@ impl AppRuntime {
                 .working_dir
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(&project_root));
+            let effective_env =
+                active_profile_launch_env(&profile_config_path, config.runtime_target)?;
+            apply_effective_spawn_env(&mut config.env_vars, &mut config.remove_env, effective_env);
+            config.env_vars.insert(
+                "GWT_PROJECT_ROOT".to_string(),
+                worktree_path.display().to_string(),
+            );
             refresh_managed_gwt_assets_for_worktree(&worktree_path)
                 .map_err(|error| error.to_string())?;
             if let Err(error) = gwt::index_worker::bootstrap_project_index_for_path(&worktree_path)
@@ -3514,6 +3554,7 @@ impl AppRuntime {
                 command: config.command.clone(),
                 args: config.args.clone(),
                 env: config.env_vars.clone(),
+                remove_env: config.remove_env.clone(),
                 cwd: config.working_dir.clone(),
             };
 
@@ -3565,6 +3606,7 @@ impl AppRuntime {
         project_root: String,
         window_id: String,
         mut config: ShellLaunchConfig,
+        profile_config_path: PathBuf,
     ) {
         let result = (|| {
             proxy.send(UserEvent::LaunchProgress {
@@ -3572,6 +3614,17 @@ impl AppRuntime {
                 message: "Preparing worktree...".to_string(),
             });
             resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
+            let worktree_path = config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&project_root));
+            let effective_env =
+                active_profile_launch_env(&profile_config_path, config.runtime_target)?;
+            apply_effective_spawn_env(&mut config.env_vars, &mut config.remove_env, effective_env);
+            config.env_vars.insert(
+                "GWT_PROJECT_ROOT".to_string(),
+                worktree_path.display().to_string(),
+            );
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
                 proxy.send(UserEvent::LaunchProgress {
