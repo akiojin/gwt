@@ -2811,9 +2811,19 @@ impl AppRuntime {
         };
         let action_stage = Self::launch_wizard_action_error_stage(&action);
         let action_label = Self::launch_wizard_action_label(&action);
+        let requested_agent_id = match &action {
+            gwt::LaunchWizardAction::SetAgent { agent_id } => Some(agent_id.clone()),
+            _ => None,
+        };
         session.wizard.apply(action);
         if let Some(error) = session.wizard.error.as_deref() {
-            Self::log_launch_wizard_error(&session, action_stage, action_label, error);
+            Self::log_launch_wizard_error(
+                &session,
+                action_stage,
+                action_label,
+                requested_agent_id.as_deref(),
+                error,
+            );
         }
 
         match session.wizard.completion.take() {
@@ -2823,21 +2833,39 @@ impl AppRuntime {
             Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     let error = "The selected session window is no longer available".to_string();
-                    Self::log_launch_wizard_error(&session, "focus_window", action_label, &error);
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "focus_window",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
                     session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 };
                 let Some(tab) = self.tab_mut(&address.tab_id) else {
                     let error = "Project tab not found".to_string();
-                    Self::log_launch_wizard_error(&session, "focus_window", action_label, &error);
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "focus_window",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
                     session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 };
                 if !tab.workspace.focus_window(&address.raw_id, None) {
                     let error = "The selected session window is no longer available".to_string();
-                    Self::log_launch_wizard_error(&session, "focus_window", action_label, &error);
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "focus_window",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
                     session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
@@ -2852,7 +2880,13 @@ impl AppRuntime {
             Some(LaunchWizardCompletion::Launch(config)) => {
                 let Some(bounds) = bounds else {
                     let error = "Viewport bounds are required to launch a window".to_string();
-                    Self::log_launch_wizard_error(&session, "launch_bounds", action_label, &error);
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "launch_bounds",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
                     session.wizard.error = Some(error);
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
@@ -2869,6 +2903,7 @@ impl AppRuntime {
                                     &session,
                                     "spawn_agent_window",
                                     action_label,
+                                    requested_agent_id.as_deref(),
                                     &error,
                                 );
                                 session.wizard.error = Some(error);
@@ -2888,6 +2923,7 @@ impl AppRuntime {
                                     &session,
                                     "spawn_shell_window",
                                     action_label,
+                                    requested_agent_id.as_deref(),
                                     &error,
                                 );
                                 session.wizard.error = Some(error);
@@ -4055,6 +4091,7 @@ impl AppRuntime {
         session: &LaunchWizardSession,
         stage: &'static str,
         action: &'static str,
+        requested_agent_id: Option<&str>,
         error: &str,
     ) {
         let view = session.wizard.view();
@@ -4063,15 +4100,20 @@ impl AppRuntime {
             .linked_issue_number
             .map(|issue_number| issue_number.to_string())
             .unwrap_or_else(|| "none".to_string());
+        let requested_agent_id = requested_agent_id.unwrap_or("none");
+        let selected_docker_service = view.selected_docker_service.as_deref().unwrap_or("none");
         tracing::error!(
             target: "gwt::agent_launch",
             stage = %stage,
             action = %action,
             wizard_id = %session.wizard_id,
             tab_id = %session.tab_id,
+            requested_agent_id = %requested_agent_id,
             selected_agent_id = %view.selected_agent_id,
             selected_launch_target = %view.selected_launch_target,
             selected_runtime_target = %view.selected_runtime_target,
+            selected_tool_version = %view.selected_version,
+            selected_docker_service = %selected_docker_service,
             linked_issue_number = %linked_issue_number,
             error = %sanitized_error,
             "launch wizard action failed"
@@ -4317,10 +4359,10 @@ mod tests {
 
     use base64::Engine;
     use gwt::{
-        empty_workspace_state, load_restored_workspace_state, load_session_state, AgentOption,
-        BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent,
-        LaunchWizardAction, LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView,
-        ProjectKind, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
+        empty_workspace_state, load_restored_workspace_state, load_session_state, BackendEvent,
+        BranchCleanupInfo, BranchListEntry, BranchScope, FrontendEvent, LaunchWizardAction,
+        LaunchWizardContext, LaunchWizardState, ProfileEnvEntryView, ProjectKind, WindowGeometry,
+        WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
@@ -4853,7 +4895,7 @@ exit 0
         }
     }
 
-    fn sample_unavailable_agent_launch_wizard_session(
+    fn sample_no_agent_launch_wizard_session(
         tab_id: &str,
         project_root: &Path,
     ) -> LaunchWizardSession {
@@ -4881,14 +4923,7 @@ exit 0
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
                 },
-                vec![AgentOption {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    available: false,
-                    installed_version: None,
-                    versions: Vec::new(),
-                    custom_agent: None,
-                }],
+                Vec::new(),
                 Vec::new(),
             ),
         }
@@ -5103,9 +5138,7 @@ exit 0
             &[WindowPreset::Branches],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        runtime.launch_wizard = Some(sample_unavailable_agent_launch_wizard_session(
-            "tab-1", &repo,
-        ));
+        runtime.launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
 
         let events = capture_tracing_events(|| {
             let _ = runtime
@@ -5130,7 +5163,11 @@ exit 0
         );
         assert_eq!(
             event.fields.get("selected_agent_id").map(String::as_str),
-            Some("codex")
+            Some("")
+        );
+        assert_eq!(
+            event.fields.get("requested_agent_id").map(String::as_str),
+            Some("none")
         );
         assert_eq!(
             event
@@ -5142,6 +5179,58 @@ exit 0
         assert_eq!(
             event.fields.get("error").map(String::as_str),
             Some("Agent option is unavailable")
+        );
+    }
+
+    #[test]
+    fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::NonRepo,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
+
+        let events = capture_tracing_events(|| {
+            let _ = runtime.handle_launch_wizard_action(
+                LaunchWizardAction::SetAgent {
+                    agent_id: "codex".to_string(),
+                },
+                Some(canvas_bounds()),
+            );
+        });
+
+        let event = events
+            .iter()
+            .find(|event| {
+                event.level == Level::ERROR
+                    && event.target == "gwt::agent_launch"
+                    && event.fields.get("stage").map(String::as_str) == Some("agent_select")
+            })
+            .expect("set agent failure log");
+        assert_eq!(
+            event.fields.get("requested_agent_id").map(String::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            event
+                .fields
+                .get("selected_runtime_target")
+                .map(String::as_str),
+            Some("host")
+        );
+        assert_eq!(
+            event
+                .fields
+                .get("selected_tool_version")
+                .map(String::as_str),
+            Some("")
         );
     }
 

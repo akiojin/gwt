@@ -24,20 +24,12 @@ pub(crate) fn detect_wizard_docker_context_and_status(
     let suggested_service = docker_devcontainer_defaults(project_root, &files)
         .and_then(|defaults| defaults.service)
         .or_else(|| services.first().map(|service| service.name.clone()));
-    let status = suggested_service
-        .as_deref()
-        .map(|service| {
-            gwt_docker::compose_service_status_with_files(&compose_files, service)
-                .unwrap_or(gwt_docker::ComposeServiceStatus::NotFound)
-        })
-        .unwrap_or(gwt_docker::ComposeServiceStatus::NotFound);
-
     (
         Some(DockerWizardContext {
             services: services.into_iter().map(|service| service.name).collect(),
             suggested_service,
         }),
-        status,
+        gwt_docker::ComposeServiceStatus::Unknown,
     )
 }
 
@@ -467,7 +459,8 @@ pub(crate) fn normalize_docker_launch_action(
         | DockerLifecycleIntent::Restart
         | DockerLifecycleIntent::CreateAndStart => match status {
             ComposeServiceStatus::Running => DockerLaunchServiceAction::Connect,
-            ComposeServiceStatus::Stopped
+            ComposeServiceStatus::Unknown
+            | ComposeServiceStatus::Stopped
             | ComposeServiceStatus::Exited
             | ComposeServiceStatus::NotFound => DockerLaunchServiceAction::Start,
         },

@@ -951,7 +951,8 @@ fn normalize_docker_launch_action(
         | DockerLifecycleIntent::Restart
         | DockerLifecycleIntent::CreateAndStart => match status {
             ComposeServiceStatus::Running => DockerLaunchServiceAction::Connect,
-            ComposeServiceStatus::Stopped
+            ComposeServiceStatus::Unknown
+            | ComposeServiceStatus::Stopped
             | ComposeServiceStatus::Exited
             | ComposeServiceStatus::NotFound => DockerLaunchServiceAction::Start,
         },

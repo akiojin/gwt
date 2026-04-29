@@ -1,5 +1,32 @@
 # Lessons Learned
 
+## 2026-04-29 — fix(launch): Launch Wizard は runtime 検出と実行可否検証を混ぜない
+
+### 事象
+
+Launch Agent の初期表示が Docker status probe に引きずられて遅延し、Codex などの
+agent 選択でも Host 側の検出結果により `Agent option is unavailable` が出た。
+ユーザーから、Docker での起動が存在するのに Host PATH / Docker status を
+Wizard の選択可否へ使っている点を再度指摘された。
+
+### 原因
+
+Wizard hydration が Docker file/config detection と `docker compose ps` による
+runtime status detection を混同していた。さらに agent option の `available` を
+Host 上の agent 検出結果として扱い、その値で built-in / custom agent の選択と
+launch config build をブロックしていた。
+
+### 再発防止策
+
+1. Wizard は候補提示と設定収集だけを行い、Host/Docker/将来 runtime の実行可否は
+   Launch preparation で選択 runtime に対して検証する。
+2. Docker/DevContainer 検出は Wizard 初期表示ではファイル存在確認と設定ファイル
+   読み取りに限定し、Docker CLI / daemon / `docker compose ps` は呼ばない。
+3. built-in agent と configured custom agent は Host 検出結果で無効化しない。
+   command/package runner 不在は session/tab 作成前の preparation error として扱う。
+4. 同種の修正では、Docker CLI を呼ばない regression test と、Host 未検出 agent が
+   選択できる regression test を先に RED にする。
+
 ## 2026-04-29 — fix(gui): Agent 起動失敗は UI エラーだけでなく構造化ログに残す
 
 ### 事象

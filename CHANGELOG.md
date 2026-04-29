@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.11.6] - 2026-04-29
+
+### Bug Fixes
+
+- Make launch agent wizard runtime-first
+
 ## [9.11.5] - 2026-04-29
 
 ### Bug Fixes

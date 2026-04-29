@@ -68,6 +68,7 @@ pub enum CommandOutputStream {
 /// Status of a Docker Compose service.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ComposeServiceStatus {
+    Unknown,
     Running,
     Stopped,
     Exited,
