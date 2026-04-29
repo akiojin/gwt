@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.11.3] - 2026-04-29
+
+### Bug Fixes
+
+- Reduce hook timeout hot path overhead
+- Launch shell terminals as login shells
+
 ## [9.11.2] - 2026-04-29
 
 ### Bug Fixes
