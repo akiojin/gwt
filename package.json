@@ -4,7 +4,8 @@
   "description": "Desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
   "bin": {
-    "gwt": "bin/gwt.cjs"
+    "gwt": "bin/gwt.cjs",
+    "gwtd": "bin/gwtd.cjs"
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.cjs",

@@ -14,7 +14,7 @@ Download the release asset for your platform from
 
 - GUI-first installer: `gwt-macos-universal.dmg`
 - Open `GWT.app` from the mounted DMG for the native desktop launch surface
-- Use the install script when you want the `gwtd` CLI in your `PATH`
+- Use the install script when you want the `gwt` and `gwtd` CLIs in your `PATH`
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash

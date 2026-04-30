@@ -286,7 +286,25 @@ Closes #456
 まず現在の develop 向け PR を確認：
 
 ```bash
-GWT_BIN="${GWT_BIN_PATH:-gwtd}"
+resolve_gwt_bin() {
+  if [ -n "${GWT_BIN_PATH:-}" ] && [ -x "$GWT_BIN_PATH" ]; then
+    printf '%s\n' "$GWT_BIN_PATH"
+    return 0
+  fi
+  if command -v gwtd >/dev/null 2>&1; then
+    command -v gwtd
+    return 0
+  fi
+  repo_root="${GWT_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+  if [ -x "$repo_root/target/debug/gwtd" ]; then
+    printf '%s\n' "$repo_root/target/debug/gwtd"
+    return 0
+  fi
+  printf '%s\n' "gwtd not found; set GWT_BIN_PATH, install gwtd into PATH, or run cargo build -p gwt --bin gwtd." >&2
+  return 127
+}
+
+GWT_BIN="$(resolve_gwt_bin)" || exit $?
 "$GWT_BIN" pr current
 ```
 
@@ -337,7 +355,7 @@ PR bodyには以下を含めてください：
 まず、ステップ10の直後に `"$GWT_BIN" pr current` を再実行し、出力 1 行目の `#<number>` から PR 番号を取得する：
 
 ```bash
-GWT_BIN="${GWT_BIN_PATH:-gwtd}"
+GWT_BIN="$(resolve_gwt_bin)" || exit $?
 PR_CURRENT=$("$GWT_BIN" pr current)
 PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head -1)
 ```
@@ -345,7 +363,7 @@ PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head
 各 Issue にコメントを追記：
 
 ```bash
-GWT_BIN="${GWT_BIN_PATH:-gwtd}"
+GWT_BIN="$(resolve_gwt_bin)" || exit $?
 COMMENT_FILE=$(mktemp)
 printf 'Included in release v%s (#%s)\n' "{NEW_VERSION}" "$PR_NUMBER" > "$COMMENT_FILE"
 

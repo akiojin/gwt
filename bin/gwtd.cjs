@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * Wrapper script to execute the gwt Rust binary.
- * If the binary is not found (e.g., bunx skips postinstall),
+ * Wrapper script to execute the gwtd Rust binary.
+ * If the bundle is not found (e.g., bunx skips postinstall),
  * it will be downloaded on-demand from GitHub Releases.
  */
 
-const { binaryNameForPlatform } = require("../scripts/release-assets.cjs");
+const { daemonBinaryNameForPlatform } = require("../scripts/release-assets.cjs");
 const { createLauncher } = require("./launcher.cjs");
 
 const launcher = createLauncher({
-  commandName: "gwt",
-  binaryNameForPlatform,
+  commandName: "gwtd",
+  binaryNameForPlatform: daemonBinaryNameForPlatform,
 });
 
 if (require.main === module) {

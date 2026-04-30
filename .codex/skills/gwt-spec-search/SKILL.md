@@ -7,6 +7,14 @@ description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cac
 
 gwt maintains a vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is rebuilt from the cache. Use `gwtd issue spec pull --all` to refresh the cache before searching.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## SPEC search first for spec integration
 
 When the user asks any of the following, use SPEC search **before** manual file grep or directory listing:
