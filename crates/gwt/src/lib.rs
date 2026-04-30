@@ -7,6 +7,7 @@ pub mod daemon_runtime;
 mod discussion_resume;
 pub mod file_tree;
 pub mod gui_single_instance;
+pub mod handlers;
 pub mod index_worker;
 mod issue_cache;
 pub mod knowledge_bridge;

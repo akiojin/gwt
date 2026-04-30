@@ -136,7 +136,7 @@ pub(crate) fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, S
     let title = gwt::project_title_from_path(&canonical);
 
     let (project_root, kind) = match gwt_git::detect_repo_type(&canonical) {
-        gwt_git::RepoType::Normal(root) => (
+        gwt_git::RepoType::Normal { path: root, .. } => (
             dunce::canonicalize(root).unwrap_or_else(|_| canonical.clone()),
             gwt::ProjectKind::Git,
         ),

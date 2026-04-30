@@ -10,8 +10,15 @@ use gwt_core::{GwtError, Result};
 /// The type of repository detected at a given path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoType {
-    /// A normal (non-bare) git repository. Contains the resolved repo root path.
-    Normal(PathBuf),
+    /// A normal (non-bare) git repository.
+    ///
+    /// `needs_migration` indicates that gwt would prefer to migrate this
+    /// layout to the Nested Bare+Worktree convention before opening
+    /// (SPEC-1934 US-6, FR-019). Currently every Normal layout is flagged.
+    Normal {
+        path: PathBuf,
+        needs_migration: bool,
+    },
     /// A bare git repository with an optional develop worktree path.
     Bare { develop_worktree: Option<PathBuf> },
     /// Not inside any git repository.
@@ -25,7 +32,10 @@ pub enum RepoType {
 pub fn detect_repo_type(path: &Path) -> RepoType {
     // Check if path itself has .git (normal repo or worktree)
     if path.join(".git").exists() {
-        return RepoType::Normal(path.to_path_buf());
+        return RepoType::Normal {
+            path: path.to_path_buf(),
+            needs_migration: true,
+        };
     }
     // Check if path itself is a bare repo (has HEAD + objects + refs)
     if path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists() {
@@ -52,7 +62,10 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
                 found_bare = true;
             }
             if child.join(".git").is_dir() {
-                return RepoType::Normal(child);
+                return RepoType::Normal {
+                    path: child,
+                    needs_migration: true,
+                };
             }
         }
         if found_bare {
@@ -69,7 +82,10 @@ pub fn detect_repo_type(path: &Path) -> RepoType {
             break;
         }
         if parent.join(".git").exists() {
-            return RepoType::Normal(parent.to_path_buf());
+            return RepoType::Normal {
+                path: parent.to_path_buf(),
+                needs_migration: true,
+            };
         }
         if parent.join("HEAD").exists()
             && parent.join("objects").exists()
@@ -380,7 +396,10 @@ mod tests {
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
-        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Normal(_)));
+        assert!(matches!(
+            detect_repo_type(tmp.path()),
+            RepoType::Normal { .. }
+        ));
     }
 
     #[test]
@@ -405,7 +424,7 @@ mod tests {
             .unwrap();
         let subdir = tmp.path().join("a").join("b");
         std::fs::create_dir_all(&subdir).unwrap();
-        assert!(matches!(detect_repo_type(&subdir), RepoType::Normal(_)));
+        assert!(matches!(detect_repo_type(&subdir), RepoType::Normal { .. }));
     }
 
     #[test]
@@ -433,7 +452,10 @@ mod tests {
             .output()
             .unwrap();
         // Parent directory should detect Normal via child scan
-        assert!(matches!(detect_repo_type(tmp.path()), RepoType::Normal(_)));
+        assert!(matches!(
+            detect_repo_type(tmp.path()),
+            RepoType::Normal { .. }
+        ));
     }
 
     // ---- clone_repo tests ----
