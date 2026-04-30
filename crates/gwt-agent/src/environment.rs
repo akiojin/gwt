@@ -256,7 +256,7 @@ fn parse_macos_path_helper_output(output: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn push_path_value(entries: &mut Vec<PathBuf>, value: &str) {
     for path in std::env::split_paths(value) {
         push_unique_path(entries, path);

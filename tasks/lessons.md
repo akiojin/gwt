@@ -1,5 +1,28 @@
 # Lessons Learned
 
+## 2026-04-30 — fix(ci): ローカル lint は CI と同じ package selection でも確認する
+
+### 事象
+
+PR #2230 の `Clippy & Rustfmt` で、Linux CI の
+`cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings` が
+`crates/gwt-agent/src/environment.rs` の `push_path_value` を dead code として失敗した。
+手元では先に workspace 全体の clippy を通していたが、CI と同一の package selection では
+確認していなかった。
+
+### 原因
+
+`push_path_value` は macOS の `path_helper` 経路だけで使われる helper だったが、
+`#[cfg(not(windows))]` で Linux にも compile されていた。workspace 全体の all-targets では
+test target 側の利用条件に隠れ、PR CI の lib dependency build でだけ dead code が表面化した。
+
+### 再発防止策
+
+1. PR lint を確認するときは、広い workspace clippy に加えて CI と同一の
+   `cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings` も実行する。
+2. OS 固有 helper は「使われる呼び出し元」と同じ `cfg` 条件まで狭め、Linux CI に不要な symbol を残さない。
+3. CI で失敗したら、ローカル成功結果より GitHub Actions の exact command と package selection を優先して再現する。
+
 ## 2026-04-30 — fix(gui): 修正済み判断の前にインストール済みアプリの最新ログで再検証する
 
 ### 事象
