@@ -4583,7 +4583,7 @@ mod tests {
             ["init", "-q"].as_slice(),
             ["remote", "add", "origin", remote.as_str()].as_slice(),
         ] {
-            let output = std::process::Command::new("git")
+            let output = gwt_core::process::hidden_command("git")
                 .args(args)
                 .current_dir(repo_path)
                 .output()

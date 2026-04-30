@@ -3,7 +3,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use gwt_core::{GwtError, Result};
@@ -107,7 +106,7 @@ pub fn clone_repo(url: &str, target_dir: &Path) -> Result<PathBuf> {
         .ok_or_else(|| GwtError::Git(format!("Invalid target path: {}", target_dir.display())))?;
 
     // Try with -b develop first
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["clone", "--depth=1", "-b", "develop", url, target])
         .output()
         .map_err(|e| GwtError::Git(format!("git clone: {e}")))?;
@@ -117,7 +116,7 @@ pub fn clone_repo(url: &str, target_dir: &Path) -> Result<PathBuf> {
     }
 
     // Fallback: clone without -b develop (uses default branch)
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["clone", "--depth=1", url, target])
         .output()
         .map_err(|e| GwtError::Git(format!("git clone: {e}")))?;
@@ -298,7 +297,7 @@ impl Repository {
     ///
     /// Returns `None` for detached HEAD.
     pub fn current_branch(&self) -> Result<Option<String>> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["symbolic-ref", "--short", "HEAD"])
             .current_dir(&self.path)
             .output()
@@ -315,7 +314,7 @@ impl Repository {
 
     /// List local and remote branch names.
     pub fn branches(&self) -> Result<Vec<String>> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["branch", "-a", "--format=%(refname:short)"])
             .current_dir(&self.path)
             .output()
@@ -337,7 +336,7 @@ impl Repository {
 
     /// Check if this repository is bare.
     pub fn is_bare(&self) -> bool {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["rev-parse", "--is-bare-repository"])
             .current_dir(&self.path)
             .output();
@@ -350,7 +349,7 @@ impl Repository {
 
     /// Check if the current directory is inside a worktree.
     pub fn is_worktree(&self) -> bool {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["rev-parse", "--is-inside-work-tree"])
             .current_dir(&self.path)
             .output();
@@ -377,7 +376,7 @@ mod tests {
     #[test]
     fn detect_repo_type_returns_normal_for_git_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -387,7 +386,7 @@ mod tests {
     #[test]
     fn detect_repo_type_returns_bare_for_bare_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", "--bare", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -400,7 +399,7 @@ mod tests {
     #[test]
     fn detect_repo_type_walks_parents_to_find_normal() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -413,7 +412,7 @@ mod tests {
     fn detect_repo_type_finds_bare_in_child_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let bare_dir = tmp.path().join("repo.git");
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", "--bare", bare_dir.to_str().unwrap()])
             .output()
             .unwrap();
@@ -429,7 +428,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo_dir = tmp.path().join("my-project");
         std::fs::create_dir_all(&repo_dir).unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", repo_dir.to_str().unwrap()])
             .output()
             .unwrap();
@@ -452,7 +451,7 @@ mod tests {
     #[test]
     fn install_develop_protection_creates_hook() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -479,7 +478,7 @@ mod tests {
     #[test]
     fn install_develop_protection_preserves_existing_hook() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -498,7 +497,7 @@ mod tests {
     #[test]
     fn install_develop_protection_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -515,7 +514,7 @@ mod tests {
     #[test]
     fn install_develop_protection_blocks_main_but_not_develop() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -533,7 +532,7 @@ mod tests {
     #[test]
     fn install_develop_protection_rewrites_legacy_managed_block() {
         let tmp = tempfile::tempdir().unwrap();
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -560,7 +559,7 @@ mod tests {
     fn initialize_workspace_creates_specs_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let gwt_home = tmp.path().join(".gwt-home");
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -573,7 +572,7 @@ mod tests {
     fn initialize_workspace_creates_config_in_supplied_gwt_home() {
         let tmp = tempfile::tempdir().unwrap();
         let gwt_home = tmp.path().join(".gwt-home");
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -592,7 +591,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let gwt_home = tmp.path().join(".gwt-home");
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -621,7 +620,7 @@ mod tests {
     #[test]
     fn open_valid_git_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -633,7 +632,7 @@ mod tests {
     #[test]
     fn discover_walks_up_to_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -656,12 +655,12 @@ mod tests {
     fn current_branch_returns_name() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
         // Create an initial commit so HEAD exists
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path)
             .output()
@@ -676,11 +675,11 @@ mod tests {
     fn branches_lists_at_least_one() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path)
             .output()
@@ -694,7 +693,7 @@ mod tests {
     #[test]
     fn is_bare_false_for_normal_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();
@@ -706,7 +705,7 @@ mod tests {
     #[test]
     fn is_worktree_true_for_normal_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", tmp.path().to_str().unwrap()])
             .output()
             .unwrap();

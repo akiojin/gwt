@@ -55,7 +55,7 @@ impl PrStatus {
 ///
 /// The `repo_slug` should be in "owner/repo" format.
 pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
-    let output = std::process::Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args([
             "pr",
             "view",
@@ -222,7 +222,7 @@ where
 }
 
 fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
-    let output = std::process::Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -314,7 +314,7 @@ pub struct PrCheckReport {
 /// Runs `gh pr view` to gather CI, merge, and review states. Falls back
 /// to `Unknown` states when `gh` is unavailable or the repo has no open PR.
 pub fn pr_check_report(repo_path: &Path) -> Result<PrCheckReport> {
-    let output = std::process::Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args([
             "pr",
             "view",

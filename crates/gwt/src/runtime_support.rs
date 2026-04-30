@@ -306,7 +306,7 @@ pub(crate) fn origin_remote_ref(branch_name: &str) -> String {
 }
 
 pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
         .output()
@@ -327,7 +327,7 @@ pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
 }
 
 pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args([
             "show-ref",
             "--verify",
@@ -500,7 +500,7 @@ mod windows_console {
 }
 
 pub(crate) fn resolve_repo_coordinates() -> Option<(String, String)> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;

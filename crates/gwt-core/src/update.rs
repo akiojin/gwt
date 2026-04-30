@@ -1204,7 +1204,7 @@ fn is_process_running(pid: u32) -> bool {
         let script = format!(
             "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
         );
-        std::process::Command::new("powershell")
+        crate::process::hidden_command("powershell")
             .args(["-NoProfile", "-Command", &script])
             .status()
             .map(|s: std::process::ExitStatus| s.success())

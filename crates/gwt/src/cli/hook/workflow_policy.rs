@@ -231,13 +231,13 @@ mod tests {
 
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo).expect("create repo");
-        let mut init_cmd = std::process::Command::new("git");
+        let mut init_cmd = gwt_core::process::hidden_command("git");
         init_cmd.args(["init", "--quiet"]).current_dir(repo);
         gwt_core::process::scrub_git_env(&mut init_cmd);
         let init = init_cmd.output().expect("git init");
         assert!(init.status.success(), "git init failed");
 
-        let mut remote_cmd = std::process::Command::new("git");
+        let mut remote_cmd = gwt_core::process::hidden_command("git");
         remote_cmd
             .args([
                 "remote",
@@ -250,7 +250,7 @@ mod tests {
         let remote = remote_cmd.output().expect("git remote add");
         assert!(remote.status.success(), "git remote add failed");
 
-        let mut branch_cmd = std::process::Command::new("git");
+        let mut branch_cmd = gwt_core::process::hidden_command("git");
         branch_cmd
             .args(["checkout", "-b", "feature/coverage"])
             .current_dir(repo);

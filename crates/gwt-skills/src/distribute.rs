@@ -4,9 +4,9 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
-    process::Command,
 };
 
+use gwt_core::process::hidden_command;
 use include_dir::Dir;
 
 use crate::assets::{CLAUDE_COMMANDS, CLAUDE_SKILLS};
@@ -286,7 +286,7 @@ fn should_skip_tracked_path(
 }
 
 fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
-    match Command::new("git")
+    match hidden_command("git")
         .arg("-C")
         .arg(worktree)
         .arg("ls-files")
@@ -310,7 +310,7 @@ fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
 }
 
 fn is_git_worktree(worktree: &Path) -> bool {
-    match Command::new("git")
+    match hidden_command("git")
         .arg("-C")
         .arg(worktree)
         .arg("rev-parse")

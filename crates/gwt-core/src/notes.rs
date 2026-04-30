@@ -320,13 +320,13 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let mut init_cmd = std::process::Command::new("git");
+        let mut init_cmd = crate::process::hidden_command("git");
         init_cmd.args(["init", path.to_str().unwrap()]);
         crate::process::scrub_git_env(&mut init_cmd);
         let output = init_cmd.output().expect("git init");
         assert!(output.status.success(), "git init failed");
 
-        let mut email_cmd = std::process::Command::new("git");
+        let mut email_cmd = crate::process::hidden_command("git");
         email_cmd
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path);
@@ -334,7 +334,7 @@ mod tests {
         let email = email_cmd.output().expect("git config user.email");
         assert!(email.status.success(), "git config user.email failed");
 
-        let mut name_cmd = std::process::Command::new("git");
+        let mut name_cmd = crate::process::hidden_command("git");
         name_cmd
             .args(["config", "user.name", "Test User"])
             .current_dir(path);
@@ -344,7 +344,7 @@ mod tests {
     }
 
     fn add_origin(path: &Path, url: &str) {
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = crate::process::hidden_command("git");
         cmd.args(["remote", "add", "origin", url]).current_dir(path);
         crate::process::scrub_git_env(&mut cmd);
         let output = cmd.output().expect("git remote add origin");
@@ -357,13 +357,13 @@ mod tests {
 
     fn commit_file(path: &Path, name: &str, body: &str) {
         std::fs::write(path.join(name), body).unwrap();
-        let mut add_cmd = std::process::Command::new("git");
+        let mut add_cmd = crate::process::hidden_command("git");
         add_cmd.args(["add", name]).current_dir(path);
         crate::process::scrub_git_env(&mut add_cmd);
         let add = add_cmd.output().expect("git add");
         assert!(add.status.success(), "git add failed");
 
-        let mut commit_cmd = std::process::Command::new("git");
+        let mut commit_cmd = crate::process::hidden_command("git");
         commit_cmd.args(["commit", "-m", "init"]).current_dir(path);
         crate::process::scrub_git_env(&mut commit_cmd);
         let commit = commit_cmd.output().expect("git commit");
@@ -552,7 +552,7 @@ mod tests {
         add_origin(&repo, "https://github.com/example/project.git");
         commit_file(&repo, "README.md", "# repo\n");
 
-        let mut wt_cmd = std::process::Command::new("git");
+        let mut wt_cmd = crate::process::hidden_command("git");
         wt_cmd
             .args([
                 "worktree",

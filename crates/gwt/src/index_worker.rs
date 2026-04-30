@@ -1,6 +1,5 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -68,7 +67,7 @@ fn project_index_status_for_path_inner(
         compute_worktree_hash(&repo_root).map_err(|err| format!("compute worktree hash: {err}"))?;
     let report =
         gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    let output = Command::new(project_index_python_path())
+    let output = gwt_core::process::hidden_command(project_index_python_path())
         .arg(gwt_runtime_runner_path())
         .arg("--action")
         .arg("status")
@@ -161,7 +160,7 @@ fn resolve_git_worktree_root(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
     }
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(path)
         .output()
@@ -177,7 +176,7 @@ fn resolve_git_worktree_root(path: &Path) -> Option<PathBuf> {
 }
 
 fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(project_root)
         .output()

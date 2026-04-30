@@ -3,8 +3,9 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process::Command,
 };
+
+use gwt_core::process::hidden_command;
 
 const BEGIN_MARKER: &str = "# gwt-managed-begin";
 const END_MARKER: &str = "# gwt-managed-end";
@@ -52,7 +53,7 @@ pub fn update_git_exclude(worktree: &Path) -> io::Result<()> {
 }
 
 fn resolve_git_exclude_path(worktree: &Path) -> io::Result<PathBuf> {
-    let output = Command::new("git")
+    let output = hidden_command("git")
         .arg("-C")
         .arg(worktree)
         .args(["rev-parse", "--git-path", "info/exclude"])

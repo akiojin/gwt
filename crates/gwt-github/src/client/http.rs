@@ -16,8 +16,9 @@
 //! so one network round-trip covers "issue body + every comment"; mutations
 //! go through the REST endpoints.
 
-use std::{process::Command, sync::Mutex};
+use std::sync::Mutex;
 
+use gwt_core::process::hidden_command;
 use serde_json::{json, Value};
 
 use crate::client::{
@@ -336,7 +337,7 @@ fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
 }
 
 fn resolve_gh_token() -> Result<String, ApiError> {
-    let output = Command::new("gh")
+    let output = hidden_command("gh")
         .args(["auth", "token"])
         .output()
         .map_err(|e| ApiError::Network(format!("gh auth token: {e}")))?;
