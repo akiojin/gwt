@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.13.0] - 2026-04-30
+
+### Features
+
+- **migration:** SPEC-1934 US-6 GUI 統合のバックエンド経路を実装
+- **migration:** SPEC-1934 US-6 GUI 統合のフロントエンドを実装
+
 ## [9.12.0] - 2026-04-30
 
 ### Documentation
