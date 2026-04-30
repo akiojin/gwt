@@ -362,6 +362,29 @@ enum UserEvent {
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
+    /// SPEC-1934 FR-029: progress tick from
+    /// `gwt::migration::execute_migration`. Re-broadcast as
+    /// [`gwt::BackendEvent::MigrationProgress`].
+    MigrationProgress {
+        tab_id: String,
+        phase: gwt_core::migration::MigrationPhase,
+        percent: u8,
+    },
+    /// SPEC-1934 US-6.9: migration finished successfully. Triggers a model
+    /// reset on the project tab and a [`gwt::BackendEvent::MigrationDone`]
+    /// broadcast.
+    MigrationDone {
+        tab_id: String,
+        branch_worktree_path: PathBuf,
+    },
+    /// SPEC-1934 US-6.6: migration failed; recovery state mirrors the
+    /// rollback verdict the executor produced.
+    MigrationError {
+        tab_id: String,
+        phase: gwt_core::migration::MigrationPhase,
+        message: String,
+        recovery: gwt_core::migration::RecoveryState,
+    },
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -856,6 +879,7 @@ mod tests {
             project_root: PathBuf::from("E:/gwt/test-repo"),
             kind: gwt::ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
         }
     }
 
@@ -888,6 +912,7 @@ mod tests {
             project_root,
             kind,
             workspace,
+            migration_pending: false,
         }
     }
 
@@ -4463,6 +4488,36 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 app.pending_update = Some(state);
+            }
+            Event::UserEvent(UserEvent::MigrationProgress {
+                tab_id,
+                phase,
+                percent,
+            }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(
+                    BackendEvent::MigrationProgress {
+                        tab_id,
+                        phase: phase.as_str().to_string(),
+                        percent,
+                    },
+                )]);
+            }
+            Event::UserEvent(UserEvent::MigrationDone {
+                tab_id,
+                branch_worktree_path,
+            }) => {
+                let events = app.handle_migration_done(&tab_id, &branch_worktree_path);
+                board_projection_watchers.sync(&app, proxy.clone());
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::MigrationError {
+                tab_id,
+                phase,
+                message,
+                recovery,
+            }) => {
+                let events = app.handle_migration_error(&tab_id, phase, message, recovery);
+                clients.dispatch(events);
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::MenuEvent(event)) => {
