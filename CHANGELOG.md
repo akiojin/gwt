@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.7] - 2026-04-30
+
+### Bug Fixes
+
+- Apply profile env to GUI PTY launches
+- Centralize launch environment composition
+- **gui:** Keep launch wizard footer below content
 
 ## [9.11.6] - 2026-04-29
 
