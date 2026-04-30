@@ -241,6 +241,24 @@ pub enum FrontendEvent {
         base_url: String,
         api_key: String,
     },
+    /// SPEC-1934 US-6: user accepted the Migration confirmation modal for
+    /// `tab_id`. Backend runs `gwt::migration::execute_migration` and streams
+    /// progress as [`BackendEvent::MigrationProgress`] / [`BackendEvent::MigrationDone`]
+    /// / [`BackendEvent::MigrationError`].
+    StartMigration {
+        tab_id: String,
+    },
+    /// SPEC-1934 US-6.7: user dismissed the migration modal for `tab_id`.
+    /// Tab opens with the original Normal Git layout; the modal will appear
+    /// again on the next launch.
+    SkipMigration {
+        tab_id: String,
+    },
+    /// SPEC-1934 US-6.8: user chose Quit from the migration modal. The app
+    /// terminates without touching the repository.
+    QuitMigration {
+        tab_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -461,6 +479,39 @@ pub enum BackendEvent {
     CustomAgentError {
         code: CustomAgentErrorCode,
         message: String,
+    },
+    /// SPEC-1934 US-6.1: a project tab was opened on a Normal Git layout.
+    /// The frontend should present the migration confirmation modal.
+    MigrationDetected {
+        tab_id: String,
+        project_root: String,
+        branch: Option<String>,
+        has_dirty: bool,
+        has_locked: bool,
+        has_submodules: bool,
+    },
+    /// SPEC-1934 FR-029: incremental progress while
+    /// `gwt::migration::execute_migration` runs. `phase` is the snake_case key
+    /// from `MigrationPhase::as_str()`.
+    MigrationProgress {
+        tab_id: String,
+        phase: String,
+        percent: u8,
+    },
+    /// SPEC-1934 US-6.9: migration completed successfully.
+    /// `branch_worktree_path` is where the GUI should reload the project tab.
+    MigrationDone {
+        tab_id: String,
+        branch_worktree_path: String,
+    },
+    /// SPEC-1934 US-6.6: migration failed; `recovery` is one of
+    /// `untouched`, `rolled_back`, or `partial`. The frontend uses this to
+    /// decide whether to offer Retry / Restore / Quit.
+    MigrationError {
+        tab_id: String,
+        phase: String,
+        message: String,
+        recovery: String,
     },
 }
 
