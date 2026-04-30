@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.12] - 2026-04-30
+
+### Bug Fixes
+
+- Windows GUIのサブプロセス表示を抑止
+- **gui:** Open launch wizard without hydration loading
+- **gui:** Address launch wizard review follow-ups
+
 ## [9.11.11] - 2026-04-30
 
 ### Bug Fixes
