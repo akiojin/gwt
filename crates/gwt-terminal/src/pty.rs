@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(not(windows))]
+use std::path::Path;
+
 use portable_pty::{native_pty_system, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use tracing::instrument;
 
@@ -230,8 +233,41 @@ fn normalize_spawn_config(config: SpawnConfig) -> SpawnConfig {
 
     #[cfg(not(windows))]
     {
-        config
+        normalize_non_windows_spawn_config(config)
     }
+}
+
+#[cfg(not(windows))]
+fn normalize_non_windows_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
+    if let Some(command) = resolve_command_from_env_path(&config.command, &config.env) {
+        config.command = command.display().to_string();
+    }
+    config
+}
+
+#[cfg(not(windows))]
+fn resolve_command_from_env_path(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
+    if command.is_empty() || command.contains('/') {
+        return None;
+    }
+    let path_value = env.get("PATH")?;
+    std::env::split_paths(path_value).find_map(|dir| {
+        let candidate = dir.join(command);
+        is_executable_file(&candidate).then_some(candidate)
+    })
+}
+
+#[cfg(all(not(windows), unix))]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(all(not(windows), not(unix)))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 impl Drop for PtyHandle {
@@ -292,6 +328,35 @@ mod tests {
 
     fn sleep_config(secs: &str) -> SpawnConfig {
         command_config(sleep_command(secs))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_spawn_config_resolves_command_from_config_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = dir.path().join("gwt-test-runner");
+        std::fs::write(&runner, "#!/bin/sh\nexit 0\n").expect("write runner");
+        let mut permissions = std::fs::metadata(&runner)
+            .expect("runner metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&runner, permissions).expect("chmod runner");
+
+        let config = SpawnConfig {
+            command: "gwt-test-runner".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            env: HashMap::from([("PATH".to_string(), dir.path().display().to_string())]),
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+
+        let normalized = normalize_spawn_config(config);
+
+        assert_eq!(PathBuf::from(normalized.command), runner);
     }
 
     #[test]

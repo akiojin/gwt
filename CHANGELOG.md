@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.8] - 2026-04-30
+
+### Bug Fixes
+
+- Resolve PTY commands from launch PATH
+
 ## [9.11.7] - 2026-04-30
 
 ### Bug Fixes
