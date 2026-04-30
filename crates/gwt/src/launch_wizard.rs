@@ -243,6 +243,7 @@ pub fn previous_launch_profile_from_sessions(
             left.updated_at
                 .cmp(&right.updated_at)
                 .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
         })
         .cloned()
         .map(previous_profile_from_session)
@@ -3527,6 +3528,43 @@ mod tests {
             gwt_agent::LaunchRuntimeTarget::Docker
         );
         assert_eq!(profile.docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
+    fn previous_launch_profile_tie_breaks_equal_timestamps_by_session_id() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let timestamp = Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap();
+        let mut lower_id = sample_session_record(
+            "feature/lower",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            timestamp,
+            None,
+        );
+        lower_id.id = "session-a".to_string();
+        lower_id.model = Some("gpt-5.4".to_string());
+        let mut higher_id = sample_session_record(
+            "feature/higher",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            timestamp,
+            None,
+        );
+        higher_id.id = "session-b".to_string();
+        higher_id.model = Some("gpt-5.5".to_string());
+
+        let profile = previous_launch_profile_from_sessions(
+            &worktree,
+            &[higher_id.clone(), lower_id.clone()],
+        )
+        .expect("profile");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+
+        let profile = previous_launch_profile_from_sessions(&worktree, &[lower_id, higher_id])
+            .expect("profile");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
     }
 
     #[test]
