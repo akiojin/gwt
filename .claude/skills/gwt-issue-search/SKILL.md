@@ -7,6 +7,14 @@ description: "Semantic search over all GitHub Issues using vector embeddings. Us
 
 gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. The gwt TUI refreshes it asynchronously at startup with a 15-minute TTL; non-TUI sessions get an auto-build on the first search.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## Issues search first
 
 When the user asks any of the following, use GitHub Issues search before manual `gwtd issue view`,

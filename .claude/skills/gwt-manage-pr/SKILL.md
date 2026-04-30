@@ -14,6 +14,14 @@ next-step guidance returned from this workflow.
 
 Canonical agent-facing surface is `gwtd pr ...` / `gwtd actions ...` for PR inspection, create/update, and fix flows. The current implementation may still use GitHub REST / `gh` internally as transport, while GraphQL remains the transport for unresolved review threads and thread reply/resolve.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## Mode Auto-Detection
 
 On invocation, run Shared Preflight, then route:

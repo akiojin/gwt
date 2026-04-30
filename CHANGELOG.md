@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.11] - 2026-04-30
+
+### Bug Fixes
+
+- **skills:** Resolve gwtd without PATH
+
 ## [9.11.10] - 2026-04-30
 
 ### Bug Fixes

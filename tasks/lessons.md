@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-04-30 — fix(skills): managed skills must not assume gwtd is on PATH
+
+### 事象
+
+`$gwt-discussion` / `$gwt-manage-pr` などの managed skill 実行時に、
+Codex セッションの `PATH` へ `gwtd` が存在しないため、CLI 呼び出しが失敗する余地が残っていた。
+同時に npm package の `bin` は `gwt` だけを公開しており、release bundle に `gwtd` が
+含まれていても `gwtd` command shim としては利用できなかった。
+
+### 原因
+
+`GWT_BIN_PATH` 注入は実装済みだったが、managed command asset は
+`GWT_BIN="${GWT_BIN_PATH:-gwtd}"` のままで、`GWT_BIN_PATH` がない環境では bare `gwtd`
+lookup に戻っていた。さらに macOS の DMG は GUI-first 配布であり、CLI を PATH に置く
+install script が実体として存在しなかった。
+
+### 再発防止策
+
+1. managed skill / command asset は `GWT_BIN_PATH`、PATH 上の `gwtd`、repo-local
+   `target/debug/gwtd` の順で解決し、見つからない場合は actionable error を出す。
+2. release / npm / install script の配布契約は `gwt` と `gwtd` を必ず同時に検証する。
+3. PATH 問題の修正では、実行ログの症状、package shim、install guidance、managed asset の
+   実テキストを同時に確認する。
+
 ## 2026-04-30 — fix(ci): ローカル lint は CI と同じ package selection でも確認する
 
 ### 事象

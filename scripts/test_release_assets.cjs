@@ -7,6 +7,7 @@ const { execFileSync } = require("child_process");
 const {
   binaryNameForPlatform,
   bundleBinaryNamesForPlatform,
+  daemonBinaryNameForPlatform,
   installBundleFromArchive,
   primaryReleaseAssetName,
   releaseAssetName,
@@ -47,6 +48,9 @@ run("release helper keeps platform binary names stable", () => {
   assert.equal(binaryNameForPlatform("win32"), "gwt.exe");
   assert.equal(binaryNameForPlatform("linux"), "gwt");
   assert.equal(binaryNameForPlatform("darwin"), "gwt");
+  assert.equal(daemonBinaryNameForPlatform("win32"), "gwtd.exe");
+  assert.equal(daemonBinaryNameForPlatform("linux"), "gwtd");
+  assert.equal(daemonBinaryNameForPlatform("darwin"), "gwtd");
 });
 
 run("release helper keeps bundle binary names stable", () => {
@@ -56,8 +60,12 @@ run("release helper keeps bundle binary names stable", () => {
 });
 
 run("installer entrypoints are loadable under package type module", () => {
+  const daemonLauncher = require("../bin/gwtd.cjs");
+
   assert.equal(typeof postinstall.main, "function");
   assert.equal(typeof launcher.main, "function");
+  assert.equal(typeof daemonLauncher.main, "function");
+  assert.equal(typeof daemonLauncher.readVersion, "function");
 });
 
 run("windows installer definition includes the gwtd companion binary", () => {
@@ -78,6 +86,8 @@ run("release workflow packages gwtd alongside gwt", () => {
 
 run("package scripts keep the GUI front door and release contract explicit", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+  assert.equal(pkg.bin.gwt, "bin/gwt.cjs");
+  assert.equal(pkg.bin.gwtd, "bin/gwtd.cjs");
   assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
   assert.equal(
     pkg.scripts["test:frontend-bundle"],
@@ -86,6 +96,23 @@ run("package scripts keep the GUI front door and release contract explicit", () 
   assert.equal(pkg.scripts["test:release-flow"], "bash scripts/check-release-flow.sh");
   assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");
   assert.equal(pkg.scripts.build, "cargo build --release -p gwt --bin gwt --bin gwtd");
+});
+
+run("macos install scripts install and remove both public command shims", () => {
+  const install = fs.readFileSync(
+    path.join(__dirname, "..", "installers", "macos", "install.sh"),
+    "utf8"
+  );
+  const uninstall = fs.readFileSync(
+    path.join(__dirname, "..", "installers", "macos", "uninstall.sh"),
+    "utf8"
+  );
+
+  assert.match(install, /gwt-macos-\$\{ARCH\}\.tar\.gz/);
+  assert.match(install, /for BIN in gwt gwtd/);
+  assert.match(install, /chmod \+x "\$INSTALL_DIR\/\$BIN"/);
+  assert.match(uninstall, /for BIN in gwt gwtd/);
+  assert.match(uninstall, /rm -f "\$INSTALL_DIR\/\$BIN"/);
 });
 
 run("test all script keeps rust tests plus frontend release checks", () => {
