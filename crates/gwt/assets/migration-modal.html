@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Migrate Repository</title>
+  <link rel="stylesheet" href="migration-modal.css" />
+</head>
+<body>
+  <main class="migration-modal" role="dialog" aria-labelledby="migration-title" aria-modal="true">
+    <header class="migration-modal__header">
+      <h1 id="migration-title">Migrate to Bare + Worktree layout</h1>
+      <p class="migration-modal__subtitle" data-slot="repo-path"></p>
+    </header>
+
+    <section class="migration-modal__body">
+      <p>
+        gwt manages repositories in a Nested layout
+        (<code>&lt;project&gt;.git/</code> + <code>&lt;branch&gt;/</code>).
+        This repository is currently a Normal Git checkout. Migrate to keep it consistent
+        with other gwt-managed projects in your workspace.
+      </p>
+      <ul class="migration-modal__details" data-slot="details">
+        <!-- Filled by migration-modal.ts on `migration:detected` -->
+      </ul>
+      <p class="migration-modal__warning">
+        A full snapshot will be saved to <code>.gwt-migration-backup/</code> first.
+        On any failure, the repository is restored to its original state.
+      </p>
+    </section>
+
+    <section class="migration-modal__progress" data-slot="progress" hidden>
+      <p data-slot="phase-label">Preparing…</p>
+      <progress max="100" value="0" data-slot="phase-progress"></progress>
+    </section>
+
+    <footer class="migration-modal__actions">
+      <button type="button" data-action="migrate" class="migration-modal__btn migration-modal__btn--primary">Migrate</button>
+      <button type="button" data-action="skip" class="migration-modal__btn">Skip</button>
+      <button type="button" data-action="quit" class="migration-modal__btn migration-modal__btn--danger">Quit</button>
+    </footer>
+  </main>
+  <script type="module" src="migration-modal.js"></script>
+</body>
+</html>
