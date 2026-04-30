@@ -13,6 +13,7 @@ mod issue_cache;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;
+pub mod migration;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
