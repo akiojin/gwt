@@ -118,6 +118,27 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows and Linux, `Ctrl+Shift+C` also copies the current terminal
 selection. `Ctrl+C` stays mapped to the running terminal process.
 
+## Workspace Layout
+
+gwt manages each project as a **Nested Bare + Worktree** layout under your
+workspace directory:
+
+```
+<workspace>/<project>/
+├── <project>.git/          # bare repository
+├── develop/                # develop worktree (default working directory)
+├── feature/<name>/         # additional worktrees by branch
+└── .gwt/project.toml       # gwt-managed project metadata
+```
+
+`gwt` auto-creates this layout when you clone through the Initialization
+wizard. Existing Normal Git repositories (`.git/` directly under the project
+directory) are recognised so a migration to the Nested Bare + Worktree layout
+can be run on demand. The migration safely backs up the original tree to
+`.gwt-migration-backup/`, rebuilds the bare repo, recreates each worktree,
+and rolls back automatically if any phase fails. Tracking work is captured in
+[GitHub Issue #1934 (SPEC-1934)](https://github.com/akiojin/gwt/issues/1934).
+
 ## Canvas Operations
 
 - Zoom the canvas with the on-screen zoom buttons

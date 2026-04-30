@@ -7,6 +7,7 @@ pub mod branch;
 pub mod commit;
 pub mod diff;
 pub mod issue;
+pub mod migration;
 pub mod pr_status;
 pub mod repository;
 pub mod worktree;
