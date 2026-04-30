@@ -164,7 +164,13 @@ where
         .working_dir
         .clone()
         .unwrap_or_else(|| repo_path.to_path_buf());
-    LaunchEnvironment::empty()
+    let launch_env = match config.runtime_target {
+        LaunchRuntimeTarget::Host => {
+            LaunchEnvironment::from_base_env(crate::environment::host_process_env())
+        }
+        LaunchRuntimeTarget::Docker => LaunchEnvironment::empty(),
+    };
+    launch_env
         .with_project_root(&worktree_path)
         .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
     refresh_worktree_assets(&worktree_path)?;

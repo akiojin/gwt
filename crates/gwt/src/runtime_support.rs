@@ -359,7 +359,9 @@ pub(crate) fn resolve_launch_spec_with_fallback(
 
 #[cfg(test)]
 pub(crate) fn spawn_env() -> HashMap<String, String> {
-    let (env, _) = gwt_agent::LaunchEnvironment::from_base_env(std::env::vars()).into_parts();
+    let (env, _) =
+        gwt_agent::LaunchEnvironment::from_base_env(gwt_agent::environment::host_process_env())
+            .into_parts();
     env
 }
 

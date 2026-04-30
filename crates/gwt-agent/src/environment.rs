@@ -2,12 +2,46 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
-use crate::types::LaunchRuntimeTarget;
+use crate::{
+    session::{
+        GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
+        GWT_SESSION_RUNTIME_PATH_ENV,
+    },
+    types::LaunchRuntimeTarget,
+};
 
 const GWT_PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
+const GWT_REPO_HASH_ENV: &str = "GWT_REPO_HASH";
+const GWT_WORKTREE_HASH_ENV: &str = "GWT_WORKTREE_HASH";
+const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
+    GWT_BIN_PATH_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV,
+    GWT_HOOK_FORWARD_URL_ENV,
+    GWT_PROJECT_ROOT_ENV,
+    GWT_REPO_HASH_ENV,
+    GWT_SESSION_ID_ENV,
+    GWT_SESSION_RUNTIME_PATH_ENV,
+    GWT_WORKTREE_HASH_ENV,
+];
+
+/// Return the current host process environment with GUI-launch PATH gaps filled.
+pub fn host_process_env() -> HashMap<String, String> {
+    hydrate_host_base_env(std::env::vars().collect::<Vec<_>>())
+}
+
+/// Fill common GUI-launch PATH gaps in a host base environment.
+pub(crate) fn hydrate_host_base_env<I>(base_env: I) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env: HashMap<String, String> = base_env.into_iter().collect();
+    remove_inherited_launch_env(&mut env);
+    hydrate_host_path(&mut env);
+    env
+}
 
 /// Effective environment assembled from the active profile and launch context.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,10 +86,9 @@ impl LaunchEnvironment {
         runtime_target: LaunchRuntimeTarget,
     ) -> Result<Self, String> {
         match runtime_target {
-            LaunchRuntimeTarget::Host => Self::from_active_profile_with_base(
-                config_path,
-                std::env::vars().collect::<Vec<_>>(),
-            ),
+            LaunchRuntimeTarget::Host => {
+                Self::from_active_profile_with_base(config_path, host_process_env())
+            }
             LaunchRuntimeTarget::Docker => Self::from_active_profile_with_base(
                 config_path,
                 std::iter::empty::<(String, String)>(),
@@ -103,7 +136,9 @@ impl LaunchEnvironment {
         I: IntoIterator<Item = (String, String)>,
     {
         match runtime_target {
-            LaunchRuntimeTarget::Host => Self::from_active_profile_with_base(config_path, base_env),
+            LaunchRuntimeTarget::Host => {
+                Self::from_active_profile_with_base(config_path, hydrate_host_base_env(base_env))
+            }
             LaunchRuntimeTarget::Docker => Self::from_active_profile_with_base(
                 config_path,
                 std::iter::empty::<(String, String)>(),
@@ -161,6 +196,81 @@ fn ensure_terminal_env(env: &mut HashMap<String, String>) {
         .or_insert_with(|| "xterm-256color".to_string());
     env.entry("COLORTERM".to_string())
         .or_insert_with(|| "truecolor".to_string());
+}
+
+fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
+    for key in INHERITED_LAUNCH_ENV_KEYS {
+        env.remove(*key);
+    }
+}
+
+#[cfg(windows)]
+fn hydrate_host_path(_env: &mut HashMap<String, String>) {}
+
+#[cfg(not(windows))]
+fn hydrate_host_path(env: &mut HashMap<String, String>) {
+    let mut entries = env
+        .get("PATH")
+        .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos_path_helper_path(env.get("PATH").map(String::as_str)) {
+        push_path_value(&mut entries, &path);
+    }
+
+    if let Some(home) = env.get("HOME").filter(|home| !home.trim().is_empty()) {
+        let home = PathBuf::from(home);
+        for relative in [".bun/bin", ".local/bin", ".cargo/bin"] {
+            let candidate = home.join(relative);
+            if candidate.is_dir() {
+                push_unique_path(&mut entries, candidate);
+            }
+        }
+    }
+
+    if let Ok(path) = std::env::join_paths(&entries) {
+        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_path_helper_path(current_path: Option<&str>) -> Option<String> {
+    let mut command = std::process::Command::new("/usr/libexec/path_helper");
+    command.arg("-s");
+    if let Some(path) = current_path {
+        command.env("PATH", path);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_path_helper_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_path_helper_output(output: &str) -> Option<String> {
+    let start = output.find("PATH=\"")? + "PATH=\"".len();
+    let rest = &output[start..];
+    let end = rest.find("\";")?;
+    Some(rest[..end].to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn push_path_value(entries: &mut Vec<PathBuf>, value: &str) {
+    for path in std::env::split_paths(value) {
+        push_unique_path(entries, path);
+    }
+}
+
+#[cfg(not(windows))]
+fn push_unique_path(entries: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    if !entries.iter().any(|entry| entry == &path) {
+        entries.push(path);
+    }
 }
 
 fn merged_remove_env(base: &[String], additional: &[String]) -> Vec<String> {
@@ -339,5 +449,93 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(remove_env.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_runtime_expands_minimal_gui_path_with_existing_user_bins() {
+        let home = tempfile::tempdir().unwrap();
+        for relative in [".bun/bin", ".local/bin", ".cargo/bin"] {
+            std::fs::create_dir_all(home.path().join(relative)).unwrap();
+        }
+        let (_dir, config_path) = write_profile_config(Profile::new("default"));
+        let base_env = vec![
+            (
+                "PATH".to_string(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            ),
+            ("HOME".to_string(), home.path().display().to_string()),
+        ];
+
+        let (env, _) = LaunchEnvironment::from_active_profile_for_runtime_with_base(
+            &config_path,
+            LaunchRuntimeTarget::Host,
+            base_env,
+        )
+        .unwrap()
+        .into_parts();
+
+        let path = env.get("PATH").expect("PATH");
+        let entries = std::env::split_paths(path).collect::<Vec<_>>();
+        assert!(entries.contains(&home.path().join(".bun/bin")));
+        assert!(entries.contains(&home.path().join(".local/bin")));
+        assert!(entries.contains(&home.path().join(".cargo/bin")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn docker_runtime_does_not_import_host_user_bins() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".bun/bin")).unwrap();
+        let (_dir, config_path) = write_profile_config(Profile::new("default"));
+
+        let (env, _) = LaunchEnvironment::from_active_profile_for_runtime_with_base(
+            &config_path,
+            LaunchRuntimeTarget::Docker,
+            vec![
+                (
+                    "PATH".to_string(),
+                    "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+                ),
+                ("HOME".to_string(), home.path().display().to_string()),
+            ],
+        )
+        .unwrap()
+        .into_parts();
+
+        let entries = env
+            .get("PATH")
+            .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(!entries.contains(&home.path().join(".bun/bin")));
+    }
+
+    #[test]
+    fn host_base_env_drops_inherited_launch_scoped_env() {
+        let env = hydrate_host_base_env([
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            (GWT_BIN_PATH_ENV.to_string(), "/stale/gwtd".to_string()),
+            (GWT_SESSION_ID_ENV.to_string(), "parent-session".to_string()),
+            (
+                GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+                "/tmp/parent.json".to_string(),
+            ),
+            (
+                GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                "secret-token".to_string(),
+            ),
+            (GWT_PROJECT_ROOT_ENV.to_string(), "/old/project".to_string()),
+        ]);
+
+        let path_entries = env
+            .get("PATH")
+            .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(path_entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(!env.contains_key(GWT_BIN_PATH_ENV));
+        assert!(!env.contains_key(GWT_SESSION_ID_ENV));
+        assert!(!env.contains_key(GWT_SESSION_RUNTIME_PATH_ENV));
+        assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
+        assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
     }
 }

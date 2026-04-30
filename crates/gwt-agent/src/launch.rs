@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     custom::{CustomAgentType, CustomCodingAgent},
+    environment::{host_process_env, hydrate_host_base_env},
     session::GWT_SESSION_RUNTIME_PATH_ENV,
     types::{AgentColor, AgentId, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode},
 };
@@ -208,9 +209,21 @@ fn package_runner_candidates() -> &'static [(&'static str, bool)] {
 /// - bunx: no `--yes` needed
 /// - npx: `--yes` needed to suppress interactive prompt
 fn find_bunx_or_npx() -> (String, bool) {
+    let env = host_process_env();
+    find_bunx_or_npx_with_env(&env)
+}
+
+fn find_bunx_or_npx_with_env(env: &HashMap<String, String>) -> (String, bool) {
+    let env = hydrate_host_base_env(env.clone());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let path = env.get("PATH").map(String::as_str);
     for (name, needs_yes) in package_runner_candidates() {
-        if let Ok(path) = which::which(name) {
-            let path_str = path.to_string_lossy();
+        let found = match path {
+            Some(path) => which::which_in(name, Some(path), &cwd),
+            None => which::which(name),
+        };
+        if let Ok(found) = found {
+            let path_str = found.to_string_lossy();
             if path_str.contains("node_modules") {
                 continue;
             }
@@ -1249,6 +1262,36 @@ mod tests {
 
         let needs_yes: Vec<bool> = candidates.iter().map(|(_, yes)| *yes).collect();
         assert_eq!(needs_yes, vec![false, true]);
+    }
+
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn package_runner_detection_uses_hydrated_host_env_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("home");
+        let bin = home.path().join(".bun/bin");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        let bunx = bin.join("bunx");
+        std::fs::write(&bunx, "#!/bin/sh\nexit 0\n").expect("write bunx");
+        let mut permissions = std::fs::metadata(&bunx)
+            .expect("bunx metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&bunx, permissions).expect("chmod bunx");
+
+        let env = HashMap::from([
+            (
+                "PATH".to_string(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            ),
+            ("HOME".to_string(), home.path().display().to_string()),
+        ]);
+
+        let (executable, needs_yes) = find_bunx_or_npx_with_env(&env);
+
+        assert_eq!(PathBuf::from(executable), bunx);
+        assert!(!needs_yes);
     }
 
     #[test]
