@@ -91,7 +91,7 @@ run("package scripts keep the GUI front door and release contract explicit", () 
   assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
   assert.equal(
     pkg.scripts["test:frontend-bundle"],
-    "node --check crates/gwt/web/app.js && node --check crates/gwt/web/branch-cleanup-modal.js"
+    "node --check crates/gwt/web/app.js && node --check crates/gwt/web/branch-cleanup-modal.js && node --check crates/gwt/web/migration-modal.js"
   );
   assert.equal(pkg.scripts["test:release-flow"], "bash scripts/check-release-flow.sh");
   assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");

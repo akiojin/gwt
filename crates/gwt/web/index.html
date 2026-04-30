@@ -1899,6 +1899,63 @@
         color: #334155;
       }
 
+      /* SPEC-1934 US-6 migration modal — built on the shared modal-shell
+         layout, only the in-modal text/list/progress styles are migration
+         specific. */
+      .migration-modal-subtitle {
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+        color: #475569;
+        font-size: 12px;
+        word-break: break-all;
+        margin: 4px 0 12px;
+      }
+      .migration-modal-body {
+        margin: 0 0 12px;
+        line-height: 1.55;
+        font-size: 13px;
+        color: #1f2937;
+      }
+      .migration-modal-details {
+        list-style: disc;
+        padding-left: 20px;
+        margin: 8px 0 12px;
+        color: #334155;
+        font-size: 12px;
+      }
+      .migration-modal-details li.blocked {
+        color: #b91c1c;
+      }
+      .migration-modal-hint {
+        background: #fef3c7;
+        border-left: 3px solid #f59e0b;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: #78350f;
+        margin: 0 0 12px;
+      }
+      .migration-modal-phase-label {
+        font-weight: 600;
+        margin: 8px 0 4px;
+        color: #1f2937;
+      }
+      .migration-modal-progress {
+        width: 100%;
+        height: 8px;
+      }
+      .migration-modal-error-message {
+        color: #b91c1c;
+        margin: 8px 0;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+        font-size: 12px;
+        word-break: break-word;
+      }
+      .migration-modal-recovery {
+        color: #334155;
+        font-size: 12px;
+        margin: 4px 0 12px;
+      }
+
       /* Empty states share `.workspace-empty-state` through additive class names. */
 
       .mock-section {
@@ -2672,6 +2729,11 @@
         </div>
       </div>
       <div class="modal-backdrop" id="branch-cleanup-modal">
+        <div class="modal-shell"></div>
+      </div>
+      <!-- SPEC-1934 US-6: confirmation modal shown when a Normal Git layout
+           is detected at startup. Renderer lives in /migration-modal.js. -->
+      <div class="modal-backdrop" id="migration-modal">
         <div class="modal-shell"></div>
       </div>
     </div>

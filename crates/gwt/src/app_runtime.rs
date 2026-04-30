@@ -410,6 +410,70 @@ pub(crate) struct ProjectTabRuntime {
     pub(crate) project_root: PathBuf,
     pub(crate) kind: gwt::ProjectKind,
     pub(crate) workspace: WorkspaceState,
+    /// SPEC-1934 US-6: in-memory flag set when the tab was opened on a Normal
+    /// Git layout that we want to migrate. The frontend sees a
+    /// [`BackendEvent::MigrationDetected`] until the user picks Migrate /
+    /// Skip / Quit. Not persisted: re-detected on every launch.
+    pub(crate) migration_pending: bool,
+}
+
+fn recovery_state_label(recovery: gwt_core::migration::RecoveryState) -> &'static str {
+    use gwt_core::migration::RecoveryState;
+    match recovery {
+        RecoveryState::Untouched => "untouched",
+        RecoveryState::RolledBack => "rolled_back",
+        RecoveryState::Partial => "partial",
+    }
+}
+
+/// Best-effort `git symbolic-ref --short HEAD` for the migration modal
+/// preview. Returns `None` for detached HEAD or unreadable repositories so
+/// the frontend can fall back to a neutral label.
+fn read_head_branch(project_root: &Path) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+/// `true` when `git status --porcelain` reports any entry. Failures are
+/// treated as "not dirty" since the backend can fall through to the regular
+/// validator pass.
+fn detect_dirty(project_root: &Path) -> bool {
+    gwt_core::process::hidden_command("git")
+        .args(["status", "--porcelain"])
+        .current_dir(project_root)
+        .output()
+        .map(|out| out.status.success() && !out.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// `true` when any worktree under `project_root` is locked. Mirrors the more
+/// thorough check inside `gwt_core::migration::validator::check_locked_worktrees`.
+fn detect_locked_worktrees(project_root: &Path) -> bool {
+    let Ok(output) = gwt_core::process::hidden_command("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(project_root)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.starts_with("locked"))
 }
 
 #[derive(Debug, Clone)]
@@ -441,6 +505,9 @@ pub(crate) struct ProjectOpenTarget {
     pub(crate) project_root: PathBuf,
     pub(crate) title: String,
     pub(crate) kind: gwt::ProjectKind,
+    /// `true` when the resolved layout is a Normal Git checkout that gwt would
+    /// like to migrate to its Nested Bare+Worktree convention (SPEC-1934 US-6).
+    pub(crate) needs_migration: bool,
 }
 
 pub(crate) struct AppRuntime {
@@ -481,6 +548,9 @@ impl ProjectTabRuntime {
             project_root: tab.project_root,
             kind: tab.kind,
             workspace: WorkspaceState::from_persisted(workspace),
+            // Re-detected at startup via resolve_project_target; persistence
+            // does not carry the flag.
+            migration_pending: false,
         }
     }
 }
@@ -790,6 +860,9 @@ impl AppRuntime {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
             }
+            FrontendEvent::StartMigration { tab_id } => self.start_migration_events(&tab_id),
+            FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
+            FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
         }
     }
 
@@ -851,7 +924,7 @@ impl AppRuntime {
             })
             .collect();
 
-        build_frontend_sync_events(
+        let mut events = build_frontend_sync_events(
             client_id,
             self.app_state_view(),
             terminal_statuses,
@@ -860,7 +933,12 @@ impl AppRuntime {
                 .as_ref()
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
-        )
+        );
+        // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
+        // frontend during state hydration so the modal opens without waiting
+        // for another roundtrip.
+        events.extend(self.migration_detected_replies(client_id));
+        events
     }
 
     pub(crate) fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
@@ -878,6 +956,10 @@ impl AppRuntime {
                 if wizard_closed {
                     events.push(self.launch_wizard_state_broadcast(None));
                 }
+                // SPEC-1934 US-6.1: when a tab was opened on a Normal Git
+                // layout, surface the confirmation modal alongside the regular
+                // workspace broadcast.
+                events.extend(self.migration_detected_broadcasts());
                 events
             }
             Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
@@ -910,12 +992,164 @@ impl AppRuntime {
                 load_restored_workspace_state(&target.project_root)
                     .map_err(|error| error.to_string())?
             }),
+            migration_pending: target.needs_migration,
         });
         self.active_tab_id = Some(tab_id);
         self.remember_recent_project(&target);
         let wizard_closed = self.clear_launch_wizard().is_some();
         self.persist().map_err(|error| error.to_string())?;
         Ok(wizard_closed)
+    }
+
+    fn migration_detected_event_for(&self, tab: &ProjectTabRuntime) -> BackendEvent {
+        BackendEvent::MigrationDetected {
+            tab_id: tab.id.clone(),
+            project_root: tab.project_root.display().to_string(),
+            branch: read_head_branch(&tab.project_root),
+            has_dirty: detect_dirty(&tab.project_root),
+            has_locked: detect_locked_worktrees(&tab.project_root),
+            has_submodules: tab.project_root.join(".gitmodules").is_file(),
+        }
+    }
+
+    /// SPEC-1934 US-6.1 broadcast variant: used by `open_project_path_events`
+    /// to inform every connected frontend that a tab needs migration.
+    pub(crate) fn migration_detected_broadcasts(&self) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.migration_pending)
+            .map(|tab| OutboundEvent::broadcast(self.migration_detected_event_for(tab)))
+            .collect()
+    }
+
+    /// SPEC-1934 US-6.1 reply variant: used by `frontend_sync_events` so a
+    /// freshly-connected frontend learns about pending migrations during
+    /// state hydration without resending to other clients.
+    pub(crate) fn migration_detected_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.migration_pending)
+            .map(|tab| OutboundEvent::reply(client_id, self.migration_detected_event_for(tab)))
+            .collect()
+    }
+
+    /// SPEC-1934 FR-019: user accepted the migration confirmation modal.
+    /// Spawns `gwt::migration::execute_migration` on a background thread and
+    /// streams progress / completion / error back through `UserEvent::Migration*`.
+    pub(crate) fn start_migration_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return Vec::new();
+        };
+        let project_root = tab.project_root.clone();
+        let proxy = self.proxy.clone();
+        let tab_id_owned = tab_id.to_string();
+
+        std::thread::spawn(move || {
+            let progress_tab = tab_id_owned.clone();
+            let progress_proxy = proxy.clone();
+            let outcome = gwt::migration::execute_migration(
+                &project_root,
+                gwt_core::migration::MigrationOptions::default(),
+                move |phase, percent| {
+                    progress_proxy.send(UserEvent::MigrationProgress {
+                        tab_id: progress_tab.clone(),
+                        phase,
+                        percent,
+                    });
+                },
+            );
+            match outcome {
+                Ok(result) => proxy.send(UserEvent::MigrationDone {
+                    tab_id: tab_id_owned,
+                    branch_worktree_path: result.branch_worktree_path,
+                }),
+                Err(error) => proxy.send(UserEvent::MigrationError {
+                    tab_id: tab_id_owned,
+                    phase: error.phase,
+                    message: error.message,
+                    recovery: error.recovery,
+                }),
+            }
+        });
+
+        Vec::new()
+    }
+
+    /// SPEC-1934 US-6.7: user dismissed the modal. Drop the in-memory flag so
+    /// the rest of the GUI proceeds without further detection events.
+    pub(crate) fn skip_migration_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.migration_pending = false;
+        }
+        Vec::new()
+    }
+
+    /// SPEC-1934 US-6.9: migration finished successfully. Re-point the project
+    /// tab at the new branch worktree, reload its persisted workspace, and
+    /// surface a [`BackendEvent::MigrationDone`] alongside a refreshed
+    /// workspace_state broadcast.
+    pub(crate) fn handle_migration_done(
+        &mut self,
+        tab_id: &str,
+        branch_worktree_path: &Path,
+    ) -> Vec<OutboundEvent> {
+        let canonical = dunce::canonicalize(branch_worktree_path)
+            .unwrap_or_else(|_| branch_worktree_path.to_path_buf());
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.project_root = canonical.clone();
+            tab.kind = gwt::ProjectKind::Git;
+            tab.migration_pending = false;
+            match load_restored_workspace_state(&canonical) {
+                Ok(persisted) => tab.workspace = WorkspaceState::from_persisted(persisted),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "gwt::migration",
+                        ?canonical,
+                        %error,
+                        "post-migration workspace reload failed; keeping current workspace state"
+                    );
+                }
+            }
+        }
+        let _ = self.persist();
+
+        vec![
+            self.workspace_state_broadcast(),
+            OutboundEvent::broadcast(BackendEvent::MigrationDone {
+                tab_id: tab_id.to_string(),
+                branch_worktree_path: canonical.display().to_string(),
+            }),
+        ]
+    }
+
+    /// SPEC-1934 US-6.6: migration failed. Drop the pending flag (the
+    /// frontend offers Retry / Restore / Quit) and broadcast the failure.
+    pub(crate) fn handle_migration_error(
+        &mut self,
+        tab_id: &str,
+        phase: gwt_core::migration::MigrationPhase,
+        message: String,
+        recovery: gwt_core::migration::RecoveryState,
+    ) -> Vec<OutboundEvent> {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.migration_pending = false;
+        }
+        vec![OutboundEvent::broadcast(BackendEvent::MigrationError {
+            tab_id: tab_id.to_string(),
+            phase: phase.as_str().to_string(),
+            message,
+            recovery: recovery_state_label(recovery).to_string(),
+        })]
+    }
+
+    /// SPEC-1934 US-6.8: user chose Quit. Phase 10.4 will translate this into
+    /// a `UserEvent::QuitApp` once the runtime helper lands (T-097); the
+    /// frontend already closes the modal optimistically.
+    pub(crate) fn quit_migration_events(&mut self, _tab_id: &str) -> Vec<OutboundEvent> {
+        // TODO(T-097): proxy.send(UserEvent::QuitApp) once the dispatch
+        // helper lands.
+        Vec::new()
     }
 
     pub(crate) fn remember_recent_project(&mut self, target: &ProjectOpenTarget) {
@@ -4925,6 +5159,7 @@ exit 0
             project_root,
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
         }
     }
 
@@ -4945,6 +5180,7 @@ exit 0
             project_root,
             kind,
             workspace,
+            migration_pending: false,
         }
     }
 
@@ -6049,6 +6285,7 @@ exit 0
             project_root: repo,
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
         };
         let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -6661,6 +6898,7 @@ exit 0
             project_root: repo,
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let current_window_id = combined_window_id("tab-1", "profile-1");
@@ -6806,6 +7044,7 @@ exit 0
             project_root: repo.clone(),
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
         };
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let current_window_id = combined_window_id("tab-1", "memo-1");
@@ -7043,6 +7282,7 @@ exit 0
             project_root: repo.clone(),
             kind: ProjectKind::Git,
             workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
         };
         let other_tab = sample_project_tab_with_window_at(
             "tab-2",
@@ -7077,5 +7317,120 @@ exit 0
                 ..
             } if *id == combined_window_id("tab-2", "board-3")
         )));
+    }
+
+    fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRuntime {
+        ProjectTabRuntime {
+            id: tab_id.to_string(),
+            title: "Repo".to_string(),
+            project_root,
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(empty_workspace_state()),
+            migration_pending: true,
+        }
+    }
+
+    #[test]
+    fn migration_detected_broadcasts_only_for_pending_tabs() {
+        let temp = tempdir().expect("tempdir");
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        fs::create_dir_all(&repo_a).expect("repo-a");
+        fs::create_dir_all(&repo_b).expect("repo-b");
+
+        let pending = migration_pending_tab("tab-1", repo_a.clone());
+        let mut clean = sample_project_tab("tab-2", "Other", repo_b.clone(), ProjectKind::Git, &[]);
+        clean.migration_pending = false;
+        let runtime = sample_runtime(temp.path(), vec![pending, clean], Some("tab-1"));
+
+        let events = runtime.migration_detected_broadcasts();
+
+        assert_eq!(events.len(), 1, "only pending tabs should broadcast");
+        assert!(matches!(
+            &events[0],
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MigrationDetected { tab_id, .. },
+            } if tab_id == "tab-1"
+        ));
+    }
+
+    #[test]
+    fn handle_migration_done_repoints_tab_and_emits_broadcast() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let new_worktree = project.join("develop");
+        fs::create_dir_all(&new_worktree).expect("new worktree");
+
+        let tab = migration_pending_tab("tab-1", project.clone());
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_migration_done("tab-1", &new_worktree);
+
+        let updated = runtime
+            .tabs
+            .iter()
+            .find(|t| t.id == "tab-1")
+            .expect("tab still present");
+        let canonical_new =
+            dunce::canonicalize(&new_worktree).unwrap_or_else(|_| new_worktree.clone());
+        assert_eq!(updated.project_root, canonical_new);
+        assert!(!updated.migration_pending, "pending flag must clear");
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MigrationDone { tab_id, .. },
+            } if tab_id == "tab-1"
+        )));
+    }
+
+    #[test]
+    fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
+        use gwt_core::migration::{MigrationPhase, RecoveryState};
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+
+        let tab = migration_pending_tab("tab-1", project);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.handle_migration_error(
+            "tab-1",
+            MigrationPhase::Bareify,
+            "boom".to_string(),
+            RecoveryState::RolledBack,
+        );
+
+        assert!(
+            !runtime
+                .tabs
+                .iter()
+                .find(|t| t.id == "tab-1")
+                .unwrap()
+                .migration_pending
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MigrationError { tab_id, recovery, phase, .. },
+            } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
+        )));
+    }
+
+    #[test]
+    fn skip_migration_events_clears_pending_flag_without_broadcast() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+
+        let tab = migration_pending_tab("tab-1", project);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.skip_migration_events("tab-1");
+        assert!(events.is_empty(), "skip must not emit events itself");
+        assert!(!runtime.tabs[0].migration_pending);
     }
 }

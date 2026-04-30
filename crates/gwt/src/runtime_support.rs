@@ -121,6 +121,7 @@ pub(crate) fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
         title: gwt::project_title_from_path(&path),
         project_root: path,
         kind: gwt::ProjectKind::NonRepo,
+        needs_migration: false,
     }
 }
 
@@ -135,27 +136,33 @@ pub(crate) fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, S
     }
     let title = gwt::project_title_from_path(&canonical);
 
-    let (project_root, kind) = match gwt_git::detect_repo_type(&canonical) {
-        gwt_git::RepoType::Normal { path: root, .. } => (
+    let (project_root, kind, needs_migration) = match gwt_git::detect_repo_type(&canonical) {
+        gwt_git::RepoType::Normal {
+            path: root,
+            needs_migration,
+        } => (
             dunce::canonicalize(root).unwrap_or_else(|_| canonical.clone()),
             gwt::ProjectKind::Git,
+            needs_migration,
         ),
         gwt_git::RepoType::Bare {
             develop_worktree: Some(worktree),
         } => (
             dunce::canonicalize(worktree).unwrap_or_else(|_| canonical.clone()),
             gwt::ProjectKind::Git,
+            false,
         ),
         gwt_git::RepoType::Bare {
             develop_worktree: None,
-        } => (canonical.clone(), gwt::ProjectKind::Bare),
-        gwt_git::RepoType::NonRepo => (canonical.clone(), gwt::ProjectKind::NonRepo),
+        } => (canonical.clone(), gwt::ProjectKind::Bare, false),
+        gwt_git::RepoType::NonRepo => (canonical.clone(), gwt::ProjectKind::NonRepo, false),
     };
 
     Ok(ProjectOpenTarget {
         title,
         project_root,
         kind,
+        needs_migration,
     })
 }
 
@@ -550,5 +557,46 @@ mod tests {
                 "non-GUI helper tooling must stay on the CLI path: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_project_target_marks_needs_migration_for_normal_repo() {
+        // SPEC-1934 US-6 / FR-019: Normal Git layout must propagate the
+        // migration flag so the GUI can show the confirmation modal at startup.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        gwt_core::process::hidden_command("git")
+            .args(["init", tmp.path().to_str().unwrap()])
+            .output()
+            .expect("git init");
+
+        let target = super::resolve_project_target(tmp.path()).expect("normal target");
+        assert_eq!(target.kind, gwt::ProjectKind::Git);
+        assert!(
+            target.needs_migration,
+            "Normal Git layout must surface needs_migration=true"
+        );
+    }
+
+    #[test]
+    fn fallback_project_target_does_not_set_needs_migration() {
+        let target =
+            super::fallback_project_target(std::path::PathBuf::from("/tmp/_does_not_exist"));
+        assert!(!target.needs_migration);
+    }
+
+    #[test]
+    fn resolve_project_target_for_bare_layout_does_not_request_migration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repo.git");
+        gwt_core::process::hidden_command("git")
+            .args(["init", "--bare", bare.to_str().unwrap()])
+            .output()
+            .expect("git init bare");
+
+        let target = super::resolve_project_target(tmp.path()).expect("bare target");
+        assert!(
+            !target.needs_migration,
+            "Bare layout must not request migration"
+        );
     }
 }

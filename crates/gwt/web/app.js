@@ -1,6 +1,7 @@
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
+      import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -40,6 +41,10 @@
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
       const branchCleanupModal = document.getElementById("branch-cleanup-modal");
       const branchCleanupDialog = branchCleanupModal.querySelector(".modal-shell");
+      const migrationModal = document.getElementById("migration-modal");
+      const migrationDialog = migrationModal
+        ? migrationModal.querySelector(".modal-shell")
+        : null;
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
@@ -211,6 +216,23 @@
         tabs: [],
         active_tab_id: null,
         recent_projects: [],
+      };
+      // SPEC-1934 US-6: state for the migration confirmation / progress modal.
+      // `tabId` identifies which tab the active migration belongs to so a
+      // multi-project frontend never mixes events from different repos.
+      let migrationModalState = {
+        open: false,
+        stage: "confirm", // "confirm" | "running" | "error"
+        tabId: null,
+        projectRoot: "",
+        branch: null,
+        hasDirty: false,
+        hasLocked: false,
+        hasSubmodules: false,
+        phase: "confirm",
+        percent: 0,
+        message: "",
+        recovery: "",
       };
       let versionState = { current: "", latest: "" };
       let indexStatusState = { state: "", detail: "" };
@@ -4579,6 +4601,46 @@
         });
       }
 
+      // SPEC-1934 US-6: Migration modal entry point. Re-rendered on every
+      // BackendEvent::Migration* arrival so the UI mirrors the executor state.
+      function renderMigrationModal() {
+        if (!migrationModal || !migrationDialog) return;
+        renderMigrationModalView({
+          modalEl: migrationModal,
+          dialogEl: migrationDialog,
+          state: { migrationModal: migrationModalState },
+          createNode,
+          onMigrate: () => {
+            if (!migrationModalState.tabId) return;
+            const tabId = migrationModalState.tabId;
+            migrationModalState.stage = "running";
+            migrationModalState.phase = "validate";
+            migrationModalState.percent = 0;
+            renderMigrationModal();
+            send({ kind: "start_migration", tab_id: tabId });
+          },
+          onSkip: () => {
+            const tabId = migrationModalState.tabId;
+            migrationModalState.open = false;
+            migrationModalState.stage = "confirm";
+            migrationModalState.message = "";
+            migrationModalState.recovery = "";
+            renderMigrationModal();
+            if (tabId) {
+              send({ kind: "skip_migration", tab_id: tabId });
+            }
+          },
+          onQuit: () => {
+            const tabId = migrationModalState.tabId;
+            migrationModalState.open = false;
+            renderMigrationModal();
+            if (tabId) {
+              send({ kind: "quit_migration", tab_id: tabId });
+            }
+          },
+        });
+      }
+
       function mountWindowBody(windowData, element) {
         const body = element.querySelector(".window-body");
         body.innerHTML = "";
@@ -6050,6 +6112,61 @@
               "error",
             );
             break;
+          case "migration_detected": {
+            // SPEC-1934 US-6.1: server says a project tab needs migration.
+            migrationModalState = {
+              open: true,
+              stage: "confirm",
+              tabId: event.tab_id,
+              projectRoot: event.project_root || "",
+              branch: event.branch || null,
+              hasDirty: Boolean(event.has_dirty),
+              hasLocked: Boolean(event.has_locked),
+              hasSubmodules: Boolean(event.has_submodules),
+              phase: "confirm",
+              percent: 0,
+              message: "",
+              recovery: "",
+            };
+            renderMigrationModal();
+            break;
+          }
+          case "migration_progress": {
+            // Phase tick from execute_migration. Ignore if the modal already
+            // closed (e.g. user pressed Quit) so we never re-open it.
+            if (
+              !migrationModalState.open ||
+              migrationModalState.tabId !== event.tab_id
+            ) {
+              break;
+            }
+            migrationModalState.stage = "running";
+            migrationModalState.phase = event.phase || "confirm";
+            migrationModalState.percent = Number.isFinite(event.percent)
+              ? event.percent
+              : 0;
+            renderMigrationModal();
+            break;
+          }
+          case "migration_done": {
+            if (migrationModalState.tabId === event.tab_id) {
+              migrationModalState.open = false;
+              migrationModalState.stage = "confirm";
+              migrationModalState.percent = 0;
+              renderMigrationModal();
+            }
+            break;
+          }
+          case "migration_error": {
+            if (migrationModalState.tabId !== event.tab_id) break;
+            migrationModalState.open = true;
+            migrationModalState.stage = "error";
+            migrationModalState.phase = event.phase || "error";
+            migrationModalState.message = event.message || "";
+            migrationModalState.recovery = event.recovery || "";
+            renderMigrationModal();
+            break;
+          }
         }
       }
 

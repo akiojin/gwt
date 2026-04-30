@@ -1,6 +1,6 @@
 {
   "name": "@akiojin/gwt",
-  "version": "9.12.0",
+  "version": "9.13.0",
   "description": "Desktop GUI for Git worktree management and coding agent launch",
   "type": "module",
   "bin": {
@@ -12,8 +12,8 @@
     "dev": "cargo run -p gwt --bin gwt",
     "build": "cargo build --release -p gwt --bin gwt --bin gwtd",
     "test": "cargo test -p gwt-core -p gwt --all-features",
-    "test:frontend-bundle": "node --check crates/gwt/web/app.js && node --check crates/gwt/web/branch-cleanup-modal.js",
-    "test:frontend-smoke": "node --test crates/gwt/web/__tests__/branch-cleanup.smoke.test.mjs",
+    "test:frontend-bundle": "node --check crates/gwt/web/app.js && node --check crates/gwt/web/branch-cleanup-modal.js && node --check crates/gwt/web/migration-modal.js",
+    "test:frontend-smoke": "node --test crates/gwt/web/__tests__/branch-cleanup.smoke.test.mjs crates/gwt/web/__tests__/migration-modal.smoke.test.mjs",
     "test:release-assets": "node scripts/test_release_assets.cjs",
     "test:release-flow": "bash scripts/check-release-flow.sh",
     "test:all": "bash scripts/test-all.sh",
