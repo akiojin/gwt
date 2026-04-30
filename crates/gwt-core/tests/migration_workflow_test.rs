@@ -1,6 +1,8 @@
 //! Workflow-level tests for the SPEC-1934 US-6 migration support.
 
 use gwt_core::config::BareProjectConfig;
+use gwt_core::migration::backup::{self, BACKUP_DIR_NAME};
+use gwt_core::migration::rollback;
 use gwt_core::migration::validator::{
     self, check_disk_space, check_locked_worktrees, check_write_permission, evaluate_disk_space,
     ValidationError,
@@ -194,6 +196,127 @@ fn t026_validate_aggregates_all_checks_for_clean_normal_repo() {
         .unwrap();
 
     validator::validate(tmp.path()).expect("clean Normal Git must pass aggregate validate()");
+}
+
+#[test]
+fn t030_backup_create_copies_tree_into_backup_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
+    std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
+    std::fs::write(tmp.path().join("nested").join("b.txt"), "beta").unwrap();
+
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+    assert_eq!(snapshot.project_root, tmp.path());
+
+    let backup_dir = tmp.path().join(BACKUP_DIR_NAME);
+    assert!(backup_dir.is_dir(), "backup dir must exist");
+    assert_eq!(snapshot.backup_dir, backup_dir);
+
+    assert!(backup_dir.join("a.txt").is_file());
+    assert!(backup_dir.join("nested").join("b.txt").is_file());
+    assert_eq!(
+        std::fs::read_to_string(backup_dir.join("a.txt")).unwrap(),
+        "alpha"
+    );
+}
+
+#[test]
+fn t030_backup_create_excludes_self() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("real.txt"), "x").unwrap();
+
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+
+    // The backup directory must not contain a recursive copy of itself.
+    assert!(!snapshot.backup_dir.join(BACKUP_DIR_NAME).exists());
+    assert!(snapshot.backup_dir.join("real.txt").is_file());
+}
+
+#[test]
+fn t032_backup_create_renames_existing_backup() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("seed.txt"), "fresh").unwrap();
+    let backup_dir = tmp.path().join(BACKUP_DIR_NAME);
+    std::fs::create_dir_all(&backup_dir).unwrap();
+    std::fs::write(backup_dir.join("stale.txt"), "stale").unwrap();
+
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+
+    assert!(snapshot.backup_dir.join("seed.txt").is_file());
+
+    // The legacy backup must be renamed (any sibling starting with the backup
+    // dir name + "-" is acceptable; we just ensure stale content exists somewhere).
+    let mut found_legacy = false;
+    for entry in std::fs::read_dir(tmp.path()).unwrap().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&format!("{BACKUP_DIR_NAME}-")) {
+            let stale = entry.path().join("stale.txt");
+            if stale.is_file() && std::fs::read_to_string(&stale).unwrap_or_default() == "stale" {
+                found_legacy = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        found_legacy,
+        "legacy backup must be preserved with timestamp suffix"
+    );
+}
+
+#[test]
+fn t034_backup_restore_returns_files_to_project_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("keep.txt"), "v1").unwrap();
+    std::fs::create_dir_all(tmp.path().join("dir")).unwrap();
+    std::fs::write(tmp.path().join("dir").join("nested.txt"), "n1").unwrap();
+
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+
+    // Mutate the live tree to simulate a partial migration before restore.
+    std::fs::remove_file(tmp.path().join("keep.txt")).unwrap();
+    std::fs::write(tmp.path().join("dir").join("nested.txt"), "tampered").unwrap();
+    std::fs::write(tmp.path().join("new.txt"), "added during migration").unwrap();
+
+    backup::restore(&snapshot).expect("backup::restore");
+
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("keep.txt")).unwrap(),
+        "v1",
+        "removed file must be brought back"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("dir").join("nested.txt")).unwrap(),
+        "n1",
+        "tampered file must be reverted"
+    );
+    assert!(
+        !tmp.path().join("new.txt").exists(),
+        "files added after backup must be cleared on restore"
+    );
+}
+
+#[test]
+fn t036_rollback_uses_backup_to_restore_partial_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a"), "1").unwrap();
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+
+    // Pretend a phase failed and left junk.
+    std::fs::write(tmp.path().join("partial.bin"), "garbage").unwrap();
+    std::fs::remove_file(tmp.path().join("a")).unwrap();
+
+    rollback::rollback_migration(&snapshot).expect("rollback");
+
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("a")).unwrap(),
+        "1",
+        "rollback must restore deleted files"
+    );
+    assert!(
+        !tmp.path().join("partial.bin").exists(),
+        "rollback must clear partial files"
+    );
 }
 
 #[test]
