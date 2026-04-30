@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-30 — fix(gui): 修正済み判断の前にインストール済みアプリの最新ログで再検証する
+
+### 事象
+
+v9.11.9 適用後も `$gwt-discussion` / Codex 起動で
+`PTY creation failed: Unable to spawn npx because: No viable candidates found in PATH "/usr/bin:/bin:/usr/sbin:/sbin"`
+が再発していた。`~/.gwt/projects/8a5edab282632443/logs/gwt.log.2026-04-30`
+には 2026-04-30T11:36:32+09:00 の失敗が記録されており、アプリも
+`/Applications/GWT.app` v9.11.9 だった。
+
+### 原因
+
+前回修正は PTY spawn 時に `config.env["PATH"]` から bare command を解決するだけで、
+GUI / LaunchServices 由来の最小 `PATH` そのものを Host launch env で復元していなかった。
+また、project log はエラーを記録していたが、PTY に渡した `PATH` でコマンドが解決可能かの
+診断がなく、原因の切り分けが遅れた。
+
+### 再発防止策
+
+1. 「修正済み」と判断する前に、インストール済みアプリの version、起動中プロセス、
+   project-scoped log の最新失敗時刻を確認する。
+2. GUI Host 起動の `PATH` 問題では、runner 選択だけでなく Host base env 生成元を検査する。
+3. PTY spawn failure では、エラー本文に加えて `env_path`、path entry 数、
+   command の env PATH 解決可否を structured log に残す。
+
 ## 2026-04-30 — fix(gui): PTY creation failure は runner 名ではなく起動環境から切り分ける
 
 ### 事象

@@ -158,7 +158,7 @@ pub(crate) fn build_shell_process_launch(
     let base_env = if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
         gwt_agent::LaunchEnvironment::from_base_env(std::iter::empty::<(String, String)>())
     } else {
-        gwt_agent::LaunchEnvironment::from_base_env(std::env::vars().collect::<Vec<_>>())
+        gwt_agent::LaunchEnvironment::from_base_env(gwt_agent::environment::host_process_env())
     };
     let mut env = config.env_vars.clone();
     let mut remove_env = config.remove_env.clone();
