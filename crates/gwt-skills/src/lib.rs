@@ -985,6 +985,10 @@ mod tests {
                 "expected canonical gwtd actions log guidance in {relative}"
             );
             assert!(
+                pr_skill.contains("GWT_BIN_PATH") && pr_skill.contains("target/debug/gwtd"),
+                "expected managed PR skill to resolve gwtd without relying on PATH in {relative}"
+            );
+            assert!(
                 pr_skill.contains("current user's language"),
                 "expected language contract in {relative}"
             );
@@ -1100,6 +1104,17 @@ mod tests {
             "expected release command to route shell snippets through GWT_BIN_PATH"
         );
         assert!(
+            release_command.contains("resolve_gwt_bin()")
+                && release_command.contains("command -v gwtd")
+                && release_command.contains("target/debug/gwtd")
+                && release_command.contains("gwtd not found"),
+            "expected release command to resolve gwtd from GWT_BIN_PATH, PATH, or repo-local debug binary"
+        );
+        assert!(
+            !release_command.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
+            "unexpected bare gwtd fallback in release command"
+        );
+        assert!(
             release_command.contains("\"$GWT_BIN\" issue comment"),
             "expected release command to use the canonical gwtd issue comment via GWT_BIN"
         );
@@ -1124,6 +1139,17 @@ mod tests {
         assert!(
             pr_command.contains("GWT_BIN_PATH"),
             "expected gwt-manage-pr command wrapper to point to canonical GWT_BIN_PATH auth check"
+        );
+        assert!(
+            pr_command.contains("resolve_gwt_bin()")
+                && pr_command.contains("command -v gwtd")
+                && pr_command.contains("target/debug/gwtd")
+                && pr_command.contains("gwtd not found"),
+            "expected gwt-manage-pr command wrapper to resolve gwtd from GWT_BIN_PATH, PATH, or repo-local debug binary"
+        );
+        assert!(
+            !pr_command.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
+            "unexpected bare gwtd fallback in gwt-manage-pr command"
         );
         assert!(
             pr_command.contains("conflicting") || pr_command.contains("behind"),

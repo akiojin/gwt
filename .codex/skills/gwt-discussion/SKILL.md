@@ -17,6 +17,14 @@ Use the current user's language for decision summaries, `Discussion TODO`,
 during this workflow, unless an existing artifact must keep its established
 language.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## When to use
 
 - A rough idea may or may not become a SPEC

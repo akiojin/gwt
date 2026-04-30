@@ -27,6 +27,14 @@ Use the current user's language for task summaries, completion reports, task
 check updates, and any user-facing text generated while executing the workflow,
 unless an existing artifact must keep its established language.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## Exit CLI (Stop-block contract)
 
 SPEC-1935 FR-014r routes Stop through `skill-build-spec-stop-check`, which

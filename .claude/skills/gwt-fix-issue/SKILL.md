@@ -7,6 +7,14 @@ description: "Use when the user wants to resolve an existing GitHub Issue by num
 
 Public task entrypoint for resolving an existing GitHub Issue.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## When to use
 
 - The Issue number or URL is already known

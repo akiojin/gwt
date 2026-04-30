@@ -12,7 +12,7 @@ gwt は Git worktree の管理と、`Claude Code` / `Codex` / `Gemini` /
 
 - GUI 向けの主配布物: `gwt-macos-universal.dmg`
 - マウントした DMG から `GWT.app` を開くとネイティブ GUI をそのまま起動できます
-- `PATH` に `gwtd` CLI を入れたい場合は install script を使います
+- `PATH` に `gwt` / `gwtd` CLI を入れたい場合は install script を使います
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/install.sh | bash

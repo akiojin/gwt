@@ -80,8 +80,24 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
         "PR command asset should tell managed sessions to use GWT_BIN_PATH, got: {manage_pr}"
     );
     assert!(
-        manage_pr.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
-        "PR command asset should default managed sessions to gwtd, got: {manage_pr}"
+        manage_pr.contains("resolve_gwt_bin()"),
+        "PR command asset should define the gwtd resolver, got: {manage_pr}"
+    );
+    assert!(
+        manage_pr.contains("command -v gwtd"),
+        "PR command asset should fall back to PATH gwtd, got: {manage_pr}"
+    );
+    assert!(
+        manage_pr.contains("target/debug/gwtd"),
+        "PR command asset should fall back to repo-local gwtd, got: {manage_pr}"
+    );
+    assert!(
+        manage_pr.contains("gwtd not found"),
+        "PR command asset should fail with an actionable gwtd error, got: {manage_pr}"
+    );
+    assert!(
+        !manage_pr.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
+        "PR command asset must not fall back directly to a bare gwtd lookup, got: {manage_pr}"
     );
     assert!(
         !manage_pr.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwt}\""),
@@ -95,8 +111,24 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
         "release command asset should shell out through GWT_BIN_PATH, got: {release}"
     );
     assert!(
-        release.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
-        "release command asset should default managed sessions to gwtd, got: {release}"
+        release.contains("resolve_gwt_bin()"),
+        "release command asset should define the gwtd resolver, got: {release}"
+    );
+    assert!(
+        release.contains("command -v gwtd"),
+        "release command asset should fall back to PATH gwtd, got: {release}"
+    );
+    assert!(
+        release.contains("target/debug/gwtd"),
+        "release command asset should fall back to repo-local gwtd, got: {release}"
+    );
+    assert!(
+        release.contains("gwtd not found"),
+        "release command asset should fail with an actionable gwtd error, got: {release}"
+    );
+    assert!(
+        !release.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwtd}\""),
+        "release command asset must not fall back directly to a bare gwtd lookup, got: {release}"
     );
     assert!(
         !release.contains("GWT_BIN=\"${GWT_BIN_PATH:-gwt}\""),

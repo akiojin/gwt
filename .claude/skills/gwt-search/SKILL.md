@@ -17,6 +17,14 @@ All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues are repo-
 
 When invoked outside the gwt TUI, the runner falls back to a synchronous mtime+size diff per call: results are always correct, just slower than the TUI watcher path.
 
+## gwtd resolution
+
+Before executing any `gwtd ...` command from this skill or its references,
+resolve `GWT_BIN` first: executable `GWT_BIN_PATH`, then `command -v gwtd`,
+then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
+command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
+`gwtd not found` error.
+
 ## Quick reference
 
 ```text
