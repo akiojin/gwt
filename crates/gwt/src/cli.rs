@@ -37,7 +37,6 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
-    process::Command,
 };
 
 pub(crate) use board::parse as parse_board_args;
@@ -809,7 +808,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 }
 "#;
 
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args([
             "api",
             "graphql",
@@ -888,7 +887,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 }
 
 fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args([
             "pr",
             "view",
@@ -944,7 +943,7 @@ fn create_pr_via_gh(
         args.push("--draft".to_string());
     }
 
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args(&args)
         .current_dir(repo_path)
         .output()?;
@@ -987,7 +986,7 @@ fn edit_pr_via_gh(
         args.push(label.clone());
     }
 
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args(&args)
         .current_dir(repo_path)
         .output()?;
@@ -1014,7 +1013,7 @@ fn parse_pr_number_from_url(url: &str) -> Option<u64> {
 }
 
 fn comment_on_pr_via_gh(repo_path: &std::path::Path, number: u64, body: &str) -> io::Result<()> {
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args(["pr", "comment", &number.to_string(), "--body", body])
         .current_dir(repo_path)
         .output()?;
@@ -1029,7 +1028,9 @@ fn comment_on_pr_via_gh(repo_path: &std::path::Path, number: u64, body: &str) ->
 
 fn fetch_pr_reviews_via_gh(owner: &str, repo: &str, number: u64) -> io::Result<Vec<PrReview>> {
     let endpoint = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
-    let output = Command::new("gh").args(["api", &endpoint]).output()?;
+    let output = gwt_core::process::hidden_command("gh")
+        .args(["api", &endpoint])
+        .output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "gh api {endpoint}: {}",
@@ -1109,7 +1110,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
   }
 }
 "#;
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args([
             "api",
             "graphql",
@@ -1237,7 +1238,7 @@ mutation($threadId: ID!, $body: String!) {
 }
 "#;
         if should_reply_to_review_thread(&current_thread, body) {
-            let reply = Command::new("gh")
+            let reply = gwt_core::process::hidden_command("gh")
                 .args([
                     "api",
                     "graphql",
@@ -1264,7 +1265,7 @@ mutation($threadId: ID!) {
   }
 }
 "#;
-        let resolve = Command::new("gh")
+        let resolve = gwt_core::process::hidden_command("gh")
             .args([
                 "api",
                 "graphql",
@@ -1310,7 +1311,7 @@ fn fetch_pr_checks_via_gh(
         "startedAt",
         "completedAt",
     ];
-    let mut output = Command::new("gh")
+    let mut output = gwt_core::process::hidden_command("gh")
         .args([
             "pr",
             "checks",
@@ -1340,7 +1341,7 @@ fn fetch_pr_checks_via_gh(
                 .filter(|field| available.iter().any(|candidate| candidate == field))
                 .collect();
             if !selected.is_empty() {
-                output = Command::new("gh")
+                output = gwt_core::process::hidden_command("gh")
                     .args([
                         "pr",
                         "checks",
@@ -1475,7 +1476,7 @@ fn parse_available_fields(message: &str) -> Vec<String> {
 }
 
 fn fetch_actions_run_log_via_gh(repo_path: &std::path::Path, run_id: u64) -> io::Result<String> {
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args(["run", "view", &run_id.to_string(), "--log"])
         .current_dir(repo_path)
         .output()?;
@@ -1495,7 +1496,7 @@ fn fetch_actions_job_log_via_gh(
     job_id: u64,
 ) -> io::Result<String> {
     let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
-    let output = Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args(["api", &endpoint])
         .current_dir(repo_path)
         .output()?;
@@ -2204,7 +2205,7 @@ fn main() -> ExitCode {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
-        let status = std::process::Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .arg("init")
             .arg("-q")
             .current_dir(temp.path())

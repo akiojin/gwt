@@ -71,7 +71,7 @@ impl RuntimeProvisioner for RealProvisioner {
     }
 
     fn create_venv(&self, python: &BootstrapPython, venv_dir: &Path) -> Result<()> {
-        let mut command = Command::new(&python.program);
+        let mut command = crate::process::hidden_command(&python.program);
         command
             .args(python.prefix_args)
             .arg("-m")
@@ -82,7 +82,7 @@ impl RuntimeProvisioner for RealProvisioner {
 
     fn install_requirements(&self, venv_python: &Path, requirements: &Path) -> Result<()> {
         run_checked(
-            Command::new(venv_python)
+            crate::process::hidden_command(venv_python)
                 .arg("-m")
                 .arg("pip")
                 .arg("install")
@@ -95,14 +95,16 @@ impl RuntimeProvisioner for RealProvisioner {
 
     fn probe_chromadb(&self, venv_python: &Path) -> Result<()> {
         run_checked(
-            Command::new(venv_python).arg("-c").arg("import chromadb"),
+            crate::process::hidden_command(venv_python)
+                .arg("-c")
+                .arg("import chromadb"),
             "python -c import chromadb",
         )
     }
 
     fn probe_runner(&self, venv_python: &Path, runner_script: &Path) -> Result<()> {
         run_checked(
-            Command::new(venv_python)
+            crate::process::hidden_command(venv_python)
                 .arg(runner_script)
                 .arg("--action")
                 .arg("probe"),
@@ -389,7 +391,7 @@ fn python_version(
     path: &Path,
     prefix_args: &[&str],
 ) -> std::result::Result<(u32, u32, String), String> {
-    let output = Command::new(path)
+    let output = crate::process::hidden_command(path)
         .args(prefix_args)
         .arg("-c")
         .arg(PYTHON_VERSION_SNIPPET)

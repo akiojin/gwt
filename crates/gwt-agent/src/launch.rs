@@ -15,7 +15,7 @@ use crate::{
 /// Resolve the gwt repo hash for the directory by shelling out to
 /// `git remote get-url origin`. Returns `None` when no origin is configured.
 fn detect_repo_hash_for_dir(dir: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .arg("remote")
         .arg("get-url")
         .arg("origin")

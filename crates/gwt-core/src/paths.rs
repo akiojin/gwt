@@ -395,7 +395,7 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = crate::process::hidden_command("git");
         cmd.args(["init", path.to_str().unwrap()]);
         crate::process::scrub_git_env(&mut cmd);
         let output = cmd.output().expect("git init");
@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn add_origin(path: &Path, url: &str) {
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = crate::process::hidden_command("git");
         cmd.args(["remote", "add", "origin", url]).current_dir(path);
         crate::process::scrub_git_env(&mut cmd);
         let output = cmd.output().expect("git remote add origin");

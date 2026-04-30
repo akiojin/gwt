@@ -339,7 +339,7 @@ fn coordination_project_dir(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 fn coordination_repo_root(worktree_root: &Path) -> Option<PathBuf> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process::hidden_command("git");
     cmd.args(["rev-parse", "--show-toplevel"])
         .current_dir(worktree_root);
     crate::process::scrub_git_env(&mut cmd);
@@ -361,7 +361,7 @@ fn coordination_migration_marker_path(project_dir: &Path) -> PathBuf {
 }
 
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process::hidden_command("git");
     cmd.args(["worktree", "list", "--porcelain"])
         .current_dir(worktree_root);
     crate::process::scrub_git_env(&mut cmd);
@@ -813,7 +813,7 @@ mod tests {
 
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let mut init_cmd = std::process::Command::new("git");
+        let mut init_cmd = crate::process::hidden_command("git");
         init_cmd.args(["init", "--quiet"]).current_dir(&repo);
         crate::process::scrub_git_env(&mut init_cmd);
         let output = init_cmd.output().unwrap();

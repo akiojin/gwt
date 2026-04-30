@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    process::Command,
 };
 
 use gwt_core::paths::gwt_cache_dir;
@@ -105,21 +104,22 @@ impl SemanticSearchClient for RunnerSemanticSearchClient {
         let repo_hash = crate::index_worker::detect_repo_hash(repo_path)
             .ok_or_else(|| "semantic search requires a git origin remote".to_string())?;
         gwt_core::runtime::ensure_project_index_runtime().map_err(|error| error.to_string())?;
-        let output = Command::new(crate::index_worker::project_index_python_path())
-            .arg(gwt_core::paths::gwt_runtime_runner_path())
-            .arg("--action")
-            .arg(action)
-            .arg("--repo-hash")
-            .arg(repo_hash.as_str())
-            .arg("--project-root")
-            .arg(repo_path)
-            .arg("--query")
-            .arg(query)
-            .arg("--n-results")
-            .arg(limit.to_string())
-            .current_dir(repo_path)
-            .output()
-            .map_err(|error| format!("run semantic search: {error}"))?;
+        let output =
+            gwt_core::process::hidden_command(crate::index_worker::project_index_python_path())
+                .arg(gwt_core::paths::gwt_runtime_runner_path())
+                .arg("--action")
+                .arg(action)
+                .arg("--repo-hash")
+                .arg(repo_hash.as_str())
+                .arg("--project-root")
+                .arg(repo_path)
+                .arg("--query")
+                .arg(query)
+                .arg("--n-results")
+                .arg(limit.to_string())
+                .current_dir(repo_path)
+                .output()
+                .map_err(|error| format!("run semantic search: {error}"))?;
         if !output.status.success() {
             return Err(format_runner_failure(&output));
         }
@@ -846,13 +846,13 @@ mod tests {
 
     fn init_repo(repo: &Path) {
         fs::create_dir_all(repo).expect("create repo");
-        let mut init_cmd = std::process::Command::new("git");
+        let mut init_cmd = gwt_core::process::hidden_command("git");
         init_cmd.args(["init", "--quiet"]).current_dir(repo);
         gwt_core::process::scrub_git_env(&mut init_cmd);
         let init = init_cmd.output().expect("git init");
         assert!(init.status.success(), "git init failed");
 
-        let mut remote_cmd = std::process::Command::new("git");
+        let mut remote_cmd = gwt_core::process::hidden_command("git");
         remote_cmd
             .args([
                 "remote",

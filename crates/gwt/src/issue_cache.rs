@@ -3,7 +3,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -177,7 +176,7 @@ fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
 }
 
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
-    let output = Command::new(gh_executable())
+    let output = gwt_core::process::hidden_command(gh_executable())
         .args([
             "issue",
             "list",
@@ -202,7 +201,7 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
 }
 
 fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSnapshot, String> {
-    let output = Command::new(gh_executable())
+    let output = gwt_core::process::hidden_command(gh_executable())
         .args([
             "issue",
             "view",
@@ -476,7 +475,7 @@ echo [{\"number\":7,\"title\":\"Cached issue\",\"body\":\"Body\",\"labels\":[{\"
 exit /b 0\r\n",
         )
         .expect("write fake gh");
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", "-b", "main"])
             .current_dir(&repo_path)
             .status()
@@ -545,7 +544,7 @@ if /I \"%1 %2\"==\"issue view\" (\r\n\
 exit /b 1\r\n",
         )
         .expect("write fake gh");
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", "-b", "main"])
             .current_dir(&repo_path)
             .status()

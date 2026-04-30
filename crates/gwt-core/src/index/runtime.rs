@@ -239,7 +239,7 @@ impl RunnerSpawner for PythonRunnerSpawner {
         project_root: &Path,
         respect_ttl: bool,
     ) -> std::io::Result<()> {
-        let mut cmd = std::process::Command::new(&self.python_executable);
+        let mut cmd = crate::process::hidden_command(&self.python_executable);
         cmd.arg(&self.runner_script)
             .arg("--action")
             .arg("index-issues")

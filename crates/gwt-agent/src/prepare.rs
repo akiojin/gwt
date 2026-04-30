@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 use crate::{
@@ -585,7 +585,7 @@ fn probe_host_package_runner(
     remove_env: &[String],
     cwd: Option<PathBuf>,
 ) -> bool {
-    let mut process = Command::new(command);
+    let mut process = gwt_core::process::hidden_command(command);
     process
         .args(args)
         .stdin(Stdio::null())
@@ -1218,7 +1218,7 @@ fn origin_remote_ref(branch_name: &str) -> String {
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
         .output()
@@ -1237,7 +1237,7 @@ fn current_git_branch(repo_path: &Path) -> Result<String, String> {
 }
 
 fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["show-ref", "--verify", "--quiet"])
         .arg(format!("refs/heads/{branch_name}"))
         .current_dir(repo_path)
@@ -1297,7 +1297,6 @@ mod tests {
     use crate::{AgentLaunchBuilder, SessionMode};
     use std::{
         fs,
-        process::Command,
         sync::atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
@@ -1684,38 +1683,38 @@ mod tests {
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo dir");
 
-        let init = Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "-q", "-b", "develop"])
             .current_dir(&repo)
             .status()
             .expect("git init");
         assert!(init.success(), "git init failed");
-        let config_name = Command::new("git")
+        let config_name = gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Codex"])
             .current_dir(&repo)
             .status()
             .expect("git config user.name");
         assert!(config_name.success(), "git config user.name failed");
-        let config_email = Command::new("git")
+        let config_email = gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "codex@example.com"])
             .current_dir(&repo)
             .status()
             .expect("git config user.email");
         assert!(config_email.success(), "git config user.email failed");
         fs::write(repo.join("README.md"), "repo\n").expect("write readme");
-        let add = Command::new("git")
+        let add = gwt_core::process::hidden_command("git")
             .args(["add", "README.md"])
             .current_dir(&repo)
             .status()
             .expect("git add");
         assert!(add.success(), "git add failed");
-        let commit = Command::new("git")
+        let commit = gwt_core::process::hidden_command("git")
             .args(["commit", "-qm", "init"])
             .current_dir(&repo)
             .status()
             .expect("git commit");
         assert!(commit.success(), "git commit failed");
-        let detach = Command::new("git")
+        let detach = gwt_core::process::hidden_command("git")
             .args(["checkout", "--detach"])
             .current_dir(&repo)
             .status()

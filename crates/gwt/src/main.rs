@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -377,7 +377,6 @@ mod tests {
         collections::HashMap,
         fs,
         path::{Path, PathBuf},
-        process::Command,
         sync::{Arc, Mutex, RwLock},
         time::{Duration, Instant},
     };
@@ -482,7 +481,7 @@ mod tests {
 
     fn init_git_repo(path: &Path) {
         fs::create_dir_all(path).expect("create repo dir");
-        let init = Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "-q"])
             .arg(path)
             .status()
@@ -495,7 +494,7 @@ mod tests {
             vec!["commit", "--allow-empty", "-qm", "init"],
             vec!["branch", "feature/demo"],
         ] {
-            let status = Command::new("git")
+            let status = gwt_core::process::hidden_command("git")
                 .args(&args)
                 .current_dir(path)
                 .status()
@@ -510,7 +509,7 @@ mod tests {
         let origin = root.join("origin.git");
 
         fs::create_dir_all(&seed).expect("create seed dir");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["init", "-q", "-b", "develop"])
             .arg(&seed)
             .status()
@@ -521,7 +520,7 @@ mod tests {
             vec!["config", "user.name", "Codex Test"],
             vec!["config", "user.email", "codex@example.com"],
         ] {
-            let status = Command::new("git")
+            let status = gwt_core::process::hidden_command("git")
                 .args(&args)
                 .current_dir(&seed)
                 .status()
@@ -531,7 +530,7 @@ mod tests {
 
         fs::write(seed.join("README.md"), "seed\n").expect("write seed readme");
         for args in [vec!["add", "README.md"], vec!["commit", "-qm", "init"]] {
-            let status = Command::new("git")
+            let status = gwt_core::process::hidden_command("git")
                 .args(&args)
                 .current_dir(&seed)
                 .status()
@@ -539,7 +538,7 @@ mod tests {
             assert!(status.success(), "git {:?} failed", args);
         }
 
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["clone", "--bare"])
             .arg(&seed)
             .arg(&origin)
@@ -547,7 +546,7 @@ mod tests {
             .expect("git clone --bare");
         assert!(status.success(), "git clone --bare failed");
 
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["clone"])
             .arg(&origin)
             .arg(path)
@@ -559,7 +558,7 @@ mod tests {
             vec!["config", "user.name", "Codex Test"],
             vec!["config", "user.email", "codex@example.com"],
         ] {
-            let status = Command::new("git")
+            let status = gwt_core::process::hidden_command("git")
                 .args(&args)
                 .current_dir(path)
                 .status()
@@ -1770,13 +1769,13 @@ mod tests {
         let repo = temp.path().join("repo");
         init_git_repo(&repo);
         let default_branch = current_git_branch(&repo).expect("current branch");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["checkout", "-qb", "feature/prune-me"])
             .current_dir(&repo)
             .status()
             .expect("create branch");
         assert!(status.success(), "create branch failed");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["checkout", default_branch.as_str()])
             .current_dir(&repo)
             .status()
@@ -2611,7 +2610,7 @@ mod tests {
         assert!(missing_err.contains("failed to open project"));
 
         let bare = temp.path().join("bare.git");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["init", "--bare"])
             .arg(&bare)
             .status()
@@ -2720,7 +2719,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("demo-repo");
         fs::create_dir_all(repo.join("apps/frontend")).expect("create repo dirs");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["init", "-q"])
             .current_dir(temp.path())
             .arg(&repo)
@@ -3470,38 +3469,38 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo dir");
-        let init = Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "-q", "-b", "develop"])
             .current_dir(&repo)
             .status()
             .expect("git init");
         assert!(init.success(), "git init failed");
-        let config_name = Command::new("git")
+        let config_name = gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Codex"])
             .current_dir(&repo)
             .status()
             .expect("git config user.name");
         assert!(config_name.success(), "git config user.name failed");
-        let config_email = Command::new("git")
+        let config_email = gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "codex@example.com"])
             .current_dir(&repo)
             .status()
             .expect("git config user.email");
         assert!(config_email.success(), "git config user.email failed");
         fs::write(repo.join("README.md"), "repo\n").expect("write readme");
-        let add = Command::new("git")
+        let add = gwt_core::process::hidden_command("git")
             .args(["add", "README.md"])
             .current_dir(&repo)
             .status()
             .expect("git add");
         assert!(add.success(), "git add failed");
-        let commit = Command::new("git")
+        let commit = gwt_core::process::hidden_command("git")
             .args(["commit", "-qm", "init"])
             .current_dir(&repo)
             .status()
             .expect("git commit");
         assert!(commit.success(), "git commit failed");
-        let branch = Command::new("git")
+        let branch = gwt_core::process::hidden_command("git")
             .args(["branch", "feature/demo"])
             .current_dir(&repo)
             .status()
@@ -3599,7 +3598,7 @@ mod tests {
         .expect("non repo short circuit");
         assert!(working_dir.is_none());
 
-        let detach = Command::new("git")
+        let detach = gwt_core::process::hidden_command("git")
             .args(["checkout", "--detach", "HEAD"])
             .current_dir(&repo)
             .status()
@@ -3616,7 +3615,7 @@ mod tests {
         .expect_err("repo branch resolution failure should not silently skip");
         assert!(err.contains("git branch --show-current"));
 
-        let attach = Command::new("git")
+        let attach = gwt_core::process::hidden_command("git")
             .args(["checkout", "develop"])
             .current_dir(&repo)
             .status()
@@ -3652,14 +3651,14 @@ mod tests {
         assert_eq!(preset_dir.as_deref(), Some(preset.as_path()));
         assert!(preset_env.is_empty());
 
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["branch", "feature/existing"])
             .current_dir(&repo)
             .status()
             .expect("create feature branch");
         assert!(status.success(), "create feature branch failed");
         let existing_worktree = temp.path().join("feature-existing");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["worktree", "add"])
             .arg(&existing_worktree)
             .arg("feature/existing")
@@ -3711,7 +3710,7 @@ mod tests {
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &created_dir)));
 
-        let output = Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["branch", "--show-current"])
             .current_dir(&created_dir)
             .output()
@@ -3722,7 +3721,7 @@ mod tests {
             "feature/created"
         );
 
-        let local_only_branch = Command::new("git")
+        let local_only_branch = gwt_core::process::hidden_command("git")
             .args(["branch", "feature/local-only"])
             .current_dir(&repo)
             .status()
@@ -3743,7 +3742,7 @@ mod tests {
         )
         .expect("local-only worktree");
         let local_only_dir = local_only_dir.expect("local-only worktree dir");
-        let local_remote = Command::new("git")
+        let local_remote = gwt_core::process::hidden_command("git")
             .args([
                 "show-ref",
                 "--verify",
@@ -4223,13 +4222,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let init = Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "--quiet"])
             .current_dir(&repo)
             .output()
             .expect("git init");
         assert!(init.status.success(), "git init failed");
-        let remote = Command::new("git")
+        let remote = gwt_core::process::hidden_command("git")
             .args([
                 "remote",
                 "add",
@@ -4240,19 +4239,19 @@ mod tests {
             .output()
             .expect("git remote");
         assert!(remote.status.success(), "git remote add failed");
-        let branch = Command::new("git")
+        let branch = gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "feature/coverage"])
             .current_dir(&repo)
             .output()
             .expect("git checkout");
         assert!(branch.status.success(), "git checkout failed");
-        let config_name = Command::new("git")
+        let config_name = gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(&repo)
             .output()
             .expect("git config user.name");
         assert!(config_name.status.success(), "git config user.name failed");
-        let config_email = Command::new("git")
+        let config_email = gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(&repo)
             .output()
@@ -4262,13 +4261,13 @@ mod tests {
             "git config user.email failed"
         );
         fs::write(repo.join("README.md"), "hello\n").expect("write README");
-        let add = Command::new("git")
+        let add = gwt_core::process::hidden_command("git")
             .args(["add", "README.md"])
             .current_dir(&repo)
             .output()
             .expect("git add");
         assert!(add.status.success(), "git add failed");
-        let commit = Command::new("git")
+        let commit = gwt_core::process::hidden_command("git")
             .args(["commit", "-m", "init"])
             .current_dir(&repo)
             .output()

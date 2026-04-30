@@ -76,7 +76,7 @@ pub fn is_branch_merged_into(repo_path: &Path, branch: &str, base: &str) -> Resu
         return Ok(false);
     }
 
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["cherry", base, branch])
         .current_dir(repo_path)
         .output()
@@ -176,7 +176,7 @@ fn detect_cleanable_target_for_remote(
 /// `[gone]` (FR-018a). Used to flag branches whose remote was deleted but
 /// which still exist locally.
 pub fn list_gone_branches(repo_path: &Path) -> Result<HashSet<String>> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args([
             "for-each-ref",
             "--format=%(refname:short)\t%(upstream:track)",
@@ -218,7 +218,7 @@ pub fn delete_local_branch(repo_path: &Path, name: &str, force: bool) -> Result<
     }
 
     let flag = if force { "-D" } else { "-d" };
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["branch", flag, name])
         .current_dir(repo_path)
         .output()
@@ -233,7 +233,7 @@ pub fn delete_local_branch(repo_path: &Path, name: &str, force: bool) -> Result<
 
 /// Returns true when `git rev-parse --verify <ref>` succeeds.
 fn ref_exists(repo_path: &Path, refname: &str) -> Result<bool> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "--verify", "--quiet", refname])
         .current_dir(repo_path)
         .output()
@@ -268,7 +268,7 @@ pub struct DivergenceInfo {
 /// Returns `DivergenceInfo { ahead, behind }`. If either ref is missing the
 /// command will fail and an error is returned.
 pub fn git_divergence(repo_path: &Path, branch: &str, upstream: &str) -> Result<DivergenceInfo> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args([
             "-C",
             &repo_path.to_string_lossy(),
@@ -340,7 +340,7 @@ pub struct Branch {
 pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
     let format =
         "%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(upstream:track)\t%(creatordate:iso8601)";
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["for-each-ref", &format!("--format={format}"), "refs/heads/"])
         .current_dir(repo_path)
         .output()
@@ -361,7 +361,7 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
     let remote_names = list_remote_names(repo_path).unwrap_or_default();
 
     // Also list remote branches
-    let remote_output = std::process::Command::new("git")
+    let remote_output = gwt_core::process::hidden_command("git")
         .args([
             "for-each-ref",
             "--format=%(refname:short)\t%(creatordate:iso8601)",
@@ -403,7 +403,7 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<Branch>> {
 }
 
 pub fn list_remote_names(repo_path: &Path) -> Result<Vec<String>> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .arg("remote")
         .current_dir(repo_path)
         .output()
@@ -620,7 +620,7 @@ mod tests {
     // ---------- Branch Cleanup helpers (FR-018) ----------
 
     fn run(args: &[&str], cwd: &Path) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(args)
             .current_dir(cwd)
             .output()
@@ -883,11 +883,11 @@ mod tests {
     fn list_branches_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path)
             .output()

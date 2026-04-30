@@ -12,6 +12,7 @@ regex = { workspace = true }
 sha2 = { workspace = true }
 fs2 = { workspace = true }
 reqwest = { workspace = true }
+gwt-core = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -2981,7 +2981,7 @@ pub fn build_builtin_agent_options(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, process::Command};
+    use std::collections::HashMap;
 
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
@@ -3202,13 +3202,13 @@ mod tests {
 
     fn init_repo_with_origin(path: &Path, origin: &str) {
         std::fs::create_dir_all(path).expect("repo dir");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["init"])
             .current_dir(path)
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["remote", "add", "origin", origin])
             .current_dir(path)
             .status()

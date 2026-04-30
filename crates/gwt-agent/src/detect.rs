@@ -110,7 +110,7 @@ impl AgentDetector {
     }
 
     fn fetch_version(command: &str, version_flag: &str, prefix_args: &[&str]) -> Option<String> {
-        let mut cmd = std::process::Command::new(command);
+        let mut cmd = gwt_core::process::hidden_command(command);
         for arg in prefix_args {
             cmd.arg(arg);
         }
