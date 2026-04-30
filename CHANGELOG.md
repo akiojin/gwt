@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.12.0] - 2026-04-30
+
+### Documentation
+
+- **migration:** SPEC-1934 進捗を README + tasks セクションに反映
+
+### Features
+
+- **migration:** SPEC-1934 US-6 マイグレーション基盤を追加
+- **migration:** SPEC-1934 US-6 Validator フェーズを実装
+- **migration:** SPEC-1934 US-6 Backup + Rollback フェーズを実装
+- **migration:** SPEC-1934 US-6 Bareify フェーズと bare 用 hook 適用を実装
+- **migration:** SPEC-1934 US-6 Worktrees + Submodules + Tracking フェーズを実装
+- **migration:** SPEC-1934 US-6 Executor + E2E migration を実装
+
+### Testing
+
+- **migration:** SPEC-1934 US-6 拡張 E2E シナリオを追加
+
 ## [9.11.12] - 2026-04-30
 
 ### Bug Fixes
