@@ -192,6 +192,24 @@ pub(crate) fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<Knowledg
     }
 }
 
+pub(crate) fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
+    if current_git_branch(repo_path)
+        .as_ref()
+        .is_ok_and(|current| current == branch_name)
+    {
+        return Some(repo_path.to_path_buf());
+    }
+
+    let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    manager
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
+        .map(|worktree| worktree.path)
+}
+
 pub(crate) fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],
