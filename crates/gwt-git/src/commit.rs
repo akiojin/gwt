@@ -23,7 +23,7 @@ pub struct CommitEntry {
 /// Returns up to `count` commits from HEAD.
 pub fn recent_commits(repo_path: &Path, count: usize) -> Result<Vec<CommitEntry>> {
     let format = "%h\t%s\t%an\t%aI";
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args([
             "log",
             &format!("--max-count={count}"),
@@ -108,16 +108,16 @@ mod tests {
     fn recent_commits_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "first commit"])
             .current_dir(path)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "second commit"])
             .current_dir(path)
             .output()
@@ -133,12 +133,12 @@ mod tests {
     fn recent_commits_respects_count() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
         for i in 0..5 {
-            std::process::Command::new("git")
+            gwt_core::process::hidden_command("git")
                 .args(["commit", "--allow-empty", "-m", &format!("commit {i}")])
                 .current_dir(path)
                 .output()
@@ -153,7 +153,7 @@ mod tests {
     fn recent_commits_empty_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();

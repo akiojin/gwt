@@ -96,7 +96,7 @@ fn cache_filename(owner: &str, repo: &str) -> String {
 /// Fetch open issues from GitHub via `gh issue list --json`.
 pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
     let repo_slug = format!("{owner}/{repo}");
-    let output = std::process::Command::new("gh")
+    let output = gwt_core::process::hidden_command("gh")
         .args([
             "issue",
             "list",

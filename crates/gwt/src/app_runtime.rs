@@ -163,6 +163,98 @@ pub(crate) struct ActiveAgentSession {
     pub(crate) tab_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LaunchWizardMemoryCache {
+    sessions: Vec<gwt_agent::Session>,
+    agent_options: Vec<gwt::AgentOption>,
+}
+
+impl LaunchWizardMemoryCache {
+    pub(crate) fn load(sessions_dir: &Path) -> Self {
+        Self {
+            sessions: Self::load_sessions(sessions_dir),
+            agent_options: Self::load_agent_options(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_with_agent_options(
+        sessions_dir: &Path,
+        agent_options: Vec<gwt::AgentOption>,
+    ) -> Self {
+        Self {
+            sessions: Self::load_sessions(sessions_dir),
+            agent_options,
+        }
+    }
+
+    fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
+        let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
+            })
+            .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+            .collect()
+    }
+
+    fn load_agent_options() -> Vec<gwt::AgentOption> {
+        gwt::load_agent_options(&gwt_agent::VersionCache::load(
+            &gwt::default_wizard_version_cache_path(),
+        ))
+    }
+
+    fn refresh_agent_options(&mut self) {
+        self.agent_options = Self::load_agent_options();
+    }
+
+    fn agent_options(&self) -> Vec<gwt::AgentOption> {
+        self.agent_options.clone()
+    }
+
+    fn quick_start_entries(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Vec<gwt::QuickStartEntry> {
+        gwt::launch_wizard::quick_start_entries_from_sessions(
+            repo_path,
+            branch_name,
+            &self.sessions,
+        )
+    }
+
+    fn previous_profile(&self, repo_path: &Path) -> Option<gwt::LaunchWizardPreviousProfile> {
+        gwt::launch_wizard::previous_launch_profile_from_sessions(repo_path, &self.sessions)
+    }
+
+    fn record_session(&mut self, session: gwt_agent::Session) {
+        if let Some(existing) = self
+            .sessions
+            .iter_mut()
+            .find(|existing| existing.id == session.id)
+        {
+            *existing = session;
+        } else {
+            self.sessions.push(session);
+        }
+    }
+
+    fn mark_stopped(&mut self, session_id: &str) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+        }
+    }
+}
+
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 struct IssueBranchLinkStore {
     #[serde(default)]
@@ -365,6 +457,7 @@ pub(crate) struct AppRuntime {
     pub(crate) proxy: AppEventProxy,
     pub(crate) blocking_tasks: BlockingTaskSpawner,
     pub(crate) sessions_dir: PathBuf,
+    pub(crate) launch_wizard_cache: LaunchWizardMemoryCache,
     pub(crate) launch_wizard: Option<LaunchWizardSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
@@ -421,6 +514,7 @@ impl AppRuntime {
         let active_tab_id = normalize_active_tab_id(&tabs, persisted.active_tab_id);
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let _ = gwt_agent::reset_runtime_state_dir(&sessions_dir);
+        let launch_wizard_cache = LaunchWizardMemoryCache::load(&sessions_dir);
 
         let mut app = Self {
             tabs,
@@ -436,6 +530,7 @@ impl AppRuntime {
             proxy: AppEventProxy::new(proxy),
             blocking_tasks,
             sessions_dir,
+            launch_wizard_cache,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
@@ -675,27 +770,48 @@ impl AppRuntime {
                 client_id,
                 gwt::custom_agents_dispatch::list_presets_event(),
             )],
-            FrontendEvent::AddCustomAgentFromPreset { input } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::add_from_preset_event(
+            FrontendEvent::AddCustomAgentFromPreset { input } => {
+                let event = gwt::custom_agents_dispatch::add_from_preset_event(
                     gwt::PresetId::ClaudeCodeOpenaiCompat,
                     serde_json::to_value(input)
                         .expect("custom agent preset payload should serialize"),
-                ),
-            )],
-            FrontendEvent::UpdateCustomAgent { agent } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::update_event(*agent),
-            )],
-            FrontendEvent::DeleteCustomAgent { agent_id } => vec![OutboundEvent::reply(
-                client_id,
-                gwt::custom_agents_dispatch::delete_event(agent_id),
-            )],
+                );
+                self.custom_agent_reply_with_cache_refresh(client_id, event)
+            }
+            FrontendEvent::UpdateCustomAgent { agent } => {
+                let event = gwt::custom_agents_dispatch::update_event(*agent);
+                self.custom_agent_reply_with_cache_refresh(client_id, event)
+            }
+            FrontendEvent::DeleteCustomAgent { agent_id } => {
+                let event = gwt::custom_agents_dispatch::delete_event(agent_id);
+                self.custom_agent_reply_with_cache_refresh(client_id, event)
+            }
             FrontendEvent::TestBackendConnection { base_url, api_key } => {
                 self.spawn_backend_connection_probe(client_id, base_url, api_key);
                 Vec::new()
             }
         }
+    }
+
+    fn custom_agent_reply_with_cache_refresh(
+        &mut self,
+        client_id: ClientId,
+        event: BackendEvent,
+    ) -> Vec<OutboundEvent> {
+        if matches!(
+            &event,
+            BackendEvent::CustomAgentSaved { .. } | BackendEvent::CustomAgentDeleted { .. }
+        ) {
+            self.launch_wizard_cache.refresh_agent_options();
+            let had_open_wizard = self.launch_wizard.is_some();
+            self.refresh_open_launch_wizard_from_cache();
+            let mut events = vec![OutboundEvent::reply(client_id, event)];
+            if had_open_wizard {
+                events.push(self.launch_wizard_state_outbound());
+            }
+            return events;
+        }
+        vec![OutboundEvent::reply(client_id, event)]
     }
 
     pub(crate) fn spawn_backend_connection_probe(
@@ -2615,44 +2731,61 @@ impl AppRuntime {
     ) -> Result<(), String> {
         let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
+        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
+        let quick_start_root = worktree_path
+            .clone()
+            .unwrap_or_else(|| project_root.to_path_buf());
+        let quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&quick_start_root, &normalized_branch_name);
+        let previous_profile = self.launch_wizard_cache.previous_profile(&quick_start_root);
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let (docker_context, docker_service_status) =
+            detect_wizard_docker_context_and_status(&quick_start_root);
         let wizard_id = Uuid::new_v4().to_string();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
-            wizard_id: wizard_id.clone(),
-            wizard: LaunchWizardState::open_loading(
+            wizard_id,
+            wizard: LaunchWizardState::open_with_previous_profile(
                 LaunchWizardContext {
                     selected_branch: synthetic_branch_entry(branch_name),
                     normalized_branch_name,
-                    worktree_path: None,
-                    quick_start_root: project_root.to_path_buf(),
+                    worktree_path,
+                    quick_start_root,
                     live_sessions,
-                    docker_context: None,
-                    docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                    docker_context,
+                    docker_service_status,
                     linked_issue_number,
                 },
-                Vec::new(),
+                agent_options,
+                quick_start_entries,
+                previous_profile,
             ),
         });
 
-        let proxy = self.proxy.clone();
-        let sessions_dir = self.sessions_dir.clone();
-        let project_root = project_root.to_path_buf();
-        let branch_name = branch_name.to_string();
-        let active_session_branches = self.active_session_branches_for_tab(tab_id);
-        thread::spawn(move || {
-            let result = resolve_launch_wizard_hydration(
-                &project_root,
-                &branch_name,
-                &active_session_branches,
-                &sessions_dir,
-            );
-            proxy.send(UserEvent::LaunchWizardHydrated {
-                wizard_id,
-                result: Box::new(result),
-            });
-        });
-
         Ok(())
+    }
+
+    fn refresh_open_launch_wizard_from_cache(&mut self) {
+        let Some(session) = self.launch_wizard.as_mut() else {
+            return;
+        };
+        let context = session.wizard.context.clone();
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&context.quick_start_root, &context.normalized_branch_name);
+        session.wizard.apply_hydration(gwt::LaunchWizardHydration {
+            selected_branch: Some(context.selected_branch),
+            normalized_branch_name: context.normalized_branch_name,
+            worktree_path: context.worktree_path,
+            quick_start_root: context.quick_start_root,
+            docker_context: context.docker_context,
+            docker_service_status: context.docker_service_status,
+            agent_options,
+            quick_start_entries,
+            previous_profile: None,
+        });
     }
 
     pub(crate) fn open_issue_launch_wizard_events(
@@ -2741,26 +2874,6 @@ impl AppRuntime {
             ));
         });
         Vec::new()
-    }
-
-    pub(crate) fn handle_launch_wizard_hydrated(
-        &mut self,
-        wizard_id: String,
-        result: Result<LaunchWizardHydration, String>,
-    ) -> Vec<OutboundEvent> {
-        let Some(session) = self.launch_wizard.as_mut() else {
-            return Vec::new();
-        };
-        if session.wizard_id != wizard_id {
-            return Vec::new();
-        }
-
-        match result {
-            Ok(hydration) => session.wizard.apply_hydration(hydration),
-            Err(error) => session.wizard.set_hydration_error(error),
-        }
-
-        vec![self.launch_wizard_state_outbound()]
     }
 
     pub(crate) fn handle_issue_launch_wizard_prepared(
@@ -3136,6 +3249,7 @@ impl AppRuntime {
                         tab_id: address.tab_id,
                     },
                 );
+                self.refresh_launch_wizard_session_cache(&window_id);
 
                 match self.spawn_process_window(&window_id, geometry, process_launch) {
                     Ok(()) => {
@@ -3647,6 +3761,24 @@ impl AppRuntime {
             &session.session_id,
             gwt_agent::AgentStatus::Stopped,
         );
+        self.launch_wizard_cache.mark_stopped(&session.session_id);
+    }
+
+    fn refresh_launch_wizard_session_cache(&mut self, window_id: &str) {
+        let Some(session) = self.active_agent_sessions.get(window_id) else {
+            return;
+        };
+        let path = self
+            .sessions_dir
+            .join(format!("{}.toml", session.session_id));
+        match gwt_agent::Session::load_and_migrate(&path) {
+            Ok(session) => self.launch_wizard_cache.record_session(session),
+            Err(error) => tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to refresh Launch Wizard session cache"
+            ),
+        }
     }
 
     pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
@@ -4435,10 +4567,11 @@ mod tests {
 
     use super::{
         ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardSession,
-        OutboundEvent, ProjectTabRuntime, UserEvent, WindowRuntime,
+        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProjectTabRuntime, UserEvent,
+        WindowRuntime,
     };
-    use crate::{combined_window_id, PtyWriterRegistry};
+    use crate::{combined_window_id, same_worktree_path, PtyWriterRegistry};
 
     #[derive(Debug, Clone)]
     struct CapturedTracingEvent {
@@ -4583,7 +4716,7 @@ mod tests {
             ["init", "-q"].as_slice(),
             ["remote", "add", "origin", remote.as_str()].as_slice(),
         ] {
-            let output = std::process::Command::new("git")
+            let output = gwt_core::process::hidden_command("git")
                 .args(args)
                 .current_dir(repo_path)
                 .output()
@@ -4860,6 +4993,8 @@ exit 0
         let log_dir = temp_root.join("logs");
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
         fs::create_dir_all(&log_dir).expect("create log dir");
+        let launch_wizard_cache =
+            LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, sample_agent_options());
         let pty_writers: PtyWriterRegistry = Arc::new(RwLock::new(HashMap::new()));
         let mut runtime = AppRuntime {
             tabs,
@@ -4875,6 +5010,7 @@ exit 0
             proxy,
             blocking_tasks: BlockingTaskSpawner::thread(),
             sessions_dir,
+            launch_wizard_cache,
             launch_wizard: None,
             active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
             window_pty_statuses: HashMap::new(),
@@ -4945,6 +5081,26 @@ exit 0
                 Vec::new(),
             ),
         }
+    }
+
+    fn sample_agent_options() -> Vec<gwt::AgentOption> {
+        vec![gwt::AgentOption {
+            id: "codex".to_string(),
+            name: "Codex".to_string(),
+            available: true,
+            installed_version: Some("latest".to_string()),
+            versions: vec!["latest".to_string()],
+            custom_agent: None,
+        }]
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
     }
 
     fn sample_no_agent_launch_wizard_session(
@@ -5174,6 +5330,138 @@ exit 0
                 if id == &window_id
                     && *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
+        ));
+    }
+
+    #[test]
+    fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let sessions_dir = temp.path().join("sessions");
+        fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let mut session = gwt_agent::Session::new(&repo, "feature/demo", gwt_agent::AgentId::Codex);
+        session.model = Some("gpt-5.4".to_string());
+        session.reasoning_level = Some("high".to_string());
+        session.tool_version = Some("latest".to_string());
+        session.session_mode = gwt_agent::SessionMode::Continue;
+        session.skip_permissions = true;
+        session.codex_fast_mode = true;
+        session.save(&sessions_dir).expect("save session");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None)
+            .expect("open launch wizard");
+
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("launch wizard")
+            .wizard
+            .view();
+        assert!(!view.is_hydrating);
+        assert_eq!(view.selected_agent_id, "codex");
+        assert_eq!(view.selected_model, "gpt-5.4");
+        assert_eq!(view.selected_reasoning, "high");
+        assert_eq!(view.selected_version, "latest");
+        assert_eq!(view.selected_execution_mode, "continue");
+        assert!(view.skip_permissions);
+        assert!(view.codex_fast_mode);
+    }
+
+    #[test]
+    fn app_runtime_open_launch_wizard_uses_branch_worktree_for_docker_context() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        fs::write(repo.join("README.md"), "repo\n").expect("readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+        run_git(&repo, &["branch", "feature/docker"]);
+
+        let branch_worktree = temp.path().join("repo-feature-docker");
+        let branch_worktree_arg = branch_worktree.to_string_lossy().to_string();
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                &branch_worktree_arg,
+                "feature/docker",
+            ],
+        );
+        fs::write(
+            branch_worktree.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.20\n",
+        )
+        .expect("compose");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Branches],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime
+            .open_launch_wizard_for_branch("tab-1", &repo, "feature/docker", None)
+            .expect("open launch wizard");
+
+        let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
+        assert!(wizard
+            .context
+            .worktree_path
+            .as_ref()
+            .is_some_and(|path| same_worktree_path(path, &branch_worktree)));
+        assert!(same_worktree_path(
+            &wizard.context.quick_start_root,
+            &branch_worktree
+        ));
+        let view = wizard.view();
+        assert!(view.show_runtime_target);
+        assert_eq!(view.selected_runtime_target, "docker");
+        assert_eq!(view.selected_docker_service.as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
+
+        let events = runtime.custom_agent_reply_with_cache_refresh(
+            "client-1".to_string(),
+            BackendEvent::CustomAgentDeleted {
+                agent_id: "custom-agent".to_string(),
+            },
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].event,
+            BackendEvent::CustomAgentDeleted { .. }
+        ));
+        assert!(matches!(
+            events[1].event,
+            BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
     }
 

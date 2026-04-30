@@ -40,7 +40,7 @@ impl FileEntry {
     pub fn diff_content(&self, repo_path: &Path) -> Result<String> {
         match self.status {
             FileStatus::Staged => {
-                let output = std::process::Command::new("git")
+                let output = gwt_core::process::hidden_command("git")
                     .args(["diff", "--cached", "--", self.path.to_str().unwrap_or("")])
                     .current_dir(repo_path)
                     .output()
@@ -48,7 +48,7 @@ impl FileEntry {
                 Ok(String::from_utf8_lossy(&output.stdout).to_string())
             }
             FileStatus::Unstaged => {
-                let output = std::process::Command::new("git")
+                let output = gwt_core::process::hidden_command("git")
                     .args(["diff", "--", self.path.to_str().unwrap_or("")])
                     .current_dir(repo_path)
                     .output()
@@ -65,7 +65,7 @@ impl FileEntry {
 
 /// Get the working tree status as a list of `FileEntry`.
 pub fn get_status(repo_path: &Path) -> Result<Vec<FileEntry>> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["status", "--porcelain=v1"])
         .current_dir(repo_path)
         .output()
@@ -198,11 +198,11 @@ mod tests {
     fn get_status_in_clean_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path)
             .output()
@@ -216,11 +216,11 @@ mod tests {
     fn get_status_with_untracked_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path)
             .output()

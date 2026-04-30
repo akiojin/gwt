@@ -56,7 +56,7 @@ fn run_repo_backed_cli(argv: &[String]) -> i32 {
 }
 
 fn resolve_repo_coordinates() -> Option<(String, String)> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;

@@ -1,6 +1,9 @@
 //! Process execution helpers.
 
-use std::process::{Command, Output};
+use std::{
+    ffi::OsStr,
+    process::{Command, Output},
+};
 
 use crate::error::{GwtError, Result};
 
@@ -22,7 +25,7 @@ fn capture_output(cmd: &str, output: Output) -> Result<String> {
 /// Returns an error if the command fails to start or exits with a non-zero
 /// status.
 pub fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(cmd)
+    let output = hidden_command(cmd)
         .args(args)
         .output()
         .map_err(GwtError::Io)?;
@@ -31,7 +34,7 @@ pub fn run_command(cmd: &str, args: &[&str]) -> Result<String> {
 
 /// Run a command with additional environment variables and capture its stdout.
 pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) -> Result<String> {
-    let mut command = Command::new(cmd);
+    let mut command = hidden_command(cmd);
     command.args(args);
     for (key, value) in env {
         command.env(key, value);
@@ -43,6 +46,40 @@ pub fn run_command_with_env(cmd: &str, args: &[&str], env: &[(String, String)]) 
 /// Check whether a command exists on `$PATH`.
 pub fn command_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()
+}
+
+/// Create a non-interactive command that does not create an extra console
+/// window when spawned from the Windows GUI front door.
+pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    configure_hidden_command(&mut command);
+    command
+}
+
+/// Apply platform-specific non-interactive process flags.
+pub fn configure_hidden_command(command: &mut Command) -> &mut Command {
+    let flags = hidden_creation_flags();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(flags);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = flags;
+    }
+    command
+}
+
+#[cfg(windows)]
+fn hidden_creation_flags() -> u32 {
+    0x08000000
+}
+
+#[cfg(not(windows))]
+fn hidden_creation_flags() -> u32 {
+    0
 }
 
 /// Drop `GIT_*` env vars from `cmd` that override path-specific lookup.
@@ -178,5 +215,29 @@ mod tests {
         // `git --version` is universally available in dev environments
         let version = get_command_version("git").unwrap();
         assert!(version.contains("git version"));
+    }
+
+    #[test]
+    fn hidden_creation_flags_match_platform() {
+        if cfg!(windows) {
+            assert_eq!(hidden_creation_flags(), 0x08000000);
+        } else {
+            assert_eq!(hidden_creation_flags(), 0);
+        }
+    }
+
+    #[test]
+    fn hidden_command_captures_stdout() {
+        let (cmd, args) = echo_command("hidden hello");
+        let output = hidden_command(&cmd)
+            .args(args)
+            .output()
+            .expect("run hidden command");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "hidden hello"
+        );
     }
 }

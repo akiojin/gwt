@@ -437,7 +437,7 @@ pub(crate) fn probe_host_package_runner_with_timeout(
     timeout: Duration,
     poll_interval: Duration,
 ) -> bool {
-    let mut process = Command::new(command);
+    let mut process = gwt_core::process::hidden_command(command);
     process
         .args(args)
         .stdin(Stdio::null())

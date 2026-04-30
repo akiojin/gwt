@@ -221,20 +221,50 @@ pub fn load_previous_launch_profile(
     sessions_dir: &Path,
 ) -> Option<LaunchWizardPreviousProfile> {
     let entries = std::fs::read_dir(sessions_dir).ok()?;
-    entries
+    let sessions = entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
             (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
         })
         .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+        .collect::<Vec<_>>();
+    previous_launch_profile_from_sessions(repo_path, &sessions)
+}
+
+pub fn previous_launch_profile_from_sessions(
+    repo_path: &Path,
+    sessions: &[gwt_agent::Session],
+) -> Option<LaunchWizardPreviousProfile> {
+    sessions
+        .iter()
         .filter(|session| same_launch_profile_repo(repo_path, session))
         .max_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)
                 .then_with(|| left.created_at.cmp(&right.created_at))
+                .then_with(|| left.id.cmp(&right.id))
         })
+        .cloned()
         .map(previous_profile_from_session)
+}
+
+pub fn quick_start_entries_from_sessions(
+    repo_path: &Path,
+    branch_name: &str,
+    sessions: &[gwt_agent::Session],
+) -> Vec<QuickStartEntry> {
+    let sessions = sessions
+        .iter()
+        .filter(|session| session.branch == branch_name)
+        .filter(|session| same_launch_profile_repo(repo_path, session))
+        .cloned()
+        .map(|mut session| {
+            session.worktree_path = repo_path.to_path_buf();
+            session
+        })
+        .collect::<Vec<_>>();
+    quick_start::collect_quick_start_entries_from_sessions(repo_path, branch_name, sessions)
 }
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {
@@ -2981,7 +3011,7 @@ pub fn build_builtin_agent_options(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, process::Command};
+    use std::collections::HashMap;
 
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
@@ -3202,13 +3232,13 @@ mod tests {
 
     fn init_repo_with_origin(path: &Path, origin: &str) {
         std::fs::create_dir_all(path).expect("repo dir");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["init"])
             .current_dir(path)
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
-        let status = Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["remote", "add", "origin", origin])
             .current_dir(path)
             .status()
@@ -3498,6 +3528,43 @@ mod tests {
             gwt_agent::LaunchRuntimeTarget::Docker
         );
         assert_eq!(profile.docker_service.as_deref(), Some("gwt"));
+    }
+
+    #[test]
+    fn previous_launch_profile_tie_breaks_equal_timestamps_by_session_id() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let timestamp = Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap();
+        let mut lower_id = sample_session_record(
+            "feature/lower",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            timestamp,
+            None,
+        );
+        lower_id.id = "session-a".to_string();
+        lower_id.model = Some("gpt-5.4".to_string());
+        let mut higher_id = sample_session_record(
+            "feature/higher",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            timestamp,
+            None,
+        );
+        higher_id.id = "session-b".to_string();
+        higher_id.model = Some("gpt-5.5".to_string());
+
+        let profile = previous_launch_profile_from_sessions(
+            &worktree,
+            &[higher_id.clone(), lower_id.clone()],
+        )
+        .expect("profile");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+
+        let profile = previous_launch_profile_from_sessions(&worktree, &[lower_id, higher_id])
+            .expect("profile");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
     }
 
     #[test]

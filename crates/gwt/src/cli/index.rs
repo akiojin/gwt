@@ -3,7 +3,6 @@ use std::{
     io,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use gwt_core::{repo_hash::RepoHash, worktree_hash::compute_worktree_hash};
@@ -153,7 +152,7 @@ fn project_index_python_path() -> PathBuf {
 }
 
 fn run_runner_status(context: &IndexContext) -> Result<std::process::Output, SpecOpsError> {
-    Command::new(&context.python)
+    gwt_core::process::hidden_command(&context.python)
         .arg(&context.runner)
         .arg("--action")
         .arg("status")
@@ -217,7 +216,7 @@ fn run_runner_rebuild(
     context: &IndexContext,
     action: RebuildAction,
 ) -> Result<std::process::Output, SpecOpsError> {
-    let mut command = Command::new(&context.python);
+    let mut command = gwt_core::process::hidden_command(&context.python);
     command
         .arg(&context.runner)
         .arg("--action")

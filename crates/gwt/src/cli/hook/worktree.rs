@@ -2,13 +2,13 @@
 //! `block-file-ops`. Shells out to `git rev-parse --show-toplevel`
 //! exactly like the Node helpers did.
 
-use std::{path::PathBuf, process::Command};
+use std::path::PathBuf;
 
 /// Return the worktree root as reported by `git rev-parse
 /// --show-toplevel`. Falls back to the current process cwd if git is
 /// unavailable or the command fails.
 pub fn detect_worktree_root() -> PathBuf {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "--show-toplevel"])
         .output();
     match output {

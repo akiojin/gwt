@@ -49,7 +49,7 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["worktree", "list", "--porcelain"])
             .current_dir(&self.repo_path)
             .output()
@@ -66,7 +66,7 @@ impl WorktreeManager {
 
     /// Fetch latest refs from `origin`.
     pub fn fetch_origin(&self) -> Result<()> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["fetch", "origin", "--prune"])
             .current_dir(&self.repo_path)
             .output()
@@ -87,7 +87,7 @@ impl WorktreeManager {
         let tracking_ref = to_tracking_ref(remote_ref)
             .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {remote_ref}")))?;
 
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["show-ref", "--verify", "--quiet", &tracking_ref])
             .current_dir(&self.repo_path)
             .output()
@@ -105,7 +105,7 @@ impl WorktreeManager {
 
     /// Create a new worktree at `path` for `branch`.
     pub fn create(&self, branch: &str, path: &Path) -> Result<()> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["worktree", "add", path.to_str().unwrap_or(""), branch])
             .current_dir(&self.repo_path)
             .output()
@@ -128,7 +128,7 @@ impl WorktreeManager {
             )));
         }
 
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args([
                 "worktree",
                 "add",
@@ -159,7 +159,7 @@ impl WorktreeManager {
     ) -> Result<()> {
         let base_ref = normalize_remote_ref(base_remote_ref);
         let push_refspec = format!("{base_ref}:refs/heads/{new_branch}");
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["push", "origin", &push_refspec])
             .current_dir(&self.repo_path)
             .output()
@@ -197,7 +197,7 @@ impl WorktreeManager {
             .split_once('/')
             .ok_or_else(|| GwtError::Git(format!("invalid remote ref: {normalized}")))?;
 
-        let mut command = std::process::Command::new("git");
+        let mut command = gwt_core::process::hidden_command("git");
         command
             .args(["push", remote, "--delete", branch])
             .current_dir(&self.repo_path);
@@ -222,7 +222,7 @@ impl WorktreeManager {
         path: &Path,
     ) -> Result<()> {
         let remote_ref = normalize_remote_ref(remote_ref);
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args([
                 "worktree",
                 "add",
@@ -240,7 +240,7 @@ impl WorktreeManager {
             return Err(GwtError::Git(stderr));
         }
 
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["branch", "--set-upstream-to", &remote_ref, local_branch])
             .current_dir(path)
             .output()
@@ -255,7 +255,7 @@ impl WorktreeManager {
 
     /// Remove the worktree at `path`.
     pub fn remove(&self, path: &Path) -> Result<()> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["worktree", "remove", path.to_str().unwrap_or("")])
             .current_dir(&self.repo_path)
             .output()
@@ -273,7 +273,7 @@ impl WorktreeManager {
     /// `git worktree remove --force` so worktrees with uncommitted or
     /// untracked files can also be deleted by Branch Cleanup.
     pub fn remove_force(&self, path: &Path) -> Result<()> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["worktree", "remove", "--force", path.to_str().unwrap_or("")])
             .current_dir(&self.repo_path)
             .output()
@@ -294,7 +294,7 @@ impl WorktreeManager {
     /// branch delete that follows inside [`Self::cleanup_branch`]. `--expire
     /// now` disables that grace period.
     pub fn prune(&self) -> Result<()> {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["worktree", "prune", "--expire", "now"])
             .current_dir(&self.repo_path)
             .output()
@@ -423,7 +423,7 @@ fn terminate_child_tree_platform(pid: u32) {
 
 #[cfg(windows)]
 fn terminate_child_tree_platform(pid: u32) {
-    let _ = Command::new("taskkill")
+    let _ = gwt_core::process::hidden_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -486,7 +486,7 @@ fn to_tracking_ref(remote_ref: &str) -> Option<String> {
 
 /// Resolve the main worktree root for a repository or linked worktree path.
 pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(repo_path)
         .output()
@@ -600,20 +600,20 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .expect("git init");
         assert!(output.status.success(), "git init failed");
 
-        let email = std::process::Command::new("git")
+        let email = gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path)
             .output()
             .expect("git config user.email");
         assert!(email.status.success(), "git config user.email failed");
 
-        let name = std::process::Command::new("git")
+        let name = gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(path)
             .output()
@@ -622,7 +622,7 @@ mod tests {
     }
 
     fn init_bare_git_repo(path: &Path) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["init", "--bare", path.to_str().unwrap()])
             .output()
             .expect("git init --bare");
@@ -631,7 +631,7 @@ mod tests {
 
     fn slow_command() -> std::process::Command {
         if cfg!(windows) {
-            let mut command = std::process::Command::new("powershell");
+            let mut command = gwt_core::process::hidden_command("powershell");
             command.args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 250"]);
             command
         } else {
@@ -643,7 +643,7 @@ mod tests {
 
     fn verbose_command() -> std::process::Command {
         if cfg!(windows) {
-            let mut command = std::process::Command::new("powershell");
+            let mut command = gwt_core::process::hidden_command("powershell");
             command.args([
                 "-NoProfile",
                 "-Command",
@@ -659,7 +659,7 @@ mod tests {
 
     fn lingering_pipe_command() -> std::process::Command {
         if cfg!(windows) {
-            let mut command = std::process::Command::new("powershell");
+            let mut command = gwt_core::process::hidden_command("powershell");
             command.args([
                 "-NoProfile",
                 "-Command",
@@ -674,7 +674,7 @@ mod tests {
     }
 
     fn git_clone_repo(src: &Path, dst: &Path) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["clone", src.to_str().unwrap(), dst.to_str().unwrap()])
             .output()
             .expect("git clone");
@@ -686,7 +686,7 @@ mod tests {
     }
 
     fn git_push_branch(path: &Path, branch: &str) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["push", "-u", "origin", branch])
             .current_dir(path)
             .output()
@@ -699,7 +699,7 @@ mod tests {
     }
 
     fn git_commit_allow_empty(path: &Path, message: &str) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", message])
             .current_dir(path)
             .output()
@@ -712,7 +712,7 @@ mod tests {
     }
 
     fn git_checkout_new_branch(path: &Path, branch: &str) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", branch])
             .current_dir(path)
             .output()
@@ -810,7 +810,7 @@ prunable gitdir file points to non-existent location
         git_commit_allow_empty(&repo_path, "initial commit");
 
         let linked_worktree = tmp.path().join("develop");
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args([
                 "worktree",
                 "add",
@@ -841,13 +841,13 @@ prunable gitdir file points to non-existent location
 
         let bootstrap_path = tmp.path().join("bootstrap");
         git_clone_repo(&bare_repo_path, &bootstrap_path);
-        let email = std::process::Command::new("git")
+        let email = gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(&bootstrap_path)
             .output()
             .expect("git config user.email");
         assert!(email.status.success(), "git config user.email failed");
-        let name = std::process::Command::new("git")
+        let name = gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(&bootstrap_path)
             .output()
@@ -858,7 +858,7 @@ prunable gitdir file points to non-existent location
         git_push_branch(&bootstrap_path, "develop");
 
         let linked_worktree = tmp.path().join("develop");
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args([
                 "worktree",
                 "add",
@@ -903,7 +903,7 @@ prunable gitdir file points to non-existent location
             .unwrap();
 
         assert!(worktree_path.exists());
-        let branch_output = std::process::Command::new("git")
+        let branch_output = gwt_core::process::hidden_command("git")
             .args(["branch", "--show-current"])
             .current_dir(&worktree_path)
             .output()
@@ -936,7 +936,7 @@ prunable gitdir file points to non-existent location
         // Dirty the worktree (uncommitted + untracked).
         std::fs::write(worktree_path.join("dirty.txt"), "dirty\n").unwrap();
         std::fs::write(worktree_path.join("staged.txt"), "staged\n").unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["add", "staged.txt"])
             .current_dir(&worktree_path)
             .output()
@@ -1036,7 +1036,7 @@ prunable gitdir file points to non-existent location
         git_commit_allow_empty(&repo_path, "initial commit");
 
         // Create a branch but no worktree.
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["branch", "feature/no-worktree"])
             .current_dir(&repo_path)
             .output()
@@ -1209,7 +1209,7 @@ prunable gitdir file points to non-existent location
             .unwrap();
         assert!(worktree_path.exists());
 
-        let branch_output = std::process::Command::new("git")
+        let branch_output = gwt_core::process::hidden_command("git")
             .args(["branch", "--show-current"])
             .current_dir(&worktree_path)
             .output()
@@ -1220,7 +1220,7 @@ prunable gitdir file points to non-existent location
             "feature/materialized"
         );
 
-        let upstream_output = std::process::Command::new("git")
+        let upstream_output = gwt_core::process::hidden_command("git")
             .args([
                 "rev-parse",
                 "--abbrev-ref",
@@ -1241,11 +1241,11 @@ prunable gitdir file points to non-existent location
     fn list_worktrees_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["init", path.to_str().unwrap()])
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path)
             .output()
@@ -1258,7 +1258,7 @@ prunable gitdir file points to non-existent location
     }
 
     fn git_add_remote(path: &Path, name: &str, remote: &Path) {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["remote", "add", name, remote.to_str().unwrap()])
             .current_dir(path)
             .output()

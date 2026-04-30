@@ -183,49 +183,6 @@ pub(crate) fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
     }
 }
 
-pub(crate) fn resolve_launch_wizard_hydration(
-    project_root: &Path,
-    branch_name: &str,
-    active_session_branches: &std::collections::HashSet<String>,
-    sessions_dir: &Path,
-) -> Result<LaunchWizardHydration, String> {
-    let agent_options = load_agent_options(&gwt_agent::VersionCache::load(
-        &default_wizard_version_cache_path(),
-    ));
-    let entries = list_branch_entries_with_active_sessions(project_root, active_session_branches)
-        .map_err(|error| error.to_string())?;
-    let selected_branch = entries
-        .into_iter()
-        .find(|entry| entry.name == branch_name)
-        .ok_or_else(|| format!("Branch not found: {branch_name}"))?;
-    let normalized_branch_name = normalize_branch_name(&selected_branch.name);
-    let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
-    let quick_start_root = worktree_path
-        .clone()
-        .unwrap_or_else(|| project_root.to_path_buf());
-    let quick_start_entries = gwt::launch_wizard::load_quick_start_entries(
-        &quick_start_root,
-        sessions_dir,
-        &normalized_branch_name,
-    );
-    let previous_profile =
-        gwt::launch_wizard::load_previous_launch_profile(&quick_start_root, sessions_dir);
-    let (docker_context, docker_service_status) =
-        detect_wizard_docker_context_and_status(&quick_start_root);
-
-    Ok(LaunchWizardHydration {
-        selected_branch: Some(selected_branch),
-        normalized_branch_name,
-        worktree_path,
-        quick_start_root,
-        docker_context,
-        docker_service_status,
-        agent_options,
-        quick_start_entries,
-        previous_profile,
-    })
-}
-
 pub(crate) fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
         WindowPreset::Issue => Some(KnowledgeKind::Issue),
@@ -306,7 +263,7 @@ pub(crate) fn origin_remote_ref(branch_name: &str) -> String {
 }
 
 pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
         .output()
@@ -327,7 +284,7 @@ pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
 }
 
 pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args([
             "show-ref",
             "--verify",
@@ -500,7 +457,7 @@ mod windows_console {
 }
 
 pub(crate) fn resolve_repo_coordinates() -> Option<(String, String)> {
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()?;
