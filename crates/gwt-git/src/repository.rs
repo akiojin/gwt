@@ -197,11 +197,19 @@ fn upsert_managed_hook_block(existing: &str) -> String {
 
 /// Install a pre-commit hook that blocks direct commits on main.
 ///
+/// Accepts both Normal Git layouts (`<repo>/.git/hooks/...`) and Bare layouts
+/// (`<repo>.git/hooks/...` produced by Nested Bare+Worktree migration).
+///
 /// If a pre-commit hook already exists, the gwt block is appended (preserving
 /// existing content). If the gwt block is already present, it is rewritten in
 /// place so legacy develop protection is removed.
 pub fn install_develop_protection(repo_path: &Path) -> Result<()> {
-    let hooks_dir = repo_path.join(".git").join("hooks");
+    let hooks_dir = if repo_path.join(".git").is_dir() {
+        repo_path.join(".git").join("hooks")
+    } else {
+        // Bare layout: hooks live directly under the repo path.
+        repo_path.join("hooks")
+    };
     fs::create_dir_all(&hooks_dir).map_err(GwtError::Io)?;
 
     let hook_path = hooks_dir.join("pre-commit");
