@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.10] - 2026-04-30
+
+### Bug Fixes
+
+- Restore GUI host PATH for agent launches
+- Scope macos path helper for linux lint
+
+### Miscellaneous Tasks
+
+- Merge develop into pty fix branch
+
 ## [9.11.9] - 2026-04-30
 
 ### Bug Fixes

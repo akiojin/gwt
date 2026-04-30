@@ -40,6 +40,12 @@ pub struct SpawnConfig {
     pub cwd: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpawnDiagnostic {
+    path_entry_count: usize,
+    command_resolved_from_env_path: bool,
+}
+
 /// Handle to a spawned PTY process.
 ///
 /// Provides methods for I/O, resize, and process lifecycle management.
@@ -84,12 +90,30 @@ impl PtyHandle {
             cmd.env(key, value);
         }
 
-        let child =
-            pair.slave
-                .spawn_command(cmd)
-                .map_err(|e| TerminalError::PtyCreationFailed {
-                    reason: e.to_string(),
-                })?;
+        let child = match pair.slave.spawn_command(cmd) {
+            Ok(child) => child,
+            Err(error) => {
+                let diagnostic = spawn_diagnostic(&config);
+                let cwd = config
+                    .cwd
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                tracing::error!(
+                    target: "gwt::pty",
+                    command = %config.command,
+                    cwd = %cwd,
+                    path_entry_count = diagnostic.path_entry_count,
+                    command_resolved_from_env_path = diagnostic.command_resolved_from_env_path,
+                    env_path = %env_path_for_log(&config.env),
+                    error = %error,
+                    "PTY spawn command failed"
+                );
+                return Err(TerminalError::PtyCreationFailed {
+                    reason: error.to_string(),
+                });
+            }
+        };
 
         let writer = pair
             .master
@@ -237,6 +261,36 @@ fn normalize_spawn_config(config: SpawnConfig) -> SpawnConfig {
     }
 }
 
+fn spawn_diagnostic(config: &SpawnConfig) -> SpawnDiagnostic {
+    SpawnDiagnostic {
+        path_entry_count: env_path_value(&config.env)
+            .map(|path| std::env::split_paths(path).count())
+            .unwrap_or(0),
+        command_resolved_from_env_path: command_resolves_from_env_path(config),
+    }
+}
+
+#[cfg(not(windows))]
+fn command_resolves_from_env_path(config: &SpawnConfig) -> bool {
+    resolve_command_from_env_path(&config.command, &config.env).is_some()
+}
+
+#[cfg(windows)]
+fn command_resolves_from_env_path(_config: &SpawnConfig) -> bool {
+    false
+}
+
+fn env_path_value(env: &HashMap<String, String>) -> Option<&str> {
+    env.get("PATH")
+        .or_else(|| env.get("Path"))
+        .or_else(|| env.get("path"))
+        .map(String::as_str)
+}
+
+fn env_path_for_log(env: &HashMap<String, String>) -> &str {
+    env_path_value(env).unwrap_or("<unset>")
+}
+
 #[cfg(not(windows))]
 fn normalize_non_windows_spawn_config(mut config: SpawnConfig) -> SpawnConfig {
     if let Some(command) = resolve_command_from_env_path(&config.command, &config.env) {
@@ -357,6 +411,36 @@ mod tests {
         let normalized = normalize_spawn_config(config);
 
         assert_eq!(PathBuf::from(normalized.command), runner);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_diagnostic_reports_config_path_command_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runner = dir.path().join("gwt-test-runner");
+        std::fs::write(&runner, "#!/bin/sh\nexit 0\n").expect("write runner");
+        let mut permissions = std::fs::metadata(&runner)
+            .expect("runner metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&runner, permissions).expect("chmod runner");
+
+        let config = SpawnConfig {
+            command: "gwt-test-runner".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            env: HashMap::from([("PATH".to_string(), dir.path().display().to_string())]),
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+
+        let diagnostic = spawn_diagnostic(&config);
+
+        assert_eq!(diagnostic.path_entry_count, 1);
+        assert!(diagnostic.command_resolved_from_env_path);
     }
 
     #[test]

@@ -1,5 +1,53 @@
 # Lessons Learned
 
+## 2026-04-30 — fix(ci): ローカル lint は CI と同じ package selection でも確認する
+
+### 事象
+
+PR #2230 の `Clippy & Rustfmt` で、Linux CI の
+`cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings` が
+`crates/gwt-agent/src/environment.rs` の `push_path_value` を dead code として失敗した。
+手元では先に workspace 全体の clippy を通していたが、CI と同一の package selection では
+確認していなかった。
+
+### 原因
+
+`push_path_value` は macOS の `path_helper` 経路だけで使われる helper だったが、
+`#[cfg(not(windows))]` で Linux にも compile されていた。workspace 全体の all-targets では
+test target 側の利用条件に隠れ、PR CI の lib dependency build でだけ dead code が表面化した。
+
+### 再発防止策
+
+1. PR lint を確認するときは、広い workspace clippy に加えて CI と同一の
+   `cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings` も実行する。
+2. OS 固有 helper は「使われる呼び出し元」と同じ `cfg` 条件まで狭め、Linux CI に不要な symbol を残さない。
+3. CI で失敗したら、ローカル成功結果より GitHub Actions の exact command と package selection を優先して再現する。
+
+## 2026-04-30 — fix(gui): 修正済み判断の前にインストール済みアプリの最新ログで再検証する
+
+### 事象
+
+v9.11.9 適用後も `$gwt-discussion` / Codex 起動で
+`PTY creation failed: Unable to spawn npx because: No viable candidates found in PATH "/usr/bin:/bin:/usr/sbin:/sbin"`
+が再発していた。`~/.gwt/projects/8a5edab282632443/logs/gwt.log.2026-04-30`
+には 2026-04-30T11:36:32+09:00 の失敗が記録されており、アプリも
+`/Applications/GWT.app` v9.11.9 だった。
+
+### 原因
+
+前回修正は PTY spawn 時に `config.env["PATH"]` から bare command を解決するだけで、
+GUI / LaunchServices 由来の最小 `PATH` そのものを Host launch env で復元していなかった。
+また、project log はエラーを記録していたが、PTY に渡した `PATH` でコマンドが解決可能かの
+診断がなく、原因の切り分けが遅れた。
+
+### 再発防止策
+
+1. 「修正済み」と判断する前に、インストール済みアプリの version、起動中プロセス、
+   project-scoped log の最新失敗時刻を確認する。
+2. GUI Host 起動の `PATH` 問題では、runner 選択だけでなく Host base env 生成元を検査する。
+3. PTY spawn failure では、エラー本文に加えて `env_path`、path entry 数、
+   command の env PATH 解決可否を structured log に残す。
+
 ## 2026-04-30 — fix(gui): PTY creation failure は runner 名ではなく起動環境から切り分ける
 
 ### 事象
