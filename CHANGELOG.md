@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.11.9] - 2026-04-30
+
+### Bug Fixes
+
+- **gui:** Restore macOS paste shortcuts
+
+### Ci
+
+- Install WebView deps for coverage workflow
+
 ## [9.11.8] - 2026-04-30
 
 ### Bug Fixes
