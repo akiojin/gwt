@@ -229,6 +229,7 @@ pub struct LaunchConfig {
     pub command: String,
     pub args: Vec<String>,
     pub env_vars: HashMap<String, String>,
+    pub remove_env: Vec<String>,
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
     pub base_branch: Option<String>,
@@ -527,6 +528,7 @@ impl AgentLaunchBuilder {
             command: runner.executable,
             args,
             env_vars,
+            remove_env: Vec::new(),
             working_dir: self.working_dir,
             branch: self.branch,
             base_branch: self.base_branch,
@@ -717,6 +719,8 @@ impl AgentLaunchBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::custom::{CustomAgentType, CustomCodingAgent, ModeArgs};
 
     use super::*;

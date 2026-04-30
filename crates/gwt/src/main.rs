@@ -85,11 +85,11 @@ pub(crate) use runtime_support::{
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     origin_remote_ref, resolve_launch_spec_with_fallback, resolve_launch_wizard_hydration,
     resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
-    should_auto_start_restored_window, spawn_env, synthetic_branch_entry, workspace_view_for_tab,
+    should_auto_start_restored_window, synthetic_branch_entry, workspace_view_for_tab,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
-    branch_worktree_path, parse_github_remote_url, suffixed_worktree_path,
+    branch_worktree_path, parse_github_remote_url, spawn_env, suffixed_worktree_path,
     worktree_path_is_occupied,
 };
 pub(crate) use update_front_door::{apply_update_and_exit, spawn_startup_update_check};
@@ -395,6 +395,7 @@ mod tests {
         ShellLaunchConfig, WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
+    use gwt_config::{Profile, Settings};
     use gwt_core::logging::{LogEvent, LogLevel};
     use gwt_core::update::UpdateState;
     use gwt_terminal::PaneStatus;
@@ -1671,6 +1672,7 @@ mod tests {
                     command: "echo".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),
+                    remove_env: Vec::new(),
                     cwd: None,
                 },
                 "session-3".to_string(),
@@ -1698,6 +1700,7 @@ mod tests {
                 command: "echo".to_string(),
                 args: Vec::new(),
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             }),
         );
@@ -2497,6 +2500,7 @@ mod tests {
                     command: "echo".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),
+                    remove_env: Vec::new(),
                     cwd: None,
                 },
                 "session-1".to_string(),
@@ -2533,6 +2537,7 @@ mod tests {
                     command: "echo".to_string(),
                     args: Vec::new(),
                     env: HashMap::new(),
+                    remove_env: Vec::new(),
                     cwd: None,
                 },
                 "session-2".to_string(),
@@ -2560,6 +2565,7 @@ mod tests {
                 command: "echo".to_string(),
                 args: Vec::new(),
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             }),
         );
@@ -2580,6 +2586,7 @@ mod tests {
                 command: "echo".to_string(),
                 args: Vec::new(),
                 env: HashMap::new(),
+                remove_env: Vec::new(),
                 cwd: None,
             }),
         );
@@ -2777,11 +2784,12 @@ mod tests {
     #[test]
     fn host_package_runner_fallback_switches_bunx_to_npx_when_probe_fails() {
         let mut config = sample_versioned_launch_config();
+        config.remove_env = vec!["SECRET".to_string()];
 
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |command, args, _env, cwd| {
+            |command, args, _env, remove_env, cwd| {
                 assert_eq!(command, "bunx");
                 assert_eq!(
                     args,
@@ -2790,6 +2798,7 @@ mod tests {
                         "--version".to_string(),
                     ]
                 );
+                assert_eq!(remove_env, vec!["SECRET".to_string()].as_slice());
                 assert_eq!(cwd, Some(PathBuf::from("E:/gwt/develop")));
                 false
             },
@@ -2816,7 +2825,7 @@ mod tests {
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |_command, _args, _env, _cwd| true,
+            |_command, _args, _env, _remove_env, _cwd| true,
         );
 
         assert!(!changed, "successful bunx probe should keep bunx");
@@ -2831,7 +2840,7 @@ mod tests {
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |command, args, _env, cwd| {
+            |command, args, _env, _remove_env, cwd| {
                 assert_eq!(command, "bunx");
                 assert_eq!(
                     args,
@@ -2869,7 +2878,7 @@ mod tests {
         let changed = apply_host_package_runner_fallback_with_probe(
             &mut config,
             "npx".to_string(),
-            |_command, _args, _env, _cwd| {
+            |_command, _args, _env, _remove_env, _cwd| {
                 panic!("installed command should not probe bunx");
             },
         );
@@ -2894,6 +2903,7 @@ mod tests {
             command,
             args,
             &HashMap::new(),
+            &[],
             None,
             Duration::from_millis(100),
             Duration::from_millis(10),
@@ -2920,6 +2930,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::from([("EXTRA_FLAG".to_string(), "1".to_string())]),
+            remove_env: vec!["SECRET".to_string()],
             windows_shell: None,
         };
 
@@ -2936,6 +2947,7 @@ mod tests {
             config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.display().to_string().as_str())
         );
+        assert_eq!(launch.remove_env, vec!["SECRET".to_string()]);
     }
 
     #[test]
@@ -2952,6 +2964,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::new(),
+            remove_env: Vec::new(),
             windows_shell: Some(gwt_agent::WindowsShellKind::WindowsPowerShell),
         };
 
@@ -3523,6 +3536,10 @@ mod tests {
         let env = super::spawn_env();
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+        assert!(
+            env.contains_key("PATH"),
+            "PTY spawn env must inherit the process PATH"
+        );
         assert_eq!(
             super::geometry_to_pty_size(&WindowGeometry {
                 x: 0.0,
@@ -3766,6 +3783,7 @@ mod tests {
             docker_service: None,
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             env_vars: HashMap::new(),
+            remove_env: Vec::new(),
             windows_shell: None,
         };
         super::resolve_shell_launch_worktree(&repo, &mut shell_config)
@@ -4157,6 +4175,50 @@ mod tests {
             super::parse_github_remote_url("https://example.com/repo"),
             None
         );
+
+        let profile_temp = tempdir().expect("profile tempdir");
+        let config_path = profile_temp.path().join("profile-config.toml");
+        let mut settings = Settings::default();
+        settings
+            .profiles
+            .add(Profile::new("dev"))
+            .expect("add profile");
+        settings.profiles.switch("dev").expect("switch active");
+        settings
+            .profiles
+            .set_env_var("dev", "PATH", "/profile/bin:/usr/bin")
+            .expect("set PATH");
+        settings
+            .profiles
+            .set_env_var("dev", "PROFILE_ONLY", "enabled")
+            .expect("set env");
+        settings
+            .profiles
+            .add_disabled_env("dev", "SECRET")
+            .expect("disable env");
+        settings.save(&config_path).expect("save settings");
+
+        let (effective_env, remove_env) =
+            gwt_agent::LaunchEnvironment::from_active_profile_with_base(
+                &config_path,
+                [
+                    ("PATH".to_string(), "/os/bin".to_string()),
+                    ("SECRET".to_string(), "hidden".to_string()),
+                ],
+            )
+            .expect("effective env")
+            .into_parts();
+
+        assert_eq!(
+            effective_env.get("PATH").map(String::as_str),
+            Some("/profile/bin:/usr/bin")
+        );
+        assert_eq!(
+            effective_env.get("PROFILE_ONLY").map(String::as_str),
+            Some("enabled")
+        );
+        assert!(!effective_env.contains_key("SECRET"));
+        assert_eq!(remove_env, vec!["SECRET".to_string()]);
 
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

@@ -1,5 +1,30 @@
 # Lessons Learned
 
+## 2026-04-30 — fix(gui): PTY creation failure は runner 名ではなく起動環境から切り分ける
+
+### 事象
+
+`$gwt-discussion` 起動時に `PTY creation failed: Unable to spawn npx because:
+No viable candidates found in PATH "/usr/bin:/bin:/usr/sbin:/sbin"` が出た際、最初に
+`npx` / `bunx` の runner 選択へ寄せて考えすぎた。ユーザーから「本質はそこではない」と
+指摘され、GUI から起動される PTY の effective environment が active profile と
+OS 環境を正しく反映していないことが根本原因だと整理し直した。
+
+### 原因
+
+エラーメッセージ上の executable 名に引きずられ、`PATH` が最小値
+(`/usr/bin:/bin:/usr/sbin:/sbin`) になっている事実を起点に、
+GUI process env、active profile、disabled env、PTY spawn inheritance の境界を
+先に確認しなかった。
+
+### 再発防止策
+
+1. `No viable candidates found in PATH` 系の PTY 起動失敗では、runner fallback より先に
+   GUI process env と session effective env を確認する。
+2. profile env の修正では、`OS env - disabled_env + env_vars` が preview だけでなく
+   shell / agent / package runner probe / PTY spawn まで同一に届くことをテストする。
+3. `disabled_env` は env map からの欠落だけでなく、inherited env の明示削除として扱う。
+
 ## 2026-04-29 — fix(launch): Launch Wizard は runtime 検出と実行可否検証を混ぜない
 
 ### 事象
