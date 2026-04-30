@@ -116,6 +116,29 @@ Docker 起動では引き続きコンテナ内のシェルを使います。
 できます。Windows / Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 `Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 
+## ワークスペース構成
+
+gwt は各プロジェクトをワークスペースディレクトリ配下の **Nested Bare + Worktree**
+構成として管理します。
+
+```
+<workspace>/<project>/
+├── <project>.git/          # bare リポジトリ
+├── develop/                # develop ワークツリー（既定の作業ディレクトリ）
+├── feature/<name>/         # ブランチごとの追加ワークツリー
+└── .gwt/project.toml       # gwt が管理するプロジェクトメタデータ
+```
+
+Initialization ウィザード経由で clone した場合は自動でこの構成になります。
+既存の Normal Git リポジトリ（プロジェクト直下に `.git/` がある通常レイアウト）
+は検出され、要望に応じて Nested Bare + Worktree 構成へマイグレーションできます。
+マイグレーションは `.gwt-migration-backup/` にフルバックアップを取ってから
+bare リポジトリを作り直し、各 worktree を新レイアウトに再配置します。
+任意のフェーズで失敗した場合は自動的に元のレイアウトへロールバックされます。
+進行状況は
+[GitHub Issue #1934 (SPEC-1934)](https://github.com/akiojin/gwt/issues/1934)
+で管理しています。
+
 ## キャンバス操作
 
 - 画面上の zoom ボタンでキャンバスを拡大・縮小
