@@ -28,7 +28,7 @@ pub fn macos_bundle_identifier() -> &'static str {
 }
 
 pub fn macos_native_menu_titles() -> &'static [&'static str] {
-    &[APP_NAME, "File", "View", "Window"]
+    &[APP_NAME, "File", "Edit", "View", "Window"]
 }
 
 pub fn native_launch_surface() -> NativeLaunchSurface {
@@ -83,6 +83,7 @@ impl MacosNativeMenu {
         let menu_bar = Menu::new();
         let app_menu = Submenu::new(APP_NAME, true);
         let file_menu = Submenu::new("File", true);
+        let edit_menu = Submenu::new("Edit", true);
         let view_menu = Submenu::new("View", true);
         let window_menu = Submenu::new("Window", true);
         let open_project_item = MenuItem::with_id(
@@ -98,7 +99,8 @@ impl MacosNativeMenu {
             Some(Accelerator::new(Some(CMD_OR_CTRL), Code::KeyR)),
         );
 
-        let _ = menu_bar.append_items(&[&app_menu, &file_menu, &view_menu, &window_menu]);
+        let _ =
+            menu_bar.append_items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu]);
         let _ = app_menu.append_items(&[
             &PredefinedMenuItem::about(
                 None,
@@ -120,6 +122,16 @@ impl MacosNativeMenu {
             &open_project_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::close_window(None),
+        ]);
+        let _ = edit_menu.append_items(&[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::select_all(None),
         ]);
         let _ = view_menu.append_items(&[&reload_item]);
         let _ = window_menu.append_items(&[

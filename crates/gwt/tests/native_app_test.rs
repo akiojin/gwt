@@ -9,7 +9,7 @@ fn macos_native_shell_uses_expected_bundle_identifier_and_menu_titles() {
     assert_eq!(macos_bundle_identifier(), "io.github.akiojin.gwt");
     assert_eq!(
         macos_native_menu_titles(),
-        &["GWT", "File", "View", "Window"]
+        &["GWT", "File", "Edit", "View", "Window"]
     );
 }
 
@@ -35,7 +35,10 @@ fn native_launch_surface_keeps_gui_primary_bundle_and_menu_contract() {
     assert_eq!(surface.bundle_name, MACOS_APP_BUNDLE_NAME);
     assert_eq!(surface.front_door_binary, GUI_FRONT_DOOR_BINARY_NAME);
     assert_eq!(surface.daemon_binary, INTERNAL_DAEMON_BINARY_NAME);
-    assert_eq!(surface.menu_titles, &["GWT", "File", "View", "Window"]);
+    assert_eq!(
+        surface.menu_titles,
+        &["GWT", "File", "Edit", "View", "Window"]
+    );
     assert_eq!(
         surface.command_ids,
         &[OPEN_PROJECT_MENU_ID, RELOAD_MENU_ID],
