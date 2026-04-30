@@ -13,6 +13,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: develop
+      - name: Install WebView dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
       - uses: actions/setup-node@v6
         with:
           node-version: 20
