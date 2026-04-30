@@ -122,49 +122,137 @@ pub fn copy_hooks_to_bare(source_dot_git: &Path, bare: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Add a clean worktree at `<target>` for `<branch>` from the bare repo.
-pub fn add_worktree_clean(_bare: &Path, _target: &Path, _branch: &str) -> Result<()> {
-    Err(GwtError::Git(
-        "migration::add_worktree_clean — not implemented (SPEC-1934 T-050)".to_string(),
-    ))
+/// File-system entries that must never be moved by the dirty-file
+/// evacuation / restore pipeline. `.git` is the working tree's pointer (or the
+/// bare repo itself) and the migration backup is the rollback safety net.
+const EVACUATION_EXCLUSIONS: &[&str] = &[".git", ".gwt-migration-backup"];
+
+/// Add a clean worktree at `<target>` for `<branch>` from the bare repo
+/// (FR-024).
+pub fn add_worktree_clean(bare: &Path, target: &Path, branch: &str) -> Result<()> {
+    run_worktree_add(bare, target, branch, false)
 }
 
 /// Add a worktree without checkout, so callers can restore evacuated files
-/// before running `git reset` (FR-023, T-052).
-pub fn add_worktree_no_checkout(_bare: &Path, _target: &Path, _branch: &str) -> Result<()> {
-    Err(GwtError::Git(
-        "migration::add_worktree_no_checkout — not implemented (SPEC-1934 T-053)".to_string(),
-    ))
+/// before running `git reset` (FR-023).
+pub fn add_worktree_no_checkout(bare: &Path, target: &Path, branch: &str) -> Result<()> {
+    run_worktree_add(bare, target, branch, true)
 }
 
-/// Move all files except `.git/` and the migration backup to a temporary
-/// evacuation directory; returns the evacuation root for later restore.
-pub fn evacuate_dirty_files(_worktree: &Path, _evacuation_root: &Path) -> Result<PathBuf> {
-    Err(GwtError::Git(
-        "migration::evacuate_dirty_files — not implemented (SPEC-1934 T-053)".to_string(),
-    ))
+fn run_worktree_add(bare: &Path, target: &Path, branch: &str, no_checkout: bool) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(GwtError::Io)?;
+        }
+    }
+    let target_str = target.to_str().ok_or_else(|| {
+        GwtError::Git(format!(
+            "invalid worktree target path: {}",
+            target.display()
+        ))
+    })?;
+
+    let mut args: Vec<&str> = vec!["worktree", "add"];
+    if no_checkout {
+        args.push("--no-checkout");
+    }
+    args.push(target_str);
+    args.push(branch);
+
+    let output = hidden_command("git")
+        .args(&args)
+        .current_dir(bare)
+        .output()
+        .map_err(|e| GwtError::Git(format!("git worktree add: {e}")))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(GwtError::Git(format!(
+            "git worktree add {} failed: {stderr}",
+            target.display()
+        )))
+    }
 }
 
-/// Restore previously-evacuated files into the new worktree.
-pub fn restore_evacuated_files(_evacuation_root: &Path, _new_worktree: &Path) -> Result<()> {
-    Err(GwtError::Git(
-        "migration::restore_evacuated_files — not implemented (SPEC-1934 T-053)".to_string(),
-    ))
+/// Move every top-level entry under `worktree` to `evacuation_root` (creating
+/// it as needed). `.git` and the migration backup directory are kept in
+/// place. Returns the evacuation root so callers can pass it back into
+/// [`restore_evacuated_files`].
+pub fn evacuate_dirty_files(worktree: &Path, evacuation_root: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(evacuation_root).map_err(GwtError::Io)?;
+    for entry in fs::read_dir(worktree).map_err(GwtError::Io)? {
+        let entry = entry.map_err(GwtError::Io)?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if EVACUATION_EXCLUSIONS.iter().any(|e| **e == *name_str) {
+            continue;
+        }
+        let from = entry.path();
+        let to = evacuation_root.join(&name);
+        fs::rename(&from, &to).map_err(GwtError::Io)?;
+    }
+    Ok(evacuation_root.to_path_buf())
 }
 
-/// Run `git submodule update --init --recursive` in the new worktree
-/// (best effort; failure logs a warning).
-pub fn init_submodules(_worktree: &Path) -> Result<()> {
-    Err(GwtError::Git(
-        "migration::init_submodules — not implemented (SPEC-1934 T-061)".to_string(),
-    ))
+/// Restore previously-evacuated files into `new_worktree`. Existing entries
+/// in the destination (e.g. a `.git` marker created by
+/// `git worktree add --no-checkout`) are preserved.
+pub fn restore_evacuated_files(evacuation_root: &Path, new_worktree: &Path) -> Result<()> {
+    fs::create_dir_all(new_worktree).map_err(GwtError::Io)?;
+    for entry in fs::read_dir(evacuation_root).map_err(GwtError::Io)? {
+        let entry = entry.map_err(GwtError::Io)?;
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = new_worktree.join(&name);
+        if to.exists() {
+            // Don't clobber Git's bookkeeping (`.git`, `.gitignore` written by
+            // worktree add) — caller can decide whether to replace instead.
+            continue;
+        }
+        fs::rename(&from, &to).map_err(GwtError::Io)?;
+    }
+    Ok(())
 }
 
-/// Set upstream tracking for `<branch>` to `origin/<branch>`, if it exists.
-pub fn set_upstream(_worktree: &Path, _branch: &str) -> Result<()> {
-    Err(GwtError::Git(
-        "migration::set_upstream — not implemented (SPEC-1934 T-063)".to_string(),
-    ))
+/// Run `git submodule update --init --recursive` in `worktree`. Per FR-025
+/// the call is best-effort: a repo without submodules exits cleanly, and any
+/// real submodule failure is propagated as an error so the executor can log
+/// a warning without aborting the migration.
+pub fn init_submodules(worktree: &Path) -> Result<()> {
+    let output = hidden_command("git")
+        .args(["submodule", "update", "--init", "--recursive"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|e| GwtError::Git(format!("git submodule update: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(GwtError::Git(format!(
+            "git submodule update failed: {stderr}"
+        )))
+    }
+}
+
+/// Set upstream tracking for `<branch>` to `origin/<branch>` in `worktree`.
+/// FR-026 requires this to succeed silently when `origin/<branch>` is missing
+/// (e.g. local-only branches), so we treat any non-zero git exit as a no-op.
+pub fn set_upstream(worktree: &Path, branch: &str) -> Result<()> {
+    let upstream = format!("origin/{branch}");
+    let output = hidden_command("git")
+        .args(["branch", "--set-upstream-to", &upstream, branch])
+        .current_dir(worktree)
+        .output()
+        .map_err(|e| GwtError::Git(format!("git branch --set-upstream-to: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        // Missing upstream is expected for fresh / local-only branches.
+        // Non-zero exits are absorbed here so the migration does not abort.
+        Ok(())
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {

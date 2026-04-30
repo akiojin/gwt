@@ -4,7 +4,11 @@
 //! `gwt_git::migration::*`. Each test corresponds to a task in the
 //! SPEC-1934 `tasks` section.
 
-use gwt_git::migration::{bareify_local, clone_bare_from_normal, copy_hooks_to_bare};
+use gwt_git::migration::{
+    add_worktree_clean, add_worktree_no_checkout, bareify_local, clone_bare_from_normal,
+    copy_hooks_to_bare, evacuate_dirty_files, init_submodules, restore_evacuated_files,
+    set_upstream,
+};
 use gwt_git::repository::{detect_repo_type, install_develop_protection, RepoType};
 
 fn init_normal_repo(path: &std::path::Path) {
@@ -145,6 +149,154 @@ fn t047_install_develop_protection_works_against_bare_repo() {
     let content = std::fs::read_to_string(&hook).unwrap();
     assert!(content.contains("gwt-managed"));
     assert!(content.contains("\"$branch\" = \"main\""));
+}
+
+#[test]
+fn t050_add_worktree_clean_checks_out_branch_into_target() {
+    // FR-024: clean worktree migration uses plain `git worktree add` so the
+    // branch contents land in `<target>` immediately.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let workspace = tempfile::tempdir().unwrap();
+    let bare = workspace.path().join("repo.git");
+    clone_bare_from_normal(upstream.path().to_str().unwrap(), &bare).unwrap();
+
+    // Find the default branch name (init.defaultBranch may differ across hosts).
+    let head_output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(&bare)
+        .output()
+        .unwrap();
+    let branch = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    let target = workspace.path().join(&branch);
+    add_worktree_clean(&bare, &target, &branch).expect("add_worktree_clean");
+
+    assert!(target.is_dir(), "worktree dir must exist");
+    assert!(
+        target.join(".git").exists(),
+        "worktree must contain a .git marker"
+    );
+}
+
+#[test]
+fn t052_dirty_worktree_evacuate_no_checkout_restore_round_trip() {
+    // FR-023: dirty file changes must survive the migration.
+    // Workflow: evacuate → add_worktree_no_checkout → restore → git reset.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let workspace = tempfile::tempdir().unwrap();
+    let bare = workspace.path().join("repo.git");
+    clone_bare_from_normal(upstream.path().to_str().unwrap(), &bare).unwrap();
+
+    // Build a "dirty Normal worktree" simulation: a directory holding both
+    // pre-existing tracked content (clean files committed elsewhere are not
+    // available in this isolated fixture, so we limit ourselves to untracked
+    // files which round-trip the same way).
+    let dirty_root = workspace.path().join("dirty-source");
+    std::fs::create_dir_all(&dirty_root).unwrap();
+    std::fs::write(dirty_root.join("untracked.txt"), "kept").unwrap();
+    std::fs::create_dir_all(dirty_root.join("nested")).unwrap();
+    std::fs::write(dirty_root.join("nested").join("note.md"), "still here").unwrap();
+
+    // Step 1: evacuate dirty files away.
+    let evacuation = workspace.path().join("evacuation");
+    let evacuated = evacuate_dirty_files(&dirty_root, &evacuation).expect("evacuate");
+    assert!(
+        evacuated.join("untracked.txt").is_file(),
+        "untracked file must move into evacuation dir"
+    );
+    assert!(
+        !dirty_root.join("untracked.txt").exists(),
+        "original location must be empty after evacuation"
+    );
+
+    // Step 2: create the new worktree without checkout.
+    let head_output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(&bare)
+        .output()
+        .unwrap();
+    let branch = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    let new_worktree = workspace.path().join(&branch);
+    add_worktree_no_checkout(&bare, &new_worktree, &branch).expect("add_worktree_no_checkout");
+    assert!(new_worktree.is_dir());
+
+    // Step 3: restore the evacuated tree into the new worktree.
+    restore_evacuated_files(&evacuated, &new_worktree).expect("restore_evacuated_files");
+
+    assert_eq!(
+        std::fs::read_to_string(new_worktree.join("untracked.txt")).unwrap(),
+        "kept",
+        "evacuated file must be present in the new worktree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(new_worktree.join("nested").join("note.md")).unwrap(),
+        "still here"
+    );
+}
+
+#[test]
+fn t060_init_submodules_succeeds_on_repo_without_submodules() {
+    // FR-025: submodule init must be best-effort. A repo without `.gitmodules`
+    // should not fail validation here (`git submodule update` exits 0).
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let workspace = tempfile::tempdir().unwrap();
+    let bare = workspace.path().join("repo.git");
+    clone_bare_from_normal(upstream.path().to_str().unwrap(), &bare).unwrap();
+
+    let head_output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(&bare)
+        .output()
+        .unwrap();
+    let branch = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    let target = workspace.path().join(&branch);
+    add_worktree_clean(&bare, &target, &branch).unwrap();
+
+    init_submodules(&target).expect("init_submodules must be best-effort Ok");
+}
+
+#[test]
+fn t062_set_upstream_skips_when_origin_branch_is_absent() {
+    // FR-026: When `origin/<branch>` is missing, set_upstream silently
+    // succeeds rather than aborting the migration.
+    let upstream = tempfile::tempdir().unwrap();
+    init_normal_repo(upstream.path());
+    commit_initial(upstream.path());
+
+    let workspace = tempfile::tempdir().unwrap();
+    let bare = workspace.path().join("repo.git");
+    clone_bare_from_normal(upstream.path().to_str().unwrap(), &bare).unwrap();
+
+    let head_output = gwt_core::process::hidden_command("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(&bare)
+        .output()
+        .unwrap();
+    let branch = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    let target = workspace.path().join(&branch);
+    add_worktree_clean(&bare, &target, &branch).unwrap();
+
+    // The bare clone has no `origin` configured (it was cloned from a local
+    // path inside this test), so `origin/<branch>` does not exist. The call
+    // must succeed without error.
+    set_upstream(&target, &branch).expect("set_upstream must skip missing upstream gracefully");
 }
 
 #[test]
