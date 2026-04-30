@@ -221,20 +221,49 @@ pub fn load_previous_launch_profile(
     sessions_dir: &Path,
 ) -> Option<LaunchWizardPreviousProfile> {
     let entries = std::fs::read_dir(sessions_dir).ok()?;
-    entries
+    let sessions = entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
             (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
         })
         .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
+        .collect::<Vec<_>>();
+    previous_launch_profile_from_sessions(repo_path, &sessions)
+}
+
+pub fn previous_launch_profile_from_sessions(
+    repo_path: &Path,
+    sessions: &[gwt_agent::Session],
+) -> Option<LaunchWizardPreviousProfile> {
+    sessions
+        .iter()
         .filter(|session| same_launch_profile_repo(repo_path, session))
         .max_by(|left, right| {
             left.updated_at
                 .cmp(&right.updated_at)
                 .then_with(|| left.created_at.cmp(&right.created_at))
         })
+        .cloned()
         .map(previous_profile_from_session)
+}
+
+pub fn quick_start_entries_from_sessions(
+    repo_path: &Path,
+    branch_name: &str,
+    sessions: &[gwt_agent::Session],
+) -> Vec<QuickStartEntry> {
+    let sessions = sessions
+        .iter()
+        .filter(|session| session.branch == branch_name)
+        .filter(|session| same_launch_profile_repo(repo_path, session))
+        .cloned()
+        .map(|mut session| {
+            session.worktree_path = repo_path.to_path_buf();
+            session
+        })
+        .collect::<Vec<_>>();
+    quick_start::collect_quick_start_entries_from_sessions(repo_path, branch_name, sessions)
 }
 
 fn previous_profile_from_session(session: gwt_agent::Session) -> LaunchWizardPreviousProfile {

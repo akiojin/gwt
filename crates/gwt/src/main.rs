@@ -13,13 +13,12 @@ use std::{
 use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
 use base64::Engine;
 use gwt::{
-    cleanup_selected_branches, default_wizard_version_cache_path, detect_shell_program,
-    list_branch_entries_with_active_sessions, list_directory_entries, load_agent_options,
-    load_knowledge_bridge, load_restored_workspace_state, load_session_state,
-    migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree, resolve_launch_spec,
-    save_session_state, save_workspace_state, workspace_state_path, BackendEvent,
-    BranchEntriesPhase, BranchListEntry, DockerWizardContext, FrontendEvent, HookForwardTarget,
-    KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
+    cleanup_selected_branches, detect_shell_program, list_branch_entries_with_active_sessions,
+    list_directory_entries, load_knowledge_bridge, load_restored_workspace_state,
+    load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree,
+    resolve_launch_spec, save_session_state, save_workspace_state, workspace_state_path,
+    BackendEvent, BranchEntriesPhase, BranchListEntry, DockerWizardContext, FrontendEvent,
+    HookForwardTarget, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
     LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
     WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
@@ -42,6 +41,8 @@ mod repo_browser;
 mod runtime_support;
 mod update_front_door;
 
+#[cfg(test)]
+pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
@@ -83,14 +84,13 @@ pub(crate) use runtime_support::{
     combined_window_id, current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
-    origin_remote_ref, resolve_launch_spec_with_fallback, resolve_launch_wizard_hydration,
-    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
-    should_auto_start_restored_window, synthetic_branch_entry, workspace_view_for_tab,
+    origin_remote_ref, resolve_launch_spec_with_fallback, resolve_project_target, run_cli,
+    same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
+    synthetic_branch_entry, workspace_view_for_tab,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
-    branch_worktree_path, parse_github_remote_url, spawn_env, suffixed_worktree_path,
-    worktree_path_is_occupied,
+    parse_github_remote_url, spawn_env, suffixed_worktree_path, worktree_path_is_occupied,
 };
 pub(crate) use update_front_door::{apply_update_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -359,10 +359,6 @@ enum UserEvent {
         window_id: String,
         result: Result<ProcessLaunch, String>,
     },
-    LaunchWizardHydrated {
-        wizard_id: String,
-        result: Box<Result<LaunchWizardHydration, String>>,
-    },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
@@ -409,8 +405,9 @@ mod tests {
         install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AppEventProxy, AppRuntime,
-        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -913,6 +910,7 @@ mod tests {
         let log_dir = temp_root.join("logs");
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
         fs::create_dir_all(&log_dir).expect("create log dir");
+        let launch_wizard_cache = LaunchWizardMemoryCache::load(&sessions_dir);
         let mut runtime = AppRuntime {
             tabs,
             active_tab_id: active_tab_id.map(str::to_owned),
@@ -927,6 +925,7 @@ mod tests {
             proxy,
             blocking_tasks: BlockingTaskSpawner::thread(),
             sessions_dir,
+            launch_wizard_cache,
             launch_wizard: None,
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
@@ -1823,11 +1822,14 @@ mod tests {
             wizard_events[0].event,
             BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
-        wait_for_recorded_event("launch wizard hydration", &events, |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
-        });
+        assert!(
+            !runtime
+                .launch_wizard
+                .as_ref()
+                .expect("launch wizard")
+                .wizard
+                .is_hydrating
+        );
 
         let issue_events = runtime.open_issue_launch_wizard_events("client-1", &issue_id, 42);
         assert!(issue_events.is_empty());
@@ -2135,11 +2137,14 @@ mod tests {
             },
         );
         assert_eq!(wizard_events.len(), 1);
-        wait_for_recorded_event("launch wizard hydration", &events, |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
-        });
+        assert!(
+            !runtime
+                .launch_wizard
+                .as_ref()
+                .expect("launch wizard")
+                .wizard
+                .is_hydrating
+        );
 
         let issue_events = runtime.handle_frontend_event(
             "client-1".to_string(),
@@ -2202,11 +2207,11 @@ mod tests {
     }
 
     #[test]
-    fn wizard_handler_helpers_cover_hydration_preparation_focus_and_error_paths() {
+    fn wizard_handler_helpers_cover_preparation_focus_and_error_paths() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let (mut runtime, events) = sample_runtime_with_events(
+        let (mut runtime, _events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -2218,48 +2223,6 @@ mod tests {
             Some("tab-1"),
         );
         let claude_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
-
-        assert!(runtime
-            .handle_launch_wizard_hydrated("wizard-1".to_string(), Err("missing".to_string()))
-            .is_empty());
-
-        runtime.launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
-        assert!(runtime
-            .handle_launch_wizard_hydrated("other".to_string(), Err("skip".to_string()))
-            .is_empty());
-
-        let hydration_error = runtime.handle_launch_wizard_hydrated(
-            "wizard-1".to_string(),
-            Err("hydrate failed".to_string()),
-        );
-        assert_eq!(hydration_error.len(), 1);
-        assert_eq!(
-            runtime
-                .launch_wizard
-                .as_ref()
-                .unwrap()
-                .wizard
-                .hydration_error
-                .as_deref(),
-            Some("hydrate failed")
-        );
-
-        let hydration_ok = runtime.handle_launch_wizard_hydrated(
-            "wizard-1".to_string(),
-            Ok(gwt::LaunchWizardHydration {
-                selected_branch: Some(sample_branch_entry("feature/demo")),
-                normalized_branch_name: "feature/demo".to_string(),
-                worktree_path: Some(repo.clone()),
-                quick_start_root: repo.clone(),
-                docker_context: None,
-                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
-                agent_options: sample_wizard_agent_options(),
-                quick_start_entries: vec![sample_wizard_quick_start_entry(None)],
-                previous_profile: None,
-            }),
-        );
-        assert_eq!(hydration_ok.len(), 1);
-        assert!(!runtime.launch_wizard.as_ref().unwrap().wizard.is_hydrating);
 
         let missing_tab =
             runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
@@ -2308,11 +2271,14 @@ mod tests {
             prepared_ok[0].event,
             BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
-        wait_for_recorded_event("prepared launch hydration", &events, |events| {
-            events
-                .iter()
-                .any(|event| matches!(event, UserEvent::LaunchWizardHydrated { .. }))
-        });
+        assert!(
+            !runtime
+                .launch_wizard
+                .as_ref()
+                .expect("launch wizard")
+                .wizard
+                .is_hydrating
+        );
 
         runtime.launch_wizard = None;
         assert!(runtime
@@ -3508,10 +3474,6 @@ mod tests {
             .expect("git branch");
         assert!(branch.success(), "git branch failed");
 
-        assert_eq!(
-            super::branch_worktree_path(&repo, "develop"),
-            Some(repo.clone())
-        );
         assert!(super::local_branch_exists(&repo, "feature/demo").unwrap());
         assert!(!super::local_branch_exists(&repo, "feature/missing").unwrap());
 
@@ -4488,10 +4450,6 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
                 let events = app.handle_shell_launch_complete(window_id, result);
-                clients.dispatch(events);
-            }
-            Event::UserEvent(UserEvent::LaunchWizardHydrated { wizard_id, result }) => {
-                let events = app.handle_launch_wizard_hydrated(wizard_id, *result);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::IssueLaunchWizardPrepared(prepared)) => {
