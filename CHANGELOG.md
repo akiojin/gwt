@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.13.2] - 2026-05-01
+
+### Bug Fixes
+
+- **gui:** Serve migration modal module in WebView
+
 ## [9.13.1] - 2026-05-01
 
 ### Testing
