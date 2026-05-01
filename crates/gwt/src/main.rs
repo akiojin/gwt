@@ -37,6 +37,7 @@ mod docker_launch;
 mod embedded_server;
 mod embedded_web;
 mod launch_runtime;
+mod project_index_bootstrap;
 mod repo_browser;
 mod runtime_support;
 mod update_front_door;
@@ -127,6 +128,10 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
 
 fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
     let project_root = std::env::current_dir().ok();
+    let project_root_label = project_root
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
     drop(runtime.spawn(async move {
         let status = match project_root {
             Some(path) => tokio::task::spawn_blocking(move || {
@@ -134,15 +139,18 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
             })
             .await
             .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
-                state: "error".to_string(),
+                state: gwt::ProjectIndexStatusState::Error,
                 detail: format!("Project index status task failed: {err}"),
             }),
             None => gwt::ProjectIndexStatusView {
-                state: "skipped".to_string(),
+                state: gwt::ProjectIndexStatusState::Skipped,
                 detail: "No current directory".to_string(),
             },
         };
-        let _ = proxy.send_event(UserEvent::ProjectIndexStatus { status });
+        let _ = proxy.send_event(UserEvent::ProjectIndexStatus {
+            project_root: project_root_label,
+            status,
+        });
     }));
 }
 
@@ -349,6 +357,7 @@ enum UserEvent {
         message: String,
     },
     ProjectIndexStatus {
+        project_root: String,
         status: gwt::ProjectIndexStatusView,
     },
     LaunchComplete {
@@ -4441,9 +4450,15 @@ fn main() -> wry::Result<()> {
                     },
                 )]);
             }
-            Event::UserEvent(UserEvent::ProjectIndexStatus { status }) => {
+            Event::UserEvent(UserEvent::ProjectIndexStatus {
+                project_root,
+                status,
+            }) => {
                 clients.dispatch(vec![OutboundEvent::broadcast(
-                    BackendEvent::ProjectIndexStatus { status },
+                    BackendEvent::ProjectIndexStatus {
+                        project_root,
+                        status,
+                    },
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {

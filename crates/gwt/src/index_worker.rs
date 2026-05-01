@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -39,9 +40,35 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
     bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectIndexStatusState {
+    Ready,
+    Skipped,
+    Error,
+    RepairRequired,
+}
+
+impl ProjectIndexStatusState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Skipped => "skipped",
+            Self::Error => "error",
+            Self::RepairRequired => "repair_required",
+        }
+    }
+}
+
+impl fmt::Display for ProjectIndexStatusState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectIndexStatusView {
-    pub state: String,
+    pub state: ProjectIndexStatusState,
     pub detail: String,
 }
 
@@ -49,7 +76,7 @@ pub fn project_index_status_for_path(project_root: &Path) -> ProjectIndexStatusV
     match project_index_status_for_path_inner(project_root) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView {
-            state: "error".to_string(),
+            state: ProjectIndexStatusState::Error,
             detail: error,
         },
     }
@@ -60,13 +87,13 @@ fn project_index_status_for_path_inner(
 ) -> Result<ProjectIndexStatusView, String> {
     let Some(repo_root) = resolve_git_worktree_root(project_root) else {
         return Ok(ProjectIndexStatusView {
-            state: "skipped".to_string(),
+            state: ProjectIndexStatusState::Skipped,
             detail: "No git worktree detected".to_string(),
         });
     };
     let Some(repo_hash) = detect_repo_hash(&repo_root) else {
         return Ok(ProjectIndexStatusView {
-            state: "skipped".to_string(),
+            state: ProjectIndexStatusState::Skipped,
             detail: "No origin remote configured".to_string(),
         });
     };
@@ -105,7 +132,7 @@ fn project_index_status_for_path_inner(
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if stderr.is_empty() { stdout } else { stderr };
         return Ok(ProjectIndexStatusView {
-            state: "error".to_string(),
+            state: ProjectIndexStatusState::Error,
             detail: format!("runner exit {}: {detail}", output.status),
         });
     }
@@ -128,12 +155,12 @@ fn project_index_status_for_path_inner(
         .unwrap_or(0);
     if unhealthy == 0 {
         Ok(ProjectIndexStatusView {
-            state: "ready".to_string(),
+            state: ProjectIndexStatusState::Ready,
             detail: format!("Runtime ready; asset {}", report.runner_hash),
         })
     } else {
         Ok(ProjectIndexStatusView {
-            state: "repair_required".to_string(),
+            state: ProjectIndexStatusState::RepairRequired,
             detail: format!("{unhealthy} index scope(s) require repair"),
         })
     }
@@ -262,5 +289,23 @@ pub(crate) fn project_index_python_path() -> PathBuf {
         venv.join("Scripts").join("python.exe")
     } else {
         venv.join("bin").join("python3")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_index_status_state_serializes_stable_protocol_values() {
+        let status = ProjectIndexStatusView {
+            state: ProjectIndexStatusState::RepairRequired,
+            detail: "1 scope requires repair".to_string(),
+        };
+
+        let payload = serde_json::to_value(status).expect("serialize status");
+
+        assert_eq!(payload["state"], "repair_required");
+        assert_eq!(payload["detail"], "1 scope requires repair");
     }
 }

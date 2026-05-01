@@ -72,7 +72,7 @@ impl LaunchEnvironment {
         I: IntoIterator<Item = (String, String)>,
     {
         let mut env: HashMap<String, String> = base_env.into_iter().collect();
-        ensure_terminal_env(&mut env);
+        apply_required_terminal_defaults(&mut env);
         Self {
             base_env: env,
             profile_env: HashMap::new(),
@@ -118,7 +118,7 @@ impl LaunchEnvironment {
         for key in &remove_env {
             base_env.remove(key);
         }
-        ensure_terminal_env(&mut base_env);
+        apply_required_terminal_defaults(&mut base_env);
 
         Ok(Self {
             base_env,
@@ -193,7 +193,7 @@ impl LaunchEnvironment {
     }
 }
 
-fn ensure_terminal_env(env: &mut HashMap<String, String>) {
+fn apply_required_terminal_defaults(env: &mut HashMap<String, String>) {
     let replace_term = env
         .get("TERM")
         .map(|value| value.trim().is_empty() || value.eq_ignore_ascii_case("dumb"))
