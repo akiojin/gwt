@@ -668,6 +668,9 @@ impl AgentLaunchBuilder {
             args.push("--yolo".to_string());
         }
 
+        args.push("--enable".to_string());
+        args.push("goals".to_string());
+
         // Web search args
         if let Some(ref ver) = parsed_version {
             if *ver >= semver::Version::new(0, 90, 0) {
@@ -1050,6 +1053,72 @@ mod tests {
             .args
             .windows(2)
             .any(|pair| pair[0] == "--enable" && pair[1] == "codex_hooks"));
+    }
+
+    #[test]
+    fn build_codex_enables_goal_feature_by_default() {
+        let config = AgentLaunchBuilder::new(AgentId::Codex).build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+    }
+
+    #[test]
+    fn build_codex_resume_and_continue_keep_goal_feature_enabled() {
+        let resume = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("sess-123")
+            .build();
+        let continue_last = AgentLaunchBuilder::new(AgentId::Codex)
+            .session_mode(SessionMode::Continue)
+            .build();
+
+        assert!(resume
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+        assert!(resume
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "sess-123"));
+        assert!(continue_last
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+        assert!(continue_last
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "resume" && pair[1] == "--last"));
+    }
+
+    #[test]
+    fn build_non_codex_agents_do_not_enable_goal_feature() {
+        for agent in [
+            AgentId::ClaudeCode,
+            AgentId::Gemini,
+            AgentId::OpenCode,
+            AgentId::Copilot,
+            AgentId::Custom("custom".into()),
+        ] {
+            let config = AgentLaunchBuilder::new(agent).build();
+
+            assert!(!config
+                .args
+                .windows(2)
+                .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
+        }
+    }
+
+    #[test]
+    fn canonical_codex_args_do_not_include_goal_feature_flag() {
+        let args = canonical_launch_args(&AgentId::Codex);
+
+        assert_eq!(args, vec!["--no-alt-screen".to_string()]);
+        assert!(!args
+            .windows(2)
+            .any(|pair| pair[0] == "--enable" && pair[1] == "goals"));
     }
 
     #[test]
