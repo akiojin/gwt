@@ -126,6 +126,11 @@ impl BoardEntry {
         self
     }
 
+    pub fn with_target_owner(mut self, value: impl Into<String>) -> Self {
+        self.target_owners.push(value.into());
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         author_kind: AuthorKind,
@@ -1143,6 +1148,28 @@ mod tests {
         );
 
         assert!(entry.target_owners.is_empty());
+    }
+
+    #[test]
+    fn board_entry_with_target_owner_pushes_single_value() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Claim,
+            "claim",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_target_owner("sess-a3f2");
+        assert_eq!(entry.target_owners, vec!["sess-a3f2".to_string()]);
+
+        let chained = entry.with_target_owner("feature/foo");
+        assert_eq!(
+            chained.target_owners,
+            vec!["sess-a3f2".to_string(), "feature/foo".to_string()]
+        );
     }
 
     #[test]
