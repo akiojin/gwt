@@ -142,16 +142,8 @@ pub(crate) type AgentLaunchCompletion = (
 
 pub(crate) type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
-#[derive(Debug, Clone)]
-pub(crate) struct BoardPostRequest {
-    pub(crate) id: String,
-    pub(crate) entry_kind: gwt_core::coordination::BoardEntryKind,
-    pub(crate) body: String,
-    pub(crate) parent_id: Option<String>,
-    pub(crate) topics: Vec<String>,
-    pub(crate) owners: Vec<String>,
-    pub(crate) targets: Vec<String>,
-}
+mod board;
+pub(crate) use board::BoardPostRequest;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveAgentSession {
@@ -2297,138 +2289,6 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn post_board_entry_events(
-        &self,
-        client_id: &str,
-        request: BoardPostRequest,
-    ) -> Vec<OutboundEvent> {
-        let BoardPostRequest {
-            id,
-            entry_kind,
-            body,
-            parent_id,
-            topics,
-            owners,
-            targets,
-        } = request;
-
-        let Some(address) = self.window_lookup.get(&id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Window not found".to_string(),
-                },
-            )];
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Project tab not found".to_string(),
-                },
-            )];
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Window not found".to_string(),
-                },
-            )];
-        };
-        if window.preset != WindowPreset::Board {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Window is not a Board surface".to_string(),
-                },
-            )];
-        }
-
-        let trimmed_body = body.trim();
-        if trimmed_body.is_empty() {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Board entry body is required".to_string(),
-                },
-            )];
-        }
-
-        let parent_id = parent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let topics = sanitize_board_list(&topics);
-        let owners = sanitize_board_list(&owners);
-        let targets = sanitize_board_list(&targets);
-
-        let snapshot = match gwt_core::coordination::load_snapshot(&tab.project_root) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardError {
-                        id,
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-        if let Some(parent_id) = parent_id.as_deref() {
-            if !snapshot
-                .board
-                .entries
-                .iter()
-                .any(|entry| entry.id == parent_id)
-            {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardError {
-                        id,
-                        message: "Reply target was not found".to_string(),
-                    },
-                )];
-            }
-        }
-
-        let mut entry = gwt_core::coordination::BoardEntry::new(
-            gwt_core::coordination::AuthorKind::User,
-            "You",
-            entry_kind,
-            trimmed_body,
-            None,
-            parent_id,
-            topics,
-            owners,
-        );
-        if !targets.is_empty() {
-            entry = entry.with_target_owners(targets);
-        }
-        match gwt_core::coordination::post_entry(&tab.project_root, entry) {
-            Ok(snapshot) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardEntries {
-                    id,
-                    entries: snapshot.board.entries,
-                },
-            )],
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: error.to_string(),
-                },
-            )],
-        }
-    }
-
     pub(crate) fn handle_board_projection_changed_events(
         &self,
         project_root: &Path,
@@ -2801,18 +2661,6 @@ impl AppRuntime {
         );
         Vec::new()
     }
-}
-
-fn sanitize_board_list(values: &[String]) -> Vec<String> {
-    let mut sanitized = Vec::new();
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || sanitized.iter().any(|item| item == trimmed) {
-            continue;
-        }
-        sanitized.push(trimmed.to_string());
-    }
-    sanitized
 }
 
 fn load_log_entries_from_dir(log_dir: &Path) -> Result<Vec<gwt_core::logging::LogEvent>, String> {
