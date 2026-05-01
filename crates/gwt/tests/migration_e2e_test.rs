@@ -172,6 +172,71 @@ fn t103_e2e_locked_worktree_blocks_migration_with_no_changes() {
 }
 
 #[test]
+fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
+    // SPEC-1934 US-6.6: when a phase after Backup fails, rollback must
+    // restore the original Normal Git layout. We provoke the failure by
+    // pre-creating the bare target directory so `bareify_local` refuses to
+    // overwrite it; the executor then triggers `rollback_migration` which
+    // re-applies the backup snapshot.
+    let project = tempfile::tempdir().unwrap();
+    init_repo_with_commit(project.path());
+
+    // Capture pre-migration snapshot of the project tree we care about.
+    let project_dir_name = project
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .to_string();
+    let bare_target = project.path().join(format!("{project_dir_name}.git"));
+
+    // Pre-create the bare target so bareify_local fails on the
+    // "target already exists" guard. clone_bare_from_normal would fail too
+    // since there is no origin remote on this fixture.
+    std::fs::create_dir_all(&bare_target).unwrap();
+    // Drop a marker file so we can detect that the pre-existing dir was not
+    // wiped by the rollback (it should be preserved as it pre-existed).
+    std::fs::write(bare_target.join("preexisting.txt"), "marker").unwrap();
+
+    let result = execute_migration(
+        project.path(),
+        MigrationOptions::default(),
+        |_phase, _pct| {},
+    );
+
+    let err = result.expect_err("migration must fail when bare target exists");
+    assert_eq!(err.phase, MigrationPhase::Bareify);
+    // Recovery should reflect that rollback ran. Either RolledBack or
+    // Partial is acceptable for this assertion; the important invariant is
+    // that the original .git/ and tracked files are still in place.
+    assert!(matches!(
+        err.recovery,
+        RecoveryState::RolledBack | RecoveryState::Partial
+    ));
+
+    // Original Normal Git layout must remain.
+    assert!(
+        project.path().join(".git").is_dir(),
+        "original .git directory must survive rollback"
+    );
+    assert!(
+        project.path().join("README.md").is_file(),
+        "tracked file must survive rollback"
+    );
+    // The pre-existing bare-name directory we planted should still be there
+    // (it was the trigger, not something we created).
+    assert!(
+        bare_target.join("preexisting.txt").is_file(),
+        "pre-existing collision artifact must remain after rollback"
+    );
+    // No project.toml should have been written for a failed migration.
+    assert!(
+        !project.path().join(".gwt/project.toml").exists(),
+        "no project.toml must be written when migration fails"
+    );
+}
+
+#[test]
 fn t107_repo_hash_remains_stable_across_migration() {
     // SPEC-2021 / SC-019: project_scope_hash is computed from the origin URL
     // (or the path when no origin exists). Migration must not move the
