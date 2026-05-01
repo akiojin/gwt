@@ -69,6 +69,84 @@ impl BlockingTaskSpawner {
     }
 }
 
+fn spawn_project_index_bootstrap_background(proxy: AppEventProxy, project_root: PathBuf) -> bool {
+    spawn_project_index_bootstrap_background_with(
+        proxy,
+        project_root,
+        gwt::index_worker::bootstrap_project_index_for_path,
+        gwt::index_worker::project_index_status_for_path,
+    )
+}
+
+fn spawn_project_index_bootstrap_background_with<B, S>(
+    proxy: AppEventProxy,
+    project_root: PathBuf,
+    bootstrap: B,
+    status_probe: S,
+) -> bool
+where
+    B: FnOnce(&Path) -> Result<(), String> + Send + 'static,
+    S: FnOnce(&Path) -> gwt::ProjectIndexStatusView + Send + 'static,
+{
+    let spawn_result = thread::Builder::new()
+        .name("gwt-index-bootstrap".to_string())
+        .spawn(move || {
+            let bootstrap_started = Instant::now();
+            match bootstrap(&project_root) {
+                Ok(()) => {
+                    let bootstrap_elapsed_ms = bootstrap_started.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        target: "gwt::index",
+                        worktree = %project_root.display(),
+                        elapsed_ms = bootstrap_elapsed_ms,
+                        "project index bootstrap completed in background"
+                    );
+
+                    let status_started = Instant::now();
+                    let status = status_probe(&project_root);
+                    tracing::info!(
+                        target: "gwt::index",
+                        worktree = %project_root.display(),
+                        elapsed_ms = status_started.elapsed().as_millis() as u64,
+                        state = %status.state,
+                        "project index status refreshed after background bootstrap"
+                    );
+                    proxy.send(UserEvent::ProjectIndexStatus { status });
+                }
+                Err(error) => {
+                    let elapsed_ms = bootstrap_started.elapsed().as_millis() as u64;
+                    tracing::warn!(
+                        target: "gwt::index",
+                        worktree = %project_root.display(),
+                        elapsed_ms,
+                        error = %error,
+                        "project index bootstrap failed in background"
+                    );
+                    proxy.send(UserEvent::ProjectIndexStatus {
+                        status: gwt::ProjectIndexStatusView {
+                            state: "error".to_string(),
+                            detail: format!(
+                                "Project index bootstrap failed after {elapsed_ms} ms: {error}"
+                            ),
+                        },
+                    });
+                }
+            }
+        });
+
+    match spawn_result {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::index",
+                error = %error,
+                "failed to spawn project index bootstrap background task"
+            );
+            false
+        }
+    }
+}
+
 pub(crate) struct KnowledgeSearchRequest<'a> {
     pub(crate) id: &'a str,
     pub(crate) kind: KnowledgeKind,
@@ -3588,14 +3666,6 @@ impl AppRuntime {
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
             refresh_managed_gwt_assets_for_worktree(&worktree_path)
                 .map_err(|error| error.to_string())?;
-            if let Err(error) = gwt::index_worker::bootstrap_project_index_for_path(&worktree_path)
-            {
-                tracing::warn!(
-                    worktree = %worktree_path.display(),
-                    error = %error,
-                    "project index bootstrap skipped during worktree prepare"
-                );
-            }
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
                 && apply_host_package_runner_fallback(&mut config)
@@ -3693,6 +3763,7 @@ impl AppRuntime {
                 agent_id,
                 linked_issue_number,
             )) => {
+                let project_index_root = worktree_path.clone();
                 proxy.send(UserEvent::LaunchComplete {
                     window_id,
                     result: Ok((
@@ -3705,6 +3776,7 @@ impl AppRuntime {
                         linked_issue_number,
                     )),
                 });
+                spawn_project_index_bootstrap_background(proxy, project_index_root);
             }
             Err(error) => {
                 proxy.send(UserEvent::LaunchComplete {
@@ -4534,7 +4606,7 @@ mod tests {
         ffi::OsString,
         fs,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex, RwLock},
+        sync::{mpsc, Arc, Mutex, RwLock},
         thread,
         time::{Duration, Instant},
     };
@@ -4566,10 +4638,10 @@ mod tests {
     use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     use super::{
-        ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProjectTabRuntime, UserEvent,
-        WindowRuntime,
+        spawn_project_index_bootstrap_background_with, ActiveAgentSession, AppEventProxy,
+        AppRuntime, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
+        KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardMemoryCache, LaunchWizardSession,
+        OutboundEvent, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
     use crate::{combined_window_id, same_worktree_path, PtyWriterRegistry};
 
@@ -5051,6 +5123,56 @@ exit 0
             std::thread::sleep(Duration::from_millis(25));
         }
         panic!("timed out waiting for {label}: {}", path.display());
+    }
+
+    #[test]
+    fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
+        let temp = tempdir().expect("tempdir");
+        let (proxy, events) = AppEventProxy::stub();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let spawn_started = Instant::now();
+
+        let spawned = spawn_project_index_bootstrap_background_with(
+            proxy,
+            temp.path().to_path_buf(),
+            move |_project_root| {
+                started_tx.send(()).expect("signal bootstrap start");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release bootstrap");
+                Ok(())
+            },
+            |_project_root| gwt::ProjectIndexStatusView {
+                state: "ready".to_string(),
+                detail: "test bootstrap complete".to_string(),
+            },
+        );
+        let spawn_elapsed = spawn_started.elapsed();
+
+        assert!(spawned, "background bootstrap thread should spawn");
+        assert!(
+            spawn_elapsed < Duration::from_millis(250),
+            "spawning bootstrap must return before the slow bootstrap body completes"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("background bootstrap should start promptly");
+        assert!(
+            events.lock().expect("event log").is_empty(),
+            "no status should be emitted before the slow bootstrap completes"
+        );
+
+        release_tx.send(()).expect("release bootstrap");
+        wait_for_recorded_event("project index status", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::ProjectIndexStatus { status }
+                        if status.state == "ready" && status.detail == "test bootstrap complete"
+                )
+            })
+        });
     }
 
     fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {

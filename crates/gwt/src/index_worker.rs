@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gwt_core::{
@@ -24,7 +24,14 @@ pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
 }
 
 pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), String> {
+    let runtime_started = Instant::now();
     gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %project_root.display(),
+        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
+        "project index runtime ensured for bootstrap"
+    );
     let spawner = PythonRunnerSpawner {
         python_executable: project_index_python_path(),
         runner_script: gwt_runtime_runner_path(),
@@ -65,8 +72,16 @@ fn project_index_status_for_path_inner(
     };
     let worktree_hash =
         compute_worktree_hash(&repo_root).map_err(|err| format!("compute worktree hash: {err}"))?;
+    let runtime_started = Instant::now();
     let report =
         gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %project_root.display(),
+        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
+        "project index runtime ensured for status"
+    );
+    let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
         .arg(gwt_runtime_runner_path())
         .arg("--action")
@@ -78,6 +93,13 @@ fn project_index_status_for_path_inner(
         .current_dir(&repo_root)
         .output()
         .map_err(|err| format!("run project index status: {err}"))?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        elapsed_ms = runner_started.elapsed().as_millis() as u64,
+        exit_status = %output.status,
+        "project index status runner completed"
+    );
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -122,6 +144,7 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     index_root: &Path,
     spawner: &S,
 ) -> Result<(), String> {
+    let bootstrap_started = Instant::now();
     let Some(repo_root) = resolve_git_worktree_root(project_root) else {
         return Ok(());
     };
@@ -129,8 +152,17 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
         return Ok(());
     };
 
+    let worktree_list_started = Instant::now();
     let active_worktrees =
         list_git_worktree_paths(&repo_root).unwrap_or_else(|_| vec![repo_root.clone()]);
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        elapsed_ms = worktree_list_started.elapsed().as_millis() as u64,
+        worktree_count = active_worktrees.len(),
+        "project index active worktrees listed"
+    );
+    let reconcile_started = Instant::now();
     reconcile_repo(&ReconcileOptions {
         index_root: index_root.to_path_buf(),
         repo_hash: repo_hash.clone(),
@@ -138,20 +170,42 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
         legacy_worktree_dirs: active_worktrees,
     })
     .map_err(|err| err.to_string())?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        elapsed_ms = reconcile_started.elapsed().as_millis() as u64,
+        "project index repository reconciled"
+    );
 
     let refresh = RefreshIssuesOptions {
         index_root: index_root.to_path_buf(),
         repo_hash,
-        project_root: repo_root,
+        project_root: repo_root.clone(),
         ttl: Duration::from_secs(15 * 60),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| err.to_string())?;
+    let refresh_started = Instant::now();
     runtime
         .block_on(refresh_issues_if_stale(&refresh, spawner))
+        .map(|decision| {
+            tracing::info!(
+                target: "gwt::index",
+                project_root = %repo_root.display(),
+                elapsed_ms = refresh_started.elapsed().as_millis() as u64,
+                decision = ?decision,
+                "project index issue refresh checked"
+            );
+        })
         .map_err(|err| err.to_string())?;
+    tracing::info!(
+        target: "gwt::index",
+        project_root = %repo_root.display(),
+        elapsed_ms = bootstrap_started.elapsed().as_millis() as u64,
+        "project index bootstrap helper completed"
+    );
 
     Ok(())
 }

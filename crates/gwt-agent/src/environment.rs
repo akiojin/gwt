@@ -1,8 +1,10 @@
 //! Launch environment composition for host and container agent processes.
 
+#[cfg(not(windows))]
+use std::path::PathBuf;
 use std::{
     collections::{BTreeSet, HashMap},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use crate::{
@@ -192,10 +194,20 @@ impl LaunchEnvironment {
 }
 
 fn ensure_terminal_env(env: &mut HashMap<String, String>) {
-    env.entry("TERM".to_string())
-        .or_insert_with(|| "xterm-256color".to_string());
-    env.entry("COLORTERM".to_string())
-        .or_insert_with(|| "truecolor".to_string());
+    let replace_term = env
+        .get("TERM")
+        .map(|value| value.trim().is_empty() || value.eq_ignore_ascii_case("dumb"))
+        .unwrap_or(true);
+    if replace_term {
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
+    }
+    let replace_colorterm = env
+        .get("COLORTERM")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true);
+    if replace_colorterm {
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    }
 }
 
 fn remove_inherited_launch_env(env: &mut HashMap<String, String>) {
@@ -449,6 +461,20 @@ mod tests {
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
         assert!(remove_env.is_empty());
+    }
+
+    #[test]
+    fn from_base_env_replaces_dumb_terminal_type() {
+        let base_env = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("TERM".to_string(), "dumb".to_string()),
+            ("COLORTERM".to_string(), "".to_string()),
+        ];
+
+        let (env, _) = LaunchEnvironment::from_base_env(base_env).into_parts();
+
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
     }
 
     #[cfg(not(windows))]
