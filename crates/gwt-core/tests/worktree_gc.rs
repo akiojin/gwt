@@ -3,7 +3,7 @@
 use std::fs;
 
 use gwt_core::{
-    index::runtime::{reconcile_repo, ReconcileOptions},
+    index::runtime::{reconcile_repo, remove_worktree_index, ReconcileOptions},
     repo_hash::compute_repo_hash,
     worktree_hash::compute_worktree_hash,
 };
@@ -170,4 +170,23 @@ fn legacy_specs_cleanup_preserves_worktree_meta_file() {
         !worktree_root.join("manifest-specs.json").exists(),
         "legacy worktree-scoped specs manifest should still be removed"
     );
+}
+
+#[test]
+fn remove_worktree_index_deletes_existing_worktree_scope_and_ignores_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+    let worktree_hash = "0123456789abcdef";
+    let worktree_index = index_root
+        .join(repo.as_str())
+        .join("worktrees")
+        .join(worktree_hash);
+    fs::create_dir_all(&worktree_index).unwrap();
+    fs::write(worktree_index.join("manifest-code.json"), "[]").unwrap();
+
+    remove_worktree_index(&index_root, &repo, worktree_hash).unwrap();
+    assert!(!worktree_index.exists());
+
+    remove_worktree_index(&index_root, &repo, worktree_hash).unwrap();
 }
