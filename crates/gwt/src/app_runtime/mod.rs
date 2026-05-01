@@ -147,6 +147,7 @@ mod memory;
 mod migration;
 mod profile;
 mod window;
+mod wizard;
 pub(crate) use board::BoardPostRequest;
 use profile::ProfileSaveRequest;
 
@@ -3219,24 +3220,6 @@ impl AppRuntime {
         })
     }
 
-    pub(crate) fn launch_wizard_state_outbound(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: self
-                .launch_wizard
-                .as_ref()
-                .map(|wizard| Box::new(wizard.wizard.view())),
-        })
-    }
-
-    pub(crate) fn launch_wizard_state_broadcast(
-        &self,
-        wizard: Option<gwt::LaunchWizardView>,
-    ) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: wizard.map(Box::new),
-        })
-    }
-
     pub(crate) fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
         let pty_state = self
             .window_pty_statuses
@@ -3328,10 +3311,6 @@ impl AppRuntime {
             self.launch_wizard = None;
         }
         wizard_closed
-    }
-
-    pub(crate) fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
-        self.launch_wizard.take()
     }
 
     pub(crate) fn rebuild_window_lookup(&mut self) {
