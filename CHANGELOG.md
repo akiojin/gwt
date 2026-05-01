@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.13.1] - 2026-05-01
+
+### Testing
+
+- **migration:** SPEC-1934 US-6 失敗注入 E2E と動作手順 README を追加
+
 ## [9.13.0] - 2026-04-30
 
 ### Features
