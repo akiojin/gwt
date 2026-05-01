@@ -1,26 +1,28 @@
 //! Launch wizard handler split out of `app_runtime/mod.rs` for SPEC-2077
-//! Phase F1 (arch-review handoff, 2026-05-01).
+//! Phase F1 / F2a-1 (arch-review handoff, 2026-05-01).
 //!
-//! Phase F1 scope is intentionally narrow: only the wizard state broadcast
-//! / clear helpers move here so that the larger `handle_launch_wizard_action`
-//! (~600 lines) and `spawn_wizard_shell_window*` (~525 lines) helpers can be
-//! split in follow-up phases (F2 / F3) without merge conflicts.
-//!
-//! Owns:
-//! - [`AppRuntime::launch_wizard_state_outbound`] — broadcast the current
-//!   wizard view (or `None`) to all clients
-//! - [`AppRuntime::launch_wizard_state_broadcast`] — broadcast a caller-
-//!   provided view (used after the action handler mutates state)
-//! - [`AppRuntime::clear_launch_wizard`] — drop the in-memory session state
-//!   and return the previous session for any cleanup the caller needs
+//! Phase F is split into multiple sub-phases to keep blast radius small:
+//! - F1 (merged): wizard state broadcast / clear helpers
+//! - F2a-1 (this PR): branch-level open helpers (open_launch_wizard,
+//!   open_launch_wizard_for_branch, refresh_open_launch_wizard_from_cache)
+//! - F2a-2 (follow-up): issue-level open + prepared dispatch handlers
+//! - F2b (follow-up): handle_launch_wizard_action (~600 lines)
+//! - F3a/F3b (follow-up): spawn_wizard_shell_window* (~525 lines)
 //!
 //! [`LaunchWizardSession`] still lives in `mod.rs` because the larger wizard
-//! handlers (Phase F2 / F3 scope) construct and mutate it; once those
+//! handlers (Phase F2b / F3 scope) construct and mutate it; once those
 //! phases land the struct can move here too.
 
-use gwt::LaunchWizardView;
+use std::path::Path;
 
-use super::{AppRuntime, BackendEvent, LaunchWizardSession, OutboundEvent};
+use gwt::{LaunchWizardContext, LaunchWizardHydration, LaunchWizardState, LaunchWizardView};
+use uuid::Uuid;
+
+use super::{
+    branch_worktree_path, detect_wizard_docker_context_and_status, normalize_branch_name,
+    synthetic_branch_entry, AppRuntime, BackendEvent, LaunchWizardSession, OutboundEvent,
+    WindowPreset,
+};
 
 impl AppRuntime {
     pub(crate) fn launch_wizard_state_outbound(&self) -> OutboundEvent {
@@ -43,5 +45,119 @@ impl AppRuntime {
 
     pub(crate) fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
         self.launch_wizard.take()
+    }
+
+    pub(crate) fn open_launch_wizard(
+        &mut self,
+        id: &str,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            })];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Project tab not found".to_string(),
+            })];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window not found".to_string(),
+            })];
+        };
+
+        if window.preset != WindowPreset::Branches {
+            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: "Window is not a branches list".to_string(),
+            })];
+        }
+
+        let project_root = tab.project_root.clone();
+        let tab_id = address.tab_id.clone();
+        match self.open_launch_wizard_for_branch(
+            &tab_id,
+            &project_root,
+            branch_name,
+            linked_issue_number,
+        ) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
+                id: id.to_string(),
+                message: error,
+            })],
+        }
+    }
+
+    pub(crate) fn open_launch_wizard_for_branch(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Result<(), String> {
+        let normalized_branch_name = normalize_branch_name(branch_name);
+        let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
+        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
+        let quick_start_root = worktree_path
+            .clone()
+            .unwrap_or_else(|| project_root.to_path_buf());
+        let quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&quick_start_root, &normalized_branch_name);
+        let previous_profile = self.launch_wizard_cache.previous_profile(&quick_start_root);
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let (docker_context, docker_service_status) =
+            detect_wizard_docker_context_and_status(&quick_start_root);
+        let wizard_id = Uuid::new_v4().to_string();
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id,
+            wizard: LaunchWizardState::open_with_previous_profile(
+                LaunchWizardContext {
+                    selected_branch: synthetic_branch_entry(branch_name),
+                    normalized_branch_name,
+                    worktree_path,
+                    quick_start_root,
+                    live_sessions,
+                    docker_context,
+                    docker_service_status,
+                    linked_issue_number,
+                },
+                agent_options,
+                quick_start_entries,
+                previous_profile,
+            ),
+        });
+
+        Ok(())
+    }
+
+    pub(super) fn refresh_open_launch_wizard_from_cache(&mut self) {
+        let Some(session) = self.launch_wizard.as_mut() else {
+            return;
+        };
+        let context = session.wizard.context.clone();
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&context.quick_start_root, &context.normalized_branch_name);
+        session.wizard.apply_hydration(LaunchWizardHydration {
+            selected_branch: Some(context.selected_branch),
+            normalized_branch_name: context.normalized_branch_name,
+            worktree_path: context.worktree_path,
+            quick_start_root: context.quick_start_root,
+            docker_context: context.docker_context,
+            docker_service_status: context.docker_service_status,
+            agent_options,
+            quick_start_entries,
+            previous_profile: None,
+        });
     }
 }
