@@ -16,7 +16,8 @@
 use std::{path::Path, thread};
 
 use gwt::{
-    KnowledgeKind, LaunchWizardContext, LaunchWizardHydration, LaunchWizardState, LaunchWizardView,
+    KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
+    LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView, WindowGeometry,
 };
 use uuid::Uuid;
 
@@ -276,6 +277,146 @@ impl AppRuntime {
                 &client_id,
                 knowledge_error_event(id, knowledge_kind, error, None, None, None),
             )],
+        }
+    }
+
+    pub(crate) fn handle_launch_wizard_action(
+        &mut self,
+        action: gwt::LaunchWizardAction,
+        bounds: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
+        let Some(mut session) = self.launch_wizard.take() else {
+            return Vec::new();
+        };
+        let action_stage = Self::launch_wizard_action_error_stage(&action);
+        let action_label = Self::launch_wizard_action_label(&action);
+        let requested_agent_id = match &action {
+            gwt::LaunchWizardAction::SetAgent { agent_id } => Some(agent_id.clone()),
+            _ => None,
+        };
+        session.wizard.apply(action);
+        if let Some(error) = session.wizard.error.as_deref() {
+            Self::log_launch_wizard_error(
+                &session,
+                action_stage,
+                action_label,
+                requested_agent_id.as_deref(),
+                error,
+            );
+        }
+
+        match session.wizard.completion.take() {
+            Some(LaunchWizardCompletion::Cancelled) => {
+                vec![self.launch_wizard_state_broadcast(None)]
+            }
+            Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
+                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    let error = "The selected session window is no longer available".to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "focus_window",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                let Some(tab) = self.tab_mut(&address.tab_id) else {
+                    let error = "Project tab not found".to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "focus_window",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                if !tab.workspace.focus_window(&address.raw_id, None) {
+                    let error = "The selected session window is no longer available".to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "focus_window",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                }
+                self.active_tab_id = Some(address.tab_id);
+                let _ = self.persist();
+                vec![
+                    self.workspace_state_broadcast(),
+                    self.launch_wizard_state_broadcast(None),
+                ]
+            }
+            Some(LaunchWizardCompletion::Launch(config)) => {
+                let Some(bounds) = bounds else {
+                    let error = "Viewport bounds are required to launch a window".to_string();
+                    Self::log_launch_wizard_error(
+                        &session,
+                        "launch_bounds",
+                        action_label,
+                        requested_agent_id.as_deref(),
+                        &error,
+                    );
+                    session.wizard.error = Some(error);
+                    self.launch_wizard = Some(session);
+                    return vec![self.launch_wizard_state_outbound()];
+                };
+                match *config {
+                    LaunchWizardLaunchRequest::Agent(config) => {
+                        match self.spawn_agent_window(&session.tab_id, *config, bounds) {
+                            Ok(mut events) => {
+                                events.push(self.launch_wizard_state_broadcast(None));
+                                events
+                            }
+                            Err(error) => {
+                                Self::log_launch_wizard_error(
+                                    &session,
+                                    "spawn_agent_window",
+                                    action_label,
+                                    requested_agent_id.as_deref(),
+                                    &error,
+                                );
+                                session.wizard.error = Some(error);
+                                self.launch_wizard = Some(session);
+                                vec![self.launch_wizard_state_outbound()]
+                            }
+                        }
+                    }
+                    LaunchWizardLaunchRequest::Shell(config) => {
+                        match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
+                            Ok(mut events) => {
+                                events.push(self.launch_wizard_state_broadcast(None));
+                                events
+                            }
+                            Err(error) => {
+                                Self::log_launch_wizard_error(
+                                    &session,
+                                    "spawn_shell_window",
+                                    action_label,
+                                    requested_agent_id.as_deref(),
+                                    &error,
+                                );
+                                session.wizard.error = Some(error);
+                                self.launch_wizard = Some(session);
+                                vec![self.launch_wizard_state_outbound()]
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
+            }
         }
     }
 
