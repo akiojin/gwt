@@ -694,7 +694,7 @@ mod tests {
         .concat();
 
         let main_source = include_str!("main.rs");
-        let runtime_source = include_str!("app_runtime.rs");
+        let runtime_source = include_str!("app_runtime/mod.rs");
 
         assert!(
             !main_source.contains(&forbidden_init),
