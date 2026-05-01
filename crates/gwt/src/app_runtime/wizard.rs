@@ -13,15 +13,20 @@
 //! handlers (Phase F2b / F3 scope) construct and mutate it; once those
 //! phases land the struct can move here too.
 
-use std::path::Path;
+use std::{path::Path, thread};
 
-use gwt::{LaunchWizardContext, LaunchWizardHydration, LaunchWizardState, LaunchWizardView};
+use gwt::{
+    KnowledgeKind, LaunchWizardContext, LaunchWizardHydration, LaunchWizardState, LaunchWizardView,
+};
 use uuid::Uuid;
 
+use crate::UserEvent;
+
 use super::{
-    branch_worktree_path, detect_wizard_docker_context_and_status, normalize_branch_name,
-    synthetic_branch_entry, AppRuntime, BackendEvent, LaunchWizardSession, OutboundEvent,
-    WindowPreset,
+    branch_worktree_path, detect_wizard_docker_context_and_status, knowledge_error_event,
+    knowledge_kind_for_preset, list_branch_entries_with_active_sessions, normalize_branch_name,
+    preferred_issue_launch_branch, synthetic_branch_entry, AppRuntime, BackendEvent,
+    IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent, WindowPreset,
 };
 
 impl AppRuntime {
@@ -137,6 +142,141 @@ impl AppRuntime {
         });
 
         Ok(())
+    }
+
+    pub(crate) fn open_issue_launch_wizard_events(
+        &mut self,
+        client_id: &str,
+        id: &str,
+        issue_number: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Window not found",
+                    None,
+                    None,
+                    None,
+                ),
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Project tab not found",
+                    None,
+                    None,
+                    None,
+                ),
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Window not found",
+                    None,
+                    None,
+                    None,
+                ),
+            )];
+        };
+        let Some(kind) = knowledge_kind_for_preset(window.preset) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_error_event(
+                    id,
+                    KnowledgeKind::Issue,
+                    "Window is not a knowledge bridge",
+                    None,
+                    None,
+                    None,
+                ),
+            )];
+        };
+
+        let project_root = tab.project_root.clone();
+        let tab_id = address.tab_id.clone();
+        let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
+        thread::spawn(move || {
+            let result =
+                list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
+                    .map_err(|error| error.to_string())
+                    .and_then(|entries| {
+                        preferred_issue_launch_branch(&entries)
+                            .ok_or_else(|| "No local branch is available for launch".to_string())
+                    });
+            proxy.send(UserEvent::IssueLaunchWizardPrepared(
+                IssueLaunchWizardPrepared {
+                    client_id,
+                    id,
+                    knowledge_kind: kind,
+                    tab_id,
+                    project_root,
+                    issue_number,
+                    result,
+                },
+            ));
+        });
+        Vec::new()
+    }
+
+    pub(crate) fn handle_issue_launch_wizard_prepared(
+        &mut self,
+        prepared: IssueLaunchWizardPrepared,
+    ) -> Vec<OutboundEvent> {
+        let IssueLaunchWizardPrepared {
+            client_id,
+            id,
+            knowledge_kind,
+            tab_id,
+            project_root,
+            issue_number,
+            result,
+        } = prepared;
+        if self.tab(&tab_id).is_none() {
+            return vec![OutboundEvent::reply(
+                &client_id,
+                knowledge_error_event(
+                    id,
+                    knowledge_kind,
+                    "Project tab not found",
+                    None,
+                    None,
+                    None,
+                ),
+            )];
+        }
+
+        match result {
+            Ok(branch_name) => match self.open_launch_wizard_for_branch(
+                &tab_id,
+                &project_root,
+                &branch_name,
+                Some(issue_number),
+            ) {
+                Ok(()) => vec![self.launch_wizard_state_outbound()],
+                Err(error) => vec![OutboundEvent::reply(
+                    &client_id,
+                    knowledge_error_event(id, knowledge_kind, error, None, None, None),
+                )],
+            },
+            Err(error) => vec![OutboundEvent::reply(
+                &client_id,
+                knowledge_error_event(id, knowledge_kind, error, None, None, None),
+            )],
+        }
     }
 
     pub(super) fn refresh_open_launch_wizard_from_cache(&mut self) {
