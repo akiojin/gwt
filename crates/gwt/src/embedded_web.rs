@@ -15,6 +15,10 @@ pub(crate) fn branch_cleanup_modal_js() -> &'static str {
     include_str!("../web/branch-cleanup-modal.js")
 }
 
+pub(crate) fn migration_modal_js() -> &'static str {
+    include_str!("../web/migration-modal.js")
+}
+
 pub(crate) fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -42,6 +46,13 @@ pub(crate) async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         branch_cleanup_modal_js(),
+    )
+}
+
+pub(crate) async fn migration_modal_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        migration_modal_js(),
     )
 }
 
@@ -694,6 +705,37 @@ mod tests {
             !html.contains("BRANCH_CLEANUP_TIMEOUT_MS"),
             "expected branch cleanup to avoid a hard-coded frontend failure timeout"
         );
+    }
+
+    #[test]
+    fn embedded_web_serves_every_root_module_import() {
+        let js = app_js();
+        let embedded_web_source = include_str!("embedded_web.rs");
+        let embedded_server_source = include_str!("embedded_server.rs");
+
+        for module_path in ["/branch-cleanup-modal.js", "/migration-modal.js"] {
+            assert!(
+                js.contains(module_path),
+                "expected app.js to import {module_path}",
+            );
+            assert!(
+                embedded_server_source.contains(&format!("\"{module_path}\"")),
+                "expected embedded server to route {module_path}",
+            );
+
+            let source_name = module_path
+                .trim_start_matches('/')
+                .trim_end_matches(".js")
+                .replace('-', "_");
+            assert!(
+                embedded_web_source.contains(&format!("fn {source_name}_js()")),
+                "expected embedded web module source function for {module_path}",
+            );
+            assert!(
+                embedded_web_source.contains(&format!("fn {source_name}_js_handler()")),
+                "expected embedded web module handler for {module_path}",
+            );
+        }
     }
 
     #[test]
