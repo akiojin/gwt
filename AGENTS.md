@@ -183,6 +183,20 @@
 - ログ（`~/.gwt/logs/` 等）はこの環境から直接参照できる前提で対応すること
 - ログ参照の指示があれば、この環境から直接読み取って調査すること
 
+### Board 運用 (SPEC-1974)
+
+Board は Coordination ドメインの shared chat。`gwtd board post --kind <X> --body '<text>'` で投稿、`gwtd board show` で読み取り。詳細な reminder 文言は SessionStart / UserPromptSubmit / Stop hook で `board_reminder.rs` から **動的注入** される（重複ドリフトを避けるため静的ドキュメントには複製しない）。
+
+主要 kind の使い分け:
+
+- **推論可視化軸**: `status`（フェーズ遷移・思考・懸念）、`decision`（確定した判断）
+- **協調軸**: `claim`（担当宣言で衝突回避）、`next`（協調 next を broadcast）、`blocked`（ブロッカー可視化・unblock 要請）、`handoff`（具体的な引き継ぎ）
+- **その他**: `request`、`impact`、`question`
+
+`--target <session-id|branch|agent-id>` を複数指定すると、受信側 Agent の reminder injection で `[for-you]` ハイライトされる（FR-041）。指定なしは broadcast。`--owner` は SPEC/Issue 番号、`--topic` は分類タグ、`--parent` は thread reply。
+
+ツール単位の報告（"running gcc"等）は **post 禁止**。reasoning milestone (phase / choice / concern) または coordination boundary (claim / next / blocked / handoff / decision) でのみ post する。
+
 ## ドキュメント管理
 
 - ドキュメントはREADME.md/README.ja.mdに集約する

@@ -226,7 +226,7 @@ pub enum CliCommand {
     ActionsJobLogs { job_id: u64 },
     /// `gwtd board show [--json]`.
     BoardShow { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)`.
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>]`.
     BoardPost {
         kind: String,
         body: Option<String>,
@@ -234,6 +234,7 @@ pub enum CliCommand {
         parent: Option<String>,
         topics: Vec<String>,
         owners: Vec<String>,
+        targets: Vec<String>,
     },
     /// `gwtd index status`.
     IndexStatus,

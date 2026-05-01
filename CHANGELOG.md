@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.14.0] - 2026-05-01
+
+### Features
+
+- **coordination:** Board に coordination 投稿軸と target_owners を追加 (SPEC-1974 Phase 9)
+- **agent:** Enable Codex goal command on launch
+
 ## [9.13.2] - 2026-05-01
 
 ### Bug Fixes

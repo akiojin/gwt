@@ -101,6 +101,8 @@ pub struct BoardEntry {
     pub origin_session_id: Option<String>,
     #[serde(default)]
     pub origin_agent_id: Option<String>,
+    #[serde(default)]
+    pub target_owners: Vec<String>,
 }
 
 impl BoardEntry {
@@ -116,6 +118,11 @@ impl BoardEntry {
 
     pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
         self.origin_agent_id = Some(value.into());
+        self
+    }
+
+    pub fn with_target_owners(mut self, values: Vec<String>) -> Self {
+        self.target_owners = values;
         self
     }
 
@@ -146,6 +153,7 @@ impl BoardEntry {
             origin_branch: None,
             origin_session_id: None,
             origin_agent_id: None,
+            target_owners: Vec::new(),
         }
     }
 }
@@ -1119,6 +1127,60 @@ mod tests {
         assert_eq!(entry.origin_branch.as_deref(), Some("feature/update-board"));
         assert_eq!(entry.origin_session_id.as_deref(), Some("sess-a3f2"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-codex-001"));
+    }
+
+    #[test]
+    fn board_entry_target_owners_default_empty() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "no targets",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+
+        assert!(entry.target_owners.is_empty());
+    }
+
+    #[test]
+    fn board_entry_round_trips_target_owners_with_values() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Claim,
+            "I claim feature/foo",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_target_owners(vec!["sess-a3f2".into(), "feature/foo".into()]);
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: BoardEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.target_owners,
+            vec!["sess-a3f2".to_string(), "feature/foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn board_entry_deserializes_legacy_without_target_owners() {
+        let legacy_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000002",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "claim",
+            "body": "legacy claim",
+            "created_at": "2026-04-14T00:00:00Z",
+            "updated_at": "2026-04-14T00:00:00Z"
+        }"#;
+
+        let entry: BoardEntry = serde_json::from_str(legacy_json).unwrap();
+        assert!(entry.target_owners.is_empty());
     }
 
     #[test]

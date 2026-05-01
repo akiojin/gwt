@@ -55,20 +55,37 @@ fn redundancy_window() -> Duration {
 
 const USER_PROMPT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
-Post to the shared Board when you cross a reasoning milestone:\n\
-- Work phase transitions (e.g., implementation -> build check -> PR handoff).\n\
-- Choices between alternatives with the reasoning behind them (e.g., \"A vs B, chose B because ...\").\n\
-- Concerns or hypotheses you are verifying (e.g., \"Hypothesis: failure stems from Y, verifying ...\").\n\
+Post to the shared Board when you cross a reasoning milestone OR a coordination boundary, \
+so other agents and the user can collaborate without collision.\n\
+\n\
+**Reasoning axes** (the *why* behind your work):\n\
+- Work phase transitions (e.g., implementation -> build check -> PR handoff). Use `--kind status`.\n\
+- Choices between alternatives with the reasoning behind them (e.g., \"A vs B, chose B because ...\"). Use `--kind decision` or `--kind status`.\n\
+- Concerns or hypotheses you are verifying (e.g., \"Hypothesis: failure stems from Y, verifying ...\"). Use `--kind status`.\n\
+\n\
+**Coordination axes** (so others know what you own and what is next):\n\
+- claim — declare ownership of a scope (e.g., \"I claim feature/X migration; others take other ranges\"). Use `--kind claim`.\n\
+- next — coordinate the next step without picking a recipient (e.g., \"phase 1 done, please pick up phase 2\"). Use `--kind next`.\n\
+- blocked — surface a blocker that needs unblocking (e.g., \"waiting on Y, requesting unblock\"). Use `--kind blocked`.\n\
+- handoff — pass concrete work to another agent or the user (e.g., \"completed Y, handing off the PR\"). Use `--kind handoff`.\n\
+- decision — broadcast a confirmed decision (e.g., \"adopting X for the migration\"). Use `--kind decision`.\n\
+\n\
+Add `--target <session-id|branch|agent-id>` (repeatable) when the post is meant for specific agents. \
+Targeted posts are highlighted as `[for-you]` in the recipient's reminder injection. Omit `--target` for broadcast.\n\
 \n\
 Do NOT post tool-level reports (e.g., \"running gcc\", \"opening file X\", \"ran test Y\"). \
 Anything already visible in the diff or log does not need a Board entry.\n\
 \n\
-Use: gwtd board post --kind status --body '<your reasoning>'\n";
+Examples:\n\
+  gwtd board post --kind status --body '<your reasoning>'\n\
+  gwtd board post --kind claim --target feature/foo --body 'taking the migration on feature/foo'\n\
+  gwtd board post --kind handoff --body 'phase 1 done, please pick up phase 2'\n";
 
 const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
-(phase change, alternative chosen, concern raised) has emerged.\n";
+(phase change, alternative chosen, concern raised) or a coordination boundary \
+(claim, next, handoff, blocked, decision) has emerged.\n";
 
 // Stop reminders are emitted as `systemMessage` (user-facing) because
 // Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
@@ -97,6 +114,11 @@ pub struct ReminderInputs {
     pub now: DateTime<Utc>,
     pub self_session_id: String,
     pub display_name: String,
+    /// Identifiers used to detect self-targeted entries (SPEC-1974 FR-041).
+    /// Typically the session id, the active branch, and the agent display
+    /// name; an entry whose `target_owners` contains any of these values is
+    /// rendered with a `[for-you]` marker. Empty disables highlighting.
+    pub self_match_keys: Vec<String>,
     /// Board entries preloaded for the event's window:
     /// - `SessionStart`: entries whose `updated_at` is within the last 24h.
     /// - `UserPromptSubmit`: entries whose `updated_at > last_injected_at`.
@@ -131,7 +153,7 @@ fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
         &inputs.self_session_id,
         SESSION_START_CAP,
     );
-    let text = session_start_text(&entries);
+    let text = session_start_text(&entries, &inputs.self_match_keys);
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
     ReminderPlan {
@@ -159,7 +181,11 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
     let context = if entries.is_empty() {
         reminder.to_string()
     } else {
-        format!("{}\n\n{}", injection_text(&entries), reminder)
+        format!(
+            "{}\n\n{}",
+            injection_text(&entries, &inputs.self_match_keys),
+            reminder
+        )
     };
 
     let mut next = inputs.reminders;
@@ -261,11 +287,23 @@ pub fn compute_plan(
         redundancy_window(),
     )?;
 
+    let mut self_match_keys = Vec::with_capacity(3);
+    if !session.id.trim().is_empty() {
+        self_match_keys.push(session.id.clone());
+    }
+    if !session.branch.trim().is_empty() {
+        self_match_keys.push(session.branch.clone());
+    }
+    if !session.display_name.trim().is_empty() {
+        self_match_keys.push(session.display_name.clone());
+    }
+
     Ok(Some(plan_reminder(ReminderInputs {
         event: intent_event,
         now,
         self_session_id: session.id.clone(),
         display_name: session.display_name.clone(),
+        self_match_keys,
         recent_entries,
         reminders,
         has_recent_own_status,
@@ -285,21 +323,21 @@ fn filter_and_cap_latest(
     entries
 }
 
-fn injection_text(entries: &[BoardEntry]) -> String {
+fn injection_text(entries: &[BoardEntry], match_keys: &[String]) -> String {
     let mut out = String::from(INJECTION_HEADER);
     for entry in entries {
-        out.push_str(&format_entry_line(entry));
+        out.push_str(&format_entry_line(entry, match_keys));
     }
     out
 }
 
-fn session_start_text(entries: &[BoardEntry]) -> String {
+fn session_start_text(entries: &[BoardEntry], match_keys: &[String]) -> String {
     let mut out = String::from(SESSION_START_HEADER);
     if entries.is_empty() {
         out.push_str("- (no recent posts from other Agents)\n");
     } else {
         for entry in entries {
-            out.push_str(&format_entry_line(entry));
+            out.push_str(&format_entry_line(entry, match_keys));
         }
     }
     out.push('\n');
@@ -307,11 +345,25 @@ fn session_start_text(entries: &[BoardEntry]) -> String {
     out
 }
 
-fn format_entry_line(entry: &BoardEntry) -> String {
+fn entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
+    !entry.target_owners.is_empty()
+        && entry
+            .target_owners
+            .iter()
+            .any(|t| match_keys.iter().any(|k| k == t))
+}
+
+fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> String {
     let branch = entry.origin_branch.as_deref().unwrap_or("-");
     let session_id = entry.origin_session_id.as_deref().unwrap_or("-");
+    let prefix = if entry_targets_self(entry, match_keys) {
+        "[for-you] "
+    } else {
+        ""
+    };
     format!(
-        "- [{author} @ {branch} / {session}] ({kind}) {body}\n",
+        "- {prefix}[{author} @ {branch} / {session}] ({kind}) {body}\n",
+        prefix = prefix,
         author = entry.author,
         branch = branch,
         session = session_id,
@@ -418,6 +470,7 @@ mod tests {
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
+            self_match_keys: vec![],
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
@@ -437,6 +490,7 @@ mod tests {
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
+            self_match_keys: vec![],
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
@@ -456,12 +510,167 @@ mod tests {
     }
 
     #[test]
+    fn plan_user_prompt_submit_includes_coordination_axes() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let text = additional_context(&plan.output);
+
+        for axis in ["claim", "next", "blocked", "handoff", "decision"] {
+            assert!(
+                text.contains(axis),
+                "USER_PROMPT_REMINDER should promote coordination axis '{axis}', got:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("--kind claim"),
+            "reminder should show --kind claim example, got:\n{text}"
+        );
+        assert!(
+            text.contains("--kind handoff"),
+            "reminder should show --kind handoff example, got:\n{text}"
+        );
+        assert!(
+            text.contains("--target"),
+            "reminder should mention --target flag for targeted posts, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn plan_user_prompt_submit_short_reminder_mentions_coordination() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: true,
+        });
+        let text = additional_context(&plan.output);
+        assert!(
+            text.contains("coordination"),
+            "short reminder should still surface coordination boundary, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn plan_session_start_marks_for_you_when_target_matches_session_id() {
+        let now = Utc::now();
+        let other = entry(
+            "OtherAgent",
+            BoardEntryKind::Claim,
+            "claim feature/foo migration",
+            "feature/other",
+            "sess-other",
+            now,
+        )
+        .with_target_owners(vec!["sess-1".into()]);
+
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now,
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec!["sess-1".into(), "feature/me".into(), "Codex".into()],
+            recent_entries: vec![other],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let text = additional_context(&plan.output);
+        let entry_line = text
+            .lines()
+            .find(|line| line.contains("claim feature/foo migration"))
+            .expect("entry line missing");
+        assert!(
+            entry_line.contains("[for-you]"),
+            "for-you marker missing on entry targeted at self session id: {entry_line}"
+        );
+    }
+
+    #[test]
+    fn plan_session_start_marks_for_you_when_target_matches_branch() {
+        let now = Utc::now();
+        let other = entry(
+            "OtherAgent",
+            BoardEntryKind::Handoff,
+            "handing off to feature/me",
+            "feature/other",
+            "sess-other",
+            now,
+        )
+        .with_target_owners(vec!["feature/me".into()]);
+
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now,
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec!["sess-1".into(), "feature/me".into(), "Codex".into()],
+            recent_entries: vec![other],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let text = additional_context(&plan.output);
+        let entry_line = text
+            .lines()
+            .find(|line| line.contains("handing off to feature/me"))
+            .expect("entry line missing");
+        assert!(
+            entry_line.contains("[for-you]"),
+            "for-you marker missing on entry targeted at self branch: {entry_line}"
+        );
+    }
+
+    #[test]
+    fn plan_session_start_no_for_you_marker_when_target_owners_empty() {
+        let now = Utc::now();
+        let other = entry(
+            "OtherAgent",
+            BoardEntryKind::Status,
+            "broadcast status",
+            "feature/other",
+            "sess-other",
+            now,
+        );
+
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now,
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec!["sess-1".into(), "feature/me".into(), "Codex".into()],
+            recent_entries: vec![other],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let text = additional_context(&plan.output);
+        let entry_line = text
+            .lines()
+            .find(|line| line.contains("broadcast status"))
+            .expect("entry line missing");
+        assert!(
+            !entry_line.contains("[for-you]"),
+            "broadcast entry must not be highlighted: {entry_line}"
+        );
+    }
+
+    #[test]
     fn plan_user_prompt_submit_short_reminder_when_redundant() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
+            self_match_keys: vec![],
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: true,
@@ -495,6 +704,7 @@ mod tests {
             now,
             self_session_id: "sess-1".into(),
             display_name: "Claude".into(),
+            self_match_keys: vec![],
             recent_entries: entries,
             reminders: RemindersState::default(),
             has_recent_own_status: false,
@@ -514,6 +724,7 @@ mod tests {
             now: Utc::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
+            self_match_keys: vec![],
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
@@ -536,6 +747,7 @@ mod tests {
             now,
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
+            self_match_keys: vec![],
             recent_entries: vec![],
             reminders,
             has_recent_own_status: false,

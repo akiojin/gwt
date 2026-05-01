@@ -53,6 +53,7 @@ pub(super) fn run<E: CliEnv>(
             parent,
             topics,
             owners,
+            targets,
         } => {
             let body = match (body, file) {
                 (Some(body), None) => body,
@@ -65,7 +66,7 @@ pub(super) fn run<E: CliEnv>(
             };
             let (author_kind, author) =
                 current_author_from_env().unwrap_or((AuthorKind::User, "user".to_string()));
-            let entry = BoardEntry::new(
+            let mut entry = BoardEntry::new(
                 author_kind,
                 author,
                 kind.parse().map_err(gwt_error_to_spec_ops_error)?,
@@ -75,6 +76,9 @@ pub(super) fn run<E: CliEnv>(
                 topics,
                 owners,
             );
+            if !targets.is_empty() {
+                entry = entry.with_target_owners(targets);
+            }
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
             out.push_str(&format!(
@@ -95,6 +99,7 @@ fn parse_post_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
     let mut parent: Option<String> = None;
     let mut topics = Vec::new();
     let mut owners = Vec::new();
+    let mut targets = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -141,6 +146,13 @@ fn parse_post_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
                 }
                 owners.push(args[i].clone());
             }
+            "--target" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--target"));
+                }
+                targets.push(args[i].clone());
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -153,6 +165,7 @@ fn parse_post_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
         parent,
         topics,
         owners,
+        targets,
     })
 }
 
@@ -258,7 +271,66 @@ mod tests {
                 parent: None,
                 topics: vec!["coordination".into()],
                 owners: vec![],
+                targets: vec![],
             }
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_collects_target_flags() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("claim"),
+            s("--body"),
+            s("I claim feature/foo"),
+            s("--target"),
+            s("sess-a3f2"),
+            s("--target"),
+            s("feature/foo"),
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            CliCommand::BoardPost {
+                kind: "claim".into(),
+                body: Some("I claim feature/foo".into()),
+                file: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec!["sess-a3f2".into(), "feature/foo".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_persists_target_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            CliCommand::BoardPost {
+                kind: "claim".into(),
+                body: Some("taking the migration".into()),
+                file: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec!["sess-a3f2".into(), "feature/x".into()],
+            },
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(
+            snapshot.board.entries[0].target_owners,
+            vec!["sess-a3f2".to_string(), "feature/x".to_string()]
         );
     }
 
@@ -283,6 +355,7 @@ mod tests {
                 parent: None,
                 topics: vec!["coordination".into()],
                 owners: vec!["1974".into()],
+                targets: vec![],
             },
             &mut out,
         )

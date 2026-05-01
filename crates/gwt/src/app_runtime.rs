@@ -150,6 +150,7 @@ pub(crate) struct BoardPostRequest {
     pub(crate) parent_id: Option<String>,
     pub(crate) topics: Vec<String>,
     pub(crate) owners: Vec<String>,
+    pub(crate) targets: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -760,6 +761,7 @@ impl AppRuntime {
                 parent_id,
                 topics,
                 owners,
+                targets,
             } => self.post_board_entry_events(
                 &client_id,
                 BoardPostRequest {
@@ -769,6 +771,7 @@ impl AppRuntime {
                     parent_id,
                     topics,
                     owners,
+                    targets,
                 },
             ),
             FrontendEvent::CreateMemoNote {
@@ -2306,6 +2309,7 @@ impl AppRuntime {
             parent_id,
             topics,
             owners,
+            targets,
         } = request;
 
         let Some(address) = self.window_lookup.get(&id) else {
@@ -2363,6 +2367,7 @@ impl AppRuntime {
             .map(str::to_string);
         let topics = sanitize_board_list(&topics);
         let owners = sanitize_board_list(&owners);
+        let targets = sanitize_board_list(&targets);
 
         let snapshot = match gwt_core::coordination::load_snapshot(&tab.project_root) {
             Ok(snapshot) => snapshot,
@@ -2393,7 +2398,7 @@ impl AppRuntime {
             }
         }
 
-        let entry = gwt_core::coordination::BoardEntry::new(
+        let mut entry = gwt_core::coordination::BoardEntry::new(
             gwt_core::coordination::AuthorKind::User,
             "You",
             entry_kind,
@@ -2403,6 +2408,9 @@ impl AppRuntime {
             topics,
             owners,
         );
+        if !targets.is_empty() {
+            entry = entry.with_target_owners(targets);
+        }
         match gwt_core::coordination::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => vec![OutboundEvent::reply(
                 client_id,
@@ -7197,6 +7205,7 @@ exit 0
                 parent_id: Some(parent.id.clone()),
                 topics: vec!["coordination".to_string(), "phase-1b".to_string()],
                 owners: vec!["2018".to_string()],
+                targets: Vec::new(),
             },
         );
 

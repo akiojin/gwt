@@ -153,6 +153,8 @@ pub enum FrontendEvent {
         parent_id: Option<String>,
         topics: Vec<String>,
         owners: Vec<String>,
+        #[serde(default)]
+        targets: Vec<String>,
     },
     CreateMemoNote {
         id: String,
