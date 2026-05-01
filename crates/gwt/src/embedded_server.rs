@@ -116,6 +116,10 @@ impl EmbeddedServer {
                 get(embedded_web::branch_cleanup_modal_js_handler),
             )
             .route(
+                "/migration-modal.js",
+                get(embedded_web::migration_modal_js_handler),
+            )
+            .route(
                 "/assets/xterm/xterm.mjs",
                 get(embedded_web::xterm_js_handler),
             )
