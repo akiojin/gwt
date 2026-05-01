@@ -471,6 +471,7 @@ mod tests {
                 parent_id: None,
                 topics: Vec::new(),
                 owners: Vec::new(),
+                targets: Vec::new(),
             }
         ));
     }
