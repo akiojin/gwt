@@ -139,6 +139,18 @@ can be run on demand. The migration safely backs up the original tree to
 and rolls back automatically if any phase fails. Tracking work is captured in
 [GitHub Issue #1934 (SPEC-1934)](https://github.com/akiojin/gwt/issues/1934).
 
+To migrate an existing Normal Git project, open it from gwt's project
+picker (or via `Reopen Recent`). gwt detects the layout and shows a
+confirmation modal with three actions:
+
+- **Migrate** — run the migration now. Progress is streamed phase by phase
+  (Validate → Backup → Bareify → Worktrees → Submodules → Tracking →
+  Cleanup → Done). On success the project tab reloads onto the new branch
+  worktree without restarting the app.
+- **Skip** — open the project as a Normal Git checkout. The modal will
+  reappear the next time you open the project.
+- **Quit** — close the app without touching the repository.
+
 ## Canvas Operations
 
 - Zoom the canvas with the on-screen zoom buttons
