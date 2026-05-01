@@ -336,9 +336,7 @@ impl AppRuntime {
         profile_dispatch::config_path().map_err(|error| error.to_string())
     }
 
-    pub(super) fn active_profile_spawn_env(
-        &self,
-    ) -> Result<gwt_agent::LaunchEnvironment, String> {
+    pub(super) fn active_profile_spawn_env(&self) -> Result<gwt_agent::LaunchEnvironment, String> {
         let config_path = self.profile_config_path()?;
         gwt_agent::LaunchEnvironment::from_active_profile(
             &config_path,
