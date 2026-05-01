@@ -6,7 +6,9 @@ use std::{
 };
 
 use gwt_core::{
-    index::runtime::{refresh_issues_if_stale, RefreshIssuesOptions, RunnerSpawner},
+    index::runtime::{
+        refresh_issues_if_stale, PythonRunnerSpawner, RefreshIssuesOptions, RunnerSpawner,
+    },
     repo_hash::compute_repo_hash,
 };
 
@@ -140,4 +142,18 @@ async fn refresh_returns_quickly_even_when_runner_runs_long() {
         start.elapsed() < Duration::from_millis(200),
         "refresh must not block on runner work"
     );
+}
+
+#[test]
+fn python_runner_spawner_builds_issue_index_command_and_surfaces_spawn_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spawner = PythonRunnerSpawner {
+        python_executable: tmp.path().join("missing-python.exe"),
+        runner_script: tmp.path().join("runner.py"),
+    };
+
+    let error = spawner
+        .spawn_index_issues("repo-hash", tmp.path(), true)
+        .expect_err("missing executable should surface the spawn error");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }

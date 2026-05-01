@@ -235,11 +235,17 @@
         recovery: "",
       };
       let versionState = { current: "", latest: "" };
-      let indexStatusState = { state: "", detail: "" };
+      const indexStatusByProjectRoot = new Map();
       let projectError = "";
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
       function renderIndexStatus() {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const indexStatusState =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || {
+            state: "",
+            detail: "",
+          };
         const state = indexStatusState.state || "";
         indexStatusLabel.hidden = !state || state === "skipped";
         indexStatusLabel.className = `index-status ${state}`;
@@ -255,11 +261,14 @@
         indexStatusLabel.title = indexStatusState.detail || label;
       }
 
-      function setIndexStatus(status) {
-        indexStatusState = {
+      function setIndexStatus(projectRoot, status) {
+        if (!projectRoot) {
+          return;
+        }
+        indexStatusByProjectRoot.set(projectRoot, {
           state: status?.state || "",
           detail: status?.detail || "",
-        };
+        });
         renderIndexStatus();
       }
 
@@ -710,6 +719,7 @@
         setVersionState(appState.app_version, versionState.latest);
         renderProjectTabs();
         renderProjectPicker();
+        renderIndexStatus();
         updateActionAvailability();
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
@@ -5689,7 +5699,7 @@
             break;
           }
           case "project_index_status":
-            setIndexStatus(event.status);
+            setIndexStatus(event.project_root, event.status);
             break;
           case "file_tree_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(

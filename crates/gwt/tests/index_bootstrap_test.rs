@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -120,10 +120,21 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
         *calls
     );
     assert!(
-        calls[0].contains(&wt.display().to_string()),
+        call_project_root_matches(&calls[0], &wt),
         "refresh should use the requested worktree path, got {:?}",
         *calls
     );
+}
+
+fn call_project_root_matches(call: &str, expected: &Path) -> bool {
+    let Some(actual) = call.split('|').nth(1) else {
+        return false;
+    };
+    normalize_path(actual) == normalize_path(expected)
+}
+
+fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
+    dunce::canonicalize(path.as_ref()).unwrap_or_else(|_| path.as_ref().to_path_buf())
 }
 
 fn init_git_repo(path: &Path) {
