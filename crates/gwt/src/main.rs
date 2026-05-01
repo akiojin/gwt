@@ -18,9 +18,9 @@ use gwt::{
     load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree,
     resolve_launch_spec, save_session_state, save_workspace_state, workspace_state_path,
     BackendEvent, BranchEntriesPhase, BranchListEntry, DockerWizardContext, FrontendEvent,
-    HookForwardTarget, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
-    WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
+    HookForwardTarget, KnowledgeKind, LaunchWizardCompletion, LaunchWizardLaunchRequest,
+    LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, WindowGeometry, WindowPreset,
+    WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
