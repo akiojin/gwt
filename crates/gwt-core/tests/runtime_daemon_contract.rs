@@ -494,6 +494,22 @@ fn client_frame_subscribe_serializes_channel_list() {
 }
 
 #[test]
+fn client_frame_publish_round_trips_payload() {
+    let frame = ClientFrame::Publish {
+        channel: "board".to_string(),
+        payload: json!({"entries": 7, "last_seq": 42}),
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "publish");
+    assert_eq!(json_value["channel"], "board");
+    assert_eq!(json_value["payload"]["entries"], 7);
+    assert_eq!(json_value["payload"]["last_seq"], 42);
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
 fn daemon_frame_ack_serializes_to_canonical_shape() {
     let frame = DaemonFrame::Ack;
     let json_value = serde_json::to_value(&frame).unwrap();

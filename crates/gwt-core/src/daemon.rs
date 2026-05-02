@@ -181,6 +181,12 @@ pub enum ClientFrame {
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
     Subscribe { channels: Vec<String> },
+    /// Publish a payload to a daemon broadcast channel. Subscribers of
+    /// `channel` receive a [`DaemonFrame::Event`] with the same payload.
+    /// This is the gwt → gwtd companion to `Subscribe`; it is what
+    /// Phase H1 GREEN domain handlers use to fan a state change out
+    /// across all gwt instances on the same project scope.
+    Publish { channel: String, payload: Value },
     /// Request a snapshot of the daemon's current runtime stats.
     Status,
 }

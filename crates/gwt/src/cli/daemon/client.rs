@@ -370,6 +370,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_frame_fans_out_to_subscriber_through_daemon() {
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+        let endpoint = sample_endpoint(scope.clone(), &socket_path, "publish-secret");
+
+        let server_endpoint = endpoint.clone();
+        let server_socket = socket_path.clone();
+        let server_endpoint_path = endpoint_path.clone();
+        let server_hub = BroadcastHub::new();
+        let server_handle = tokio::spawn(async move {
+            server::run_server(
+                server_endpoint,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
+        });
+
+        wait_for_socket(&socket_path).await;
+
+        // Client A: subscribes to "board" and waits for events.
+        let mut subscriber = DaemonClient::connect(&endpoint).await.expect("subscriber");
+        subscriber
+            .send_frame(&ClientFrame::Subscribe {
+                channels: vec!["board".to_string()],
+            })
+            .await
+            .expect("subscribe send");
+        let sub_ack: DaemonFrame = subscriber.read_frame().await.expect("subscribe ack");
+        assert_eq!(sub_ack, DaemonFrame::Ack);
+
+        // Client B: publishes a payload via ClientFrame::Publish.
+        let mut publisher = DaemonClient::connect(&endpoint).await.expect("publisher");
+        let payload = serde_json::json!({"entries": 9});
+        publisher
+            .send_frame(&ClientFrame::Publish {
+                channel: "board".to_string(),
+                payload: payload.clone(),
+            })
+            .await
+            .expect("publish send");
+        let pub_ack: DaemonFrame = publisher.read_frame().await.expect("publish ack");
+        assert_eq!(pub_ack, DaemonFrame::Ack);
+
+        // Subscriber must observe the matching Event frame.
+        let event: DaemonFrame = tokio::time::timeout(
+            Duration::from_millis(500),
+            subscriber.read_frame::<DaemonFrame>(),
+        )
+        .await
+        .expect("subscriber read timeout")
+        .expect("subscriber read");
+        assert_eq!(
+            event,
+            DaemonFrame::Event {
+                channel: "board".to_string(),
+                payload,
+            }
+        );
+
+        drop(subscriber);
+        drop(publisher);
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
     async fn subscribed_client_receives_published_broadcast_events() {
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);
