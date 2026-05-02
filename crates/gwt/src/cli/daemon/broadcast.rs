@@ -70,10 +70,13 @@ impl BroadcastHub {
         }
     }
 
-    /// Number of distinct channels currently tracked. Test helper.
-    #[cfg(test)]
+    /// Number of distinct channels currently tracked. Used by the
+    /// daemon's status snapshot frame and by tests.
     pub(super) fn channel_count(&self) -> usize {
-        self.channels.lock().unwrap().len()
+        self.channels
+            .lock()
+            .expect("BroadcastHub mutex poisoned")
+            .len()
     }
 }
 

@@ -181,6 +181,8 @@ pub enum ClientFrame {
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
     Subscribe { channels: Vec<String> },
+    /// Request a snapshot of the daemon's current runtime stats.
+    Status,
 }
 
 /// Tagged frame envelope returned by `gwtd`.
@@ -198,6 +200,18 @@ pub enum DaemonFrame {
     Event { channel: String, payload: Value },
     /// The daemon rejected the frame. `message` is human-readable.
     Error { message: String },
+    /// Snapshot of daemon runtime stats, returned in response to a
+    /// [`ClientFrame::Status`] request.
+    Status(DaemonStatus),
+}
+
+/// Runtime stats snapshot returned by a [`DaemonFrame::Status`] frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub protocol_version: u32,
+    pub daemon_version: String,
+    pub uptime_seconds: u64,
+    pub broadcast_channels: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

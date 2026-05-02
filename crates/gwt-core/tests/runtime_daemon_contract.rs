@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use gwt_core::daemon::{
     persist_endpoint, resolve_bootstrap_action, validate_handshake, ClientFrame,
-    DaemonBootstrapAction, DaemonEndpoint, DaemonFrame, HookEnvelope, IpcHandshakeRequest,
-    IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    DaemonBootstrapAction, DaemonEndpoint, DaemonFrame, DaemonStatus, HookEnvelope,
+    IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
+    DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -523,6 +524,33 @@ fn daemon_frame_error_serializes_message() {
     let json_value = serde_json::to_value(&frame).unwrap();
     assert_eq!(json_value["type"], "error");
     assert_eq!(json_value["message"], "unknown frame type");
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn client_frame_status_serializes_to_canonical_shape() {
+    let frame = ClientFrame::Status;
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "status");
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_status_carries_uptime_and_channel_count() {
+    let frame = DaemonFrame::Status(DaemonStatus {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        daemon_version: "9.14.0".to_string(),
+        uptime_seconds: 42,
+        broadcast_channels: 3,
+    });
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "status");
+    assert_eq!(json_value["protocol_version"], DAEMON_PROTOCOL_VERSION);
+    assert_eq!(json_value["daemon_version"], "9.14.0");
+    assert_eq!(json_value["uptime_seconds"], 42);
+    assert_eq!(json_value["broadcast_channels"], 3);
     let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
     assert_eq!(round_trip, frame);
 }
