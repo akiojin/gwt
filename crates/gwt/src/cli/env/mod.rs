@@ -3,8 +3,10 @@
 //! - `mod.rs` (this file): public [`CliEnv`] trait, helper types
 //!   ([`InternalCommandOutput`] / [`InternalCommandCall`] / [`ClientRef`]),
 //!   and the global [`dispatch`] entry point.
-//! - `default.rs`: production [`DefaultCliEnv`] + [`LazyIssueClient`].
-//! - `test_env.rs`: in-memory [`TestEnv`] used by `cli` family tests.
+//! - `default.rs`: production [`default::DefaultCliEnv`] +
+//!   [`default::LazyIssueClient`].
+//! - `test_env.rs`: in-memory [`test_env::TestEnv`] used by `cli` family
+//!   tests.
 //! - `tests.rs`: env integration tests (`#[cfg(test)]`).
 
 mod default;

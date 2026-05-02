@@ -291,9 +291,9 @@ pub struct AgentLaunchBuilder {
     env_overrides: HashMap<String, String>,
     /// Env table from a `CustomCodingAgent`. Merged into the spawn env AFTER
     /// the SPEC-1921 Common family (TERM / GWT_*) and agent-specific env
-    /// (Claude / Codex / …), and BEFORE [`env_overrides`], so preset-seeded
-    /// custom entries win over built-in defaults but never clobber explicit
-    /// caller-provided overrides.
+    /// (Claude / Codex / …), and BEFORE the explicit `env_overrides` field
+    /// above, so preset-seeded custom entries win over built-in defaults
+    /// but never clobber explicit caller-provided overrides.
     custom_agent_env: HashMap<String, String>,
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
