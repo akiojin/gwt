@@ -57,10 +57,9 @@ impl BroadcastHub {
     /// `channel`. Returns the number of receivers the frame was queued
     /// for (zero is a successful no-op when nobody is listening).
     ///
-    /// Phase H1 GREEN will call this from real domain handlers (Board
-    /// projection writer, runtime status aggregator). Until then the
-    /// only callers live in tests, so the lib-only dead-code lint is
-    /// suppressed.
+    /// Called from `server::handle_connection` when a
+    /// `ClientFrame::Publish` arrives, so the daemon fans the payload
+    /// out to every subscribed connection on `channel`.
     ///
     /// Critically, the global `channels` mutex is released *before*
     /// `sender.send` runs. `tokio::sync::broadcast::Sender::send`
@@ -68,7 +67,6 @@ impl BroadcastHub {
     /// across that call would block unrelated subscribe / publish
     /// activity on other channels for the duration of a (potentially
     /// large) fan-out.
-    #[allow(dead_code)]
     pub(crate) fn publish(&self, channel: &str, frame: DaemonFrame) -> usize {
         let sender = {
             let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
