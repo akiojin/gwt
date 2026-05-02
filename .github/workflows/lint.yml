@@ -5,6 +5,18 @@ on:
     branches: [develop, main]
 
 jobs:
+  audit:
+    name: Cargo Deny (advisories + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.4
+      - name: Run cargo deny (advisories + sources)
+        run: cargo deny check advisories sources
   lint:
     name: Clippy & Rustfmt
     runs-on: ubuntu-latest
