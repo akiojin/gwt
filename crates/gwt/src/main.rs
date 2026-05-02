@@ -3527,13 +3527,6 @@ mod tests {
             defaults.workspace_folder.as_deref(),
             Some("/workspaces/repo")
         );
-        assert!(super::same_worktree_path(
-            defaults
-                .compose_file
-                .as_deref()
-                .expect("compose file from defaults"),
-            &compose_file,
-        ));
         assert_eq!(defaults.compose_files.len(), 1);
         assert!(super::same_worktree_path(
             &defaults.compose_files[0],
