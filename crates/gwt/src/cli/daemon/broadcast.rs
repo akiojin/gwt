@@ -34,18 +34,18 @@ pub(super) const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 /// single short-lived [`Mutex`]. Channels are created on-demand the
 /// first time `subscribe` or `publish` references them.
 #[derive(Clone, Default)]
-pub(super) struct BroadcastHub {
+pub(crate) struct BroadcastHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<DaemonFrame>>>>,
 }
 
 impl BroadcastHub {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Return a subscriber receiver for `channel`, creating the channel
     /// if it does not exist yet.
-    pub(super) fn subscribe(&self, channel: &str) -> broadcast::Receiver<DaemonFrame> {
+    pub(crate) fn subscribe(&self, channel: &str) -> broadcast::Receiver<DaemonFrame> {
         let mut guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
         let sender = guard
             .entry(channel.to_string())
@@ -62,7 +62,7 @@ impl BroadcastHub {
     /// only callers live in tests, so the lib-only dead-code lint is
     /// suppressed.
     #[allow(dead_code)]
-    pub(super) fn publish(&self, channel: &str, frame: DaemonFrame) -> usize {
+    pub(crate) fn publish(&self, channel: &str, frame: DaemonFrame) -> usize {
         let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
         match guard.get(channel) {
             Some(sender) => sender.send(frame).unwrap_or(0),
@@ -72,7 +72,7 @@ impl BroadcastHub {
 
     /// Number of distinct channels currently tracked. Used by the
     /// daemon's status snapshot frame and by tests.
-    pub(super) fn channel_count(&self) -> usize {
+    pub(crate) fn channel_count(&self) -> usize {
         self.channels
             .lock()
             .expect("BroadcastHub mutex poisoned")
