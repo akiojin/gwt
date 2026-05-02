@@ -1,5 +1,70 @@
 # Lessons Learned
 
+## 2026-05-04 — multi-round correction loops on the same docs are a smell, not a feature
+
+### 事象
+
+architecture.md / README の daemon 説明を refresh しようとして、 同一の
+docs を 3 ラウンド連続 codex P2 で訂正することになった
+(PR #2335 → #2336 → #2337):
+
+1. **PR #2335**: `gwtd daemon` が GUI 起動時に "auto-bootstrap" すると
+   記載 → 実装は endpoint メタデータを書くだけで daemon サーバーを
+   起動しないため事実誤認。 加えて endpoint ファイル名を
+   `endpoint.json` と書いたが、 実際は
+   `RuntimeScope::endpoint_path` で `<worktree-hash>.json`。
+2. **PR #2336**: 上記 2 件を訂正したが、 「最初の `gwt` GUI 起動時に
+   endpoint メタデータが記録され、 後続プロセスが live な daemon を
+   見つけられる」と書き直した → これも誤り。 `is_alive` predicate が
+   `|pid| pid == self.pid` という狭い条件のため、 `gwtd daemon
+   start` の endpoint を「dead」扱いで削除し sentinel で上書きする。
+   GUI 起動が live daemon の endpoint を **clobber する** という
+   逆方向の事実だった。
+3. **PR #2337**: 残りの誤った claim をすべて削り、 verifiable な記述
+   だけに切り戻した。 副産物として、 codex の指摘から実装の
+   front-door clobber bug が浮上したため Issue #2338 として登録。
+
+### 原因
+
+各ラウンドで「修正したつもり」でも、 自分が新しく書いた wording が
+別の事実誤認を含むまま push し、 codex が次の round で別の角度から
+反証してきた。 共通する根本原因は **ストーリー先行で書いた wording
+を、 実際の code path で逐語検証していなかった** こと。 PR #2313 で
+書いた `tasks/lessons.md` rule 4 そのものに自分自身が複数回失敗した
+形になる。
+
+具体的に逃した検証ステップ:
+
+- "auto-bootstrap" と書く前に `serve_blocking` の caller を grep
+  すれば、 GUI front door からは呼ばれていないことがすぐ判った
+- "endpoint.json" と書く前に `endpoint_path` の実装を読めば、
+  filename が `<worktree-hash>.json` であることが判った
+- "subsequent processes can find a live daemon" と書く前に
+  `prepare_daemon_front_door_for_path` の `is_alive` closure
+  を読めば、 自分の PID 以外を全部 dead 扱いする狭さに気づけた
+
+### 再発防止策
+
+1. **同一 PR が 2 ラウンド以上 codex P2 を受けたら、 反射的に追加
+   修正で押し返さず、 一度全文を verifiable claim だけに削ぎ落とす**。
+   "自分の story を docs で再構築する" モードに入っている合図。
+2. **daemon / IPC / runtime のような並行系挙動を docs で説明する
+   ときは、 各文を書く前に「この文を反証できる code path はないか」
+   を 1 文ごとに 30 秒だけ自問する**。 grep 1 回で済む確認が
+   review round 1 周分のコストを節約する。
+3. **副産物として bug を発見したら、 docs PR の場で fix まで踏み込
+   まず Issue 化する**。 PR #2337 → Issue #2338 が良い分離例。
+   front-door clobber は SPEC-2077 owner の design 判断が要るため
+   autonomous fix の対象ではない。
+4. **lessons.md の rule 4 自体を、 失敗するたびに具体例として
+   追記する**。 抽象ルールだけだと自分の脳内で「適用済」と錯覚
+   しやすい。 具体 instance が増えるほど、 同じ罠の sniff test が
+   早く効くようになる。
+
+PR #2305 / #2310 / #2311 / #2315 (codex P2 round 1) と本ラウンド
+(round 2) の両方が「verify-before-write」の同じ rule を破った
+事例なので、 Phase H2-H4 docs を書くときは特に注意する。
+
 ## 2026-05-04 — review feedback: claims must be verified against the actual code path
 
 ### 事象
