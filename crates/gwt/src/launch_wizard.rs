@@ -946,10 +946,10 @@ impl LaunchWizardState {
             return Err("Launch options are still loading".to_string());
         }
 
-        let working_dir = if !self.is_new_branch {
-            self.context.worktree_path.clone()
-        } else {
+        let working_dir = if self.is_new_branch {
             None
+        } else {
+            self.context.worktree_path.clone()
         };
         let branch = (!self.branch_name.is_empty()).then(|| self.branch_name.clone());
         let base_branch = self.is_new_branch.then(|| {
