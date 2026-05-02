@@ -12,8 +12,9 @@ pub use quick_start::load_quick_start_entries;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "release/"];
 
-/// Source kind of a SPEC/Issue knowledge bridge that opened the Launch Wizard.
-/// Used to seed branch names as `{prefix}{kind}-{number}` per SPEC-2014 FR-024/025.
+/// Distinguishes the source bridge so branch names seed as `issue-{n}` vs
+/// `spec-{n}` (kept independent of `linked_issue_number` because Branches-window
+/// callers can know the number from a linkage store but not the source kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkedIssueKind {
@@ -2942,21 +2943,6 @@ fn docker_lifecycle_value(intent: gwt_agent::DockerLifecycleIntent) -> &'static 
     }
 }
 
-#[cfg(test)]
-fn apply_branch_prefix(seed: &str, prefix: &str) -> String {
-    let trimmed = seed.trim();
-    let suffix = BRANCH_TYPE_PREFIXES
-        .iter()
-        .find_map(|known| trimmed.strip_prefix(known))
-        .unwrap_or(trimmed)
-        .trim_matches('/');
-    if suffix.is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}{suffix}")
-    }
-}
-
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
 }
@@ -3670,7 +3656,12 @@ mod tests {
         assert_eq!(state.base_branch_name.as_deref(), Some("feature/gui"));
     }
 
-    // SPEC-2014 FR-024/025: branch name auto-seed from SPEC/Issue window.
+    fn create_new_with_prefix(state: &mut LaunchWizardState, prefix: &str) {
+        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
+        state.apply(LaunchWizardAction::SetBranchType {
+            prefix: prefix.to_string(),
+        });
+    }
 
     #[test]
     fn branch_seed_uses_issue_kind_when_create_new_then_feature_prefix() {
@@ -3679,10 +3670,7 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
-        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
-        state.apply(LaunchWizardAction::SetBranchType {
-            prefix: "feature/".to_string(),
-        });
+        create_new_with_prefix(&mut state, "feature/");
         assert_eq!(state.branch_name, "feature/issue-42");
     }
 
@@ -3693,10 +3681,7 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
-        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
-        state.apply(LaunchWizardAction::SetBranchType {
-            prefix: "feature/".to_string(),
-        });
+        create_new_with_prefix(&mut state, "feature/");
         assert_eq!(state.branch_name, "feature/spec-2014");
     }
 
@@ -3707,10 +3692,7 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
-        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
-        state.apply(LaunchWizardAction::SetBranchType {
-            prefix: "bugfix/".to_string(),
-        });
+        create_new_with_prefix(&mut state, "bugfix/");
         assert_eq!(state.branch_name, "bugfix/issue-10");
     }
 
@@ -3721,10 +3703,7 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
-        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
-        state.apply(LaunchWizardAction::SetBranchType {
-            prefix: "feature/".to_string(),
-        });
+        create_new_with_prefix(&mut state, "feature/");
         assert_eq!(state.branch_name, "feature/");
     }
 
@@ -3735,15 +3714,10 @@ mod tests {
             sample_agent_options(),
             Vec::new(),
         );
-        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
-        state.apply(LaunchWizardAction::SetBranchType {
-            prefix: "feature/".to_string(),
-        });
-        // user replaces the auto-seeded suffix
+        create_new_with_prefix(&mut state, "feature/");
         state.apply(LaunchWizardAction::SetBranchName {
             value: "feature/custom-name".to_string(),
         });
-        // switching prefix should preserve the user-entered suffix
         state.apply(LaunchWizardAction::SetBranchType {
             prefix: "bugfix/".to_string(),
         });
@@ -3752,8 +3726,6 @@ mod tests {
 
     #[test]
     fn branch_seed_omits_title_slug_for_spec_proposal_a() {
-        // SPEC-2014 FR-025 (Proposal A): SPEC seed must be `spec-{n}` only,
-        // not the legacy gwt-tui `feature/spec-{n}-{title-slug}` form.
         let ctx =
             context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Spec, 2014);
         let suffix = ctx
@@ -3764,9 +3736,6 @@ mod tests {
 
     #[test]
     fn branch_seed_create_new_then_default_prefix_seeds_branch_name() {
-        // SetBranchMode { create_new: true } currently primes branch_name to
-        // BRANCH_TYPE_PREFIXES[0] (=feature/). With a linked issue context the
-        // prime should include the auto-seeded suffix as well.
         let mut state = LaunchWizardState::open_with(
             context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Issue, 7),
             sample_agent_options(),
@@ -4902,11 +4871,6 @@ mod tests {
             docker_lifecycle_value(gwt_agent::DockerLifecycleIntent::CreateAndStart),
             "create_and_start"
         );
-        assert_eq!(
-            apply_branch_prefix("feature/coverage", "fix/"),
-            "fix/coverage"
-        );
-        assert_eq!(apply_branch_prefix("  ", "chore/"), "chore/");
         assert!(is_explicit_model_selection("gpt-5.5"));
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
