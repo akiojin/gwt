@@ -2306,53 +2306,6 @@ impl AppRuntime {
         Ok(events)
     }
 
-    pub(crate) fn spawn_wizard_shell_window(
-        &mut self,
-        tab_id: &str,
-        config: ShellLaunchConfig,
-        bounds: WindowGeometry,
-    ) -> Result<Vec<OutboundEvent>, String> {
-        let tab = self
-            .tab_mut(tab_id)
-            .ok_or_else(|| "Project tab not found".to_string())?;
-        let project_root = tab.project_root.display().to_string();
-        let title = format!(
-            "{} · {}",
-            config.display_name,
-            config.branch.as_ref().unwrap_or(&"workspace".to_string())
-        );
-        let window = tab
-            .workspace
-            .add_window_with_title(WindowPreset::Shell, title, false, bounds);
-        self.register_window(tab_id, &window.id);
-        let window_id = combined_window_id(tab_id, &window.id);
-
-        self.window_pty_statuses
-            .insert(window_id.clone(), WindowProcessStatus::Running);
-        self.window_hook_states.remove(&window_id);
-
-        let mut events = vec![self.workspace_state_broadcast()];
-        events.extend(Self::status_events(
-            window_id.clone(),
-            WindowProcessStatus::Running,
-            Some("Launching...".to_string()),
-        ));
-
-        let proxy = self.proxy.clone();
-        let profile_config_path = self.profile_config_path()?;
-        thread::spawn(move || {
-            Self::spawn_wizard_shell_window_async(
-                proxy,
-                project_root,
-                window_id,
-                config,
-                profile_config_path,
-            )
-        });
-
-        Ok(events)
-    }
-
     pub(crate) fn spawn_agent_window_async(
         proxy: AppEventProxy,
         sessions_dir: PathBuf,
