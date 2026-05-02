@@ -87,14 +87,10 @@ running `gwtd daemon start` brings up a per-project runtime daemon
 — for example, with the daemon running, Board posts you make in one
 `gwt` window appear in another instance opened on the same repo
 without a polling delay. The daemon keeps running in the background
-until you stop it (Ctrl-C or SIGTERM); the first `gwt` GUI launch on
-a project records the daemon's endpoint metadata under `~/.gwt/...`
-so subsequent processes can find a live daemon if one is running, and
-stale entries from a crashed daemon are cleaned up on the next
-`gwtd daemon start`. `gwtd daemon status` prints the live endpoint
-for diagnostics. Without `gwtd daemon start`, multi-instance fan-out
-is inactive but local file-based state and the file watcher continue
-to work as before.
+until you stop it (Ctrl-C or SIGTERM). `gwtd daemon status` prints
+the live endpoint for diagnostics. Without `gwtd daemon start`,
+multi-instance fan-out is inactive but local file-based state and
+the file watcher continue to work as before.
 
 Windows currently has no long-running daemon: `gwtd daemon start`
 exits with "not yet implemented", and managed hooks fall back to

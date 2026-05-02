@@ -30,11 +30,9 @@ gwt は二つの Rust バイナリ — `gwt` (GUI フロントドア) と `gwtd`
 ## Data Flow
 
 1. `gwt` を GUI モードで起動すると、ネイティブウィンドウとローカル
-   HTTP/WebSocket サーバーが立ち上がる。 macOS / Linux では同時に
-   `prepare_daemon_front_door_for_path` がプロジェクトの daemon
-   endpoint メタデータを書き込む (`bind: "internal://gwt-front-door"`
-   sentinel) — ただしこれは endpoint ファイルの記録だけで、 IPC
-   サーバーは起動しない
+   HTTP/WebSocket サーバーが立ち上がる。 multi-instance daemon
+   (`gwtd daemon start`) は別途ユーザーが起動するため、 GUI 起動
+   それ自体は IPC サーバーを bring up しない (詳細は step 5)
 2. WebView は同じサーバーへ接続し、キャンバス上のウィンドウ状態を
    同期する
 3. `Shell` / `Agent` ウィンドウは PTY を通してプロセスを実行する
