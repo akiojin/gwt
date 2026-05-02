@@ -489,4 +489,53 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.contains("#42 [OPEN] Issue family direct run"));
     }
+
+    // -------------------------------------------------------------------
+    // SPEC-1942 SC-025 follow-up: issue-family helper tests relocated
+    // from cli.rs.
+    // -------------------------------------------------------------------
+
+    use crate::cli::test_support::sample_issue_snapshot;
+    use crate::cli::LinkedPrSummary;
+
+    #[test]
+    fn cache_backed_issue_and_linked_pr_helpers_reuse_cached_data() {
+        let temp = TempDir::new().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let snapshot = sample_issue_snapshot();
+        env.client.seed(snapshot.clone());
+
+        let loaded = load_or_refresh_issue(&mut env, snapshot.number, false).expect("load issue");
+        assert_eq!(loaded.snapshot.number, snapshot.number);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+
+        let cached = load_or_refresh_issue(&mut env, snapshot.number, false).expect("cached issue");
+        assert_eq!(cached.snapshot.title, snapshot.title);
+        assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
+
+        env.seed_linked_prs(
+            42,
+            vec![LinkedPrSummary {
+                number: 128,
+                title: "Enforce coverage".to_string(),
+                state: "OPEN".to_string(),
+                url: "https://github.com/akiojin/gwt/pull/128".to_string(),
+            }],
+        );
+        let linked =
+            load_or_refresh_linked_prs(&mut env, snapshot.number, false).expect("linked prs");
+        assert_eq!(linked.len(), 1);
+        assert_eq!(env.linked_pr_calls(), vec![42]);
+
+        env.clear_linked_pr_calls();
+        let cached_linked = load_or_refresh_linked_prs(&mut env, snapshot.number, false)
+            .expect("cached linked prs");
+        assert_eq!(cached_linked.len(), 1);
+        assert!(env.linked_pr_calls().is_empty());
+
+        let cache_path = linked_prs_cache_path(temp.path(), snapshot.number);
+        std::fs::create_dir_all(cache_path.parent().expect("cache dir")).expect("create cache dir");
+        std::fs::write(&cache_path, "{not-json").expect("write invalid json");
+        assert!(read_linked_prs_cache(temp.path(), snapshot.number).is_err());
+    }
 }
