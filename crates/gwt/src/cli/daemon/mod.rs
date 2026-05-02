@@ -12,11 +12,11 @@
 //! enter the listen loop.
 
 #[cfg(unix)]
-pub(super) mod broadcast;
+pub(crate) mod broadcast;
 #[cfg(unix)]
 pub mod client;
 #[cfg(unix)]
-pub(super) mod server;
+pub(crate) mod server;
 
 use std::path::PathBuf;
 #[cfg(unix)]

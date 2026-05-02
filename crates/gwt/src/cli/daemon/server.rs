@@ -102,7 +102,7 @@ pub(super) fn serve_blocking(
     result
 }
 
-pub(super) async fn run_server(
+pub(crate) async fn run_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,
