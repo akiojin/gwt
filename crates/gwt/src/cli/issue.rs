@@ -1,6 +1,15 @@
-use gwt_github::{Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError};
+use std::{fs, io, path::PathBuf};
+
+use gwt_github::{
+    cache::write_atomic, client::ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot,
+    IssueState, SpecOpsError,
+};
 
 use crate::cli::{CliEnv, CliParseError, IssueCommand, LinkedPrSummary};
+
+fn io_as_api_error(err: io::Error) -> SpecOpsError {
+    SpecOpsError::from(ApiError::Network(err.to_string()))
+}
 
 pub(super) fn parse(args: &[String]) -> Result<IssueCommand, CliParseError> {
     let mut it = args.iter().peekable();
@@ -42,17 +51,17 @@ pub(super) fn run<E: CliEnv>(
 
     let code = match cmd {
         IssueCommand::View { number, refresh } => {
-            let entry = super::load_or_refresh_issue(env, IssueNumber(number), refresh)?;
+            let entry = load_or_refresh_issue(env, IssueNumber(number), refresh)?;
             render_issue(out, &entry.snapshot);
             0
         }
         IssueCommand::Comments { number, refresh } => {
-            let entry = super::load_or_refresh_issue(env, IssueNumber(number), refresh)?;
+            let entry = load_or_refresh_issue(env, IssueNumber(number), refresh)?;
             render_issue_comments(out, &entry.snapshot);
             0
         }
         IssueCommand::LinkedPrs { number, refresh } => {
-            let linked_prs = super::load_or_refresh_linked_prs(env, IssueNumber(number), refresh)?;
+            let linked_prs = load_or_refresh_linked_prs(env, IssueNumber(number), refresh)?;
             render_linked_prs(out, &linked_prs);
             0
         }
@@ -73,7 +82,7 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            let _ = super::refresh_issue_cache(env, IssueNumber(number))?;
+            let _ = refresh_issue_cache(env, IssueNumber(number))?;
             out.push_str(&format!(
                 "created comment {} on #{}\n",
                 comment.id.0, number
@@ -210,6 +219,206 @@ pub(super) fn render_linked_prs(out: &mut String, linked_prs: &[LinkedPrSummary]
             pr.number, pr.state, pr.title, pr.url
         ));
     }
+}
+
+pub(super) fn load_or_refresh_issue<E: CliEnv>(
+    env: &mut E,
+    number: IssueNumber,
+    refresh: bool,
+) -> Result<gwt_github::CacheEntry, SpecOpsError> {
+    let cache = Cache::new(env.cache_root());
+    if !refresh {
+        if let Some(entry) = cache.load_entry(number) {
+            return Ok(entry);
+        }
+    }
+    refresh_issue_cache(env, number)
+}
+
+pub(super) fn refresh_issue_cache<E: CliEnv>(
+    env: &mut E,
+    number: IssueNumber,
+) -> Result<gwt_github::CacheEntry, SpecOpsError> {
+    let snapshot = match env.client().fetch(number, None)? {
+        gwt_github::FetchResult::Updated(snapshot) => snapshot,
+        gwt_github::FetchResult::NotModified => {
+            return Cache::new(env.cache_root())
+                .load_entry(number)
+                .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)));
+        }
+    };
+    let cache = Cache::new(env.cache_root());
+    cache.write_snapshot(&snapshot)?;
+    cache
+        .load_entry(number)
+        .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))
+}
+
+pub(super) fn load_or_refresh_linked_prs<E: CliEnv>(
+    env: &mut E,
+    number: IssueNumber,
+    refresh: bool,
+) -> Result<Vec<LinkedPrSummary>, SpecOpsError> {
+    let cache_root = env.cache_root();
+    if !refresh {
+        if let Some(cached) = read_linked_prs_cache(&cache_root, number)? {
+            return Ok(cached);
+        }
+    }
+    let linked_prs = env.fetch_linked_prs(number).map_err(io_as_api_error)?;
+    write_linked_prs_cache(&cache_root, number, &linked_prs)?;
+    Ok(linked_prs)
+}
+
+pub(super) fn linked_prs_cache_path(cache_root: &std::path::Path, number: IssueNumber) -> PathBuf {
+    cache_root
+        .join(number.0.to_string())
+        .join("linked_prs.json")
+}
+
+pub(super) fn read_linked_prs_cache(
+    cache_root: &std::path::Path,
+    number: IssueNumber,
+) -> Result<Option<Vec<LinkedPrSummary>>, SpecOpsError> {
+    let path = linked_prs_cache_path(cache_root, number);
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let parsed = serde_json::from_str(&text)
+                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+            Ok(Some(parsed))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(io_as_api_error(err)),
+    }
+}
+
+pub(super) fn write_linked_prs_cache(
+    cache_root: &std::path::Path,
+    number: IssueNumber,
+    linked_prs: &[LinkedPrSummary],
+) -> Result<(), SpecOpsError> {
+    let bytes = serde_json::to_vec_pretty(linked_prs)
+        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    write_atomic(&linked_prs_cache_path(cache_root, number), &bytes).map_err(io_as_api_error)
+}
+
+pub(super) fn fetch_linked_prs_via_gh(
+    owner: &str,
+    repo: &str,
+    number: IssueNumber,
+) -> io::Result<Vec<LinkedPrSummary>> {
+    let query = r#"
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
+        nodes {
+          __typename
+          ... on CrossReferencedEvent {
+            source {
+              __typename
+              ... on PullRequest {
+                number
+                title
+                state
+                url
+              }
+            }
+          }
+          ... on ConnectedEvent {
+            subject {
+              __typename
+              ... on PullRequest {
+                number
+                title
+                state
+                url
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+    let output = gwt_core::process::hidden_command("gh")
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("repo={repo}"),
+            "-F",
+            &format!("number={}", number.0),
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "gh api graphql failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let nodes = value
+        .get("data")
+        .and_then(|v| v.get("repository"))
+        .and_then(|v| v.get("issue"))
+        .and_then(|v| v.get("timelineItems"))
+        .and_then(|v| v.get("nodes"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for node in nodes {
+        let typename = node
+            .get("__typename")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let pr = match typename {
+            "CrossReferencedEvent" => node.get("source"),
+            "ConnectedEvent" => node.get("subject"),
+            _ => None,
+        };
+        let Some(pr) = pr else { continue };
+        if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
+            continue;
+        }
+        let Some(pr_number) = pr.get("number").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        if !seen.insert(pr_number) {
+            continue;
+        }
+        out.push(LinkedPrSummary {
+            number: pr_number,
+            title: pr
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            state: pr
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            url: pr
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

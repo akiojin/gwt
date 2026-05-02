@@ -372,7 +372,7 @@ impl CliEnv for DefaultCliEnv {
         fs::read_to_string(path)
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
-        super::fetch_linked_prs_via_gh(&self.owner, &self.repo, number)
+        super::issue::fetch_linked_prs_via_gh(&self.owner, &self.repo, number)
     }
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
         super::pr::fetch_current_pr_via_gh(&self.repo_path)
@@ -446,10 +446,15 @@ impl CliEnv for DefaultCliEnv {
         )
     }
     fn fetch_actions_run_log(&mut self, run_id: u64) -> io::Result<String> {
-        super::fetch_actions_run_log_via_gh(&self.repo_path, run_id)
+        super::actions::fetch_actions_run_log_via_gh(&self.repo_path, run_id)
     }
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String> {
-        super::fetch_actions_job_log_via_gh(&self.owner, &self.repo, &self.repo_path, job_id)
+        super::actions::fetch_actions_job_log_via_gh(
+            &self.owner,
+            &self.repo,
+            &self.repo_path,
+            job_id,
+        )
     }
     fn run_internal_command(
         &mut self,

@@ -33,15 +33,11 @@ mod pr;
 mod skill_state_runtime;
 pub mod update;
 
-use std::{
-    fs,
-    io::{self},
-    path::PathBuf,
-};
+use std::io::{self};
 
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
-use gwt_github::{cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, SpecOpsError};
+use gwt_github::{ApiError, SpecOpsError};
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -595,252 +591,6 @@ pub(crate) fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-fn load_or_refresh_issue<E: CliEnv>(
-    env: &mut E,
-    number: IssueNumber,
-    refresh: bool,
-) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let cache = Cache::new(env.cache_root());
-    if !refresh {
-        if let Some(entry) = cache.load_entry(number) {
-            return Ok(entry);
-        }
-    }
-    refresh_issue_cache(env, number)
-}
-
-fn refresh_issue_cache<E: CliEnv>(
-    env: &mut E,
-    number: IssueNumber,
-) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let snapshot = match env.client().fetch(number, None)? {
-        gwt_github::FetchResult::Updated(snapshot) => snapshot,
-        gwt_github::FetchResult::NotModified => {
-            return Cache::new(env.cache_root())
-                .load_entry(number)
-                .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)));
-        }
-    };
-    let cache = Cache::new(env.cache_root());
-    cache.write_snapshot(&snapshot)?;
-    cache
-        .load_entry(number)
-        .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))
-}
-
-fn load_or_refresh_linked_prs<E: CliEnv>(
-    env: &mut E,
-    number: IssueNumber,
-    refresh: bool,
-) -> Result<Vec<LinkedPrSummary>, SpecOpsError> {
-    let cache_root = env.cache_root();
-    if !refresh {
-        if let Some(cached) = read_linked_prs_cache(&cache_root, number)? {
-            return Ok(cached);
-        }
-    }
-    let linked_prs = env.fetch_linked_prs(number).map_err(io_as_api_error)?;
-    write_linked_prs_cache(&cache_root, number, &linked_prs)?;
-    Ok(linked_prs)
-}
-
-fn linked_prs_cache_path(cache_root: &std::path::Path, number: IssueNumber) -> PathBuf {
-    cache_root
-        .join(number.0.to_string())
-        .join("linked_prs.json")
-}
-
-fn read_linked_prs_cache(
-    cache_root: &std::path::Path,
-    number: IssueNumber,
-) -> Result<Option<Vec<LinkedPrSummary>>, SpecOpsError> {
-    let path = linked_prs_cache_path(cache_root, number);
-    match fs::read_to_string(&path) {
-        Ok(text) => {
-            let parsed = serde_json::from_str(&text)
-                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
-            Ok(Some(parsed))
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(io_as_api_error(err)),
-    }
-}
-
-fn write_linked_prs_cache(
-    cache_root: &std::path::Path,
-    number: IssueNumber,
-    linked_prs: &[LinkedPrSummary],
-) -> Result<(), SpecOpsError> {
-    let bytes = serde_json::to_vec_pretty(linked_prs)
-        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
-    write_atomic(&linked_prs_cache_path(cache_root, number), &bytes).map_err(io_as_api_error)
-}
-
-fn fetch_linked_prs_via_gh(
-    owner: &str,
-    repo: &str,
-    number: IssueNumber,
-) -> io::Result<Vec<LinkedPrSummary>> {
-    let query = r#"
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    issue(number: $number) {
-      timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
-        nodes {
-          __typename
-          ... on CrossReferencedEvent {
-            source {
-              __typename
-              ... on PullRequest {
-                number
-                title
-                state
-                url
-              }
-            }
-          }
-          ... on ConnectedEvent {
-            subject {
-              __typename
-              ... on PullRequest {
-                number
-                title
-                state
-                url
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-f",
-            &format!("owner={owner}"),
-            "-f",
-            &format!("repo={repo}"),
-            "-F",
-            &format!("number={}", number.0),
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh api graphql failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    let nodes = value
-        .get("data")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.get("issue"))
-        .and_then(|v| v.get("timelineItems"))
-        .and_then(|v| v.get("nodes"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for node in nodes {
-        let typename = node
-            .get("__typename")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let pr = match typename {
-            "CrossReferencedEvent" => node.get("source"),
-            "ConnectedEvent" => node.get("subject"),
-            _ => None,
-        };
-        let Some(pr) = pr else { continue };
-        if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
-            continue;
-        }
-        let Some(pr_number) = pr.get("number").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        if !seen.insert(pr_number) {
-            continue;
-        }
-        out.push(LinkedPrSummary {
-            number: pr_number,
-            title: pr
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: pr
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: pr
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
-    }
-    Ok(out)
-}
-
-fn fetch_actions_run_log_via_gh(repo_path: &std::path::Path, run_id: u64) -> io::Result<String> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["run", "view", &run_id.to_string(), "--log"])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh run view --log: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn fetch_actions_job_log_via_gh(
-    owner: &str,
-    repo: &str,
-    repo_path: &std::path::Path,
-    job_id: u64,
-) -> io::Result<String> {
-    let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["api", &endpoint])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh api {endpoint}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    if output.stdout.starts_with(b"PK") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "job logs returned a zip archive; unable to parse",
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Dispatch a `gwtd hook <name> [args...]` invocation.
-///
-/// SPEC-2077 hot path tightening: `gwtd hook ...` remains the outward-facing
-/// surface, but dispatches in-process so every Claude/Codex hook event does not
-/// pay for a second `gwtd __internal daemon-hook ...` process spawn. The hidden
-/// internal command stays available as a compatibility route.
 pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
     run_daemon_hook(env, name, rest)
 }
@@ -1449,12 +1199,14 @@ fn main() -> ExitCode {
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
         }];
 
-        assert!(read_linked_prs_cache(temp.path(), number)
-            .unwrap()
-            .is_none());
-        write_linked_prs_cache(temp.path(), number, &linked_prs).unwrap();
+        assert!(
+            crate::cli::issue::read_linked_prs_cache(temp.path(), number)
+                .unwrap()
+                .is_none()
+        );
+        crate::cli::issue::write_linked_prs_cache(temp.path(), number, &linked_prs).unwrap();
         assert_eq!(
-            read_linked_prs_cache(temp.path(), number).unwrap(),
+            crate::cli::issue::read_linked_prs_cache(temp.path(), number).unwrap(),
             Some(linked_prs)
         );
 
@@ -1715,11 +1467,13 @@ fn main() -> ExitCode {
         let snapshot = sample_issue_snapshot();
         env.client.seed(snapshot.clone());
 
-        let loaded = load_or_refresh_issue(&mut env, snapshot.number, false).expect("load issue");
+        let loaded = crate::cli::issue::load_or_refresh_issue(&mut env, snapshot.number, false)
+            .expect("load issue");
         assert_eq!(loaded.snapshot.number, snapshot.number);
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
 
-        let cached = load_or_refresh_issue(&mut env, snapshot.number, false).expect("cached issue");
+        let cached = crate::cli::issue::load_or_refresh_issue(&mut env, snapshot.number, false)
+            .expect("cached issue");
         assert_eq!(cached.snapshot.title, snapshot.title);
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
 
@@ -1733,27 +1487,30 @@ fn main() -> ExitCode {
             }],
         );
         let linked =
-            load_or_refresh_linked_prs(&mut env, snapshot.number, false).expect("linked prs");
+            crate::cli::issue::load_or_refresh_linked_prs(&mut env, snapshot.number, false)
+                .expect("linked prs");
         assert_eq!(linked.len(), 1);
         assert_eq!(env.linked_pr_calls(), vec![42]);
 
         env.clear_linked_pr_calls();
-        let cached_linked = load_or_refresh_linked_prs(&mut env, snapshot.number, false)
-            .expect("cached linked prs");
+        let cached_linked =
+            crate::cli::issue::load_or_refresh_linked_prs(&mut env, snapshot.number, false)
+                .expect("cached linked prs");
         assert_eq!(cached_linked.len(), 1);
         assert!(env.linked_pr_calls().is_empty());
 
-        let cache_path = linked_prs_cache_path(temp.path(), snapshot.number);
+        let cache_path = crate::cli::issue::linked_prs_cache_path(temp.path(), snapshot.number);
         std::fs::create_dir_all(cache_path.parent().expect("cache dir")).expect("create cache dir");
         std::fs::write(&cache_path, "{not-json").expect("write invalid json");
-        assert!(read_linked_prs_cache(temp.path(), snapshot.number).is_err());
+        assert!(crate::cli::issue::read_linked_prs_cache(temp.path(), snapshot.number).is_err());
     }
 
     #[test]
     fn gh_wrappers_parse_successful_responses() {
         with_fake_gh("success", |repo_path| {
             let linked =
-                fetch_linked_prs_via_gh("akiojin", "gwt", IssueNumber(42)).expect("linked");
+                crate::cli::issue::fetch_linked_prs_via_gh("akiojin", "gwt", IssueNumber(42))
+                    .expect("linked");
             assert_eq!(linked.len(), 2);
             assert_eq!(linked[0].number, 12);
             assert_eq!(linked[1].state, "MERGED");
@@ -1814,11 +1571,13 @@ fn main() -> ExitCode {
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].conclusion, "SUCCESS");
 
-            let run_log = fetch_actions_run_log_via_gh(repo_path, 90).expect("run log");
+            let run_log =
+                crate::cli::actions::fetch_actions_run_log_via_gh(repo_path, 90).expect("run log");
             assert_eq!(run_log.trim(), "run log 90");
 
             let job_log =
-                fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91).expect("job log");
+                crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
+                    .expect("job log");
             assert_eq!(job_log, "job log 91");
         });
     }
@@ -1853,7 +1612,8 @@ fn main() -> ExitCode {
 
         with_fake_gh("job-log-zip", |repo_path| {
             let err =
-                fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91).expect_err("zip");
+                crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
+                    .expect_err("zip");
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert!(err.to_string().contains("zip archive"));
         });
