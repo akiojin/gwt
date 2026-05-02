@@ -2,10 +2,10 @@
 //!
 //! [`BroadcastHub`] keeps a `tokio::sync::broadcast` channel per logical
 //! event channel ("board", "runtime-status", ...). When a per-connection
-//! handler observes a [`ClientFrame::Subscribe`], it asks the hub for a
-//! receiver. Daemon-side code paths (Board projection writer, runtime
-//! status aggregator, hook event router) call [`BroadcastHub::publish`]
-//! to fan a single payload out to all subscribers.
+//! handler observes a [`gwt_core::daemon::ClientFrame::Subscribe`], it asks
+//! the hub for a receiver. Daemon-side code paths (Board projection writer,
+//! runtime status aggregator, hook event router) call
+//! [`BroadcastHub::publish`] to fan a single payload out to all subscribers.
 //!
 //! The hub is intentionally small: one mutex around a `HashMap<String,
 //! broadcast::Sender<DaemonFrame>>`. Phase H1 wired the Board
