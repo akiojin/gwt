@@ -113,7 +113,7 @@ impl<C: IssueClient> SpecOps<C> {
             .unwrap_or(SectionLocation::Body);
 
         // Start from the latest full body text and patch it in place.
-        let mut issue_body = entry.snapshot.body.clone();
+        let mut issue_body = entry.snapshot.body;
         let mut new_sections_index = spec_body.sections_index.clone();
 
         match (&prev_location, &new_location) {

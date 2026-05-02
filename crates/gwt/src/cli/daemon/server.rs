@@ -192,7 +192,7 @@ impl Drop for ConnectionGuard {
 }
 
 fn spawn_signal_watcher(shutdown: Arc<Notify>) {
-    let term = shutdown.clone();
+    let term = shutdown;
     tokio::spawn(async move {
         let mut sigterm = match signal(SignalKind::terminate()) {
             Ok(sig) => sig,

@@ -867,8 +867,8 @@ impl LaunchWizardState {
             .ok_or_else(|| "Agent option is unavailable".to_string())?;
 
         let agent_id = agent_id_from_key(&selected_agent.id);
-        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
-        if let Some(custom_agent) = selected_agent.custom_agent.clone() {
+        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+        if let Some(custom_agent) = selected_agent.custom_agent {
             builder = builder.custom_agent(custom_agent);
         }
 
@@ -964,7 +964,7 @@ impl LaunchWizardState {
 
         Ok(ShellLaunchConfig {
             working_dir,
-            branch: branch.clone(),
+            branch,
             base_branch,
             display_name: "Shell".to_string(),
             runtime_target: self.runtime_target,
@@ -5199,7 +5199,7 @@ mod tests {
         let mut resumable = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
-            state.quick_start_entries.clone(),
+            state.quick_start_entries,
         );
         resumable.apply(LaunchWizardAction::ApplyQuickStart {
             index: 0,

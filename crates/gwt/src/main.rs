@@ -1520,9 +1520,7 @@ mod tests {
             1
         );
         assert_eq!(
-            runtime
-                .maximize_window_events(&file_tree_id, bounds.clone())
-                .len(),
+            runtime.maximize_window_events(&file_tree_id, bounds).len(),
             1
         );
         assert!(
@@ -1836,7 +1834,7 @@ mod tests {
                 "session-3".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo.clone(),
+                repo,
                 AgentId::Codex,
                 None,
             )),
@@ -2021,7 +2019,7 @@ mod tests {
             vec![sample_project_tab(
                 "tab-1",
                 "Repo",
-                repo.clone(),
+                repo,
                 ProjectKind::Git,
                 &[
                     WindowPreset::Branches,
@@ -2135,7 +2133,7 @@ mod tests {
                     "client-1".to_string(),
                     gwt::FrontendEvent::MaximizeWindow {
                         id: file_tree_id.clone(),
-                        bounds: bounds.clone(),
+                        bounds,
                     },
                 )
                 .len(),
@@ -2211,7 +2209,7 @@ mod tests {
                 .handle_frontend_event(
                     "client-1".to_string(),
                     gwt::FrontendEvent::LoadFileTree {
-                        id: file_tree_id.clone(),
+                        id: file_tree_id,
                         path: Some("src".to_string()),
                     },
                 )
@@ -2540,7 +2538,7 @@ mod tests {
                     selected_branch: sample_branch_entry("feature/demo"),
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: Some(repo.clone()),
-                    quick_start_root: repo.clone(),
+                    quick_start_root: repo,
                     live_sessions: Vec::new(),
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
@@ -2687,7 +2685,7 @@ mod tests {
                 "session-2".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo.clone(),
+                repo,
                 AgentId::Codex,
                 None,
             )),
@@ -3517,7 +3515,7 @@ mod tests {
         let files = gwt_docker::DockerFiles {
             dockerfile: None,
             compose_file: Some(compose_file.clone()),
-            devcontainer_dir: Some(devcontainer_dir.clone()),
+            devcontainer_dir: Some(devcontainer_dir),
         };
 
         let defaults =
@@ -4205,7 +4203,7 @@ mod tests {
             Some("main")
         );
         assert_eq!(
-            super::preferred_issue_launch_branch(&[head.clone()]).as_deref(),
+            super::preferred_issue_launch_branch(&[head]).as_deref(),
             Some("feature/current")
         );
         assert!(super::preferred_issue_launch_branch(&[]).is_none());
@@ -4511,7 +4509,7 @@ fn main() -> wry::Result<()> {
         &runtime,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
-        pty_writers.clone(),
+        pty_writers,
     )
     .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());

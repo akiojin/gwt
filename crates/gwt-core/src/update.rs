@@ -328,8 +328,8 @@ impl UpdateManager {
                     checked_at: now,
                     latest_version: Some(latest_ver.to_string()),
                     release_url: Some(release.html_url.clone()),
-                    portable_asset_url: portable_asset_url.clone(),
-                    installer_asset_url: installer_asset_url.clone(),
+                    portable_asset_url,
+                    installer_asset_url,
                     asset_url: asset_url.clone(),
                 };
                 let _ = write_cache(&self.cache_path, &cache_file);
@@ -2842,7 +2842,7 @@ mod tests {
         );
         assert_eq!(
             app_bundle_executable_path(&bundle, target),
-            Some(bundle_exe.clone())
+            Some(bundle_exe)
         );
         assert_eq!(
             find_matching_app_bundle(temp.path(), target),
