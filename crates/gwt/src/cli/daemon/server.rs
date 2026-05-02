@@ -11,12 +11,16 @@
 //!    [`validate_handshake`].
 //! 3. Write the matching [`IpcHandshakeResponse`] line.
 //! 4. While the connection stays open, accept newline-delimited JSON
-//!    payloads (today: log + ack; later phases route hook envelopes).
+//!    payloads (today: hook envelopes log + ack, board publish/subscribe
+//!    fans out via the broadcast hub, status returns daemon snapshot).
 //!
-//! Hook envelope routing is intentionally out of scope for this PR — the
-//! purpose here is to stand up the daemon process and make `gwt -> gwtd`
-//! IPC end-to-end provable. Phase H1〜H4 will graft handler logic onto
-//! the per-connection loop.
+//! Phase H1 (board projection daemon broadcast) is shipped. Hook
+//! envelope routing into real GUI-side handlers is still on the
+//! per-connection loop's TODO — Phase H2/H3/H4 will graft
+//! `handle_runtime_output` / `handle_runtime_status` /
+//! `handle_runtime_hook_event` / `handle_launch_complete` /
+//! `handle_shell_launch_complete` ownership across the IPC boundary
+//! (see SPEC-2077 plan.md Phase H1-H4).
 
 #![cfg(unix)]
 
@@ -279,9 +283,12 @@ async fn handle_connection(
         }
         match serde_json::from_str::<ClientFrame>(trimmed) {
             Ok(ClientFrame::Hook(envelope)) => {
-                // Phase H1〜H4 will route hook envelopes into real handlers;
-                // for now we just ack so the client side knows the daemon
-                // received the frame.
+                // Hook envelope routing into real GUI-side handlers is
+                // gated on Phase H3 (handle_runtime_hook_event daemon
+                // migration). Until then we ack so the client side knows
+                // the daemon received the frame, and the existing
+                // synchronous `gwt hook ...` dispatch path remains the
+                // outward-facing fallback.
                 tracing::debug!(
                     target: "gwtd::daemon",
                     hook = %envelope.hook_name,
