@@ -105,8 +105,9 @@ fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
     // would be killed before it finishes the connect/publish/ack
     // round-trip (the daemon would then never see the broadcast).
     // The publish is bounded by `daemon_publisher::publish_event`'s
-    // per-stage timeout (~200 ms, ~400 ms worst case), which is an
-    // acceptable amount of synchronous wall time for a CLI command.
+    // per-stage timeout (~200 ms each across connect / send / ack,
+    // ~600 ms worst case), which is an acceptable amount of
+    // synchronous wall time for a CLI command.
     let result = crate::daemon_publisher::publish_event(
         project_root,
         "board",

@@ -181,8 +181,9 @@ fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
     // Fire-and-forget: spawn a detached thread so the GUI handler's
     // `Vec<OutboundEvent>` return is never delayed by the daemon
     // round-trip. The publish itself is bounded by the
-    // `daemon_publisher::publish_event` per-stage timeout (~200 ms),
-    // so the spawned thread can never linger long.
+    // `daemon_publisher::publish_event` per-stage timeout (~200 ms
+    // each across connect / send / ack, ~600 ms worst case), so the
+    // spawned thread can never linger long.
     let project_root_owned = project_root.to_path_buf();
     let _ = std::thread::Builder::new()
         .name("gwt-board-daemon-publish".to_string())
