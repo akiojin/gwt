@@ -2990,10 +2990,18 @@
           status.classList.add("info");
         }
 
+        // The actual scroll viewport is `.board-timeline-scroll`, the
+        // parent wrapper that has `overflow: auto`. Reading scrollTop /
+        // scrollHeight off `.board-timeline` returns 0/wrong values
+        // because `.board-timeline` itself is sized to its content.
+        const scroller = timeline.parentElement;
         const stickyBottomThreshold = 64;
-        const previousScrollTop = timeline.scrollTop;
-        const previousScrollMax = timeline.scrollHeight - timeline.clientHeight;
+        const previousScrollTop = scroller ? scroller.scrollTop : 0;
+        const previousScrollMax = scroller
+          ? scroller.scrollHeight - scroller.clientHeight
+          : 0;
         const wasNearBottom =
+          !scroller ||
           previousScrollMax <= 0 ||
           previousScrollMax - previousScrollTop <= stickyBottomThreshold;
 
@@ -3033,10 +3041,12 @@
           timeline.appendChild(card);
         }
 
-        if (wasNearBottom) {
-          timeline.scrollTop = timeline.scrollHeight;
-        } else {
-          timeline.scrollTop = previousScrollTop;
+        if (scroller) {
+          if (wasNearBottom) {
+            scroller.scrollTop = scroller.scrollHeight;
+          } else {
+            scroller.scrollTop = previousScrollTop;
+          }
         }
 
         composer.innerHTML = "";

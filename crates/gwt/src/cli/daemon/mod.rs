@@ -307,7 +307,11 @@ fn start_daemon<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOps
             Ok(0)
         }
         DaemonBootstrapAction::Spawn { endpoint_path } => {
-            server::serve_blocking(scope, endpoint_path, out)
+            // Pass `env.stdout()` directly so `serve_blocking` can
+            // flush its readiness lines while the serve loop is still
+            // running. Returning the buffer-only `out` here would mean
+            // those lines are visible only after shutdown.
+            server::serve_blocking(scope, endpoint_path, env.stdout())
         }
     }
 }
@@ -339,9 +343,17 @@ fn is_process_alive_pid(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Conservative fallback — assume alive so we never racily clobber
-        // an in-flight daemon endpoint on an unsupported platform.
-        true
+        // The long-running daemon currently only runs under cfg(unix);
+        // `start_daemon` is a stub on every other platform. Reporting
+        // every persisted endpoint as "alive" therefore surfaced
+        // permanent-stale entries in `gwtd daemon status`. Returning
+        // `false` here lets `resolve_bootstrap_action` treat the
+        // endpoint as dead on platforms where no daemon can actually
+        // be running, so the file gets cleaned up on the next status
+        // / start. When Windows named-pipe support lands, this branch
+        // should switch to a real liveness probe (e.g.
+        // `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...)`).
+        false
     }
 }
 
