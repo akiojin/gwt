@@ -69,9 +69,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn far_unused_pid_is_not_alive() {
-        // u32::MAX - 1 is well past any realistic OS pid_t allocation
-        // window; if this ever fails on a CI runner we'll know that
-        // pid recycling has reached extreme territory.
-        assert!(!is_process_alive(u32::MAX - 1));
+        // Use `i32::MAX as u32` so the value stays positive after the
+        // `pid as libc::pid_t` cast inside `is_process_alive`. Going
+        // higher (e.g. `u32::MAX - 1`) wraps to a negative `pid_t` and
+        // `kill(-N, 0)` probes process *group* `N` instead of a far
+        // PID, which is a different semantic and can flake on
+        // runners where group 2 exists.
+        //
+        // `i32::MAX` (~2.1 billion) is far past any realistic OS
+        // pid_t allocation window today; if this ever flakes on a CI
+        // runner we'll have learned that pid recycling has reached
+        // extreme territory.
+        assert!(!is_process_alive(i32::MAX as u32));
     }
 }
