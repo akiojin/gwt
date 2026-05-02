@@ -47,10 +47,10 @@ use super::broadcast::BroadcastHub;
 
 const ACCEPT_BACKOFF_MS: u64 = 50;
 
-pub(super) fn serve_blocking(
+pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     scope: RuntimeScope,
     endpoint_path: PathBuf,
-    out: &mut String,
+    writer: &mut W,
 ) -> Result<i32, SpecOpsError> {
     let socket_path = derive_socket_path(&endpoint_path);
     if let Err(err) = ensure_socket_parent(&socket_path) {
@@ -72,15 +72,22 @@ pub(super) fn serve_blocking(
     persist_endpoint(&endpoint_path, &endpoint)
         .map_err(|err| config_error(format!("failed to persist daemon endpoint: {err}")))?;
 
-    out.push_str(&format!(
-        "gwtd daemon start: bind={socket}\n",
+    // Stream readiness lines to the caller's stdout *before* entering
+    // the blocking serve loop. Buffering them in a `&mut String` left
+    // supervising scripts unable to detect that the daemon was up
+    // until the process eventually exited.
+    let _ = writeln!(
+        writer,
+        "gwtd daemon start: bind={socket}",
         socket = socket_path.display()
-    ));
-    out.push_str(&format!(
-        "gwtd daemon start: pid={pid} version={version}\n",
+    );
+    let _ = writeln!(
+        writer,
+        "gwtd daemon start: pid={pid} version={version}",
         pid = endpoint.pid,
         version = endpoint.daemon_version
-    ));
+    );
+    let _ = writer.flush();
 
     let runtime = Builder::new_multi_thread()
         .enable_all()
