@@ -54,9 +54,8 @@ pub fn housekeep_at(log_dir: &Path, retention_days: u32, today: NaiveDate) -> Ho
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let file_name = match path.file_name().and_then(|s| s.to_str()) {
-            Some(name) => name,
-            None => continue,
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
         };
         report.inspected += 1;
 

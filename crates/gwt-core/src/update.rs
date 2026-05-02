@@ -294,17 +294,14 @@ impl UpdateManager {
 
         match self.fetch_latest_release() {
             Ok(release) => {
-                let latest_ver = match parse_tag_version(&release.tag_name) {
-                    Some(v) => v,
-                    None => {
-                        return UpdateState::Failed {
-                            message: format!(
-                                "Failed to parse release tag as version: {}",
-                                release.tag_name
-                            ),
-                            failed_at: now,
-                        };
-                    }
+                let Some(latest_ver) = parse_tag_version(&release.tag_name) else {
+                    return UpdateState::Failed {
+                        message: format!(
+                            "Failed to parse release tag as version: {}",
+                            release.tag_name
+                        ),
+                        failed_at: now,
+                    };
                 };
 
                 let platform = Platform::detect();
@@ -1128,12 +1125,9 @@ fn find_extracted_binary(extract_dir: &Path, binary_name: &str) -> Result<Option
     // Fallback: deep search.
     let mut stack = vec![extract_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => {
-                // Ignore unreadable directories and continue searching other paths.
-                continue;
-            }
+        // Ignore unreadable directories and continue searching other paths.
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
         };
 
         for entry in entries.flatten() {
