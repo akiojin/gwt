@@ -28,8 +28,8 @@ use std::{
 };
 
 use gwt_core::daemon::{
-    persist_endpoint, validate_handshake, DaemonEndpoint, IpcHandshakeRequest,
-    IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
+    persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame,
+    IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
 use tokio::{
@@ -196,13 +196,21 @@ async fn handle_connection(
         if trimmed.is_empty() {
             continue;
         }
-        // Phase 1: surface the frame to logs; Phase H1 will route into
-        // hook handlers / runtime-state aggregator.
-        tracing::debug!(target: "gwtd::daemon", frame = %trimmed, "received frame");
-        write_half
-            .write_all(b"{\"ack\":true}\n")
-            .await
-            .map_err(|err| format!("ack write failed: {err}"))?;
+        let response = match serde_json::from_str::<ClientFrame>(trimmed) {
+            Ok(frame) => {
+                // Phase 1: surface the frame to logs; Phase H1 will route
+                // hook envelopes / subscriptions into actual handlers.
+                tracing::debug!(target: "gwtd::daemon", ?frame, "received client frame");
+                DaemonFrame::Ack
+            }
+            Err(err) => {
+                tracing::warn!(target: "gwtd::daemon", frame = %trimmed, error = %err, "rejected unrecognized frame");
+                DaemonFrame::Error {
+                    message: format!("frame parse failed: {err}"),
+                }
+            }
+        };
+        write_json_line(&mut write_half, &response).await?;
     }
 
     Ok(())
@@ -291,7 +299,8 @@ mod tests {
     use std::{path::Path, time::Duration};
 
     use gwt_core::daemon::{
-        DaemonEndpoint, IpcHandshakeRequest, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+        ClientFrame, DaemonEndpoint, HookEnvelope, IpcHandshakeRequest, RuntimeScope,
+        RuntimeTarget, DAEMON_PROTOCOL_VERSION,
     };
     use tempfile::TempDir;
     use tokio::{
@@ -418,14 +427,43 @@ mod tests {
             .expect("read response");
         assert!(response_line.contains("\"accepted\":true"));
 
-        // Send a sample frame and expect the ack response.
+        // Send a typed `ClientFrame::Hook` and expect a `DaemonFrame::Ack`.
+        let request_scope = sample_scope(&temp);
+        let frame = ClientFrame::Hook(HookEnvelope {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            scope: request_scope,
+            hook_name: "runtime-state".to_string(),
+            session_id: None,
+            cwd: temp.path().to_path_buf(),
+            payload: serde_json::json!({}),
+        });
+        let mut frame_bytes = serde_json::to_vec(&frame).expect("serialize frame");
+        frame_bytes.push(b'\n');
         write_half
-            .write_all(b"{\"hook\":\"runtime-state\"}\n")
+            .write_all(&frame_bytes)
             .await
             .expect("write frame");
         let mut ack = String::new();
         reader.read_line(&mut ack).await.expect("read ack");
-        assert!(ack.contains("\"ack\":true"));
+        assert!(
+            ack.contains("\"type\":\"ack\""),
+            "expected typed ack frame, got: {ack}"
+        );
+
+        // Send a malformed line and expect a typed Error frame back.
+        write_half
+            .write_all(b"not-json\n")
+            .await
+            .expect("write malformed frame");
+        let mut error_line = String::new();
+        reader
+            .read_line(&mut error_line)
+            .await
+            .expect("read error frame");
+        assert!(
+            error_line.contains("\"type\":\"error\""),
+            "expected typed error frame, got: {error_line}"
+        );
 
         // Closing the client should let the per-connection task finish.
         drop(write_half);

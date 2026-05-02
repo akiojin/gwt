@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use gwt_core::daemon::{
-    persist_endpoint, resolve_bootstrap_action, validate_handshake, DaemonBootstrapAction,
-    DaemonEndpoint, HookEnvelope, IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope,
-    RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    persist_endpoint, resolve_bootstrap_action, validate_handshake, ClientFrame,
+    DaemonBootstrapAction, DaemonEndpoint, DaemonFrame, HookEnvelope, IpcHandshakeRequest,
+    IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -447,6 +447,84 @@ fn persist_endpoint_round_trips_through_file_system() {
     assert_eq!(loaded.pid, 4242);
     assert_eq!(loaded.bind, "http://127.0.0.1:7777");
     assert_eq!(loaded.auth_token, "secret-token");
+}
+
+#[test]
+fn client_frame_hook_round_trips_through_json() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let envelope = HookEnvelope {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        scope,
+        hook_name: "pre-command".into(),
+        session_id: Some("sess-1".into()),
+        cwd: PathBuf::from(project_root.path()),
+        payload: json!({"command": "codex"}),
+    };
+
+    let frame = ClientFrame::Hook(envelope);
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "hook");
+    assert_eq!(json_value["hook_name"], "pre-command");
+    assert_eq!(json_value["payload"]["command"], "codex");
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn client_frame_subscribe_serializes_channel_list() {
+    let frame = ClientFrame::Subscribe {
+        channels: vec!["board".to_string(), "runtime-status".to_string()],
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "subscribe");
+    assert_eq!(json_value["channels"][0], "board");
+    assert_eq!(json_value["channels"][1], "runtime-status");
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_ack_serializes_to_canonical_shape() {
+    let frame = DaemonFrame::Ack;
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "ack");
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_event_carries_channel_and_payload() {
+    let frame = DaemonFrame::Event {
+        channel: "board".to_string(),
+        payload: json!({"entries": 3}),
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "event");
+    assert_eq!(json_value["channel"], "board");
+    assert_eq!(json_value["payload"]["entries"], 3);
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_error_serializes_message() {
+    let frame = DaemonFrame::Error {
+        message: "unknown frame type".to_string(),
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "error");
+    assert_eq!(json_value["message"], "unknown frame type");
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
 }
 
 #[test]

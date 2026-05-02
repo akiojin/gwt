@@ -131,7 +131,10 @@ where
 mod tests {
     use std::time::Duration;
 
-    use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION};
+    use gwt_core::daemon::{
+        ClientFrame, DaemonEndpoint, DaemonFrame, HookEnvelope, RuntimeScope, RuntimeTarget,
+        DAEMON_PROTOCOL_VERSION,
+    };
     use tempfile::TempDir;
 
     use super::DaemonClient;
@@ -192,13 +195,26 @@ mod tests {
             .await
             .expect("client connects");
 
-        client
-            .send_frame(&serde_json::json!({ "hook": "runtime-state" }))
-            .await
-            .expect("send frame");
+        let hook_frame = ClientFrame::Hook(HookEnvelope {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            scope: scope.clone(),
+            hook_name: "runtime-state".to_string(),
+            session_id: None,
+            cwd: temp.path().to_path_buf(),
+            payload: serde_json::json!({}),
+        });
+        client.send_frame(&hook_frame).await.expect("send frame");
 
-        let ack = client.read_ack().await.expect("read ack");
-        assert_eq!(ack, serde_json::json!({ "ack": true }));
+        let ack: DaemonFrame = client.read_frame().await.expect("read ack");
+        assert_eq!(ack, DaemonFrame::Ack);
+
+        // Send a Subscribe frame and confirm it also acks.
+        let subscribe = ClientFrame::Subscribe {
+            channels: vec!["board".to_string()],
+        };
+        client.send_frame(&subscribe).await.expect("send subscribe");
+        let ack2: DaemonFrame = client.read_frame().await.expect("read second ack");
+        assert_eq!(ack2, DaemonFrame::Ack);
 
         drop(client);
         server_handle.abort();
