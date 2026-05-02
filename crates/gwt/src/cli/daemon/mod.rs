@@ -166,9 +166,10 @@ fn probe_daemon_endpoint(
 fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     match result {
         Ok(status) => format!(
-            "ok uptime={uptime}s channels={channels}",
+            "ok uptime={uptime}s channels={channels} connections={connections}",
             uptime = status.uptime_seconds,
-            channels = status.broadcast_channels
+            channels = status.broadcast_channels,
+            connections = status.connections
         ),
         Err(err) => format!("failed:{err}"),
     }
@@ -319,10 +320,11 @@ mod tests {
             daemon_version: "9.14.0".to_string(),
             uptime_seconds: 12,
             broadcast_channels: 2,
+            connections: 1,
         };
         let formatted = format_probe_result(&Ok(status));
         #[cfg(unix)]
-        assert_eq!(formatted, "ok uptime=12s channels=2");
+        assert_eq!(formatted, "ok uptime=12s channels=2 connections=1");
         #[cfg(not(unix))]
         assert_eq!(formatted, "ok");
     }

@@ -23,7 +23,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -117,6 +120,7 @@ pub(super) async fn run_server(
 
     let endpoint = Arc::new(endpoint);
     let started_at = Instant::now();
+    let connections = Arc::new(AtomicUsize::new(0));
     let _endpoint_path = endpoint_path; // retained for symmetry with future watch flows
     loop {
         tokio::select! {
@@ -130,9 +134,11 @@ pub(super) async fn run_server(
                     Ok((stream, _addr)) => {
                         let endpoint = Arc::clone(&endpoint);
                         let hub = hub.clone();
+                        let connections = Arc::clone(&connections);
                         tokio::spawn(async move {
+                            let guard = ConnectionGuard::new(connections);
                             if let Err(err) =
-                                handle_connection(stream, endpoint, hub, started_at).await
+                                handle_connection(stream, endpoint, hub, started_at, &guard).await
                             {
                                 tracing::warn!("gwtd daemon: connection error: {err}");
                             }
@@ -148,6 +154,30 @@ pub(super) async fn run_server(
     }
 
     Ok(0)
+}
+
+/// RAII counter for live IPC connections. The constructor increments
+/// the shared counter; `Drop` decrements it. This guarantees the
+/// counter stays accurate even on panic or abnormal task abort.
+struct ConnectionGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ConnectionGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+
+    fn snapshot(&self) -> usize {
+        self.counter.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn spawn_signal_watcher(shutdown: Arc<Notify>) {
@@ -180,6 +210,7 @@ async fn handle_connection(
     endpoint: Arc<DaemonEndpoint>,
     hub: BroadcastHub,
     started_at: Instant,
+    connection_guard: &ConnectionGuard,
 ) -> Result<(), String> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -273,6 +304,7 @@ async fn handle_connection(
                     daemon_version: endpoint.daemon_version.clone(),
                     uptime_seconds: started_at.elapsed().as_secs(),
                     broadcast_channels: hub.channel_count(),
+                    connections: connection_guard.snapshot(),
                 };
                 if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
                     break;
