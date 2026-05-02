@@ -19,7 +19,11 @@ pub mod client;
 pub(super) mod server;
 
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::time::Duration;
 
+#[cfg(unix)]
+use gwt_core::daemon::DaemonEndpoint;
 use gwt_core::daemon::{
     resolve_bootstrap_action, DaemonBootstrapAction, RuntimeScope, RuntimeTarget,
     DAEMON_PROTOCOL_VERSION,
@@ -27,6 +31,9 @@ use gwt_core::daemon::{
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::{CliEnv, CliParseError, DaemonCommand};
+
+#[cfg(unix)]
+const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
     match args.first().map(String::as_str) {
@@ -88,11 +95,13 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
 
     match action {
         DaemonBootstrapAction::Reuse(endpoint) => {
+            let probe = probe_daemon_endpoint(&endpoint);
             out.push_str(&format!(
-                "running pid={pid} bind={bind} version={version}\n",
+                "running pid={pid} bind={bind} version={version} probe={probe}\n",
                 pid = endpoint.pid,
                 bind = endpoint.bind,
-                version = endpoint.daemon_version
+                version = endpoint.daemon_version,
+                probe = format_probe_result(&probe)
             ));
             Ok(0)
         }
@@ -105,6 +114,41 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
             ));
             Ok(0)
         }
+    }
+}
+
+#[cfg(unix)]
+fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("tokio runtime build failed: {err}"))?;
+    runtime.block_on(async {
+        match tokio::time::timeout(
+            STATUS_PROBE_TIMEOUT,
+            client::DaemonClient::connect(endpoint),
+        )
+        .await
+        {
+            Ok(Ok(_client)) => Ok(()),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(format!(
+                "probe timeout after {ms}ms",
+                ms = STATUS_PROBE_TIMEOUT.as_millis()
+            )),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn probe_daemon_endpoint(_endpoint: &gwt_core::daemon::DaemonEndpoint) -> Result<(), String> {
+    Err("probe not implemented on this platform".to_string())
+}
+
+fn format_probe_result(result: &Result<(), String>) -> String {
+    match result {
+        Ok(()) => "ok".to_string(),
+        Err(err) => format!("failed:{err}"),
     }
 }
 
@@ -204,5 +248,42 @@ mod tests {
     fn parse_rejects_extra_args() {
         let err = parse(&[s("start"), s("--whatever")]).unwrap_err();
         assert!(matches!(err, CliParseError::Usage));
+    }
+
+    #[test]
+    fn format_probe_result_ok_renders_ok() {
+        assert_eq!(format_probe_result(&Ok(())), "ok");
+    }
+
+    #[test]
+    fn format_probe_result_err_includes_message() {
+        let result: Result<(), String> = Err("connection refused".to_string());
+        assert_eq!(format_probe_result(&result), "failed:connection refused");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_daemon_endpoint_fails_for_unreachable_bind() {
+        use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().expect("tempdir");
+        let scope = RuntimeScope::new(
+            "abcdef0123456789",
+            "feedfacecafebeef",
+            temp.path().to_path_buf(),
+            RuntimeTarget::Host,
+        )
+        .expect("scope");
+        let bogus_socket = temp.path().join("does-not-exist.sock");
+        let endpoint = DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            bogus_socket.to_string_lossy().to_string(),
+            "tok".to_string(),
+            "test-daemon".to_string(),
+        );
+        let result = probe_daemon_endpoint(&endpoint);
+        assert!(result.is_err(), "expected probe to fail for missing socket");
     }
 }
