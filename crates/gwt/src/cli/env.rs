@@ -498,21 +498,30 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "discuss" => super::parse_discuss_args(&rest),
         "plan" => super::parse_plan_args(&rest),
         "build" => super::parse_build_args(&rest),
-        "update" => Ok(super::CliCommand::Update {
-            check_only: rest.iter().any(|a| a == "--check"),
-        }),
+        "update" => {
+            let mode = if rest.iter().any(|a| a == "--check") {
+                super::UpdateCommand::CheckOnly
+            } else {
+                super::UpdateCommand::Apply
+            };
+            Ok(super::CliCommand::Update(mode))
+        }
         "__internal" => match rest.first().map(String::as_str) {
-            Some("apply-update") => Ok(super::CliCommand::InternalApplyUpdate {
-                rest: rest[1..].to_vec(),
-            }),
-            Some("run-installer") => Ok(super::CliCommand::InternalRunInstaller {
-                rest: rest[1..].to_vec(),
-            }),
+            Some("apply-update") => Ok(super::CliCommand::Update(
+                super::UpdateCommand::InternalApply {
+                    rest: rest[1..].to_vec(),
+                },
+            )),
+            Some("run-installer") => Ok(super::CliCommand::Update(
+                super::UpdateCommand::InternalRunInstaller {
+                    rest: rest[1..].to_vec(),
+                },
+            )),
             Some("daemon-hook") => parse_hook_args(&rest[1..]).map(|cmd| match cmd {
-                super::CliCommand::Hook { name, rest } => {
-                    super::CliCommand::InternalDaemonHook { name, rest }
+                super::CliCommand::Hook(super::HookCommand::Run { name, rest }) => {
+                    super::CliCommand::Hook(super::HookCommand::InternalDaemon { name, rest })
                 }
-                _ => unreachable!("parse_hook_args must return CliCommand::Hook"),
+                _ => unreachable!("parse_hook_args must return CliCommand::Hook(Run {{..}})"),
             }),
             other => Err(CliParseError::UnknownSubcommand(format!(
                 "__internal {}",

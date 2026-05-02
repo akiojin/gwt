@@ -1,9 +1,10 @@
 //! Integration tests for the `gwtd issue spec` CLI dispatch (SPEC-12 Phase 6).
 
 use gwt::cli::{
-    dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli, CliCommand,
-    CliParseError, LinkedPrSummary, PrCheckItem, PrChecksSummary, PrCreateCall, PrEditCall,
-    PrReview, PrReviewThread, PrReviewThreadComment, TestEnv,
+    dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli,
+    ActionsCommand, CliCommand, CliParseError, HookCommand, IssueCommand, LinkedPrSummary,
+    PrCheckItem, PrChecksSummary, PrCommand, PrCreateCall, PrEditCall, PrReview, PrReviewThread,
+    PrReviewThreadComment, TestEnv,
 };
 use gwt_git::PrStatus;
 use gwt_github::{
@@ -76,10 +77,10 @@ fn red_90_parse_hook_runtime_state() {
     let cmd = parse_hook_args(&[s("runtime-state"), s("PreToolUse")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Hook {
+        CliCommand::Hook(HookCommand::Run {
             name: "runtime-state".to_string(),
             rest: vec!["PreToolUse".to_string()],
-        }
+        })
     );
 }
 
@@ -89,10 +90,10 @@ fn red_91_parse_hook_block_without_args() {
     let cmd = parse_hook_args(&[s("block-bash-policy")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Hook {
+        CliCommand::Hook(HookCommand::Run {
             name: "block-bash-policy".to_string(),
             rest: vec![],
-        }
+        })
     );
 }
 
@@ -102,10 +103,10 @@ fn red_92_parse_hook_workflow_policy_without_args() {
     let cmd = parse_hook_args(&[s("workflow-policy")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Hook {
+        CliCommand::Hook(HookCommand::Run {
             name: "workflow-policy".to_string(),
             rest: vec![],
-        }
+        })
     );
 }
 
@@ -115,10 +116,10 @@ fn red_92a_parse_hook_coordination_event() {
     let cmd = parse_hook_args(&[s("coordination-event"), s("SessionStart")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Hook {
+        CliCommand::Hook(HookCommand::Run {
             name: "coordination-event".to_string(),
             rest: vec!["SessionStart".to_string()],
-        }
+        })
     );
 }
 
@@ -128,10 +129,10 @@ fn red_92b_parse_hook_event_dispatcher() {
     let cmd = parse_hook_args(&[s("event"), s("PreToolUse")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::Hook {
+        CliCommand::Hook(HookCommand::Run {
             name: "event".to_string(),
             rest: vec!["PreToolUse".to_string()],
-        }
+        })
     );
 }
 
@@ -253,7 +254,10 @@ fn dispatch_internal_daemon_hook_runs_as_cli_helper() {
 #[test]
 fn red_71_parse_spec_read_all() {
     let cmd = parse_issue_args(&[s("spec"), s("42")]).unwrap();
-    assert_eq!(cmd, CliCommand::SpecReadAll { number: 42 });
+    assert_eq!(
+        cmd,
+        CliCommand::Issue(IssueCommand::SpecReadAll { number: 42 })
+    );
 }
 
 #[test]
@@ -261,10 +265,10 @@ fn red_72_parse_spec_read_section() {
     let cmd = parse_issue_args(&[s("spec"), s("42"), s("--section"), s("tasks")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::SpecReadSection {
+        CliCommand::Issue(IssueCommand::SpecReadSection {
             number: 42,
             section: "tasks".into()
-        }
+        })
     );
 }
 
@@ -281,11 +285,11 @@ fn red_73_parse_spec_edit_section() {
     .unwrap();
     assert_eq!(
         cmd,
-        CliCommand::SpecEditSection {
+        CliCommand::Issue(IssueCommand::SpecEditSection {
             number: 42,
             section: "tasks".into(),
             file: "/tmp/new.md".into()
-        }
+        })
     );
 }
 
@@ -294,10 +298,10 @@ fn red_74_parse_spec_list_with_phase() {
     let cmd = parse_issue_args(&[s("spec"), s("list"), s("--phase"), s("implementation")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::SpecList {
+        CliCommand::Issue(IssueCommand::SpecList {
             phase: Some("implementation".into()),
             state: None
-        }
+        })
     );
 }
 
@@ -306,10 +310,10 @@ fn red_75_parse_spec_list_with_state() {
     let cmd = parse_issue_args(&[s("spec"), s("list"), s("--state"), s("closed")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::SpecList {
+        CliCommand::Issue(IssueCommand::SpecList {
             phase: None,
             state: Some("closed".into())
-        }
+        })
     );
 }
 
@@ -336,10 +340,10 @@ fn red_94_parse_issue_view() {
     let cmd = parse_issue_args(&[s("view"), s("42")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::IssueView {
+        CliCommand::Issue(IssueCommand::View {
             number: 42,
             refresh: false,
-        }
+        })
     );
 }
 
@@ -348,10 +352,10 @@ fn red_94_parse_issue_comments_with_refresh() {
     let cmd = parse_issue_args(&[s("comments"), s("42"), s("--refresh")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::IssueComments {
+        CliCommand::Issue(IssueCommand::Comments {
             number: 42,
             refresh: true,
-        }
+        })
     );
 }
 
@@ -369,11 +373,11 @@ fn red_95_parse_issue_create() {
     .unwrap();
     assert_eq!(
         cmd,
-        CliCommand::IssueCreate {
+        CliCommand::Issue(IssueCommand::Create {
             title: "Plain issue".into(),
             file: "/tmp/body.md".into(),
             labels: vec!["bug".into()],
-        }
+        })
     );
 }
 
@@ -382,10 +386,10 @@ fn red_96_parse_issue_comment() {
     let cmd = parse_issue_args(&[s("comment"), s("42"), s("-f"), s("/tmp/comment.md")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::IssueComment {
+        CliCommand::Issue(IssueCommand::Comment {
             number: 42,
             file: "/tmp/comment.md".into(),
-        }
+        })
     );
 }
 
@@ -405,13 +409,13 @@ fn red_96a_parse_issue_comment_rejects_trailing_args() {
 #[test]
 fn red_103_parse_pr_current() {
     let cmd = parse_pr_args(&[s("current")]).unwrap();
-    assert_eq!(cmd, CliCommand::PrCurrent);
+    assert_eq!(cmd, CliCommand::Pr(PrCommand::Current));
 }
 
 #[test]
 fn red_104_parse_pr_view() {
     let cmd = parse_pr_args(&[s("view"), s("42")]).unwrap();
-    assert_eq!(cmd, CliCommand::PrView { number: 42 });
+    assert_eq!(cmd, CliCommand::Pr(PrCommand::View { number: 42 }));
 }
 
 #[test]
@@ -433,14 +437,14 @@ fn red_104a_parse_pr_create() {
     .unwrap();
     assert_eq!(
         cmd,
-        CliCommand::PrCreate {
+        CliCommand::Pr(PrCommand::Create {
             base: "develop".into(),
             head: Some("feature/hooks".into()),
             title: "feat(hooks): canonical gwtd pr create".into(),
             file: "/tmp/pr-body.md".into(),
             labels: vec!["release".into()],
             draft: true,
-        }
+        })
     );
 }
 
@@ -459,19 +463,19 @@ fn red_104b_parse_pr_edit() {
     .unwrap();
     assert_eq!(
         cmd,
-        CliCommand::PrEdit {
+        CliCommand::Pr(PrCommand::Edit {
             number: 42,
             title: Some("feat(hooks): updated title".into()),
             file: Some("/tmp/pr-body.md".into()),
             add_labels: vec!["release".into()],
-        }
+        })
     );
 }
 
 #[test]
 fn red_105_parse_pr_checks() {
     let cmd = parse_pr_args(&[s("checks"), s("42")]).unwrap();
-    assert_eq!(cmd, CliCommand::PrChecks { number: 42 });
+    assert_eq!(cmd, CliCommand::Pr(PrCommand::Checks { number: 42 }));
 }
 
 #[test]
@@ -479,23 +483,23 @@ fn red_105a_parse_pr_comment() {
     let cmd = parse_pr_args(&[s("comment"), s("42"), s("-f"), s("/tmp/reply.md")]).unwrap();
     assert_eq!(
         cmd,
-        CliCommand::PrComment {
+        CliCommand::Pr(PrCommand::Comment {
             number: 42,
             file: "/tmp/reply.md".into(),
-        }
+        })
     );
 }
 
 #[test]
 fn red_105b_parse_pr_reviews() {
     let cmd = parse_pr_args(&[s("reviews"), s("42")]).unwrap();
-    assert_eq!(cmd, CliCommand::PrReviews { number: 42 });
+    assert_eq!(cmd, CliCommand::Pr(PrCommand::Reviews { number: 42 }));
 }
 
 #[test]
 fn red_105c_parse_pr_review_threads() {
     let cmd = parse_pr_args(&[s("review-threads"), s("42")]).unwrap();
-    assert_eq!(cmd, CliCommand::PrReviewThreads { number: 42 });
+    assert_eq!(cmd, CliCommand::Pr(PrCommand::ReviewThreads { number: 42 }));
 }
 
 #[test]
@@ -510,10 +514,10 @@ fn red_105d_parse_pr_reply_and_resolve() {
     .unwrap();
     assert_eq!(
         cmd,
-        CliCommand::PrReviewThreadsReplyAndResolve {
+        CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolve {
             number: 42,
             file: "/tmp/reply.md".into(),
-        }
+        })
     );
 }
 
@@ -556,13 +560,19 @@ fn red_105e_parse_pr_fixed_arity_subcommands_reject_trailing_args() {
 #[test]
 fn red_106_parse_actions_logs() {
     let cmd = parse_actions_args(&[s("logs"), s("--run"), s("101")]).unwrap();
-    assert_eq!(cmd, CliCommand::ActionsLogs { run_id: 101 });
+    assert_eq!(
+        cmd,
+        CliCommand::Actions(ActionsCommand::Logs { run_id: 101 })
+    );
 }
 
 #[test]
 fn red_107_parse_actions_job_logs() {
     let cmd = parse_actions_args(&[s("job-logs"), s("--job"), s("202")]).unwrap();
-    assert_eq!(cmd, CliCommand::ActionsJobLogs { job_id: 202 });
+    assert_eq!(
+        cmd,
+        CliCommand::Actions(ActionsCommand::JobLogs { job_id: 202 })
+    );
 }
 
 #[test]

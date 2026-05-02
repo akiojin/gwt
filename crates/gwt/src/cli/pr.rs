@@ -1,32 +1,32 @@
 use gwt_github::SpecOpsError;
 
-use crate::cli::{CliCommand, CliEnv, CliParseError};
+use crate::cli::{CliEnv, CliParseError, PrCommand};
 
-pub(super) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
+pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
         Some("current") => {
             super::ensure_no_remaining_args(it)?;
-            Ok(CliCommand::PrCurrent)
+            Ok(PrCommand::Current)
         }
         Some("create") => parse_pr_create_args(it.collect::<Vec<_>>().as_slice()),
         Some("edit") => parse_pr_edit_args(it.collect::<Vec<_>>().as_slice()),
         Some("view") => {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
-            Ok(CliCommand::PrView { number })
+            Ok(PrCommand::View { number })
         }
         Some("comment") => {
             let number = super::parse_required_number(it.next())?;
             super::expect_flag(it.next(), "-f")?;
             let file = it.next().ok_or(CliParseError::MissingFlag("-f"))?.clone();
             super::ensure_no_remaining_args(it)?;
-            Ok(CliCommand::PrComment { number, file })
+            Ok(PrCommand::Comment { number, file })
         }
         Some("reviews") => {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
-            Ok(CliCommand::PrReviews { number })
+            Ok(PrCommand::Reviews { number })
         }
         Some("review-threads") => match it.next().map(String::as_str) {
             Some("reply-and-resolve") => {
@@ -34,21 +34,21 @@ pub(super) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
                 super::expect_flag(it.next(), "-f")?;
                 let file = it.next().ok_or(CliParseError::MissingFlag("-f"))?.clone();
                 super::ensure_no_remaining_args(it)?;
-                Ok(CliCommand::PrReviewThreadsReplyAndResolve { number, file })
+                Ok(PrCommand::ReviewThreadsReplyAndResolve { number, file })
             }
             Some(number_arg) => {
                 let number = number_arg
                     .parse()
                     .map_err(|_| CliParseError::InvalidNumber(number_arg.to_string()))?;
                 super::ensure_no_remaining_args(it)?;
-                Ok(CliCommand::PrReviewThreads { number })
+                Ok(PrCommand::ReviewThreads { number })
             }
             None => Err(CliParseError::Usage),
         },
         Some("checks") => {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
-            Ok(CliCommand::PrChecks { number })
+            Ok(PrCommand::Checks { number })
         }
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
         None => Err(CliParseError::Usage),
@@ -57,18 +57,18 @@ pub(super) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
-    cmd: CliCommand,
+    cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
-        CliCommand::PrCurrent => {
+        PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
                 Some(pr) => super::render_pr(out, &pr),
                 None => out.push_str("no current pull request\n"),
             }
             0
         }
-        CliCommand::PrCreate {
+        PrCommand::Create {
             base,
             head,
             title,
@@ -84,7 +84,7 @@ pub(super) fn run<E: CliEnv>(
             super::render_pr(out, &pr);
             0
         }
-        CliCommand::PrEdit {
+        PrCommand::Edit {
             number,
             title,
             file,
@@ -101,33 +101,33 @@ pub(super) fn run<E: CliEnv>(
             super::render_pr(out, &pr);
             0
         }
-        CliCommand::PrView { number } => {
+        PrCommand::View { number } => {
             let pr = env.fetch_pr(number).map_err(super::io_as_api_error)?;
             super::render_pr(out, &pr);
             0
         }
-        CliCommand::PrComment { number, file } => {
+        PrCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             env.comment_on_pr(number, &body)
                 .map_err(super::io_as_api_error)?;
             out.push_str(&format!("created comment on PR #{number}\n"));
             0
         }
-        CliCommand::PrReviews { number } => {
+        PrCommand::Reviews { number } => {
             let reviews = env
                 .fetch_pr_reviews(number)
                 .map_err(super::io_as_api_error)?;
             super::render_pr_reviews(out, &reviews);
             0
         }
-        CliCommand::PrReviewThreads { number } => {
+        PrCommand::ReviewThreads { number } => {
             let threads = env
                 .fetch_pr_review_threads(number)
                 .map_err(super::io_as_api_error)?;
             super::render_pr_review_threads(out, &threads);
             0
         }
-        CliCommand::PrReviewThreadsReplyAndResolve { number, file } => {
+        PrCommand::ReviewThreadsReplyAndResolve { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let resolved = env
                 .reply_and_resolve_pr_review_threads(number, &body)
@@ -137,19 +137,18 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
-        CliCommand::PrChecks { number } => {
+        PrCommand::Checks { number } => {
             let report = env
                 .fetch_pr_checks(number)
                 .map_err(super::io_as_api_error)?;
             super::render_pr_checks(out, &report);
             0
         }
-        _ => unreachable!("pr::run called with non-pr command"),
     };
     Ok(code)
 }
 
-fn parse_pr_create_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let mut base: Option<String> = None;
     let mut head: Option<String> = None;
     let mut title: Option<String> = None;
@@ -199,7 +198,7 @@ fn parse_pr_create_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
         }
         i += 1;
     }
-    Ok(CliCommand::PrCreate {
+    Ok(PrCommand::Create {
         base: base.ok_or(CliParseError::MissingFlag("--base"))?,
         head,
         title: title.ok_or(CliParseError::MissingFlag("--title"))?,
@@ -209,7 +208,7 @@ fn parse_pr_create_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
     })
 }
 
-fn parse_pr_edit_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let Some(number_arg) = args.first() else {
         return Err(CliParseError::Usage);
     };
@@ -250,7 +249,7 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
     if title.is_none() && file.is_none() && add_labels.is_empty() {
         return Err(CliParseError::Usage);
     }
-    Ok(CliCommand::PrEdit {
+    Ok(PrCommand::Edit {
         number,
         title,
         file,
@@ -282,7 +281,7 @@ mod tests {
     #[test]
     fn pr_family_parse_directly_handles_current() {
         let cmd = parse(&[s("current")]).expect("parse pr family command");
-        assert_eq!(cmd, CliCommand::PrCurrent);
+        assert_eq!(cmd, PrCommand::Current);
     }
 
     #[test]
@@ -292,7 +291,7 @@ mod tests {
         env.seed_current_pr(Some(seeded_pr()));
 
         let mut out = String::new();
-        let code = run(&mut env, CliCommand::PrCurrent, &mut out).expect("run pr family");
+        let code = run(&mut env, PrCommand::Current, &mut out).expect("run pr family");
 
         assert_eq!(code, 0);
         assert!(out.contains("#7 [OPEN] CLI family split"));

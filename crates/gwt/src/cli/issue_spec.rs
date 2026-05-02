@@ -6,7 +6,7 @@ use gwt_github::{
 };
 use serde::Deserialize;
 
-use crate::cli::{CliCommand, CliEnv, CliParseError, ClientRef};
+use crate::cli::{CliEnv, CliParseError, ClientRef, IssueCommand};
 
 const SPEC_SECTION_NAME: &str = "spec";
 const CANONICAL_SECTION_HEADINGS: [&str; 6] = [
@@ -101,7 +101,7 @@ struct StructuredUserStory {
     acceptance_scenarios: Vec<String>,
 }
 
-pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
+pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {
     if args.is_empty() {
         return Err(CliParseError::Usage);
     }
@@ -130,7 +130,7 @@ pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
             }
             i += 1;
         }
-        return Ok(CliCommand::SpecList { phase, state });
+        return Ok(IssueCommand::SpecList { phase, state });
     }
     if head == "create" {
         let mut title: Option<String> = None;
@@ -169,16 +169,16 @@ pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
             i += 1;
         }
         if help {
-            return Ok(CliCommand::SpecCreateHelp);
+            return Ok(IssueCommand::SpecCreateHelp);
         }
         if json {
-            return Ok(CliCommand::SpecCreateJson {
+            return Ok(IssueCommand::SpecCreateJson {
                 title: title.ok_or(CliParseError::MissingFlag("--title"))?,
                 file,
                 labels,
             });
         }
-        return Ok(CliCommand::SpecCreate {
+        return Ok(IssueCommand::SpecCreate {
             title: title.ok_or(CliParseError::MissingFlag("--title"))?,
             file: file.ok_or(CliParseError::MissingFlag("-f"))?,
             labels,
@@ -200,7 +200,7 @@ pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
             }
             i += 1;
         }
-        return Ok(CliCommand::SpecPull { all, numbers });
+        return Ok(IssueCommand::SpecPull { all, numbers });
     }
     if head == "repair" {
         if args.len() < 2 {
@@ -209,7 +209,7 @@ pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
         let number = args[1]
             .parse()
             .map_err(|_| CliParseError::InvalidNumber(args[1].clone()))?;
-        return Ok(CliCommand::SpecRepair { number });
+        return Ok(IssueCommand::SpecRepair { number });
     }
 
     let number = head
@@ -262,18 +262,18 @@ pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
         return Err(CliParseError::Usage);
     }
     if let Some(title) = rename_title {
-        return Ok(CliCommand::SpecRename { number, title });
+        return Ok(IssueCommand::SpecRename { number, title });
     }
     if let Some(section) = edit_section {
         if json {
-            return Ok(CliCommand::SpecEditSectionJson {
+            return Ok(IssueCommand::SpecEditSectionJson {
                 number,
                 section,
                 file,
                 replace,
             });
         }
-        return Ok(CliCommand::SpecEditSection {
+        return Ok(IssueCommand::SpecEditSection {
             number,
             section,
             file: file.ok_or(CliParseError::MissingFlag("-f"))?,
@@ -283,18 +283,18 @@ pub(super) fn parse(args: &[&String]) -> Result<CliCommand, CliParseError> {
         return Err(CliParseError::Usage);
     }
     if let Some(section) = section {
-        return Ok(CliCommand::SpecReadSection { number, section });
+        return Ok(IssueCommand::SpecReadSection { number, section });
     }
-    Ok(CliCommand::SpecReadAll { number })
+    Ok(IssueCommand::SpecReadAll { number })
 }
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
-    cmd: CliCommand,
+    cmd: IssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
-        CliCommand::SpecReadAll { number } => {
+        IssueCommand::SpecReadAll { number } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
                 ClientRef {
@@ -320,7 +320,7 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        CliCommand::SpecReadSection { number, section } => {
+        IssueCommand::SpecReadSection { number, section } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
                 ClientRef {
@@ -332,7 +332,7 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("{content}\n"));
             0
         }
-        CliCommand::SpecEditSection {
+        IssueCommand::SpecEditSection {
             number,
             section,
             file,
@@ -352,7 +352,7 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
-        CliCommand::SpecEditSectionJson {
+        IssueCommand::SpecEditSectionJson {
             number,
             section,
             file,
@@ -391,7 +391,7 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
-        CliCommand::SpecList { phase, state } => {
+        IssueCommand::SpecList { phase, state } => {
             let filter = SpecListFilter {
                 phase,
                 state: state.as_deref().and_then(|value| match value {
@@ -419,7 +419,7 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        CliCommand::SpecCreate {
+        IssueCommand::SpecCreate {
             title,
             file,
             labels,
@@ -447,7 +447,7 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
-        CliCommand::SpecCreateJson {
+        IssueCommand::SpecCreateJson {
             title,
             file,
             labels,
@@ -471,14 +471,14 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
-        CliCommand::SpecCreateHelp => {
+        IssueCommand::SpecCreateHelp => {
             out.push_str(SPEC_CREATE_HELP);
             if !SPEC_CREATE_HELP.ends_with('\n') {
                 out.push('\n');
             }
             0
         }
-        CliCommand::SpecPull { all, numbers } => {
+        IssueCommand::SpecPull { all, numbers } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
                 ClientRef {
@@ -505,7 +505,7 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        CliCommand::SpecRepair { number } => {
+        IssueCommand::SpecRepair { number } => {
             let cache = Cache::new(env.cache_root());
             let ops = SpecOps::new(
                 ClientRef {
@@ -517,7 +517,7 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("repaired cache for #{number}\n"));
             0
         }
-        CliCommand::SpecRename { number, title } => {
+        IssueCommand::SpecRename { number, title } => {
             let snapshot = env.client().patch_title(IssueNumber(number), &title)?;
             Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
             out.push_str(&format!(
@@ -1176,7 +1176,7 @@ Preserve me.
         let refs = args.iter().collect::<Vec<_>>();
         assert!(matches!(
             parse(&refs),
-            Ok(CliCommand::SpecList { phase, state })
+            Ok(IssueCommand::SpecList { phase, state })
                 if phase.as_deref() == Some("review") && state.as_deref() == Some("closed")
         ));
 
@@ -1193,7 +1193,7 @@ Preserve me.
         let refs = args.iter().collect::<Vec<_>>();
         assert!(matches!(
             parse(&refs),
-            Ok(CliCommand::SpecCreateJson { title, file, labels })
+            Ok(IssueCommand::SpecCreateJson { title, file, labels })
                 if title == "SPEC: Launch"
                     && file.as_deref() == Some("spec.json")
                     && labels == vec!["phase/review".to_string()]
@@ -1201,7 +1201,7 @@ Preserve me.
 
         let args = ["create".to_string(), "--help".to_string()];
         let refs = args.iter().collect::<Vec<_>>();
-        assert!(matches!(parse(&refs), Ok(CliCommand::SpecCreateHelp)));
+        assert!(matches!(parse(&refs), Ok(IssueCommand::SpecCreateHelp)));
 
         let args = [
             "1942".to_string(),
@@ -1215,7 +1215,7 @@ Preserve me.
         let refs = args.iter().collect::<Vec<_>>();
         assert!(matches!(
             parse(&refs),
-            Ok(CliCommand::SpecEditSectionJson {
+            Ok(IssueCommand::SpecEditSectionJson {
                 number,
                 section,
                 file,
@@ -1231,14 +1231,14 @@ Preserve me.
         let refs = args.iter().collect::<Vec<_>>();
         assert!(matches!(
             parse(&refs),
-            Ok(CliCommand::SpecPull { all, numbers }) if all && numbers == vec![77]
+            Ok(IssueCommand::SpecPull { all, numbers }) if all && numbers == vec![77]
         ));
 
         let args = ["repair".to_string(), "77".to_string()];
         let refs = args.iter().collect::<Vec<_>>();
         assert!(matches!(
             parse(&refs),
-            Ok(CliCommand::SpecRepair { number }) if number == 77
+            Ok(IssueCommand::SpecRepair { number }) if number == 77
         ));
 
         let args = [
@@ -1249,7 +1249,7 @@ Preserve me.
         let refs = args.iter().collect::<Vec<_>>();
         assert!(matches!(
             parse(&refs),
-            Ok(CliCommand::SpecRename { number, title })
+            Ok(IssueCommand::SpecRename { number, title })
                 if number == 77 && title == "SPEC: Renamed"
         ));
 
@@ -1292,7 +1292,7 @@ Preserve me.
 
         let mut out = String::new();
         assert_eq!(
-            run(&mut env, CliCommand::SpecReadAll { number: 42 }, &mut out).unwrap(),
+            run(&mut env, IssueCommand::SpecReadAll { number: 42 }, &mut out).unwrap(),
             0
         );
         assert!(out.contains("=== spec ===\nspec body"));
@@ -1302,7 +1302,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecReadSection {
+                IssueCommand::SpecReadSection {
                     number: 42,
                     section: "tasks".to_string(),
                 },
@@ -1317,7 +1317,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecList {
+                IssueCommand::SpecList {
                     phase: Some("review".to_string()),
                     state: Some("open".to_string()),
                 },
@@ -1336,7 +1336,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecCreate {
+                IssueCommand::SpecCreate {
                     title: "SPEC: Created from markdown".to_string(),
                     file: "legacy.md".to_string(),
                     labels: vec!["gwt-spec".to_string()],
@@ -1357,7 +1357,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecCreateJson {
+                IssueCommand::SpecCreateJson {
                     title: "SPEC: Created from json".to_string(),
                     file: None,
                     labels: vec!["gwt-spec".to_string()],
@@ -1371,7 +1371,7 @@ Preserve me.
 
         out.clear();
         assert_eq!(
-            run(&mut env, CliCommand::SpecCreateHelp, &mut out).unwrap(),
+            run(&mut env, IssueCommand::SpecCreateHelp, &mut out).unwrap(),
             0
         );
         assert!(out.contains("Input JSON schema:"));
@@ -1380,7 +1380,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecPull {
+                IssueCommand::SpecPull {
                     all: true,
                     numbers: Vec::new(),
                 },
@@ -1395,7 +1395,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecPull {
+                IssueCommand::SpecPull {
                     all: false,
                     numbers: vec![42],
                 },
@@ -1408,7 +1408,7 @@ Preserve me.
 
         let err = run(
             &mut env,
-            CliCommand::SpecPull {
+            IssueCommand::SpecPull {
                 all: false,
                 numbers: Vec::new(),
             },
@@ -1419,7 +1419,7 @@ Preserve me.
 
         out.clear();
         assert_eq!(
-            run(&mut env, CliCommand::SpecRepair { number: 42 }, &mut out).unwrap(),
+            run(&mut env, IssueCommand::SpecRepair { number: 42 }, &mut out).unwrap(),
             0
         );
         assert_eq!(out, "repaired cache for #42\n");
@@ -1428,7 +1428,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecRename {
+                IssueCommand::SpecRename {
                     number: 42,
                     title: "SPEC: Renamed".to_string(),
                 },
@@ -1464,7 +1464,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecEditSection {
+                IssueCommand::SpecEditSection {
                     number: 7,
                     section: "tasks".to_string(),
                     file: "tasks.md".to_string(),
@@ -1485,7 +1485,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecEditSectionJson {
+                IssueCommand::SpecEditSectionJson {
                     number: 7,
                     section: "spec".to_string(),
                     file: None,
@@ -1513,7 +1513,7 @@ Preserve me.
         assert_eq!(
             run(
                 &mut env,
-                CliCommand::SpecEditSectionJson {
+                IssueCommand::SpecEditSectionJson {
                     number: 7,
                     section: "spec".to_string(),
                     file: Some("replace.json".to_string()),
@@ -1536,7 +1536,7 @@ Preserve me.
 
         let err = run(
             &mut env,
-            CliCommand::SpecEditSectionJson {
+            IssueCommand::SpecEditSectionJson {
                 number: 7,
                 section: "tasks".to_string(),
                 file: None,

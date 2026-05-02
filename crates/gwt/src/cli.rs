@@ -39,7 +39,6 @@ use std::{
     path::PathBuf,
 };
 
-pub(crate) use board::parse as parse_board_args;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 use gwt_git::PrStatus;
@@ -47,7 +46,6 @@ use gwt_github::{
     cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
     SpecOpsError,
 };
-pub(crate) use index::parse as parse_index_args;
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -131,9 +129,36 @@ pub struct PrEditCall {
     pub add_labels: Vec<String>,
 }
 
-/// Top-level argv parse result for the CLI.
+/// Top-level argv parse result for the CLI. SPEC-1942 FR-088〜092: each top
+/// verb maps to one family-typed inner enum, so the parent enum stays at 10
+/// variants and dispatch becomes a nested match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    /// `gwtd issue ...` — issue + spec management.
+    Issue(IssueCommand),
+    /// `gwtd pr ...` — pull request management.
+    Pr(PrCommand),
+    /// `gwtd actions ...` — GitHub Actions log access.
+    Actions(ActionsCommand),
+    /// `gwtd board ...` — coordination Board read/post.
+    Board(BoardCommand),
+    /// `gwtd hook ...` and `gwtd __internal daemon-hook ...`.
+    Hook(HookCommand),
+    /// `gwtd index ...` — local search index.
+    Index(IndexCommand),
+    /// `gwtd discuss ...` — gwt-discussion exit CLI.
+    Discuss(DiscussCommand),
+    /// `gwtd plan ...` — gwt-plan-spec exit CLI.
+    Plan(PlanCommand),
+    /// `gwtd build ...` — gwt-build-spec exit CLI.
+    Build(BuildCommand),
+    /// `gwtd update [...]` and `gwtd __internal {apply-update,run-installer} ...`.
+    Update(UpdateCommand),
+}
+
+/// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueCommand {
     /// `gwtd issue spec <n>` — print all sections.
     SpecReadAll { number: u64 },
     /// `gwtd issue spec <n> --section <name>` — print a single section.
@@ -177,23 +202,28 @@ pub enum CliCommand {
     /// `gwtd issue spec <n> --rename <title>` — update the Issue title.
     SpecRename { number: u64, title: String },
     /// `gwtd issue view <n> [--refresh]` — print a plain issue from cache/live.
-    IssueView { number: u64, refresh: bool },
+    View { number: u64, refresh: bool },
     /// `gwtd issue comments <n> [--refresh]` — print issue comments.
-    IssueComments { number: u64, refresh: bool },
+    Comments { number: u64, refresh: bool },
     /// `gwtd issue linked-prs <n> [--refresh]` — print linked PR summaries.
-    IssueLinkedPrs { number: u64, refresh: bool },
+    LinkedPrs { number: u64, refresh: bool },
     /// `gwtd issue create --title <t> -f <body_file> [--label <l>]*`.
-    IssueCreate {
+    Create {
         title: String,
         file: String,
         labels: Vec<String>,
     },
     /// `gwtd issue comment <n> -f <body_file>` — create a plain issue comment.
-    IssueComment { number: u64, file: String },
-    /// `gwtd pr current` — print the PR associated with the current branch.
-    PrCurrent,
+    Comment { number: u64, file: String },
+}
+
+/// SPEC-1942 family enum for `gwtd pr ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrCommand {
+    /// `gwtd pr current`.
+    Current,
     /// `gwtd pr create --base <branch> [--head <branch>] --title <t> -f <body_file>`.
-    PrCreate {
+    Create {
         base: String,
         head: Option<String>,
         title: String,
@@ -202,32 +232,42 @@ pub enum CliCommand {
         draft: bool,
     },
     /// `gwtd pr edit <n> [--title <t>] [-f <body_file>] [--add-label <label>]*`.
-    PrEdit {
+    Edit {
         number: u64,
         title: Option<String>,
         file: Option<String>,
         add_labels: Vec<String>,
     },
-    /// `gwtd pr view <n>` — print a PR by number.
-    PrView { number: u64 },
-    /// `gwtd pr comment <n> -f <body_file>` — create a PR issue comment.
-    PrComment { number: u64, file: String },
-    /// `gwtd pr reviews <n>` — print PR review summaries.
-    PrReviews { number: u64 },
-    /// `gwtd pr review-threads <n>` — print review thread snapshots.
-    PrReviewThreads { number: u64 },
+    /// `gwtd pr view <n>`.
+    View { number: u64 },
+    /// `gwtd pr comment <n> -f <body_file>`.
+    Comment { number: u64, file: String },
+    /// `gwtd pr reviews <n>`.
+    Reviews { number: u64 },
+    /// `gwtd pr review-threads <n>`.
+    ReviewThreads { number: u64 },
     /// `gwtd pr review-threads reply-and-resolve <n> -f <body_file>`.
-    PrReviewThreadsReplyAndResolve { number: u64, file: String },
-    /// `gwtd pr checks <n>` — print PR checks and summary.
-    PrChecks { number: u64 },
-    /// `gwtd actions logs --run <id>` — print raw GitHub Actions run logs.
-    ActionsLogs { run_id: u64 },
-    /// `gwtd actions job-logs --job <id>` — print raw GitHub Actions job logs.
-    ActionsJobLogs { job_id: u64 },
+    ReviewThreadsReplyAndResolve { number: u64, file: String },
+    /// `gwtd pr checks <n>`.
+    Checks { number: u64 },
+}
+
+/// SPEC-1942 family enum for `gwtd actions ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionsCommand {
+    /// `gwtd actions logs --run <id>`.
+    Logs { run_id: u64 },
+    /// `gwtd actions job-logs --job <id>`.
+    JobLogs { job_id: u64 },
+}
+
+/// SPEC-1942 family enum for `gwtd board ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardCommand {
     /// `gwtd board show [--json]`.
-    BoardShow { json: bool },
+    Show { json: bool },
     /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>]`.
-    BoardPost {
+    Post {
         kind: String,
         body: Option<String>,
         file: Option<String>,
@@ -236,30 +276,48 @@ pub enum CliCommand {
         owners: Vec<String>,
         targets: Vec<String>,
     },
-    /// `gwtd index status`.
-    IndexStatus,
-    /// `gwtd index rebuild [--scope <scope>]`.
-    IndexRebuild { scope: IndexScope },
-    /// `gwtd hook <name> [args...]` — dispatch to an in-binary hook handler.
-    ///
-    /// See SPEC #1942 (CORE-CLI) — replaces retired external hook scripts
-    /// and inline shell hooks in `.claude/settings.local.json`.
-    Hook { name: String, rest: Vec<String> },
-    /// `gwtd update [--check]` — check for a new gwt release and optionally apply it.
-    Update { check_only: bool },
-    /// `gwtd __internal apply-update ...` — internal helper: replace the binary then restart.
-    InternalApplyUpdate { rest: Vec<String> },
-    /// `gwtd __internal run-installer ...` — internal helper: run DMG/MSI installer then restart.
-    InternalRunInstaller { rest: Vec<String> },
-    /// `gwtd __internal daemon-hook <name> [args...]` — hidden compatibility helper.
-    InternalDaemonHook { name: String, rest: Vec<String> },
-    /// `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`.
-    Discuss(DiscussAction),
-    /// `gwtd plan <start|phase|complete|abort> --spec <n> [...]`.
-    Plan(SkillStateAction),
-    /// `gwtd build <start|phase|complete|abort> --spec <n> [...]`.
-    Build(SkillStateAction),
 }
+
+/// SPEC-1942 family enum for `gwtd index ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexCommand {
+    /// `gwtd index status`.
+    Status,
+    /// `gwtd index rebuild [--scope <scope>]`.
+    Rebuild { scope: IndexScope },
+}
+
+/// SPEC-1942 family enum for `gwtd hook ...` and `gwtd __internal daemon-hook ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookCommand {
+    /// `gwtd hook <name> [args...]` — visible managed hook entry.
+    Run { name: String, rest: Vec<String> },
+    /// `gwtd __internal daemon-hook <name> [args...]` — hidden helper.
+    InternalDaemon { name: String, rest: Vec<String> },
+}
+
+/// SPEC-1942 family enum for `gwtd update ...` and `gwtd __internal apply-update`/`run-installer`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCommand {
+    /// `gwtd update --check` — only check and report.
+    CheckOnly,
+    /// `gwtd update` — check and, with approval, download and apply.
+    Apply,
+    /// `gwtd __internal apply-update ...`.
+    InternalApply { rest: Vec<String> },
+    /// `gwtd __internal run-installer ...`.
+    InternalRunInstaller { rest: Vec<String> },
+}
+
+/// SPEC-1942 family enum for `gwtd discuss ...`. Backed by the legacy
+/// [`DiscussAction`] alias to keep call-sites stable.
+pub type DiscussCommand = DiscussAction;
+
+/// SPEC-1942 family enum for `gwtd plan ...`. Backed by [`SkillStateAction`].
+pub type PlanCommand = SkillStateAction;
+
+/// SPEC-1942 family enum for `gwtd build ...`. Backed by [`SkillStateAction`].
+pub type BuildCommand = SkillStateAction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexScope {
@@ -344,17 +402,27 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
 /// the first post-subcommand argument — i.e. if the caller received
 /// `["gwt", "issue", "spec", "2001"]`, they pass `["spec", "2001"]`.
 pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
-    issue::parse(args)
+    issue::parse(args).map(CliCommand::Issue)
 }
 
 /// Parse an argv slice into a `gwtd pr ...` [`CliCommand`].
 pub fn parse_pr_args(args: &[String]) -> Result<CliCommand, CliParseError> {
-    pr::parse(args)
+    pr::parse(args).map(CliCommand::Pr)
 }
 
 /// Parse an argv slice into a `gwtd actions ...` [`CliCommand`].
 pub fn parse_actions_args(args: &[String]) -> Result<CliCommand, CliParseError> {
-    actions::parse(args)
+    actions::parse(args).map(CliCommand::Actions)
+}
+
+/// Parse an argv slice into a `gwtd board ...` [`CliCommand`].
+pub fn parse_board_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    board::parse(args).map(CliCommand::Board)
+}
+
+/// Parse an argv slice into a `gwtd index ...` [`CliCommand`].
+pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    index::parse(args).map(CliCommand::Index)
 }
 
 fn expect_flag(arg: Option<&String>, expected: &'static str) -> Result<(), CliParseError> {
@@ -381,7 +449,8 @@ fn ensure_no_remaining_args<'a>(
     Ok(())
 }
 
-/// Parse the tail of a `gwtd hook ...` argv slice into a [`CliCommand::Hook`].
+/// Parse the tail of a `gwtd hook ...` argv slice into a
+/// [`CliCommand::Hook`] holding [`HookCommand::Run`].
 ///
 /// SPEC #1942 (CORE-CLI): `gwtd hook <name> [args...]` is the single entry
 /// point for every in-binary hook handler. The known hook names are:
@@ -395,10 +464,10 @@ fn ensure_no_remaining_args<'a>(
 /// [`run_hook`].
 pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
-    Ok(CliCommand::Hook {
+    Ok(CliCommand::Hook(HookCommand::Run {
         name: head.clone(),
         rest: rest.to_vec(),
-    })
+    }))
 }
 
 /// Parse `gwtd discuss <action> --proposal <label>` (SPEC-1935 FR-014p).
@@ -480,67 +549,39 @@ fn parse_named_u64(args: &[String], flag: &'static str) -> Result<u64, CliParseE
 
 /// Dispatch a parsed [`CliCommand`] against the given [`CliEnv`].
 ///
-/// We collect output into a String buffer first so the [`SpecOps`] borrow of
+/// SPEC-1942 family-nested form: each parent variant carries the family enum
+/// and we delegate to the matching family module's `run`.
+///
+/// We collect output into a String buffer first so the family run's borrow of
 /// `env.client()` does not conflict with the mutable borrow required by
 /// `env.stdout()` at write time.
 pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
     let mut out = String::new();
     let code = match cmd {
-        cmd @ (CliCommand::SpecReadAll { .. }
-        | CliCommand::SpecReadSection { .. }
-        | CliCommand::SpecEditSection { .. }
-        | CliCommand::SpecEditSectionJson { .. }
-        | CliCommand::SpecList { .. }
-        | CliCommand::SpecCreate { .. }
-        | CliCommand::SpecCreateJson { .. }
-        | CliCommand::SpecCreateHelp
-        | CliCommand::SpecPull { .. }
-        | CliCommand::SpecRepair { .. }
-        | CliCommand::SpecRename { .. }
-        | CliCommand::IssueView { .. }
-        | CliCommand::IssueComments { .. }
-        | CliCommand::IssueLinkedPrs { .. }
-        | CliCommand::IssueCreate { .. }
-        | CliCommand::IssueComment { .. }) => issue::run(env, cmd, &mut out)?,
-        cmd @ (CliCommand::PrCurrent
-        | CliCommand::PrCreate { .. }
-        | CliCommand::PrEdit { .. }
-        | CliCommand::PrView { .. }
-        | CliCommand::PrComment { .. }
-        | CliCommand::PrReviews { .. }
-        | CliCommand::PrReviewThreads { .. }
-        | CliCommand::PrReviewThreadsReplyAndResolve { .. }
-        | CliCommand::PrChecks { .. }) => pr::run(env, cmd, &mut out)?,
-        cmd @ (CliCommand::ActionsLogs { .. } | CliCommand::ActionsJobLogs { .. }) => {
-            actions::run(env, cmd, &mut out)?
-        }
-        cmd @ (CliCommand::BoardShow { .. } | CliCommand::BoardPost { .. }) => {
-            board::run(env, cmd, &mut out)?
-        }
-        cmd @ (CliCommand::IndexStatus | CliCommand::IndexRebuild { .. }) => {
-            index::run(env, cmd, &mut out)?
-        }
+        CliCommand::Issue(inner) => issue::run(env, inner, &mut out)?,
+        CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
+        CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
+        CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
+        CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
-        CliCommand::Hook { name, rest } => {
+        CliCommand::Hook(HookCommand::Run { name, rest }) => {
             return run_hook(env, &name, &rest);
         }
-        CliCommand::InternalDaemonHook { name, rest } => {
+        CliCommand::Hook(HookCommand::InternalDaemon { name, rest }) => {
             return run_daemon_hook(env, &name, &rest);
         }
-        CliCommand::Update { check_only } => {
-            let cmd = if check_only {
-                update::UpdateCommand::CheckOnly
-            } else {
-                update::UpdateCommand::Apply
-            };
-            std::process::exit(update::run(cmd));
+        CliCommand::Update(UpdateCommand::CheckOnly) => {
+            std::process::exit(update::run(update::UpdateRunMode::CheckOnly));
         }
-        CliCommand::InternalApplyUpdate { rest } => {
+        CliCommand::Update(UpdateCommand::Apply) => {
+            std::process::exit(update::run(update::UpdateRunMode::Apply));
+        }
+        CliCommand::Update(UpdateCommand::InternalApply { rest }) => {
             std::process::exit(update::run_internal_apply_update(&rest));
         }
-        CliCommand::InternalRunInstaller { rest } => {
+        CliCommand::Update(UpdateCommand::InternalRunInstaller { rest }) => {
             std::process::exit(update::run_internal_run_installer(&rest));
         }
     };
@@ -2536,5 +2577,125 @@ fn main() -> ExitCode {
                 .expect("resolved after retry");
             assert_eq!(resolved, 2);
         });
+    }
+
+    /// SPEC-1942 family split (FR-088〜092 / SC-025〜027): the parent
+    /// [`CliCommand`] is a 10-variant nested enum and each top-level verb
+    /// parses into the matching family-typed inner enum. This RED test
+    /// pins the contract before the refactor lands and stays green
+    /// afterwards as the round-trip guard for the family split.
+    #[test]
+    fn cli_command_family_split_round_trip_parses() {
+        use crate::cli::{
+            ActionsCommand, BoardCommand, CliCommand, DiscussCommand, HookCommand, IndexCommand,
+            IssueCommand, PrCommand, UpdateCommand,
+        };
+
+        fn s(value: &str) -> String {
+            value.to_string()
+        }
+
+        // gwtd issue spec list
+        let cmd = parse_issue_args(&[s("spec"), s("list")]).expect("parse issue spec list");
+        assert!(matches!(
+            cmd,
+            CliCommand::Issue(IssueCommand::SpecList {
+                phase: None,
+                state: None
+            })
+        ));
+
+        // gwtd issue view 42 --refresh
+        let cmd =
+            parse_issue_args(&[s("view"), s("42"), s("--refresh")]).expect("parse issue view");
+        assert_eq!(
+            cmd,
+            CliCommand::Issue(IssueCommand::View {
+                number: 42,
+                refresh: true,
+            })
+        );
+
+        // gwtd pr current
+        let cmd = parse_pr_args(&[s("current")]).expect("parse pr current");
+        assert_eq!(cmd, CliCommand::Pr(PrCommand::Current));
+
+        // gwtd pr checks 12
+        let cmd = parse_pr_args(&[s("checks"), s("12")]).expect("parse pr checks");
+        assert_eq!(cmd, CliCommand::Pr(PrCommand::Checks { number: 12 }));
+
+        // gwtd actions logs --run 42
+        let cmd =
+            parse_actions_args(&[s("logs"), s("--run"), s("42")]).expect("parse actions logs");
+        assert_eq!(
+            cmd,
+            CliCommand::Actions(ActionsCommand::Logs { run_id: 42 })
+        );
+
+        // gwtd board show --json
+        let cmd = parse_board_args(&[s("show"), s("--json")]).expect("parse board show");
+        assert_eq!(cmd, CliCommand::Board(BoardCommand::Show { json: true }));
+
+        // gwtd board post --kind status --body x
+        let cmd = parse_board_args(&[s("post"), s("--kind"), s("status"), s("--body"), s("x")])
+            .expect("parse board post");
+        assert!(matches!(
+            cmd,
+            CliCommand::Board(BoardCommand::Post {
+                kind,
+                body: Some(body),
+                file: None,
+                ..
+            }) if kind == "status" && body == "x"
+        ));
+
+        // gwtd index status / rebuild
+        let cmd = parse_index_args(&[s("status")]).expect("parse index status");
+        assert_eq!(cmd, CliCommand::Index(IndexCommand::Status));
+        let cmd = parse_index_args(&[s("rebuild")]).expect("parse index rebuild");
+        assert!(matches!(
+            cmd,
+            CliCommand::Index(IndexCommand::Rebuild {
+                scope: IndexScope::All
+            })
+        ));
+
+        // gwtd hook runtime-state PreToolUse
+        let cmd =
+            parse_hook_args(&[s("runtime-state"), s("PreToolUse")]).expect("parse hook command");
+        assert!(matches!(
+            cmd,
+            CliCommand::Hook(HookCommand::Run { ref name, ref rest })
+                if name == "runtime-state" && rest == &[s("PreToolUse")]
+        ));
+
+        // gwtd discuss park --proposal "Proposal A"
+        let cmd = parse_discuss_args(&[s("park"), s("--proposal"), s("Proposal A")])
+            .expect("parse discuss park");
+        assert!(matches!(
+            cmd,
+            CliCommand::Discuss(DiscussCommand::Park { ref proposal })
+                if proposal == "Proposal A"
+        ));
+
+        // gwtd plan start --spec 1942
+        let cmd = parse_plan_args(&[s("start"), s("--spec"), s("1942")]).expect("parse plan start");
+        assert!(matches!(
+            cmd,
+            CliCommand::Plan(SkillStateAction::Start { spec: 1942 })
+        ));
+
+        // gwtd build start --spec 1942
+        let cmd =
+            parse_build_args(&[s("start"), s("--spec"), s("1942")]).expect("parse build start");
+        assert!(matches!(
+            cmd,
+            CliCommand::Build(SkillStateAction::Start { spec: 1942 })
+        ));
+
+        // `update --check` is parsed inline by `dispatch`. Round-trip it via
+        // the public CliCommand builder to keep the family contract pinned.
+        let cmd = CliCommand::Update(UpdateCommand::CheckOnly);
+        assert!(matches!(cmd, CliCommand::Update(UpdateCommand::CheckOnly)));
     }
 }

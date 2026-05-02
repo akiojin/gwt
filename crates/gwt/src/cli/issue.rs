@@ -1,8 +1,8 @@
 use gwt_github::{Cache, IssueClient, IssueNumber, SpecOpsError};
 
-use crate::cli::{CliCommand, CliEnv, CliParseError};
+use crate::cli::{CliEnv, CliParseError, IssueCommand};
 
-pub(super) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
+pub(super) fn parse(args: &[String]) -> Result<IssueCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
         Some("spec") => super::issue_spec::parse(it.collect::<Vec<_>>().as_slice()),
@@ -20,43 +20,43 @@ pub(super) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
-    cmd: CliCommand,
+    cmd: IssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     if matches!(
         cmd,
-        CliCommand::SpecReadAll { .. }
-            | CliCommand::SpecReadSection { .. }
-            | CliCommand::SpecEditSection { .. }
-            | CliCommand::SpecEditSectionJson { .. }
-            | CliCommand::SpecList { .. }
-            | CliCommand::SpecCreate { .. }
-            | CliCommand::SpecCreateJson { .. }
-            | CliCommand::SpecCreateHelp
-            | CliCommand::SpecPull { .. }
-            | CliCommand::SpecRepair { .. }
-            | CliCommand::SpecRename { .. }
+        IssueCommand::SpecReadAll { .. }
+            | IssueCommand::SpecReadSection { .. }
+            | IssueCommand::SpecEditSection { .. }
+            | IssueCommand::SpecEditSectionJson { .. }
+            | IssueCommand::SpecList { .. }
+            | IssueCommand::SpecCreate { .. }
+            | IssueCommand::SpecCreateJson { .. }
+            | IssueCommand::SpecCreateHelp
+            | IssueCommand::SpecPull { .. }
+            | IssueCommand::SpecRepair { .. }
+            | IssueCommand::SpecRename { .. }
     ) {
         return super::issue_spec::run(env, cmd, out);
     }
 
     let code = match cmd {
-        CliCommand::IssueView { number, refresh } => {
+        IssueCommand::View { number, refresh } => {
             let entry = super::load_or_refresh_issue(env, IssueNumber(number), refresh)?;
             super::render_issue(out, &entry.snapshot);
             0
         }
-        CliCommand::IssueComments { number, refresh } => {
+        IssueCommand::Comments { number, refresh } => {
             let entry = super::load_or_refresh_issue(env, IssueNumber(number), refresh)?;
             super::render_issue_comments(out, &entry.snapshot);
             0
         }
-        CliCommand::IssueLinkedPrs { number, refresh } => {
+        IssueCommand::LinkedPrs { number, refresh } => {
             let linked_prs = super::load_or_refresh_linked_prs(env, IssueNumber(number), refresh)?;
             super::render_linked_prs(out, &linked_prs);
             0
         }
-        CliCommand::IssueCreate {
+        IssueCommand::Create {
             title,
             file,
             labels,
@@ -70,7 +70,7 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
-        CliCommand::IssueComment { number, file } => {
+        IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
             let _ = super::refresh_issue_cache(env, IssueNumber(number))?;
@@ -85,7 +85,7 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
-fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<CliCommand, CliParseError> {
+fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<IssueCommand, CliParseError> {
     let Some(number_arg) = args.first() else {
         return Err(CliParseError::Usage);
     };
@@ -100,14 +100,14 @@ fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<CliCommand, Cli
         }
     }
     Ok(match mode {
-        "view" => CliCommand::IssueView { number, refresh },
-        "comments" => CliCommand::IssueComments { number, refresh },
-        "linked-prs" => CliCommand::IssueLinkedPrs { number, refresh },
+        "view" => IssueCommand::View { number, refresh },
+        "comments" => IssueCommand::Comments { number, refresh },
+        "linked-prs" => IssueCommand::LinkedPrs { number, refresh },
         _ => return Err(CliParseError::Usage),
     })
 }
 
-fn parse_issue_create_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+fn parse_issue_create_args(args: &[&String]) -> Result<IssueCommand, CliParseError> {
     let mut title: Option<String> = None;
     let mut file: Option<String> = None;
     let mut labels: Vec<String> = Vec::new();
@@ -139,14 +139,14 @@ fn parse_issue_create_args(args: &[&String]) -> Result<CliCommand, CliParseError
         }
         i += 1;
     }
-    Ok(CliCommand::IssueCreate {
+    Ok(IssueCommand::Create {
         title: title.ok_or(CliParseError::MissingFlag("--title"))?,
         file: file.ok_or(CliParseError::MissingFlag("-f"))?,
         labels,
     })
 }
 
-fn parse_issue_comment_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+fn parse_issue_comment_args(args: &[&String]) -> Result<IssueCommand, CliParseError> {
     if args.len() != 3 {
         return Err(CliParseError::Usage);
     }
@@ -154,7 +154,7 @@ fn parse_issue_comment_args(args: &[&String]) -> Result<CliCommand, CliParseErro
         .parse()
         .map_err(|_| CliParseError::InvalidNumber(args[0].clone()))?;
     match args[1].as_str() {
-        "-f" | "--file" => Ok(CliCommand::IssueComment {
+        "-f" | "--file" => Ok(IssueCommand::Comment {
             number,
             file: args[2].clone(),
         }),
@@ -178,7 +178,7 @@ mod tests {
         let cmd = parse(&[s("view"), s("42")]).expect("parse issue family command");
         assert_eq!(
             cmd,
-            CliCommand::IssueView {
+            IssueCommand::View {
                 number: 42,
                 refresh: false,
             }
@@ -192,7 +192,7 @@ mod tests {
         let cmd = crate::cli::issue_spec::parse(&refs).expect("parse spec family command");
         assert_eq!(
             cmd,
-            CliCommand::SpecList {
+            IssueCommand::SpecList {
                 phase: Some("phase/implementation".to_string()),
                 state: None,
             }
@@ -219,7 +219,7 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            CliCommand::IssueView {
+            IssueCommand::View {
                 number: 42,
                 refresh: false,
             },
