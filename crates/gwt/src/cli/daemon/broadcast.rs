@@ -14,12 +14,6 @@
 //! without re-deriving the synchronization boundary.
 
 #![cfg(unix)]
-// Phase H1 will graft this hub onto the server's per-connection task; the
-// scaffolding lands now so the data structure has a stable contract +
-// tests before any handler migration touches it. The `dead_code` allow is
-// scoped to this module and removed once `server::handle_connection`
-// starts referencing the hub.
-#![allow(dead_code)]
 
 use std::{
     collections::HashMap,
@@ -62,6 +56,12 @@ impl BroadcastHub {
     /// Publish `frame` to every subscriber currently registered on
     /// `channel`. Returns the number of receivers the frame was queued
     /// for (zero is a successful no-op when nobody is listening).
+    ///
+    /// Phase H1 GREEN will call this from real domain handlers (Board
+    /// projection writer, runtime status aggregator). Until then the
+    /// only callers live in tests, so the lib-only dead-code lint is
+    /// suppressed.
+    #[allow(dead_code)]
     pub(super) fn publish(&self, channel: &str, frame: DaemonFrame) -> usize {
         let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
         match guard.get(channel) {
