@@ -95,7 +95,7 @@ pub(super) fn serve_blocking(
     result
 }
 
-async fn run_server(
+pub(super) async fn run_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,
