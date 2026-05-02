@@ -12,5 +12,8 @@ coverage:
       paths: [crates/]
       carryforward: true
     frontend:
-      paths: [gwt-gui/src/]
+      # The Svelte frontend (gwt-gui/) was retired during the wry+tao+axum
+      # architecture migration. The current frontend is plain HTML/JS at
+      # crates/gwt/web/, which has no separate coverage target today.
+      paths: [crates/gwt/web/]
       carryforward: true

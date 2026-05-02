@@ -47,17 +47,24 @@ bunx .
 
 ```
 gwt/
-├── crates/               # Rust workspace
-├── gwt-gui/              # フロントエンド
-├── plugins/              # gwt agent assets
-├── tests/                # テストコード
-│   ├── unit/             # ユニットテスト
-│   ├── integration/      # 統合テスト
-│   ├── e2e/              # E2Eテスト
-│   ├── fixtures/         # テストフィクスチャ
-│   └── helpers/          # テストヘルパー
-└── docs/                 # ドキュメント
+├── crates/                       # Rust workspace
+│   ├── gwt/                      # メインバイナリ (gwt GUI + gwtd CLI)
+│   │   ├── src/                  # Rust ソース
+│   │   ├── tests/                # 統合テスト (#[test] in tests/*.rs)
+│   │   └── web/                  # WebView フロントエンド (HTML/JS, xterm.js)
+│   ├── gwt-core/                 # Git/PTY/設定/Issue キャッシュなどのコア
+│   ├── gwt-agent/                # エージェント起動・セッション管理
+│   ├── gwt-skills/               # 組込スキル / 管理対象アセット配布
+│   ├── gwt-github/               # GitHub Issue SOT (gwt-spec ラベル管理)
+│   └── ...                       # その他のドメインクレート (ai/git/docker/...)
+├── tests/voice_eval/             # 音声評価アセット (gwt-voice 用、ローカル実行)
+├── docs/                         # 設計ドキュメント
+└── scripts/                      # リリース/CI 補助スクリプト
 ```
+
+各ドメインクレートのソース／単体テストはそのクレート内 (`crates/<name>/src/`、
+`crates/<name>/src/**/tests.rs`) に存在し、統合テストは
+`crates/<name>/tests/` に配置されています。
 
 ## Development Workflow
 
