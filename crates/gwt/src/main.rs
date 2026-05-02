@@ -4351,7 +4351,7 @@ fn main() -> wry::Result<()> {
         })
         .ok();
 
-    if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&startup_dir) {
+    if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
         eprintln!("gwt daemon bootstrap: {error}");
     }
 

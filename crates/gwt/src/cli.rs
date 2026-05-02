@@ -33,15 +33,11 @@ mod pr;
 mod skill_state_runtime;
 pub mod update;
 
-use std::{
-    fs,
-    io::{self},
-    path::PathBuf,
-};
+use std::io::{self};
 
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
-use gwt_github::{cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, SpecOpsError};
+use gwt_github::{ApiError, SpecOpsError};
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -563,10 +559,10 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Hook(HookCommand::Run { name, rest }) => {
-            return run_hook(env, &name, &rest);
+            return hook::run_hook(env, &name, &rest);
         }
         CliCommand::Hook(HookCommand::InternalDaemon { name, rest }) => {
-            return run_daemon_hook(env, &name, &rest);
+            return hook::run_daemon_hook(env, &name, &rest);
         }
         CliCommand::Update(UpdateCommand::CheckOnly) => {
             std::process::exit(update::run(update::UpdateRunMode::CheckOnly));
@@ -593,460 +589,6 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
 pub(crate) fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-fn load_or_refresh_issue<E: CliEnv>(
-    env: &mut E,
-    number: IssueNumber,
-    refresh: bool,
-) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let cache = Cache::new(env.cache_root());
-    if !refresh {
-        if let Some(entry) = cache.load_entry(number) {
-            return Ok(entry);
-        }
-    }
-    refresh_issue_cache(env, number)
-}
-
-fn refresh_issue_cache<E: CliEnv>(
-    env: &mut E,
-    number: IssueNumber,
-) -> Result<gwt_github::CacheEntry, SpecOpsError> {
-    let snapshot = match env.client().fetch(number, None)? {
-        gwt_github::FetchResult::Updated(snapshot) => snapshot,
-        gwt_github::FetchResult::NotModified => {
-            return Cache::new(env.cache_root())
-                .load_entry(number)
-                .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)));
-        }
-    };
-    let cache = Cache::new(env.cache_root());
-    cache.write_snapshot(&snapshot)?;
-    cache
-        .load_entry(number)
-        .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))
-}
-
-fn load_or_refresh_linked_prs<E: CliEnv>(
-    env: &mut E,
-    number: IssueNumber,
-    refresh: bool,
-) -> Result<Vec<LinkedPrSummary>, SpecOpsError> {
-    let cache_root = env.cache_root();
-    if !refresh {
-        if let Some(cached) = read_linked_prs_cache(&cache_root, number)? {
-            return Ok(cached);
-        }
-    }
-    let linked_prs = env.fetch_linked_prs(number).map_err(io_as_api_error)?;
-    write_linked_prs_cache(&cache_root, number, &linked_prs)?;
-    Ok(linked_prs)
-}
-
-fn linked_prs_cache_path(cache_root: &std::path::Path, number: IssueNumber) -> PathBuf {
-    cache_root
-        .join(number.0.to_string())
-        .join("linked_prs.json")
-}
-
-fn read_linked_prs_cache(
-    cache_root: &std::path::Path,
-    number: IssueNumber,
-) -> Result<Option<Vec<LinkedPrSummary>>, SpecOpsError> {
-    let path = linked_prs_cache_path(cache_root, number);
-    match fs::read_to_string(&path) {
-        Ok(text) => {
-            let parsed = serde_json::from_str(&text)
-                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
-            Ok(Some(parsed))
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(io_as_api_error(err)),
-    }
-}
-
-fn write_linked_prs_cache(
-    cache_root: &std::path::Path,
-    number: IssueNumber,
-    linked_prs: &[LinkedPrSummary],
-) -> Result<(), SpecOpsError> {
-    let bytes = serde_json::to_vec_pretty(linked_prs)
-        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
-    write_atomic(&linked_prs_cache_path(cache_root, number), &bytes).map_err(io_as_api_error)
-}
-
-fn fetch_linked_prs_via_gh(
-    owner: &str,
-    repo: &str,
-    number: IssueNumber,
-) -> io::Result<Vec<LinkedPrSummary>> {
-    let query = r#"
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    issue(number: $number) {
-      timelineItems(first: 100, itemTypes: [CROSS_REFERENCED_EVENT, CONNECTED_EVENT]) {
-        nodes {
-          __typename
-          ... on CrossReferencedEvent {
-            source {
-              __typename
-              ... on PullRequest {
-                number
-                title
-                state
-                url
-              }
-            }
-          }
-          ... on ConnectedEvent {
-            subject {
-              __typename
-              ... on PullRequest {
-                number
-                title
-                state
-                url
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-f",
-            &format!("owner={owner}"),
-            "-f",
-            &format!("repo={repo}"),
-            "-F",
-            &format!("number={}", number.0),
-        ])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh api graphql failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    let nodes = value
-        .get("data")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.get("issue"))
-        .and_then(|v| v.get("timelineItems"))
-        .and_then(|v| v.get("nodes"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for node in nodes {
-        let typename = node
-            .get("__typename")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let pr = match typename {
-            "CrossReferencedEvent" => node.get("source"),
-            "ConnectedEvent" => node.get("subject"),
-            _ => None,
-        };
-        let Some(pr) = pr else { continue };
-        if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
-            continue;
-        }
-        let Some(pr_number) = pr.get("number").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        if !seen.insert(pr_number) {
-            continue;
-        }
-        out.push(LinkedPrSummary {
-            number: pr_number,
-            title: pr
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: pr
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: pr
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
-    }
-    Ok(out)
-}
-
-fn fetch_actions_run_log_via_gh(repo_path: &std::path::Path, run_id: u64) -> io::Result<String> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["run", "view", &run_id.to_string(), "--log"])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh run view --log: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn fetch_actions_job_log_via_gh(
-    owner: &str,
-    repo: &str,
-    repo_path: &std::path::Path,
-    job_id: u64,
-) -> io::Result<String> {
-    let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["api", &endpoint])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh api {endpoint}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    if output.stdout.starts_with(b"PK") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "job logs returned a zip archive; unable to parse",
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Dispatch a `gwtd hook <name> [args...]` invocation.
-///
-/// SPEC-2077 hot path tightening: `gwtd hook ...` remains the outward-facing
-/// surface, but dispatches in-process so every Claude/Codex hook event does not
-/// pay for a second `gwtd __internal daemon-hook ...` process spawn. The hidden
-/// internal command stays available as a compatibility route.
-pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
-    run_daemon_hook(env, name, rest)
-}
-
-#[cfg(test)]
-fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
-    let mut argv = vec![
-        "gwtd".to_string(),
-        "__internal".to_string(),
-        "daemon-hook".to_string(),
-        name.to_string(),
-    ];
-    argv.extend(rest.iter().cloned());
-    argv
-}
-
-#[cfg(test)]
-fn write_internal_command_output<E: CliEnv>(
-    env: &mut E,
-    output: crate::cli::env::InternalCommandOutput,
-) -> Result<i32, SpecOpsError> {
-    env.stdout()
-        .write_all(&output.stdout)
-        .map_err(io_as_api_error)?;
-    env.stdout().flush().map_err(io_as_api_error)?;
-    env.stderr()
-        .write_all(&output.stderr)
-        .map_err(io_as_api_error)?;
-    env.stderr().flush().map_err(io_as_api_error)?;
-    Ok(output.status)
-}
-
-pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
-    if !project_root.exists() {
-        return Ok(());
-    }
-
-    refresh_managed_assets_for_hook_front_door(project_root)?;
-
-    crate::index_worker::bootstrap_project_index_for_path(project_root)?;
-
-    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
-        project_root,
-        gwt_core::daemon::RuntimeTarget::Host,
-    )
-    .map_err(|err| err.to_string())?;
-    let gwt_home = gwt_core::paths::gwt_home();
-    let action = gwt_core::daemon::resolve_bootstrap_action(
-        &gwt_home,
-        &scope,
-        gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
-        |pid| pid == std::process::id(),
-    )
-    .map_err(|err| err.to_string())?;
-
-    if let gwt_core::daemon::DaemonBootstrapAction::Spawn { endpoint_path } = action {
-        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
-            scope,
-            std::process::id(),
-            "internal://gwt-front-door".to_string(),
-            uuid::Uuid::new_v4().to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        );
-        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
-            .map_err(|err| err.to_string())?;
-    }
-
-    Ok(())
-}
-
-fn refresh_managed_assets_for_hook_front_door(
-    project_root: &std::path::Path,
-) -> Result<(), String> {
-    if gwt_git::Repository::discover(project_root).is_err() {
-        return Ok(());
-    }
-    crate::managed_assets::refresh_managed_gwt_assets_for_worktree(project_root)
-        .map_err(|err| err.to_string())
-}
-
-pub fn run_daemon_hook<E: CliEnv>(
-    env: &mut E,
-    name: &str,
-    rest: &[String],
-) -> Result<i32, SpecOpsError> {
-    use crate::cli::hook::{
-        block_bash_policy, event_dispatcher, skill_build_spec_stop_check,
-        skill_discussion_stop_check, skill_plan_spec_stop_check, workflow_policy, HookKind,
-        HookOutput,
-    };
-
-    let Some(kind) = HookKind::from_name(name) else {
-        let _ = writeln!(env.stderr(), "gwtd hook: unknown hook '{name}'");
-        return Ok(2);
-    };
-    let stdin = env.read_stdin().map_err(io_as_api_error)?;
-
-    fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
-        match output.serialize_to(env.stdout()) {
-            Ok(()) => output.exit_code(),
-            Err(err) => {
-                let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
-                1
-            }
-        }
-    }
-    fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
-        let _ = writeln!(env.stderr(), "gwtd hook {name}: {err}");
-        1
-    }
-
-    match kind {
-        HookKind::Event => {
-            let Some(event) = rest.first() else {
-                let _ = writeln!(env.stderr(), "gwtd hook event: missing <event> argument");
-                return Ok(2);
-            };
-            let cwd = env.repo_path().to_path_buf();
-            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            match event_dispatcher::handle_with_input(
-                event,
-                &stdin,
-                &cwd,
-                current_session.as_deref(),
-            ) {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
-            }
-        }
-        HookKind::RuntimeState => {
-            let Some(event) = rest.first() else {
-                let _ = writeln!(
-                    env.stderr(),
-                    "gwtd hook runtime-state: missing <event> argument"
-                );
-                return Ok(2);
-            };
-            match crate::daemon_runtime::handle_runtime_state(event, &stdin) {
-                Ok(()) => Ok(0),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
-            }
-        }
-        HookKind::CoordinationEvent => {
-            let Some(event) = rest.first() else {
-                let _ = writeln!(
-                    env.stderr(),
-                    "gwtd hook coordination-event: missing <event> argument"
-                );
-                return Ok(2);
-            };
-            match crate::daemon_runtime::handle_coordination_event(event, &stdin) {
-                Ok(()) => Ok(0),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
-            }
-        }
-        HookKind::BoardReminder => {
-            let Some(event) = rest.first() else {
-                let _ = writeln!(
-                    env.stderr(),
-                    "gwtd hook board-reminder: missing <event> argument"
-                );
-                return Ok(2);
-            };
-            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin) {
-                Ok(output) => Ok(emit_hook_output(env, &output)),
-                Err(err) => Ok(emit_hook_error(env, name, err)),
-            }
-        }
-        HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
-            Ok(output) => Ok(emit_hook_output(env, &output)),
-            Err(err) => Ok(emit_hook_error(env, name, err)),
-        },
-        HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
-            Ok(output) => Ok(emit_hook_output(env, &output)),
-            Err(err) => Ok(emit_hook_error(env, name, err)),
-        },
-        HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
-            Ok(()) => Ok(0),
-            Err(err) => Ok(emit_hook_error(env, name, err)),
-        },
-        HookKind::SkillDiscussionStopCheck => {
-            let cwd = env.repo_path().to_path_buf();
-            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
-            Ok(emit_hook_output(env, &output))
-        }
-        HookKind::SkillPlanSpecStopCheck => {
-            let cwd = env.repo_path().to_path_buf();
-            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let output = skill_plan_spec_stop_check::handle_with_input(
-                &cwd,
-                &stdin,
-                current_session.as_deref(),
-            );
-            Ok(emit_hook_output(env, &output))
-        }
-        HookKind::SkillBuildSpecStopCheck => {
-            let cwd = env.repo_path().to_path_buf();
-            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
-            let output = skill_build_spec_stop_check::handle_with_input(
-                &cwd,
-                &stdin,
-                current_session.as_deref(),
-            );
-            Ok(emit_hook_output(env, &output))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1449,12 +991,14 @@ fn main() -> ExitCode {
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
         }];
 
-        assert!(read_linked_prs_cache(temp.path(), number)
-            .unwrap()
-            .is_none());
-        write_linked_prs_cache(temp.path(), number, &linked_prs).unwrap();
+        assert!(
+            crate::cli::issue::read_linked_prs_cache(temp.path(), number)
+                .unwrap()
+                .is_none()
+        );
+        crate::cli::issue::write_linked_prs_cache(temp.path(), number, &linked_prs).unwrap();
         assert_eq!(
-            read_linked_prs_cache(temp.path(), number).unwrap(),
+            crate::cli::issue::read_linked_prs_cache(temp.path(), number).unwrap(),
             Some(linked_prs)
         );
 
@@ -1484,7 +1028,7 @@ fn main() -> ExitCode {
 
     #[test]
     fn daemon_hook_argv_and_internal_command_output_preserve_streams() {
-        let argv = daemon_hook_argv(
+        let argv = crate::cli::hook::daemon_hook_argv(
             "runtime-state",
             &["start".to_string(), "--json".to_string()],
         );
@@ -1502,7 +1046,7 @@ fn main() -> ExitCode {
 
         let temp = tempdir().expect("tempdir");
         let mut env = TestEnv::new(temp.path().to_path_buf());
-        let status = write_internal_command_output(
+        let status = crate::cli::hook::write_internal_command_output(
             &mut env,
             InternalCommandOutput {
                 status: 7,
@@ -1577,7 +1121,8 @@ fn main() -> ExitCode {
         )
         .expect("write stale settings");
 
-        refresh_managed_assets_for_hook_front_door(temp.path()).expect("refresh hook assets");
+        crate::cli::hook::refresh_managed_assets_for_hook_front_door(temp.path())
+            .expect("refresh hook assets");
 
         let content = fs::read_to_string(&settings_path).expect("read settings");
         let value: serde_json::Value = serde_json::from_str(&content).expect("settings json");
@@ -1715,11 +1260,13 @@ fn main() -> ExitCode {
         let snapshot = sample_issue_snapshot();
         env.client.seed(snapshot.clone());
 
-        let loaded = load_or_refresh_issue(&mut env, snapshot.number, false).expect("load issue");
+        let loaded = crate::cli::issue::load_or_refresh_issue(&mut env, snapshot.number, false)
+            .expect("load issue");
         assert_eq!(loaded.snapshot.number, snapshot.number);
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
 
-        let cached = load_or_refresh_issue(&mut env, snapshot.number, false).expect("cached issue");
+        let cached = crate::cli::issue::load_or_refresh_issue(&mut env, snapshot.number, false)
+            .expect("cached issue");
         assert_eq!(cached.snapshot.title, snapshot.title);
         assert_eq!(env.client.call_log(), vec!["fetch:#42".to_string()]);
 
@@ -1733,27 +1280,30 @@ fn main() -> ExitCode {
             }],
         );
         let linked =
-            load_or_refresh_linked_prs(&mut env, snapshot.number, false).expect("linked prs");
+            crate::cli::issue::load_or_refresh_linked_prs(&mut env, snapshot.number, false)
+                .expect("linked prs");
         assert_eq!(linked.len(), 1);
         assert_eq!(env.linked_pr_calls(), vec![42]);
 
         env.clear_linked_pr_calls();
-        let cached_linked = load_or_refresh_linked_prs(&mut env, snapshot.number, false)
-            .expect("cached linked prs");
+        let cached_linked =
+            crate::cli::issue::load_or_refresh_linked_prs(&mut env, snapshot.number, false)
+                .expect("cached linked prs");
         assert_eq!(cached_linked.len(), 1);
         assert!(env.linked_pr_calls().is_empty());
 
-        let cache_path = linked_prs_cache_path(temp.path(), snapshot.number);
+        let cache_path = crate::cli::issue::linked_prs_cache_path(temp.path(), snapshot.number);
         std::fs::create_dir_all(cache_path.parent().expect("cache dir")).expect("create cache dir");
         std::fs::write(&cache_path, "{not-json").expect("write invalid json");
-        assert!(read_linked_prs_cache(temp.path(), snapshot.number).is_err());
+        assert!(crate::cli::issue::read_linked_prs_cache(temp.path(), snapshot.number).is_err());
     }
 
     #[test]
     fn gh_wrappers_parse_successful_responses() {
         with_fake_gh("success", |repo_path| {
             let linked =
-                fetch_linked_prs_via_gh("akiojin", "gwt", IssueNumber(42)).expect("linked");
+                crate::cli::issue::fetch_linked_prs_via_gh("akiojin", "gwt", IssueNumber(42))
+                    .expect("linked");
             assert_eq!(linked.len(), 2);
             assert_eq!(linked[0].number, 12);
             assert_eq!(linked[1].state, "MERGED");
@@ -1814,11 +1364,13 @@ fn main() -> ExitCode {
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].conclusion, "SUCCESS");
 
-            let run_log = fetch_actions_run_log_via_gh(repo_path, 90).expect("run log");
+            let run_log =
+                crate::cli::actions::fetch_actions_run_log_via_gh(repo_path, 90).expect("run log");
             assert_eq!(run_log.trim(), "run log 90");
 
             let job_log =
-                fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91).expect("job log");
+                crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
+                    .expect("job log");
             assert_eq!(job_log, "job log 91");
         });
     }
@@ -1853,7 +1405,8 @@ fn main() -> ExitCode {
 
         with_fake_gh("job-log-zip", |repo_path| {
             let err =
-                fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91).expect_err("zip");
+                crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
+                    .expect_err("zip");
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert!(err.to_string().contains("zip archive"));
         });

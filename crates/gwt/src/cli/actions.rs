@@ -1,3 +1,5 @@
+use std::io;
+
 use gwt_github::SpecOpsError;
 
 use crate::cli::{ActionsCommand, CliEnv, CliParseError};
@@ -50,6 +52,49 @@ pub(super) fn run<E: CliEnv>(
         }
     };
     Ok(code)
+}
+
+pub(super) fn fetch_actions_run_log_via_gh(
+    repo_path: &std::path::Path,
+    run_id: u64,
+) -> io::Result<String> {
+    let output = gwt_core::process::hidden_command("gh")
+        .args(["run", "view", &run_id.to_string(), "--log"])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "gh run view --log: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub(super) fn fetch_actions_job_log_via_gh(
+    owner: &str,
+    repo: &str,
+    repo_path: &std::path::Path,
+    job_id: u64,
+) -> io::Result<String> {
+    let endpoint = format!("/repos/{owner}/{repo}/actions/jobs/{job_id}/logs");
+    let output = gwt_core::process::hidden_command("gh")
+        .args(["api", &endpoint])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "gh api {endpoint}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if output.stdout.starts_with(b"PK") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "job logs returned a zip archive; unable to parse",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[cfg(test)]
