@@ -94,9 +94,10 @@ prints the live endpoint for diagnostics.
 
 Windows currently has no long-running daemon: `gwtd daemon start`
 exits with "not yet implemented", and managed hooks fall back to
-synchronous `gwt hook ...` dispatch. Multi-instance fan-out and
-`gwtd daemon status` are unavailable on Windows pending follow-up
-work.
+synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
+therefore unavailable on Windows pending follow-up work; `gwtd
+daemon status` still works there but always reports `stopped` until
+the named-pipe path lands.
 
 ## Main Workflow
 
