@@ -812,9 +812,9 @@ fn parse_tag_version(tag: &str) -> Option<Version> {
 fn asset_name_from_url(url: &str) -> Option<String> {
     url.split('/')
         .next_back()
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
@@ -2132,7 +2132,7 @@ mod tests {
     fn choose_apply_plan_prefers_installer_for_windows_per_user_msi_install() {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let local_app_data = temp.path().join("AppData").join("Local");
         let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
@@ -2170,7 +2170,7 @@ mod tests {
     ) {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let local_app_data = temp.path().join("AppData").join("Local");
         let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
@@ -2252,7 +2252,7 @@ mod tests {
     fn resolve_windows_restart_executable_prefers_per_user_install_after_migration() {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let local_app_data = temp.path().join("AppData").join("Local");
         let migrated_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");

@@ -249,10 +249,13 @@ fn parse_issue_labels(issue: &Value) -> Vec<String> {
 }
 
 fn parse_comment_id(comment: &Value) -> Option<u64> {
-    if let Some(id) = comment.get("databaseId").and_then(|value| value.as_u64()) {
+    if let Some(id) = comment
+        .get("databaseId")
+        .and_then(serde_json::Value::as_u64)
+    {
         return Some(id);
     }
-    if let Some(id) = comment.get("id").and_then(|value| value.as_u64()) {
+    if let Some(id) = comment.get("id").and_then(serde_json::Value::as_u64) {
         return Some(id);
     }
     let url = comment.get("url").and_then(|value| value.as_str())?;
@@ -264,7 +267,7 @@ fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot
     let issue: Value = serde_json::from_str(json).map_err(|err| err.to_string())?;
     let actual_number = issue
         .get("number")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| format!("issue #{number} missing number field", number = number.0))?;
     let title = issue
         .get("title")

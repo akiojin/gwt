@@ -125,7 +125,7 @@ impl Settings {
     {
         let _guard = UPDATE_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut settings = Self::load()?;
         mutate(&mut settings)?;

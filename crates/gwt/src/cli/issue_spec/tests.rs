@@ -127,7 +127,7 @@ Old statement.
 Keep this note.
 "#;
     let patch = StructuredSpecInput {
-        background: Some(TextBlock::Text("".to_string())),
+        background: Some(TextBlock::Text(String::new())),
         user_stories: sample_structured_input().user_stories,
         edge_cases: Some(vec!["New edge".to_string()]),
         functional_requirements: None,
@@ -206,7 +206,7 @@ Preserve me.
         None
     );
     assert_eq!(
-        render_bullet_section("Edge Cases", &["".to_string(), "- case".to_string()]),
+        render_bullet_section("Edge Cases", &[String::new(), "- case".to_string()]),
         Some("## Edge Cases\n\n- case".to_string())
     );
     assert_eq!(

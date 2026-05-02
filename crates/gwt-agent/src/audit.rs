@@ -59,7 +59,7 @@ pub fn redact_env_value_for_audit<'a>(key: &str, value: &'a str) -> std::borrow:
 /// Callers should clone the `CustomCodingAgent` first when the original must
 /// retain secrets for launch.
 pub fn redact_secrets_in_agent(agent: &mut crate::custom::CustomCodingAgent) {
-    for (key, value) in agent.env.iter_mut() {
+    for (key, value) in &mut agent.env {
         if is_secret_env_key(key) {
             *value = REDACTED_PLACEHOLDER.to_string();
         }

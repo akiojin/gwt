@@ -393,7 +393,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
             continue;
         }
-        let Some(pr_number) = pr.get("number").and_then(|v| v.as_u64()) else {
+        let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
         if !seen.insert(pr_number) {

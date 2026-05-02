@@ -362,7 +362,7 @@ pub fn sessions_dir_from_runtime_path(runtime_path: &Path) -> Option<PathBuf> {
         .parent()?
         .parent()?
         .parent()
-        .map(|path| path.to_path_buf())
+        .map(std::path::Path::to_path_buf)
 }
 
 /// Reset the runtime namespace for the current gwt process.

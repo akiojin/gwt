@@ -98,21 +98,21 @@ mod tests {
     #[test]
     fn validate_empty_id() {
         let mut a = sample_agent();
-        a.id = "".to_string();
+        a.id = String::new();
         assert!(!a.validate());
     }
 
     #[test]
     fn validate_empty_display_name() {
         let mut a = sample_agent();
-        a.display_name = "".to_string();
+        a.display_name = String::new();
         assert!(!a.validate());
     }
 
     #[test]
     fn validate_empty_command() {
         let mut a = sample_agent();
-        a.command = "".to_string();
+        a.command = String::new();
         assert!(!a.validate());
     }
 

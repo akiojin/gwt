@@ -68,7 +68,7 @@ fn extract_file_paths(segment: &str) -> Vec<String> {
         .split_whitespace()
         .skip(1)
         .filter(|t| !t.starts_with('-'))
-        .map(|t| t.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

@@ -111,7 +111,7 @@ impl AgentInfo {
         Self {
             display_name: id.display_name().to_string(),
             command: id.command().to_string(),
-            package_name: id.package_name().map(|s| s.to_string()),
+            package_name: id.package_name().map(std::string::ToString::to_string),
             color: id.default_color(),
             id,
         }

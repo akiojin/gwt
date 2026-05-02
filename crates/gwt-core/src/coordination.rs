@@ -819,7 +819,9 @@ mod tests {
 
     #[test]
     fn git_repo_without_origin_uses_project_scoped_coordination_dir() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -869,7 +871,7 @@ mod tests {
 
         let mut names: Vec<String> = std::fs::read_dir(coordination_dir(dir.path()))
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();

@@ -18,7 +18,7 @@ fn s(v: &str) -> String {
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
+    parts.iter().map(std::string::ToString::to_string).collect()
 }
 
 // -----------------------------------------------------------------

@@ -286,7 +286,7 @@ mod tests {
         ) -> std::io::Result<()> {
             self.calls
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(format!(
                     "{}|{}|{}",
                     repo_hash,
@@ -313,7 +313,7 @@ mod tests {
             spawner
                 .calls
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .len(),
             1
         );

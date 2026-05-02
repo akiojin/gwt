@@ -53,7 +53,7 @@ pub fn decide_routing(sections: &BTreeMap<SectionName, String>) -> Routing {
         let body_total: usize = map
             .iter()
             .filter_map(|(n, loc)| match loc {
-                SectionLocation::Body => sections.get(n).map(|c| c.len()),
+                SectionLocation::Body => sections.get(n).map(std::string::String::len),
                 _ => None,
             })
             .sum();
@@ -65,7 +65,7 @@ pub fn decide_routing(sections: &BTreeMap<SectionName, String>) -> Routing {
             .iter()
             .filter_map(|(n, loc)| match loc {
                 SectionLocation::Body => {
-                    let size = sections.get(n).map(|c| c.len()).unwrap_or(0);
+                    let size = sections.get(n).map(std::string::String::len).unwrap_or(0);
                     Some((n.clone(), size))
                 }
                 _ => None,

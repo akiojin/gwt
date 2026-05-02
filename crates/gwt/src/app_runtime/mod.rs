@@ -4690,7 +4690,7 @@ exit 0
         // tempdir).
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -4758,7 +4758,7 @@ exit 0
     fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -4811,7 +4811,7 @@ exit 0
     fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_views() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -4996,7 +4996,7 @@ exit 0
     fn app_runtime_knowledge_search_replies_through_async_dispatch() {
         let _lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5079,10 +5079,10 @@ exit 0
     fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _gh_lock = fake_gh_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5168,10 +5168,10 @@ exit 0
     fn app_runtime_manual_knowledge_refresh_error_preserves_request_context() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _gh_lock = fake_gh_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5241,10 +5241,10 @@ exit 0
     fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _gh_lock = fake_gh_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5412,7 +5412,7 @@ exit 0
     fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5610,7 +5610,7 @@ exit 0
     fn app_runtime_create_memo_note_broadcasts_repo_scoped_snapshot_to_memo_windows() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5644,8 +5644,8 @@ exit 0
             "client-1".to_string(),
             FrontendEvent::CreateMemoNote {
                 id: current_window_id.clone(),
-                title: "".to_string(),
-                body: "".to_string(),
+                title: String::new(),
+                body: String::new(),
                 pinned: false,
             },
         );
@@ -5684,7 +5684,7 @@ exit 0
     fn app_runtime_update_memo_note_persists_repo_scoped_edits() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5743,7 +5743,7 @@ exit 0
     fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());

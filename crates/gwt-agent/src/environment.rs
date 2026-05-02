@@ -468,7 +468,7 @@ mod tests {
         let base_env = vec![
             ("PATH".to_string(), "/usr/bin".to_string()),
             ("TERM".to_string(), "dumb".to_string()),
-            ("COLORTERM".to_string(), "".to_string()),
+            ("COLORTERM".to_string(), String::new()),
         ];
 
         let (env, _) = LaunchEnvironment::from_base_env(base_env).into_parts();

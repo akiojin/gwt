@@ -24,7 +24,7 @@ impl RunnerSpawner for RecordingSpawner {
     ) -> std::io::Result<()> {
         self.calls
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(format!(
                 "{}|{}|{}",
                 repo_hash,
@@ -108,7 +108,10 @@ fn bootstrap_helper_reconciles_index_layout_and_kicks_issue_refresh() {
         "bootstrap should remove orphan worktree index"
     );
 
-    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = spawner
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         calls.len(),
         1,

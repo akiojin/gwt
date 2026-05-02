@@ -191,7 +191,9 @@ mod tests {
 
     #[test]
     fn initial_filter_directive_prefers_rust_log_env() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original = std::env::var("RUST_LOG").ok();
         std::env::set_var("RUST_LOG", "gwt=trace");
         let cfg = LoggingConfig::new("/tmp".into()).with_config_file_level(Some(LogLevel::Warn));
@@ -204,7 +206,9 @@ mod tests {
 
     #[test]
     fn initial_filter_directive_falls_back_to_config_file_level() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original = std::env::var("RUST_LOG").ok();
         std::env::remove_var("RUST_LOG");
         let cfg = LoggingConfig::new("/tmp".into()).with_config_file_level(Some(LogLevel::Debug));
@@ -216,7 +220,9 @@ mod tests {
 
     #[test]
     fn initial_filter_directive_uses_default_when_neither_set() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original = std::env::var("RUST_LOG").ok();
         std::env::remove_var("RUST_LOG");
         let cfg = LoggingConfig::new("/tmp".into());

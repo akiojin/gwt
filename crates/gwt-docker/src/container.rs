@@ -140,7 +140,7 @@ fn spawn_output_reader(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let reader = BufReader::new(reader);
-        for line in reader.lines().map_while(|line| line.ok()) {
+        for line in reader.lines().map_while(std::result::Result::ok) {
             if tx.send(CommandOutputLine { stream, line }).is_err() {
                 break;
             }
@@ -892,7 +892,7 @@ mod tests {
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce(&PathBuf) -> R) -> R {
         let _guard = TEST_LOCK
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_dir, script_path) = write_fake_docker(script_body);
         let prev = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);

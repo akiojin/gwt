@@ -145,7 +145,7 @@ impl Cache {
         match SpecBody::parse(&snapshot.body, &parsed_comments) {
             Ok(spec_body) => {
                 let mut desired_sections: HashSet<String> = HashSet::new();
-                for (name, content) in spec_body.sections.iter() {
+                for (name, content) in &spec_body.sections {
                     let filename = section_filename(name);
                     let path = sections_dir.join(&filename);
                     write_atomic(&path, content.as_bytes())?;
