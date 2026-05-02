@@ -82,12 +82,18 @@ pub fn publish_event_with_timeout(
         let mut client = tokio::time::timeout(timeout, DaemonClient::connect(&endpoint))
             .await
             .map_err(|_| format!("connect timeout after {}ms", timeout.as_millis()))??;
-        client
-            .send_frame(&ClientFrame::Publish {
-                channel: channel.to_string(),
-                payload,
-            })
+        // Bound the send half too: a daemon that has accepted the
+        // connection but stopped reading (or a payload large enough
+        // to fill the socket buffer) can otherwise block the writer
+        // forever, freezing the synchronous caller despite the
+        // documented per-stage `timeout`.
+        let publish_frame = ClientFrame::Publish {
+            channel: channel.to_string(),
+            payload,
+        };
+        tokio::time::timeout(timeout, client.send_frame(&publish_frame))
             .await
+            .map_err(|_| format!("publish send timeout after {}ms", timeout.as_millis()))?
             .map_err(|err| format!("publish send failed: {err}"))?;
         let ack: DaemonFrame = tokio::time::timeout(timeout, client.read_frame())
             .await

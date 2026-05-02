@@ -201,12 +201,35 @@ async fn run_session(
         .send_frame(&ClientFrame::Subscribe { channels })
         .await
         .map_err(|err| format!("subscribe send failed: {err}"))?;
-    // The first frame after Subscribe is the daemon's Ack; drain it so
-    // the subsequent loop only sees Event frames.
-    let _ack: DaemonFrame = client
-        .read_frame()
-        .await
-        .map_err(|err| format!("subscribe ack failed: {err}"))?;
+    // Drain the daemon's Subscribe ack. There is a race where another
+    // client publishes to the same channel between our Subscribe
+    // frame and the daemon's Ack: the per-channel forwarder is
+    // already running (spawned before the Ack send), so the first
+    // post-subscribe frame can be an `Event` rather than the `Ack`.
+    // To avoid silently dropping the earliest event, route any
+    // `Event` we observe pre-Ack through the callback and keep
+    // reading until we see the actual `Ack` frame.
+    loop {
+        let frame: DaemonFrame = client
+            .read_frame()
+            .await
+            .map_err(|err| format!("subscribe ack failed: {err}"))?;
+        match frame {
+            DaemonFrame::Ack => break,
+            DaemonFrame::Event { channel, payload } => {
+                on_event(channel, payload);
+            }
+            DaemonFrame::Error { message } => {
+                return Err(format!("subscribe rejected: {message}"));
+            }
+            DaemonFrame::Status(_) => {
+                // The daemon does not currently emit Status before
+                // an Ack, but if it ever does we want to ignore it
+                // and keep waiting for the canonical Ack.
+                continue;
+            }
+        }
+    }
 
     loop {
         // Re-check the flag at the top of each iteration so a
