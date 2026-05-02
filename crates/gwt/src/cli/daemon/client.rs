@@ -440,6 +440,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_fans_out_to_multiple_subscribers_on_same_channel() {
+        // Locks in the multi-subscriber fan-out invariant: a single
+        // `ClientFrame::Publish` reaches every connection that has
+        // subscribed to the same channel. Phase H2-H4 will rely on
+        // this — runtime status / hook events / launch lifecycle all
+        // assume "broadcast to N gwt instances" is the default.
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+        let endpoint = sample_endpoint(scope.clone(), &socket_path, "fan-out-secret");
+
+        let server_endpoint = endpoint.clone();
+        let server_socket = socket_path.clone();
+        let server_endpoint_path = endpoint_path.clone();
+        let server_hub = BroadcastHub::new();
+        let server_handle = tokio::spawn(async move {
+            server::run_server(
+                server_endpoint,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
+        });
+
+        wait_for_socket(&socket_path).await;
+
+        // Three independent subscribers on the same "board" channel.
+        let mut subscribers = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let mut client = DaemonClient::connect(&endpoint)
+                .await
+                .expect("subscriber connects");
+            client
+                .send_frame(&ClientFrame::Subscribe {
+                    channels: vec!["board".to_string()],
+                })
+                .await
+                .expect("subscribe send");
+            let ack: DaemonFrame = client.read_frame().await.expect("subscribe ack");
+            assert_eq!(ack, DaemonFrame::Ack);
+            subscribers.push(client);
+        }
+
+        // Single publisher, single Publish frame.
+        let mut publisher = DaemonClient::connect(&endpoint)
+            .await
+            .expect("publisher connects");
+        let payload = serde_json::json!({"entries": 11});
+        publisher
+            .send_frame(&ClientFrame::Publish {
+                channel: "board".to_string(),
+                payload: payload.clone(),
+            })
+            .await
+            .expect("publish send");
+        let pub_ack: DaemonFrame = publisher.read_frame().await.expect("publish ack");
+        assert_eq!(pub_ack, DaemonFrame::Ack);
+
+        // Every subscriber must observe the same Event payload.
+        let expected = DaemonFrame::Event {
+            channel: "board".to_string(),
+            payload,
+        };
+        for (idx, mut client) in subscribers.into_iter().enumerate() {
+            let event: DaemonFrame = tokio::time::timeout(
+                Duration::from_millis(500),
+                client.read_frame::<DaemonFrame>(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("subscriber {idx} timeout"))
+            .unwrap_or_else(|err| panic!("subscriber {idx} read: {err}"));
+            assert_eq!(
+                event, expected,
+                "subscriber {idx} got unexpected frame: {event:?}"
+            );
+            drop(client);
+        }
+
+        drop(publisher);
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
     async fn subscribed_client_receives_published_broadcast_events() {
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);
