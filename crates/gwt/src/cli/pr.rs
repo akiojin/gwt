@@ -991,4 +991,187 @@ mod tests {
         assert_eq!(env.pr_current_call_count, 1);
         assert!(env.client.call_log().is_empty());
     }
+
+    // -------------------------------------------------------------------
+    // SPEC-1942 SC-025 follow-up: PR-family helper tests relocated from
+    // cli.rs. Shared fake-gh harness lives in cli/test_support.rs.
+    // -------------------------------------------------------------------
+
+    use crate::cli::test_support::{sample_thread, with_fake_gh};
+    use crate::cli::PrCreateCall;
+    use std::io;
+
+    #[test]
+    fn review_thread_reply_is_skipped_for_duplicate_body() {
+        let mut thread = sample_thread();
+        thread.comments.push(crate::cli::PrReviewThreadComment {
+            id: "comment-1".to_string(),
+            body: "Fixed in latest commit.".to_string(),
+            created_at: "2026-04-10T00:00:00Z".to_string(),
+            updated_at: "2026-04-10T00:00:00Z".to_string(),
+            author: "reviewer".to_string(),
+        });
+
+        assert!(!should_reply_to_review_thread(
+            &thread,
+            "Fixed in latest commit."
+        ));
+        assert!(should_resolve_review_thread(&thread));
+    }
+
+    #[test]
+    fn review_thread_reply_is_skipped_for_resolved_or_outdated_threads() {
+        let mut resolved = sample_thread();
+        resolved.is_resolved = true;
+        assert!(!should_reply_to_review_thread(&resolved, "reply"));
+        assert!(!should_resolve_review_thread(&resolved));
+
+        let mut outdated = sample_thread();
+        outdated.is_outdated = true;
+        assert!(!should_reply_to_review_thread(&outdated, "reply"));
+        assert!(!should_resolve_review_thread(&outdated));
+    }
+
+    #[test]
+    fn pr_checks_response_returns_error_when_gh_fails() {
+        let err = parse_pr_checks_items_response("", "auth failed", false).unwrap_err();
+        assert!(
+            err.to_string().contains("gh pr checks: auth failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn pr_checks_response_parses_success_payload() {
+        let items = parse_pr_checks_items_response(
+            r#"[{"name":"test","state":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://example.com","startedAt":"2026-04-10T00:00:00Z","completedAt":"2026-04-10T00:01:00Z","workflow":"CI"}]"#,
+            "",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "test");
+        assert_eq!(items[0].conclusion, "SUCCESS");
+    }
+
+    #[test]
+    fn gh_wrappers_parse_successful_responses() {
+        with_fake_gh("success", |repo_path| {
+            let linked = crate::cli::issue::fetch_linked_prs_via_gh(
+                "akiojin",
+                "gwt",
+                gwt_github::IssueNumber(42),
+            )
+            .expect("linked");
+            assert_eq!(linked.len(), 2);
+            assert_eq!(linked[0].number, 12);
+            assert_eq!(linked[1].state, "MERGED");
+
+            let current = fetch_current_pr_via_gh(repo_path)
+                .expect("current pr")
+                .expect("current pr exists");
+            assert_eq!(current.number, 12);
+            assert_eq!(current.merge_state_status, "CLEAN");
+
+            let created = create_pr_via_gh(
+                "akiojin/gwt",
+                repo_path,
+                &PrCreateCall {
+                    base: "develop".to_string(),
+                    head: Some("feature/coverage".to_string()),
+                    title: "Raise coverage".to_string(),
+                    body: "Body".to_string(),
+                    labels: vec!["coverage".to_string()],
+                    draft: true,
+                },
+            )
+            .expect("create pr");
+            assert_eq!(created.number, 12);
+
+            let edited = edit_pr_via_gh(
+                "akiojin/gwt",
+                repo_path,
+                12,
+                Some("Edited"),
+                Some("Updated body"),
+                &["tested".to_string()],
+            )
+            .expect("edit pr");
+            assert_eq!(edited.number, 12);
+
+            comment_on_pr_via_gh(repo_path, 12, "done").expect("comment");
+
+            let reviews = fetch_pr_reviews_via_gh("akiojin", "gwt", 12).expect("reviews");
+            assert_eq!(reviews.len(), 1);
+            assert_eq!(reviews[0].author, "reviewer");
+
+            let threads =
+                fetch_pr_review_threads_via_gh("akiojin", "gwt", 12).expect("review threads");
+            assert_eq!(threads.len(), 2);
+            assert_eq!(threads[0].line, Some(10));
+
+            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
+                .expect("reply and resolve");
+            assert_eq!(resolved, 2);
+
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert!(checks.summary.contains("PR #12"));
+            assert_eq!(checks.checks.len(), 1);
+            assert_eq!(checks.checks[0].conclusion, "SUCCESS");
+
+            let run_log =
+                crate::cli::actions::fetch_actions_run_log_via_gh(repo_path, 90).expect("run log");
+            assert_eq!(run_log.trim(), "run log 90");
+
+            let job_log =
+                crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
+                    .expect("job log");
+            assert_eq!(job_log, "job log 91");
+        });
+    }
+
+    #[test]
+    fn gh_wrappers_cover_none_fallback_and_zip_error_paths() {
+        with_fake_gh("no-current-pr", |repo_path| {
+            assert!(fetch_current_pr_via_gh(repo_path)
+                .expect("current pr result")
+                .is_none());
+        });
+
+        with_fake_gh("checks-fallback", |repo_path| {
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert_eq!(checks.checks.len(), 1);
+            assert_eq!(checks.checks[0].workflow, "coverage");
+            assert_eq!(checks.checks[0].url, "https://example.test/checks/12");
+        });
+
+        with_fake_gh("behind", |repo_path| {
+            let current = fetch_current_pr_via_gh(repo_path)
+                .expect("current pr")
+                .expect("current pr exists");
+            assert_eq!(current.effective_merge_status(), "BEHIND");
+
+            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            assert!(checks.summary.contains("Merge: BEHIND"));
+            assert_eq!(checks.merge_status, "BEHIND");
+        });
+
+        with_fake_gh("job-log-zip", |repo_path| {
+            let err =
+                crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
+                    .expect_err("zip");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("zip archive"));
+        });
+    }
+
+    #[test]
+    fn gh_wrappers_tolerate_resolve_failure_after_remote_state_changes() {
+        with_fake_gh("resolve-fails-but-resolved", |_repo_path| {
+            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
+                .expect("resolved after retry");
+            assert_eq!(resolved, 2);
+        });
+    }
 }

@@ -349,3 +349,136 @@ pub fn run_daemon_hook<E: CliEnv>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // -------------------------------------------------------------------
+    // SPEC-1942 SC-025 follow-up: hook-family helper tests relocated
+    // from cli.rs. Shared test infrastructure (ScopedEnvVar,
+    // commands_for_event) lives in cli/test_support.rs.
+    // -------------------------------------------------------------------
+
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use crate::cli::env::{InternalCommandOutput, TestEnv};
+    use crate::cli::test_support::{commands_for_event, ScopedEnvVar};
+
+    use super::*;
+
+    #[test]
+    fn daemon_hook_argv_and_internal_command_output_preserve_streams() {
+        let argv = daemon_hook_argv(
+            "runtime-state",
+            &["start".to_string(), "--json".to_string()],
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "gwtd".to_string(),
+                "__internal".to_string(),
+                "daemon-hook".to_string(),
+                "runtime-state".to_string(),
+                "start".to_string(),
+                "--json".to_string(),
+            ]
+        );
+
+        let temp = tempdir().expect("tempdir");
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        let status = write_internal_command_output(
+            &mut env,
+            InternalCommandOutput {
+                status: 7,
+                stdout: b"stdout-bytes".to_vec(),
+                stderr: b"stderr-bytes".to_vec(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(status, 7);
+        assert_eq!(env.stdout, b"stdout-bytes");
+        assert_eq!(env.stderr, b"stderr-bytes");
+    }
+
+    #[test]
+    fn hook_front_door_refresh_migrates_stale_multi_hook_settings() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let status = gwt_core::process::hidden_command("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(temp.path())
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+
+        let hook_bin = temp.path().join("bin/gwtd");
+        fs::create_dir_all(hook_bin.parent().unwrap()).expect("create bin dir");
+        fs::write(&hook_bin, "#!/bin/sh\n").expect("write hook bin");
+        let _hook_bin = ScopedEnvVar::set("GWT_HOOK_BIN", &hook_bin);
+
+        let settings_path = temp.path().join(".claude/settings.local.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).expect("create .claude");
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/bunx-old/gwtd' hook runtime-state PreToolUse",
+                                    "type": "command"
+                                }
+                            ]
+                        },
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/bunx-old/gwtd' hook forward",
+                                    "type": "command"
+                                }
+                            ]
+                        },
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "command": "'/tmp/bunx-old/gwtd' hook workflow-policy",
+                                    "type": "command"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write stale settings");
+
+        refresh_managed_assets_for_hook_front_door(temp.path()).expect("refresh hook assets");
+
+        let content = fs::read_to_string(&settings_path).expect("read settings");
+        let value: serde_json::Value = serde_json::from_str(&content).expect("settings json");
+        let commands = commands_for_event(&value, "PreToolUse");
+        assert_eq!(
+            commands.len(),
+            1,
+            "stale split hook entries must collapse to one dispatcher: {commands:?}"
+        );
+        assert!(
+            commands[0].contains(" hook event PreToolUse"),
+            "dispatcher command expected, got: {commands:?}"
+        );
+        assert!(
+            !content.contains("/tmp/bunx-old"),
+            "stale temporary hook binary path must be removed, got: {content}"
+        );
+    }
+}
