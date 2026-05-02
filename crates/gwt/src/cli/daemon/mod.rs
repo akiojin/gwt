@@ -22,12 +22,12 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
 
-#[cfg(unix)]
-use gwt_core::daemon::DaemonEndpoint;
 use gwt_core::daemon::{
-    resolve_bootstrap_action, DaemonBootstrapAction, RuntimeScope, RuntimeTarget,
+    resolve_bootstrap_action, DaemonBootstrapAction, DaemonStatus, RuntimeScope, RuntimeTarget,
     DAEMON_PROTOCOL_VERSION,
 };
+#[cfg(unix)]
+use gwt_core::daemon::{ClientFrame, DaemonEndpoint, DaemonFrame};
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::cli::{CliEnv, CliParseError, DaemonCommand};
@@ -118,36 +118,66 @@ fn report_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOp
 }
 
 #[cfg(unix)]
-fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<(), String> {
+fn probe_daemon_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonStatus, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| format!("tokio runtime build failed: {err}"))?;
     runtime.block_on(async {
-        match tokio::time::timeout(
+        let connect = tokio::time::timeout(
             STATUS_PROBE_TIMEOUT,
             client::DaemonClient::connect(endpoint),
         )
         .await
-        {
-            Ok(Ok(_client)) => Ok(()),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(format!(
+        .map_err(|_| {
+            format!(
                 "probe timeout after {ms}ms",
                 ms = STATUS_PROBE_TIMEOUT.as_millis()
-            )),
+            )
+        })??;
+        let mut client = connect;
+        client
+            .send_frame(&ClientFrame::Status)
+            .await
+            .map_err(|err| format!("status send failed: {err}"))?;
+        let frame: DaemonFrame = tokio::time::timeout(STATUS_PROBE_TIMEOUT, client.read_frame())
+            .await
+            .map_err(|_| {
+                format!(
+                    "status read timeout after {ms}ms",
+                    ms = STATUS_PROBE_TIMEOUT.as_millis()
+                )
+            })??;
+        match frame {
+            DaemonFrame::Status(status) => Ok(status),
+            other => Err(format!("expected Status frame, got: {other:?}")),
         }
     })
 }
 
 #[cfg(not(unix))]
-fn probe_daemon_endpoint(_endpoint: &gwt_core::daemon::DaemonEndpoint) -> Result<(), String> {
+fn probe_daemon_endpoint(
+    _endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<DaemonStatus, String> {
     Err("probe not implemented on this platform".to_string())
 }
 
-fn format_probe_result(result: &Result<(), String>) -> String {
+#[cfg(unix)]
+fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
     match result {
-        Ok(()) => "ok".to_string(),
+        Ok(status) => format!(
+            "ok uptime={uptime}s channels={channels}",
+            uptime = status.uptime_seconds,
+            channels = status.broadcast_channels
+        ),
+        Err(err) => format!("failed:{err}"),
+    }
+}
+
+#[cfg(not(unix))]
+fn format_probe_result(result: &Result<DaemonStatus, String>) -> String {
+    match result {
+        Ok(_) => "ok".to_string(),
         Err(err) => format!("failed:{err}"),
     }
 }
@@ -251,13 +281,8 @@ mod tests {
     }
 
     #[test]
-    fn format_probe_result_ok_renders_ok() {
-        assert_eq!(format_probe_result(&Ok(())), "ok");
-    }
-
-    #[test]
     fn format_probe_result_err_includes_message() {
-        let result: Result<(), String> = Err("connection refused".to_string());
+        let result: Result<DaemonStatus, String> = Err("connection refused".to_string());
         assert_eq!(format_probe_result(&result), "failed:connection refused");
     }
 
@@ -285,5 +310,20 @@ mod tests {
         );
         let result = probe_daemon_endpoint(&endpoint);
         assert!(result.is_err(), "expected probe to fail for missing socket");
+    }
+
+    #[test]
+    fn format_probe_result_ok_includes_uptime_and_channels() {
+        let status = DaemonStatus {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            daemon_version: "9.14.0".to_string(),
+            uptime_seconds: 12,
+            broadcast_channels: 2,
+        };
+        let formatted = format_probe_result(&Ok(status));
+        #[cfg(unix)]
+        assert_eq!(formatted, "ok uptime=12s channels=2");
+        #[cfg(not(unix))]
+        assert_eq!(formatted, "ok");
     }
 }
