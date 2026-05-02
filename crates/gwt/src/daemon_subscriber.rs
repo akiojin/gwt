@@ -283,7 +283,10 @@ fn sleep_with_stop(stop_flag: &AtomicBool, _shutdown: &Notify, total: Duration) 
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
         time::Duration,
     };
 
@@ -555,10 +558,24 @@ mod tests {
         // mutate it during the test to simulate
         // `paths::gwt_home()` -> `endpoint.json` being rewritten by a
         // restarted daemon.
+        //
+        // Wrap each call in a counter so the test can wait on the
+        // subscriber actually consuming the stale endpoint at least
+        // once before we flip the resolver state. A wall-clock sleep
+        // is unsafe here: on a slow CI runner the subscriber thread
+        // may not reach `resolver()` until *after* a fixed sleep
+        // window, in which case it would never observe the stale
+        // token and the regression path (handshake rejected → run_loop
+        // reconnects → second resolver call sees rotated token) would
+        // not run.
         let resolver_state = Arc::new(Mutex::new(stale_endpoint.clone()));
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
         let resolver_state_for_resolver = Arc::clone(&resolver_state);
+        let resolver_calls_for_resolver = Arc::clone(&resolver_calls);
         let resolver = move || -> Result<DaemonEndpoint, String> {
-            Ok(resolver_state_for_resolver.lock().unwrap().clone())
+            let snapshot = resolver_state_for_resolver.lock().unwrap().clone();
+            resolver_calls_for_resolver.fetch_add(1, Ordering::SeqCst);
+            Ok(snapshot)
         };
 
         let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
@@ -572,20 +589,41 @@ mod tests {
             },
         );
 
-        // Give the subscriber time to attempt at least one stale
-        // connect. The handshake will be rejected because the token
-        // doesn't match.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        // Sanity check: nothing has been received yet — the session
-        // never reached a Subscribe Ack because the handshake failed.
+        // Wait for the subscriber thread to call the resolver at least
+        // twice while the stale token is still installed. Two calls
+        // proves the regression path actually fired:
+        //
+        // 1. First call: subscriber reads stale endpoint, attempts
+        //    connect, handshake is rejected by the daemon.
+        // 2. run_session returns Err, run_loop sleeps with backoff,
+        //    then enters the next iteration which calls resolver
+        //    again — the second call confirms the reconnect path was
+        //    actually exercised, not just the initial spawn.
+        //
+        // Up to 5 s slack covers slow CI runners; the steady-state
+        // first-connect attempt typically lands within a few ms after
+        // `wait_for_socket` returns.
+        let mut stale_sessions_observed = false;
+        for _ in 0..500 {
+            if resolver_calls.load(Ordering::SeqCst) >= 2 {
+                stale_sessions_observed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            stale_sessions_observed,
+            "subscriber never attempted a stale-token session — regression path not exercised"
+        );
         assert!(
             received.lock().unwrap().is_empty(),
             "stale token must not deliver events"
         );
 
         // Simulate the daemon-restart endpoint refresh: rewrite the
-        // resolver's cache to the live token. The next reconnect
-        // attempt should now succeed.
+        // resolver's cache to the live token. The next resolver call
+        // (driven by run_loop's reconnect-on-error path) should now
+        // observe the rotated value and succeed.
         *resolver_state.lock().unwrap() = live_endpoint.clone();
 
         // Publish a marker event. The publish loop spins until the
