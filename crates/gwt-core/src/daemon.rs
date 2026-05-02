@@ -208,8 +208,10 @@ pub enum ClientFrame {
 ///
 /// Wire format is newline-delimited JSON. `Ack` is the canonical reply for
 /// a successfully processed [`ClientFrame`]; `Event` carries a daemon
-/// broadcast payload (used once Phase H1+ runtime ownership migrations
-/// land); `Error` represents a frame that the daemon rejected.
+/// broadcast payload (Phase H1 ships board projection events; H2-H4
+/// will add runtime status / hook events / launch lifecycle on the
+/// same variant); `Error` represents a frame that the daemon rejected;
+/// `Status` returns the snapshot requested via [`ClientFrame::Status`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonFrame {
