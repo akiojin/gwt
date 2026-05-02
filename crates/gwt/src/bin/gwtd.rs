@@ -291,14 +291,62 @@ fn run_repo_backed_cli(argv: &[String]) -> i32 {
 }
 
 fn resolve_repo_coordinates() -> Option<(String, String)> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    // Issue #2054: scan every remote (not just `origin`) and honour
+    // `GWT_GITHUB_REPO` / `GWT_REMOTE` overrides so multi-remote repos
+    // (local mirror + GitHub under a non-origin name) can still resolve.
+    if let Some(slug) = std::env::var("GWT_GITHUB_REPO")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        if let Some(parsed) = parse_owner_repo(slug.trim_end_matches(".git")) {
+            return Some(parsed);
+        }
     }
-    parse_github_remote_url(String::from_utf8_lossy(&output.stdout).trim())
+
+    let remotes = load_remote_pairs();
+
+    if let Some(name) = std::env::var("GWT_REMOTE").ok().filter(|v| !v.is_empty()) {
+        if let Some((_, url)) = remotes.iter().find(|(remote_name, _)| remote_name == &name) {
+            if let Some(parsed) = parse_github_remote_url(url) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    if let Some((_, url)) = remotes.iter().find(|(name, _)| name == "origin") {
+        if let Some(parsed) = parse_github_remote_url(url) {
+            return Some(parsed);
+        }
+    }
+
+    remotes
+        .iter()
+        .find_map(|(_, url)| parse_github_remote_url(url))
+}
+
+fn load_remote_pairs() -> Vec<(String, String)> {
+    let Ok(output) = gwt_core::process::hidden_command("git")
+        .args(["remote", "-v"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else { continue };
+        let Some(url) = parts.next() else { continue };
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        out.push((name.to_string(), url.to_string()));
+    }
+    out
 }
 
 fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
