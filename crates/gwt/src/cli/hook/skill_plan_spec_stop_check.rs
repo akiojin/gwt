@@ -84,13 +84,9 @@ pub(crate) fn decide(
     let short_name = short_verb_for(skill_name);
 
     HookOutput::stop_block(format!(
-        "{skill} for {spec} is still active{phase}.\n\
-         Continue the {skill} workflow, or call `gwtd {verb} complete --spec <n>` when the artifacts are ready, \
-         or `gwtd {verb} abort --spec <n> --reason '<text>'` to abandon.",
-        skill = skill_display,
-        spec = spec_clause,
-        phase = phase_clause,
-        verb = short_name,
+        "{skill_display} for {spec_clause} is still active{phase_clause}.\n\
+         Continue the {skill_display} workflow, or call `gwtd {short_name} complete --spec <n>` when the artifacts are ready, \
+         or `gwtd {short_name} abort --spec <n> --reason '<text>'` to abandon.",
     ))
 }
 

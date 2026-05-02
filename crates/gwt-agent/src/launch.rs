@@ -141,9 +141,9 @@ pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
     };
 
     let version_spec = if version == "latest" {
-        format!("{}@latest", package)
+        format!("{package}@latest")
     } else {
-        format!("{}@{}", package, version)
+        format!("{package}@{version}")
     };
 
     let (executable, needs_yes) = find_bunx_or_npx();
@@ -640,13 +640,13 @@ impl AgentLaunchBuilder {
         }
 
         if let Some(ref model) = self.model {
-            args.push(format!("--model={}", model));
+            args.push(format!("--model={model}"));
         }
 
         // Reasoning level (Codex-specific)
         if let Some(ref level) = self.reasoning_level {
             args.push("-c".to_string());
-            args.push(format!("model_reasoning_effort={}", level));
+            args.push(format!("model_reasoning_effort={level}"));
             args.push("-c".to_string());
             args.push("model_reasoning_summaries=detailed".to_string());
         }

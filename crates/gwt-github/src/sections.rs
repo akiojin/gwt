@@ -174,8 +174,7 @@ pub fn extract_sections(text: &str) -> Result<Vec<ExtractedSection>, SectionPars
                     Kind::End if next.name == begin_name => {
                         if next.part != begin_part {
                             return Err(SectionParseError::MalformedMarker(format!(
-                                "BEGIN/END part mismatch for '{}'",
-                                begin_name
+                                "BEGIN/END part mismatch for '{begin_name}'"
                             )));
                         }
                         next

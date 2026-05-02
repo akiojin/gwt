@@ -397,10 +397,7 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
         .and_then(|v| v.as_str())
         .unwrap_or("(untitled)");
 
-    let summary = format!(
-        "PR: {} | CI: {:?} | Merge: {:?} | Review: {:?}",
-        title, ci, merge, review
-    );
+    let summary = format!("PR: {title} | CI: {ci:?} | Merge: {merge:?} | Review: {review:?}");
 
     Ok(PrCheckReport {
         ci,
