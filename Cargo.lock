@@ -1283,6 +1283,7 @@ dependencies = [
  "gwt-terminal",
  "ignore",
  "image",
+ "libc",
  "muda",
  "notify",
  "notify-debouncer-mini",

@@ -22,6 +22,7 @@
 mod actions;
 mod board;
 mod build;
+pub mod daemon;
 mod discuss;
 mod env;
 pub mod hook;
@@ -148,6 +149,17 @@ pub enum CliCommand {
     Build(BuildCommand),
     /// `gwtd update [...]` and `gwtd __internal {apply-update,run-installer} ...`.
     Update(UpdateCommand),
+    /// `gwtd daemon ...` — long-running runtime daemon (SPEC-2077).
+    Daemon(DaemonCommand),
+}
+
+/// SPEC-2077 family enum for `gwtd daemon ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonCommand {
+    /// `gwtd daemon start` — bootstrap and serve the runtime daemon.
+    Start,
+    /// `gwtd daemon status` — print whether a daemon is registered for cwd scope.
+    Status,
 }
 
 /// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
@@ -387,6 +399,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "discuss"
                     | "plan"
                     | "build"
+                    | "daemon"
             )
         })
         .unwrap_or(false)
@@ -417,6 +430,11 @@ pub fn parse_board_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// Parse an argv slice into a `gwtd index ...` [`CliCommand`].
 pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     index::parse(args).map(CliCommand::Index)
+}
+
+/// Parse an argv slice into a `gwtd daemon ...` [`CliCommand`] (SPEC-2077).
+pub fn parse_daemon_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    daemon::parse(args).map(CliCommand::Daemon)
 }
 
 fn expect_flag(arg: Option<&String>, expected: &'static str) -> Result<(), CliParseError> {
@@ -578,6 +596,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Update(UpdateCommand::InternalRunInstaller { rest }) => {
             std::process::exit(update::run_internal_run_installer(&rest));
         }
+        CliCommand::Daemon(inner) => daemon::run(env, inner, &mut out)?,
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)
