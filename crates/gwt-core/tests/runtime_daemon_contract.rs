@@ -38,6 +38,49 @@ fn daemon_endpoint_path_is_scoped_by_repo_and_worktree() {
 }
 
 #[test]
+fn bootstrap_rejects_pre_v2_endpoint_files() {
+    // Locks in the v1 -> v2 protocol bump (PR #2299): an endpoint
+    // file persisted by a daemon speaking the older untyped frame
+    // schema (`protocol_version: 1`) must be rejected by the
+    // current bootstrap path so we force a respawn instead of
+    // inheriting an incompatible daemon. Without this regression
+    // guard a future revert of the bump would be silent.
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let gwt_home = tempdir().unwrap();
+
+    let mut legacy = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    legacy.protocol_version = 1;
+    persist_endpoint(&scope.endpoint_path(gwt_home.path()), &legacy).unwrap();
+
+    let action =
+        resolve_bootstrap_action(gwt_home.path(), &scope, DAEMON_PROTOCOL_VERSION, |pid| {
+            pid == 4242
+        })
+        .unwrap();
+    assert!(
+        matches!(action, DaemonBootstrapAction::Spawn { .. }),
+        "expected Spawn for v1 endpoint, got: {action:?}"
+    );
+    assert!(
+        !scope.endpoint_path(gwt_home.path()).exists(),
+        "stale v1 endpoint file should be removed"
+    );
+}
+
+#[test]
 fn bootstrap_reuses_live_endpoint_and_rejects_stale_or_mismatched_versions() {
     let project_root = tempdir().unwrap();
     let scope = RuntimeScope::new(
