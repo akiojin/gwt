@@ -9,18 +9,18 @@ use gwt_core::{repo_hash::RepoHash, worktree_hash::compute_worktree_hash};
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde_json::{json, Map, Value};
 
-use super::{CliCommand, CliEnv, CliParseError, IndexScope};
+use super::{CliEnv, CliParseError, IndexCommand, IndexScope};
 
-pub fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
+pub fn parse(args: &[String]) -> Result<IndexCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     match head.as_str() {
         "status" => {
             if !rest.is_empty() {
                 return Err(CliParseError::Usage);
             }
-            Ok(CliCommand::IndexStatus)
+            Ok(IndexCommand::Status)
         }
-        "rebuild" => Ok(CliCommand::IndexRebuild {
+        "rebuild" => Ok(IndexCommand::Rebuild {
             scope: parse_rebuild_scope(rest)?,
         }),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -44,11 +44,14 @@ fn parse_rebuild_scope(args: &[String]) -> Result<IndexScope, CliParseError> {
     }
 }
 
-pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand, out: &mut String) -> Result<i32, SpecOpsError> {
+pub fn run<E: CliEnv>(
+    env: &mut E,
+    cmd: IndexCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
     match cmd {
-        CliCommand::IndexStatus => run_status(env, out),
-        CliCommand::IndexRebuild { scope } => run_rebuild(env, scope, out),
-        _ => unreachable!("index::run only accepts index commands"),
+        IndexCommand::Status => run_status(env, out),
+        IndexCommand::Rebuild { scope } => run_rebuild(env, scope, out),
     }
 }
 
@@ -534,16 +537,16 @@ mod tests {
 
     #[test]
     fn parses_index_status_and_rebuild_scope() {
-        assert_eq!(parse(&s(&["status"])).unwrap(), CliCommand::IndexStatus);
+        assert_eq!(parse(&s(&["status"])).unwrap(), IndexCommand::Status);
         assert_eq!(
             parse(&s(&["rebuild", "--scope", "files-docs"])).unwrap(),
-            CliCommand::IndexRebuild {
+            IndexCommand::Rebuild {
                 scope: IndexScope::FilesDocs
             }
         );
         assert_eq!(
             parse(&s(&["rebuild"])).unwrap(),
-            CliCommand::IndexRebuild {
+            IndexCommand::Rebuild {
                 scope: IndexScope::All
             }
         );

@@ -9,7 +9,7 @@ use gwt_core::update::{is_ci, InstallerKind, PreparedPayload, UpdateManager, Upd
 
 /// Parsed form of `gwtd update` arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateCommand {
+pub enum UpdateRunMode {
     /// Only check and report; do not download or apply.
     CheckOnly,
     /// Check and, with user approval, download and apply.
@@ -142,15 +142,15 @@ impl UpdateCliOps for RealUpdateCliOps {
 }
 
 /// Parse `gwtd update [--check]` arguments.
-pub fn parse_args(args: &[String]) -> UpdateCommand {
+pub fn parse_args(args: &[String]) -> UpdateRunMode {
     if args.iter().any(|a| a == "--check") {
-        UpdateCommand::CheckOnly
+        UpdateRunMode::CheckOnly
     } else {
-        UpdateCommand::Apply
+        UpdateRunMode::Apply
     }
 }
 
-fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateCommand) -> RunOutcome {
+fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
     if ops.is_ci() {
         ops.write_stdout("Update check skipped in CI environment.\n");
         return RunOutcome::Code(0);
@@ -177,7 +177,7 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateCommand) -> RunOutcome {
         } => {
             ops.write_stdout(&format!("Update available: v{current} → v{latest}\n"));
 
-            if cmd == UpdateCommand::CheckOnly {
+            if cmd == UpdateRunMode::CheckOnly {
                 return RunOutcome::Code(0);
             }
 
@@ -281,7 +281,7 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateCommand) -> RunOutcome {
 /// Run the update command.
 ///
 /// Returns the process exit code (0 = success, non-zero = error).
-pub fn run(cmd: UpdateCommand) -> i32 {
+pub fn run(cmd: UpdateRunMode) -> i32 {
     let mut ops = RealUpdateCliOps::default();
     match run_with(&mut ops, cmd) {
         RunOutcome::Code(code) => code,
@@ -540,13 +540,13 @@ mod tests {
     #[test]
     fn parse_args_defaults_to_apply() {
         let args: Vec<String> = vec![];
-        assert_eq!(parse_args(&args), UpdateCommand::Apply);
+        assert_eq!(parse_args(&args), UpdateRunMode::Apply);
     }
 
     #[test]
     fn parse_args_check_flag() {
         let args = vec!["--check".to_string()];
-        assert_eq!(parse_args(&args), UpdateCommand::CheckOnly);
+        assert_eq!(parse_args(&args), UpdateRunMode::CheckOnly);
     }
 
     #[test]
@@ -565,7 +565,7 @@ mod tests {
     fn run_check_only_returns_zero_in_ci() {
         let _guard = CI_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("CI", "true");
-        let code = run(UpdateCommand::CheckOnly);
+        let code = run(UpdateRunMode::CheckOnly);
         std::env::remove_var("CI");
         assert_eq!(code, 0);
     }
@@ -574,7 +574,7 @@ mod tests {
     fn run_apply_returns_zero_in_ci() {
         let _guard = CI_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("CI", "true");
-        let code = run(UpdateCommand::Apply);
+        let code = run(UpdateRunMode::Apply);
         std::env::remove_var("CI");
         assert_eq!(code, 0);
     }
@@ -627,7 +627,7 @@ mod tests {
         let mut ci = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         ci.is_ci = true;
         assert!(matches!(
-            run_with(&mut ci, UpdateCommand::Apply),
+            run_with(&mut ci, UpdateRunMode::Apply),
             RunOutcome::Code(0)
         ));
         assert!(ci.stdout.contains("skipped in CI"));
@@ -637,7 +637,7 @@ mod tests {
             checked_at: Some(chrono::Utc::now()),
         };
         assert!(matches!(
-            run_with(&mut up_to_date, UpdateCommand::Apply),
+            run_with(&mut up_to_date, UpdateRunMode::Apply),
             RunOutcome::Code(0)
         ));
         assert!(up_to_date.stdout.contains("up to date"));
@@ -648,7 +648,7 @@ mod tests {
             failed_at: chrono::Utc::now(),
         };
         assert!(matches!(
-            run_with(&mut failed, UpdateCommand::Apply),
+            run_with(&mut failed, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(failed.stderr.contains("network down"));
@@ -658,7 +658,7 @@ mod tests {
     fn run_with_covers_check_only_cancel_and_missing_asset_paths() {
         let mut check_only = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         assert!(matches!(
-            run_with(&mut check_only, UpdateCommand::CheckOnly),
+            run_with(&mut check_only, UpdateRunMode::CheckOnly),
             RunOutcome::Code(0)
         ));
         assert!(check_only.stdout.contains("Update available"));
@@ -667,14 +667,14 @@ mod tests {
         let mut cancelled = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         cancelled.input_line = Ok("n\n".to_string());
         assert!(matches!(
-            run_with(&mut cancelled, UpdateCommand::Apply),
+            run_with(&mut cancelled, UpdateRunMode::Apply),
             RunOutcome::Code(0)
         ));
         assert!(cancelled.stdout.contains("Update cancelled"));
 
         let mut missing_asset = FakeUpdateCliOps::available(None);
         assert!(matches!(
-            run_with(&mut missing_asset, UpdateCommand::Apply),
+            run_with(&mut missing_asset, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(missing_asset
@@ -687,7 +687,7 @@ mod tests {
         let mut prepare_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         prepare_error.prepare_update_result = Err("download broke".to_string());
         assert!(matches!(
-            run_with(&mut prepare_error, UpdateCommand::Apply),
+            run_with(&mut prepare_error, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(prepare_error.stderr.contains("Download failed"));
@@ -696,7 +696,7 @@ mod tests {
             FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         current_exe_error.current_exe = Err(io::Error::new(io::ErrorKind::NotFound, "missing"));
         assert!(matches!(
-            run_with(&mut current_exe_error, UpdateCommand::Apply),
+            run_with(&mut current_exe_error, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(current_exe_error
@@ -706,7 +706,7 @@ mod tests {
         let mut restart_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         restart_error.write_restart_args_result = Err("disk full".to_string());
         assert!(matches!(
-            run_with(&mut restart_error, UpdateCommand::Apply),
+            run_with(&mut restart_error, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(restart_error
@@ -723,7 +723,7 @@ mod tests {
     fn run_with_covers_helper_copy_and_spawn_paths() {
         let mut apply = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         assert!(matches!(
-            run_with(&mut apply, UpdateCommand::Apply),
+            run_with(&mut apply, UpdateRunMode::Apply),
             RunOutcome::ExitSuccess
         ));
         if cfg!(windows) {
@@ -737,7 +737,7 @@ mod tests {
         let mut apply_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
         apply_error.spawn_apply_result = Err("spawn failed".to_string());
         assert!(matches!(
-            run_with(&mut apply_error, UpdateCommand::Apply),
+            run_with(&mut apply_error, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(apply_error.stderr.contains("Failed to apply update"));
@@ -746,7 +746,7 @@ mod tests {
         helper_error.make_helper_copy_result = Err("copy failed".to_string());
         if cfg!(windows) {
             assert!(matches!(
-                run_with(&mut helper_error, UpdateCommand::Apply),
+                run_with(&mut helper_error, UpdateRunMode::Apply),
                 RunOutcome::Code(1)
             ));
             assert!(helper_error
@@ -754,7 +754,7 @@ mod tests {
                 .contains("Failed to create update helper"));
         } else {
             assert!(matches!(
-                run_with(&mut helper_error, UpdateCommand::Apply),
+                run_with(&mut helper_error, UpdateRunMode::Apply),
                 RunOutcome::ExitSuccess
             ));
             assert!(helper_error.helper_copy_calls.is_empty());
@@ -766,7 +766,7 @@ mod tests {
             kind: InstallerKind::WindowsMsi,
         });
         assert!(matches!(
-            run_with(&mut installer, UpdateCommand::Apply),
+            run_with(&mut installer, UpdateRunMode::Apply),
             RunOutcome::ExitSuccess
         ));
         assert_eq!(installer.installer_calls.len(), 1);
@@ -778,7 +778,7 @@ mod tests {
         });
         installer_error.spawn_installer_result = Err("installer failed".to_string());
         assert!(matches!(
-            run_with(&mut installer_error, UpdateCommand::Apply),
+            run_with(&mut installer_error, UpdateRunMode::Apply),
             RunOutcome::Code(1)
         ));
         assert!(installer_error.stderr.contains("Failed to apply update"));
