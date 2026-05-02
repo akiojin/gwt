@@ -17,8 +17,9 @@
 //!    `Ack`.
 //!
 //! Connect, publish, and ack are each bounded by `timeout` (default
-//! 2 s). On any error the caller should treat the publish as
-//! best-effort — the local store remains authoritative.
+//! 200 ms per stage, so the worst-case wall time is ~600 ms across
+//! the three stages). On any error the caller should treat the
+//! publish as best-effort — the local store remains authoritative.
 
 #![cfg(unix)]
 
