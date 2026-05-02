@@ -37,8 +37,10 @@ use tokio::{
     net::{UnixListener, UnixStream},
     runtime::Builder,
     signal::unix::{signal, SignalKind},
-    sync::Notify,
+    sync::{mpsc, Notify},
 };
+
+use super::broadcast::BroadcastHub;
 
 const ACCEPT_BACKOFF_MS: u64 = 50;
 
@@ -83,10 +85,12 @@ pub(super) fn serve_blocking(
         .build()
         .map_err(|err| config_error(format!("tokio runtime build failed: {err}")))?;
 
+    let hub = BroadcastHub::new();
     let result = runtime.block_on(run_server(
         endpoint,
         socket_path.clone(),
         endpoint_path.clone(),
+        hub,
     ));
 
     let _ = fs::remove_file(&socket_path);
@@ -99,6 +103,7 @@ pub(super) async fn run_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,
+    hub: BroadcastHub,
 ) -> Result<i32, SpecOpsError> {
     let listener = UnixListener::bind(&socket_path).map_err(|err| {
         config_error(format!(
@@ -123,8 +128,9 @@ pub(super) async fn run_server(
                 match accept {
                     Ok((stream, _addr)) => {
                         let endpoint = Arc::clone(&endpoint);
+                        let hub = hub.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_connection(stream, endpoint).await {
+                            if let Err(err) = handle_connection(stream, endpoint, hub).await {
                                 tracing::warn!("gwtd daemon: connection error: {err}");
                             }
                         });
@@ -169,6 +175,7 @@ fn spawn_signal_watcher(shutdown: Arc<Notify>) {
 async fn handle_connection(
     stream: UnixStream,
     endpoint: Arc<DaemonEndpoint>,
+    hub: BroadcastHub,
 ) -> Result<(), String> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -182,13 +189,29 @@ async fn handle_connection(
         return Ok(()); // we already told the client; drop the connection.
     }
 
+    // After handshake, all writes flow through `out_tx` so the reader loop
+    // and any broadcast forwarders can send concurrently without sharing
+    // `write_half` directly.
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<DaemonFrame>();
+    let writer = tokio::spawn(async move {
+        while let Some(frame) = out_rx.recv().await {
+            if let Err(err) = write_json_line(&mut write_half, &frame).await {
+                tracing::warn!(target: "gwtd::daemon", error = %err, "writer task failed");
+                break;
+            }
+        }
+    });
+
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .map_err(|err| format!("read frame failed: {err}"))?;
+        let n = match reader.read_line(&mut line).await {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::warn!(target: "gwtd::daemon", error = %err, "read frame failed");
+                break;
+            }
+        };
         if n == 0 {
             break; // peer closed
         }
@@ -196,23 +219,66 @@ async fn handle_connection(
         if trimmed.is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<ClientFrame>(trimmed) {
-            Ok(frame) => {
-                // Phase 1: surface the frame to logs; Phase H1 will route
-                // hook envelopes / subscriptions into actual handlers.
-                tracing::debug!(target: "gwtd::daemon", ?frame, "received client frame");
-                DaemonFrame::Ack
+        match serde_json::from_str::<ClientFrame>(trimmed) {
+            Ok(ClientFrame::Hook(envelope)) => {
+                // Phase H1〜H4 will route hook envelopes into real handlers;
+                // for now we just ack so the client side knows the daemon
+                // received the frame.
+                tracing::debug!(
+                    target: "gwtd::daemon",
+                    hook = %envelope.hook_name,
+                    "received hook envelope"
+                );
+                if out_tx.send(DaemonFrame::Ack).is_err() {
+                    break;
+                }
+            }
+            Ok(ClientFrame::Subscribe { channels }) => {
+                for channel in channels {
+                    let mut rx = hub.subscribe(&channel);
+                    let out_tx = out_tx.clone();
+                    let channel_for_log = channel.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(frame) => {
+                                    if out_tx.send(frame).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::debug!(
+                                        target: "gwtd::daemon",
+                                        channel = %channel_for_log,
+                                        error = %err,
+                                        "broadcast receiver closed"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+                if out_tx.send(DaemonFrame::Ack).is_err() {
+                    break;
+                }
             }
             Err(err) => {
                 tracing::warn!(target: "gwtd::daemon", frame = %trimmed, error = %err, "rejected unrecognized frame");
-                DaemonFrame::Error {
-                    message: format!("frame parse failed: {err}"),
+                if out_tx
+                    .send(DaemonFrame::Error {
+                        message: format!("frame parse failed: {err}"),
+                    })
+                    .is_err()
+                {
+                    break;
                 }
             }
-        };
-        write_json_line(&mut write_half, &response).await?;
+        }
     }
 
+    drop(out_tx);
+    let _ = writer.await;
     Ok(())
 }
 
@@ -308,7 +374,7 @@ mod tests {
         net::UnixStream,
     };
 
-    use super::{build_handshake_response, run_server};
+    use super::{build_handshake_response, run_server, BroadcastHub};
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
         DaemonEndpoint::new(
@@ -394,10 +460,10 @@ mod tests {
         // and sends one frame.
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
-        let server_handle =
-            tokio::spawn(
-                async move { run_server(endpoint, server_socket, server_endpoint_path).await },
-            );
+        let server_hub = BroadcastHub::new();
+        let server_handle = tokio::spawn(async move {
+            run_server(endpoint, server_socket, server_endpoint_path, server_hub).await
+        });
 
         // wait until the socket is bound
         let mut attempts = 0;

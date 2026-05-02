@@ -138,7 +138,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::DaemonClient;
-    use crate::cli::daemon::server;
+    use crate::cli::daemon::{broadcast::BroadcastHub, server};
 
     fn sample_scope(temp: &TempDir) -> RuntimeScope {
         RuntimeScope::new(
@@ -185,8 +185,15 @@ mod tests {
         let server_endpoint = endpoint.clone();
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
+        let server_hub = BroadcastHub::new();
         let server_handle = tokio::spawn(async move {
-            server::run_server(server_endpoint, server_socket, server_endpoint_path).await
+            server::run_server(
+                server_endpoint,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
         });
 
         wait_for_socket(&socket_path).await;
@@ -232,8 +239,15 @@ mod tests {
         let server_endpoint_clone = server_endpoint.clone();
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
+        let server_hub = BroadcastHub::new();
         let server_handle = tokio::spawn(async move {
-            server::run_server(server_endpoint_clone, server_socket, server_endpoint_path).await
+            server::run_server(
+                server_endpoint_clone,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
         });
 
         wait_for_socket(&socket_path).await;
@@ -267,8 +281,15 @@ mod tests {
         let server_endpoint_clone = server_endpoint.clone();
         let server_socket = socket_path.clone();
         let server_endpoint_path = endpoint_path.clone();
+        let server_hub = BroadcastHub::new();
         let server_handle = tokio::spawn(async move {
-            server::run_server(server_endpoint_clone, server_socket, server_endpoint_path).await
+            server::run_server(
+                server_endpoint_clone,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
         });
 
         wait_for_socket(&socket_path).await;
@@ -279,6 +300,81 @@ mod tests {
         let result = DaemonClient::connect(&bad_endpoint).await;
         assert!(result.is_err(), "client connect should fail");
 
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
+    async fn subscribed_client_receives_published_broadcast_events() {
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+        let endpoint = sample_endpoint(scope.clone(), &socket_path, "broadcast-secret");
+
+        let server_endpoint = endpoint.clone();
+        let server_socket = socket_path.clone();
+        let server_endpoint_path = endpoint_path.clone();
+        // Pass a hub clone the test keeps so we can publish into it.
+        let server_hub = BroadcastHub::new();
+        let publisher = server_hub.clone();
+        let server_handle = tokio::spawn(async move {
+            server::run_server(
+                server_endpoint,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
+        });
+
+        wait_for_socket(&socket_path).await;
+
+        let mut client = DaemonClient::connect(&endpoint)
+            .await
+            .expect("client connects");
+
+        // Subscribe to the "board" channel and wait for the ack so we
+        // know the per-channel forwarder has been spawned before we
+        // publish.
+        let subscribe = ClientFrame::Subscribe {
+            channels: vec!["board".to_string()],
+        };
+        client.send_frame(&subscribe).await.expect("send subscribe");
+        let subscribe_ack: DaemonFrame = client.read_frame().await.expect("subscribe ack");
+        assert_eq!(subscribe_ack, DaemonFrame::Ack);
+
+        // Publish a board event into the hub from outside the daemon
+        // (Phase H1 GREEN will make a real handler call this).
+        let event = DaemonFrame::Event {
+            channel: "board".to_string(),
+            payload: serde_json::json!({"entries": 7}),
+        };
+        // Retry briefly: the per-channel forwarder may need a moment to
+        // register on the broadcast::Sender after the Subscribe ack.
+        let mut delivered = 0;
+        for _ in 0..20 {
+            delivered = publisher.publish("board", event.clone());
+            if delivered > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            delivered > 0,
+            "expected hub to have at least one subscriber"
+        );
+
+        let received: DaemonFrame = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.read_frame::<DaemonFrame>(),
+        )
+        .await
+        .expect("event timeout")
+        .expect("read event");
+        assert_eq!(received, event);
+
+        drop(client);
         server_handle.abort();
         let _ = server_handle.await;
     }
