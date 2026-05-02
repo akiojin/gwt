@@ -41,7 +41,6 @@ use std::{
 
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
-use gwt_git::PrStatus;
 use gwt_github::{cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, SpecOpsError};
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
@@ -796,595 +795,6 @@ query($owner: String!, $repo: String!, $number: Int!) {
     Ok(out)
 }
 
-fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
-            "pr",
-            "view",
-            "--json",
-            "number,title,state,url,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
-        ])
-        .current_dir(repo_path)
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let trimmed = stderr.trim();
-        let lowered = trimmed.to_ascii_lowercase();
-        if lowered.contains("no pull requests found")
-            || lowered.contains("no pull request found")
-            || lowered.contains("could not resolve to a pull request")
-        {
-            return Ok(None);
-        }
-        return Err(io::Error::other(format!("gh pr view: {trimmed}")));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pr = gwt_git::pr_status::parse_pr_status_json(&stdout)
-        .map_err(|err| io::Error::other(err.to_string()))?;
-    Ok(Some(pr))
-}
-
-fn create_pr_via_gh(
-    repo_slug: &str,
-    repo_path: &std::path::Path,
-    request: &PrCreateCall,
-) -> io::Result<PrStatus> {
-    let mut args = vec![
-        "pr".to_string(),
-        "create".to_string(),
-        "--base".to_string(),
-        request.base.clone(),
-        "--title".to_string(),
-        request.title.clone(),
-        "--body".to_string(),
-        request.body.clone(),
-    ];
-    if let Some(head) = &request.head {
-        args.push("--head".to_string());
-        args.push(head.clone());
-    }
-    for label in &request.labels {
-        args.push("--label".to_string());
-        args.push(label.clone());
-    }
-    if request.draft {
-        args.push("--draft".to_string());
-    }
-
-    let output = gwt_core::process::hidden_command("gh")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh pr create: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let url = extract_pr_url(&stdout).ok_or_else(|| {
-        io::Error::other(format!("gh pr create: missing PR URL in output: {stdout}"))
-    })?;
-    let number = parse_pr_number_from_url(&url)
-        .ok_or_else(|| io::Error::other(format!("gh pr create: invalid PR URL: {url}")))?;
-    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
-        .map_err(|err| io::Error::other(err.to_string()))
-}
-
-fn edit_pr_via_gh(
-    repo_slug: &str,
-    repo_path: &std::path::Path,
-    number: u64,
-    title: Option<&str>,
-    body: Option<&str>,
-    add_labels: &[String],
-) -> io::Result<PrStatus> {
-    let mut args = vec!["pr".to_string(), "edit".to_string(), number.to_string()];
-    if let Some(title) = title {
-        args.push("--title".to_string());
-        args.push(title.to_string());
-    }
-    if let Some(body) = body {
-        args.push("--body".to_string());
-        args.push(body.to_string());
-    }
-    for label in add_labels {
-        args.push("--add-label".to_string());
-        args.push(label.clone());
-    }
-
-    let output = gwt_core::process::hidden_command("gh")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh pr edit: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
-        .map_err(|err| io::Error::other(err.to_string()))
-}
-
-fn extract_pr_url(stdout: &str) -> Option<String> {
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("https://"))
-        .map(ToOwned::to_owned)
-}
-
-fn parse_pr_number_from_url(url: &str) -> Option<u64> {
-    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
-}
-
-fn comment_on_pr_via_gh(repo_path: &std::path::Path, number: u64, body: &str) -> io::Result<()> {
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["pr", "comment", &number.to_string(), "--body", body])
-        .current_dir(repo_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh pr comment: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn fetch_pr_reviews_via_gh(owner: &str, repo: &str, number: u64) -> io::Result<Vec<PrReview>> {
-    let endpoint = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
-    let output = gwt_core::process::hidden_command("gh")
-        .args(["api", &endpoint])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh api {endpoint}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let values: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    Ok(values
-        .into_iter()
-        .map(|value| PrReview {
-            id: value
-                .get("id")
-                .and_then(|v| v.as_i64())
-                .map(|v| v.to_string())
-                .or_else(|| {
-                    value
-                        .get("node_id")
-                        .and_then(|v| v.as_str())
-                        .map(ToOwned::to_owned)
-                })
-                .unwrap_or_default(),
-            state: value
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            body: value
-                .get("body")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            submitted_at: value
-                .get("submitted_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            author: value
-                .get("user")
-                .and_then(|v| v.get("login"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        })
-        .collect())
-}
-
-fn fetch_pr_review_threads_via_gh(
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> io::Result<Vec<PrReviewThread>> {
-    let query = r#"
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 100) {
-            nodes {
-              id
-              body
-              createdAt
-              updatedAt
-              author { login }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-    let output = gwt_core::process::hidden_command("gh")
-        .args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-f",
-            &format!("owner={owner}"),
-            "-f",
-            &format!("repo={repo}"),
-            "-F",
-            &format!("number={number}"),
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "gh api graphql: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    let nodes = value
-        .get("data")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.get("pullRequest"))
-        .and_then(|v| v.get("reviewThreads"))
-        .and_then(|v| v.get("nodes"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    Ok(nodes
-        .into_iter()
-        .map(|node| PrReviewThread {
-            id: node
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            is_resolved: node
-                .get("isResolved")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            is_outdated: node
-                .get("isOutdated")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            path: node
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            line: node.get("line").and_then(|v| v.as_u64()),
-            comments: node
-                .get("comments")
-                .and_then(|v| v.get("nodes"))
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|comment| PrReviewThreadComment {
-                    id: comment
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    body: comment
-                        .get("body")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    created_at: comment
-                        .get("createdAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    updated_at: comment
-                        .get("updatedAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    author: comment
-                        .get("author")
-                        .and_then(|v| v.get("login"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                })
-                .collect(),
-        })
-        .collect())
-}
-
-fn reply_and_resolve_pr_review_threads_via_gh(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    body: &str,
-) -> io::Result<usize> {
-    let unresolved: Vec<PrReviewThread> = fetch_pr_review_threads_via_gh(owner, repo, number)?
-        .into_iter()
-        .filter(should_resolve_review_thread)
-        .collect();
-
-    let mut resolved_count = 0;
-    for thread in &unresolved {
-        let Some(current_thread) =
-            fetch_pr_review_thread_state_via_gh(owner, repo, number, &thread.id)?
-        else {
-            continue;
-        };
-        if !should_resolve_review_thread(&current_thread) {
-            continue;
-        }
-
-        let reply_mutation = r#"
-mutation($threadId: ID!, $body: String!) {
-  addPullRequestReviewThreadReply(input: {
-    pullRequestReviewThreadId: $threadId,
-    body: $body
-  }) {
-    comment { id }
-  }
-}
-"#;
-        if should_reply_to_review_thread(&current_thread, body) {
-            let reply = gwt_core::process::hidden_command("gh")
-                .args([
-                    "api",
-                    "graphql",
-                    "-f",
-                    &format!("query={reply_mutation}"),
-                    "-f",
-                    &format!("threadId={}", thread.id),
-                    "-f",
-                    &format!("body={body}"),
-                ])
-                .output()?;
-            if !reply.status.success() {
-                return Err(io::Error::other(format!(
-                    "gh api graphql reply: {}",
-                    String::from_utf8_lossy(&reply.stderr).trim()
-                )));
-            }
-        }
-
-        let resolve_mutation = r#"
-mutation($threadId: ID!) {
-  resolveReviewThread(input: { threadId: $threadId }) {
-    thread { id isResolved }
-  }
-}
-"#;
-        let resolve = gwt_core::process::hidden_command("gh")
-            .args([
-                "api",
-                "graphql",
-                "-f",
-                &format!("query={resolve_mutation}"),
-                "-f",
-                &format!("threadId={}", thread.id),
-            ])
-            .output()?;
-        if !resolve.status.success() {
-            if fetch_pr_review_thread_state_via_gh(owner, repo, number, &thread.id)?
-                .as_ref()
-                .is_some_and(|thread| thread.is_resolved)
-            {
-                resolved_count += 1;
-                continue;
-            }
-            return Err(io::Error::other(format!(
-                "gh api graphql resolve: {}",
-                String::from_utf8_lossy(&resolve.stderr).trim()
-            )));
-        }
-
-        resolved_count += 1;
-    }
-
-    Ok(resolved_count)
-}
-
-fn fetch_pr_checks_via_gh(
-    repo_slug: &str,
-    repo_path: &std::path::Path,
-    number: u64,
-) -> io::Result<PrChecksSummary> {
-    let pr = gwt_git::pr_status::fetch_pr_status(repo_slug, number)
-        .map_err(|err| io::Error::other(err.to_string()))?;
-
-    let primary_fields = [
-        "name",
-        "state",
-        "conclusion",
-        "detailsUrl",
-        "startedAt",
-        "completedAt",
-    ];
-    let mut output = gwt_core::process::hidden_command("gh")
-        .args([
-            "pr",
-            "checks",
-            &number.to_string(),
-            "--json",
-            &primary_fields.join(","),
-        ])
-        .current_dir(repo_path)
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let available = parse_available_fields(&stderr);
-        if !available.is_empty() {
-            let fallback_fields = [
-                "name",
-                "state",
-                "bucket",
-                "link",
-                "startedAt",
-                "completedAt",
-                "workflow",
-            ];
-            let selected: Vec<&str> = fallback_fields
-                .iter()
-                .copied()
-                .filter(|field| available.iter().any(|candidate| candidate == field))
-                .collect();
-            if !selected.is_empty() {
-                output = gwt_core::process::hidden_command("gh")
-                    .args([
-                        "pr",
-                        "checks",
-                        &number.to_string(),
-                        "--json",
-                        &selected.join(","),
-                    ])
-                    .current_dir(repo_path)
-                    .output()?;
-            }
-        }
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let checks = parse_pr_checks_items_response(&stdout, &stderr, output.status.success())?;
-    let merge_status = pr.effective_merge_status().to_string();
-
-    Ok(PrChecksSummary {
-        summary: format!(
-            "PR #{} | CI: {} | Merge: {} | Review: {}",
-            pr.number, pr.ci_status, merge_status, pr.review_status
-        ),
-        ci_status: pr.ci_status,
-        merge_status,
-        review_status: pr.review_status,
-        checks,
-    })
-}
-
-fn fetch_pr_review_thread_state_via_gh(
-    owner: &str,
-    repo: &str,
-    number: u64,
-    thread_id: &str,
-) -> io::Result<Option<PrReviewThread>> {
-    Ok(fetch_pr_review_threads_via_gh(owner, repo, number)?
-        .into_iter()
-        .find(|thread| thread.id == thread_id))
-}
-
-fn review_thread_has_comment_body(thread: &PrReviewThread, body: &str) -> bool {
-    thread.comments.iter().any(|comment| comment.body == body)
-}
-
-fn should_reply_to_review_thread(thread: &PrReviewThread, body: &str) -> bool {
-    should_resolve_review_thread(thread) && !review_thread_has_comment_body(thread, body)
-}
-
-fn should_resolve_review_thread(thread: &PrReviewThread) -> bool {
-    !thread.is_resolved && !thread.is_outdated
-}
-
-fn parse_pr_checks_items_json(json: &str) -> Result<Vec<PrCheckItem>, serde_json::Error> {
-    let values: Vec<serde_json::Value> = serde_json::from_str(json)?;
-    Ok(values
-        .into_iter()
-        .map(|value| PrCheckItem {
-            name: value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: value
-                .get("state")
-                .or_else(|| value.get("status"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            conclusion: value
-                .get("conclusion")
-                .or_else(|| value.get("bucket"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: value
-                .get("detailsUrl")
-                .or_else(|| value.get("link"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            started_at: value
-                .get("startedAt")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            completed_at: value
-                .get("completedAt")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            workflow: value
-                .get("workflow")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        })
-        .collect())
-}
-
-fn parse_pr_checks_items_response(
-    stdout: &str,
-    stderr: &str,
-    success: bool,
-) -> io::Result<Vec<PrCheckItem>> {
-    if !success {
-        return Err(io::Error::other(format!("gh pr checks: {}", stderr.trim())));
-    }
-
-    parse_pr_checks_items_json(stdout)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
-}
-
-fn parse_available_fields(message: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut collecting = false;
-    for line in message.lines() {
-        if line.contains("Available fields:") {
-            collecting = true;
-            continue;
-        }
-        if !collecting {
-            continue;
-        }
-        let field = line.trim();
-        if field.is_empty() {
-            continue;
-        }
-        fields.push(field.to_string());
-    }
-    fields
-}
-
 fn fetch_actions_run_log_via_gh(repo_path: &std::path::Path, run_id: u64) -> io::Result<String> {
     let output = gwt_core::process::hidden_command("gh")
         .args(["run", "view", &run_id.to_string(), "--log"])
@@ -1639,15 +1049,6 @@ pub fn run_daemon_hook<E: CliEnv>(
     }
 }
 
-fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
-    if owner.is_empty() || repo.is_empty() {
-        return Err(io::Error::other(
-            "missing repository context for PR create/edit operation",
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1887,29 +1288,34 @@ fn main() -> ExitCode {
             author: "reviewer".to_string(),
         });
 
-        assert!(!should_reply_to_review_thread(
+        assert!(!crate::cli::pr::should_reply_to_review_thread(
             &thread,
             "Fixed in latest commit."
         ));
-        assert!(should_resolve_review_thread(&thread));
+        assert!(crate::cli::pr::should_resolve_review_thread(&thread));
     }
 
     #[test]
     fn review_thread_reply_is_skipped_for_resolved_or_outdated_threads() {
         let mut resolved = sample_thread();
         resolved.is_resolved = true;
-        assert!(!should_reply_to_review_thread(&resolved, "reply"));
-        assert!(!should_resolve_review_thread(&resolved));
+        assert!(!crate::cli::pr::should_reply_to_review_thread(
+            &resolved, "reply"
+        ));
+        assert!(!crate::cli::pr::should_resolve_review_thread(&resolved));
 
         let mut outdated = sample_thread();
         outdated.is_outdated = true;
-        assert!(!should_reply_to_review_thread(&outdated, "reply"));
-        assert!(!should_resolve_review_thread(&outdated));
+        assert!(!crate::cli::pr::should_reply_to_review_thread(
+            &outdated, "reply"
+        ));
+        assert!(!crate::cli::pr::should_resolve_review_thread(&outdated));
     }
 
     #[test]
     fn pr_checks_response_returns_error_when_gh_fails() {
-        let err = parse_pr_checks_items_response("", "auth failed", false).unwrap_err();
+        let err =
+            crate::cli::pr::parse_pr_checks_items_response("", "auth failed", false).unwrap_err();
         assert!(
             err.to_string().contains("gh pr checks: auth failed"),
             "unexpected error: {err}"
@@ -1918,7 +1324,7 @@ fn main() -> ExitCode {
 
     #[test]
     fn pr_checks_response_parses_success_payload() {
-        let items = parse_pr_checks_items_response(
+        let items = crate::cli::pr::parse_pr_checks_items_response(
             r#"[{"name":"test","state":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://example.com","startedAt":"2026-04-10T00:00:00Z","completedAt":"2026-04-10T00:01:00Z","workflow":"CI"}]"#,
             "",
             true,
@@ -1946,8 +1352,8 @@ fn main() -> ExitCode {
         }
     }
 
-    fn sample_pr_status() -> PrStatus {
-        PrStatus {
+    fn sample_pr_status() -> gwt_git::PrStatus {
+        gwt_git::PrStatus {
             number: 128,
             title: "Enforce coverage".to_string(),
             state: gwt_git::pr_status::PrState::Open,
@@ -2053,19 +1459,21 @@ fn main() -> ExitCode {
         );
 
         assert_eq!(
-            extract_pr_url("note\n https://github.com/akiojin/gwt/pull/55 \nignored"),
+            crate::cli::pr::extract_pr_url(
+                "note\n https://github.com/akiojin/gwt/pull/55 \nignored"
+            ),
             Some("https://github.com/akiojin/gwt/pull/55".to_string())
         );
         assert_eq!(
-            parse_pr_number_from_url("https://github.com/akiojin/gwt/pull/55/"),
+            crate::cli::pr::parse_pr_number_from_url("https://github.com/akiojin/gwt/pull/55/"),
             Some(55)
         );
         assert_eq!(
-            parse_available_fields("error\nAvailable fields:\n  number\n  title\n"),
+            crate::cli::pr::parse_available_fields("error\nAvailable fields:\n  number\n  title\n"),
             vec!["number".to_string(), "title".to_string()]
         );
 
-        let checks = parse_pr_checks_items_json(
+        let checks = crate::cli::pr::parse_pr_checks_items_json(
             r#"[{"name":"coverage","status":"IN_PROGRESS","bucket":"pending","link":"https://example.com/check"}]"#,
         )
         .unwrap();
@@ -2219,8 +1627,8 @@ fn main() -> ExitCode {
         assert!(io_as_api_error(io::Error::other("boom"))
             .to_string()
             .contains("boom"));
-        assert!(edit_or_create_repo_guard("", "repo").is_err());
-        assert!(edit_or_create_repo_guard("akiojin", "gwt").is_ok());
+        assert!(crate::cli::pr::edit_or_create_repo_guard("", "repo").is_err());
+        assert!(crate::cli::pr::edit_or_create_repo_guard("akiojin", "gwt").is_ok());
     }
 
     struct ScopedEnvVar {
@@ -2284,14 +1692,18 @@ fn main() -> ExitCode {
         assert!(out.contains("no checks"));
         assert!(out.contains("no reviews"));
         assert!(out.contains("no review threads"));
-        assert_eq!(extract_pr_url("no pull request here"), None);
+        assert_eq!(crate::cli::pr::extract_pr_url("no pull request here"), None);
         assert_eq!(
-            parse_pr_number_from_url("https://github.com/akiojin/gwt/pull/not-a-number"),
+            crate::cli::pr::parse_pr_number_from_url(
+                "https://github.com/akiojin/gwt/pull/not-a-number"
+            ),
             None
         );
-        assert!(parse_available_fields("plain error").is_empty());
+        assert!(crate::cli::pr::parse_available_fields("plain error").is_empty());
         assert_eq!(
-            parse_available_fields("oops\nAvailable fields:\n  number\n\n  title\n"),
+            crate::cli::pr::parse_available_fields(
+                "oops\nAvailable fields:\n  number\n\n  title\n"
+            ),
             vec!["number".to_string(), "title".to_string()]
         );
     }
@@ -2346,13 +1758,13 @@ fn main() -> ExitCode {
             assert_eq!(linked[0].number, 12);
             assert_eq!(linked[1].state, "MERGED");
 
-            let current = fetch_current_pr_via_gh(repo_path)
+            let current = crate::cli::pr::fetch_current_pr_via_gh(repo_path)
                 .expect("current pr")
                 .expect("current pr exists");
             assert_eq!(current.number, 12);
             assert_eq!(current.merge_state_status, "CLEAN");
 
-            let created = create_pr_via_gh(
+            let created = crate::cli::pr::create_pr_via_gh(
                 "akiojin/gwt",
                 repo_path,
                 &PrCreateCall {
@@ -2367,7 +1779,7 @@ fn main() -> ExitCode {
             .expect("create pr");
             assert_eq!(created.number, 12);
 
-            let edited = edit_pr_via_gh(
+            let edited = crate::cli::pr::edit_pr_via_gh(
                 "akiojin/gwt",
                 repo_path,
                 12,
@@ -2378,22 +1790,26 @@ fn main() -> ExitCode {
             .expect("edit pr");
             assert_eq!(edited.number, 12);
 
-            comment_on_pr_via_gh(repo_path, 12, "done").expect("comment");
+            crate::cli::pr::comment_on_pr_via_gh(repo_path, 12, "done").expect("comment");
 
-            let reviews = fetch_pr_reviews_via_gh("akiojin", "gwt", 12).expect("reviews");
+            let reviews =
+                crate::cli::pr::fetch_pr_reviews_via_gh("akiojin", "gwt", 12).expect("reviews");
             assert_eq!(reviews.len(), 1);
             assert_eq!(reviews[0].author, "reviewer");
 
-            let threads =
-                fetch_pr_review_threads_via_gh("akiojin", "gwt", 12).expect("review threads");
+            let threads = crate::cli::pr::fetch_pr_review_threads_via_gh("akiojin", "gwt", 12)
+                .expect("review threads");
             assert_eq!(threads.len(), 2);
             assert_eq!(threads[0].line, Some(10));
 
-            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
-                .expect("reply and resolve");
+            let resolved = crate::cli::pr::reply_and_resolve_pr_review_threads_via_gh(
+                "akiojin", "gwt", 12, "done",
+            )
+            .expect("reply and resolve");
             assert_eq!(resolved, 2);
 
-            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            let checks = crate::cli::pr::fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12)
+                .expect("checks");
             assert!(checks.summary.contains("PR #12"));
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].conclusion, "SUCCESS");
@@ -2410,25 +1826,27 @@ fn main() -> ExitCode {
     #[test]
     fn gh_wrappers_cover_none_fallback_and_zip_error_paths() {
         with_fake_gh("no-current-pr", |repo_path| {
-            assert!(fetch_current_pr_via_gh(repo_path)
+            assert!(crate::cli::pr::fetch_current_pr_via_gh(repo_path)
                 .expect("current pr result")
                 .is_none());
         });
 
         with_fake_gh("checks-fallback", |repo_path| {
-            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            let checks = crate::cli::pr::fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12)
+                .expect("checks");
             assert_eq!(checks.checks.len(), 1);
             assert_eq!(checks.checks[0].workflow, "coverage");
             assert_eq!(checks.checks[0].url, "https://example.test/checks/12");
         });
 
         with_fake_gh("behind", |repo_path| {
-            let current = fetch_current_pr_via_gh(repo_path)
+            let current = crate::cli::pr::fetch_current_pr_via_gh(repo_path)
                 .expect("current pr")
                 .expect("current pr exists");
             assert_eq!(current.effective_merge_status(), "BEHIND");
 
-            let checks = fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12).expect("checks");
+            let checks = crate::cli::pr::fetch_pr_checks_via_gh("akiojin/gwt", repo_path, 12)
+                .expect("checks");
             assert!(checks.summary.contains("Merge: BEHIND"));
             assert_eq!(checks.merge_status, "BEHIND");
         });
@@ -2444,8 +1862,10 @@ fn main() -> ExitCode {
     #[test]
     fn gh_wrappers_tolerate_resolve_failure_after_remote_state_changes() {
         with_fake_gh("resolve-fails-but-resolved", |_repo_path| {
-            let resolved = reply_and_resolve_pr_review_threads_via_gh("akiojin", "gwt", 12, "done")
-                .expect("resolved after retry");
+            let resolved = crate::cli::pr::reply_and_resolve_pr_review_threads_via_gh(
+                "akiojin", "gwt", 12, "done",
+            )
+            .expect("resolved after retry");
             assert_eq!(resolved, 2);
         });
     }

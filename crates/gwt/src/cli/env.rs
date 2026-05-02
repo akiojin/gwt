@@ -375,7 +375,7 @@ impl CliEnv for DefaultCliEnv {
         super::fetch_linked_prs_via_gh(&self.owner, &self.repo, number)
     }
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>> {
-        super::fetch_current_pr_via_gh(&self.repo_path)
+        super::pr::fetch_current_pr_via_gh(&self.repo_path)
     }
     fn create_pr(
         &mut self,
@@ -386,7 +386,7 @@ impl CliEnv for DefaultCliEnv {
         labels: &[String],
         draft: bool,
     ) -> io::Result<PrStatus> {
-        super::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        super::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         let request = PrCreateCall {
             base: base.to_string(),
             head: head.map(ToOwned::to_owned),
@@ -395,7 +395,7 @@ impl CliEnv for DefaultCliEnv {
             labels: labels.to_vec(),
             draft,
         };
-        super::create_pr_via_gh(
+        super::pr::create_pr_via_gh(
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             &request,
@@ -408,8 +408,8 @@ impl CliEnv for DefaultCliEnv {
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus> {
-        super::edit_or_create_repo_guard(&self.owner, &self.repo)?;
-        super::edit_pr_via_gh(
+        super::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        super::pr::edit_pr_via_gh(
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
@@ -423,23 +423,23 @@ impl CliEnv for DefaultCliEnv {
             .map_err(|err| io::Error::other(err.to_string()))
     }
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()> {
-        super::comment_on_pr_via_gh(&self.repo_path, number, body)
+        super::pr::comment_on_pr_via_gh(&self.repo_path, number, body)
     }
     fn fetch_pr_reviews(&mut self, number: u64) -> io::Result<Vec<PrReview>> {
-        super::fetch_pr_reviews_via_gh(&self.owner, &self.repo, number)
+        super::pr::fetch_pr_reviews_via_gh(&self.owner, &self.repo, number)
     }
     fn fetch_pr_review_threads(&mut self, number: u64) -> io::Result<Vec<PrReviewThread>> {
-        super::fetch_pr_review_threads_via_gh(&self.owner, &self.repo, number)
+        super::pr::fetch_pr_review_threads_via_gh(&self.owner, &self.repo, number)
     }
     fn reply_and_resolve_pr_review_threads(
         &mut self,
         number: u64,
         body: &str,
     ) -> io::Result<usize> {
-        super::reply_and_resolve_pr_review_threads_via_gh(&self.owner, &self.repo, number, body)
+        super::pr::reply_and_resolve_pr_review_threads_via_gh(&self.owner, &self.repo, number, body)
     }
     fn fetch_pr_checks(&mut self, number: u64) -> io::Result<PrChecksSummary> {
-        super::fetch_pr_checks_via_gh(
+        super::pr::fetch_pr_checks_via_gh(
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
