@@ -8,10 +8,12 @@
 //! to fan a single payload out to all subscribers.
 //!
 //! The hub is intentionally small: one mutex around a `HashMap<String,
-//! broadcast::Sender<DaemonFrame>>`. Phase H1 will graft the actual
-//! handler-to-publish wiring; this module ships the storage primitive
-//! plus tests so future PRs can layer real ownership migrations on top
-//! without re-deriving the synchronization boundary.
+//! broadcast::Sender<DaemonFrame>>`. Phase H1 wired the Board
+//! projection writer through `daemon_publisher::publish_event` to
+//! `BroadcastHub::publish("board", ...)`. Phase H2-H4 will layer
+//! `runtime-output` / `runtime-status` / `runtime-hook` /
+//! `launch-complete` channels onto the same primitive without
+//! re-deriving the synchronization boundary.
 
 #![cfg(unix)]
 
