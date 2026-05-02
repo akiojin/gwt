@@ -544,6 +544,7 @@ fn daemon_frame_status_carries_uptime_and_channel_count() {
         daemon_version: "9.14.0".to_string(),
         uptime_seconds: 42,
         broadcast_channels: 3,
+        connections: 2,
     });
     let json_value = serde_json::to_value(&frame).unwrap();
     assert_eq!(json_value["type"], "status");
@@ -551,8 +552,31 @@ fn daemon_frame_status_carries_uptime_and_channel_count() {
     assert_eq!(json_value["daemon_version"], "9.14.0");
     assert_eq!(json_value["uptime_seconds"], 42);
     assert_eq!(json_value["broadcast_channels"], 3);
+    assert_eq!(json_value["connections"], 2);
     let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
     assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_status_connections_field_defaults_to_zero_when_missing() {
+    // Older daemons may not include `connections` in their wire form;
+    // serde must treat the missing field as 0 to keep forward-compat
+    // working for clients reading from a daemon that predates the
+    // counter.
+    let json_value = json!({
+        "type": "status",
+        "protocol_version": DAEMON_PROTOCOL_VERSION,
+        "daemon_version": "old",
+        "uptime_seconds": 1,
+        "broadcast_channels": 0,
+    });
+    let frame: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    match frame {
+        DaemonFrame::Status(status) => {
+            assert_eq!(status.connections, 0);
+        }
+        other => panic!("expected Status frame, got: {other:?}"),
+    }
 }
 
 #[test]

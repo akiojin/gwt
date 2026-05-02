@@ -352,6 +352,14 @@ mod tests {
                     "expected at least the warmup channel, got {}",
                     status.broadcast_channels
                 );
+                // The asking client itself counts as one connection;
+                // the daemon should always report >= 1 from inside the
+                // ClientFrame::Status arm.
+                assert!(
+                    status.connections >= 1,
+                    "expected at least one tracked connection, got {}",
+                    status.connections
+                );
             }
             other => panic!("expected Status frame, got: {other:?}"),
         }

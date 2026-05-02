@@ -104,9 +104,9 @@ fn format_daemon_help() -> String {
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
         "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
-        "  - `status` reports `probe=ok uptime=<s>s channels=<n>` when the daemon answers a",
-        "    `ClientFrame::Status` request within 1s, or `probe=failed:<reason>` when the",
-        "    endpoint file is stale or unreachable.",
+        "  - `status` reports `probe=ok uptime=<s>s channels=<n> connections=<n>` when the",
+        "    daemon answers a `ClientFrame::Status` request within 1s, or `probe=failed:<reason>`",
+        "    when the endpoint file is stale or unreachable.",
         "",
     ]
     .join("\n")

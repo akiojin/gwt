@@ -212,6 +212,10 @@ pub struct DaemonStatus {
     pub daemon_version: String,
     pub uptime_seconds: u64,
     pub broadcast_channels: usize,
+    /// Number of currently-connected IPC clients, including the one
+    /// asking for the status snapshot.
+    #[serde(default)]
+    pub connections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
