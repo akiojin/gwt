@@ -68,6 +68,7 @@ fn print_help() {
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
     println!("  update      Check / apply gwt updates");
+    println!("  daemon      Long-running runtime daemon (SPEC-2077)");
 }
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
@@ -84,8 +85,28 @@ fn family_help(family: &str) -> Option<String> {
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
         "update" => Some(format_update_help()),
+        "daemon" => Some(format_daemon_help()),
         _ => None,
     }
+}
+
+fn format_daemon_help() -> String {
+    [
+        "gwtd daemon — Long-running runtime daemon (SPEC-2077).",
+        "",
+        "Usage: gwtd daemon <subcommand>",
+        "",
+        "Subcommands:",
+        "  start                                   Bootstrap and serve the runtime daemon",
+        "  status                                  Report whether a daemon is registered",
+        "",
+        "Notes:",
+        "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
+        "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
+        "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
+        "",
+    ]
+    .join("\n")
 }
 
 fn format_issue_help() -> String {
