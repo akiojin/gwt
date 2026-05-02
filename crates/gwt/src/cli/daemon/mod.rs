@@ -12,6 +12,8 @@
 //! enter the listen loop.
 
 #[cfg(unix)]
+pub(super) mod broadcast;
+#[cfg(unix)]
 pub mod client;
 #[cfg(unix)]
 pub(super) mod server;
