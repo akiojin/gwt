@@ -52,5 +52,5 @@ ignore = [
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "allow"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
