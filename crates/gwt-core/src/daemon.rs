@@ -168,6 +168,38 @@ pub struct IpcHandshakeResponse {
     pub rejection_reason: Option<String>,
 }
 
+/// Tagged frame envelope sent by `gwt` over the post-handshake IPC stream.
+///
+/// Wire format is newline-delimited JSON. The `type` discriminator selects
+/// the variant. Phase H1+ extends the variants for additional hot paths
+/// (subscriptions, runtime status pushes, etc.); the existing variants are
+/// stable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientFrame {
+    /// Forward a managed-hook event to the daemon for routing.
+    Hook(HookEnvelope),
+    /// Subscribe to one or more daemon broadcast channels.
+    Subscribe { channels: Vec<String> },
+}
+
+/// Tagged frame envelope returned by `gwtd`.
+///
+/// Wire format is newline-delimited JSON. `Ack` is the canonical reply for
+/// a successfully processed [`ClientFrame`]; `Event` carries a daemon
+/// broadcast payload (used once Phase H1+ runtime ownership migrations
+/// land); `Error` represents a frame that the daemon rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonFrame {
+    /// Acknowledgment for the previous client frame.
+    Ack,
+    /// Broadcast event delivered to subscribed clients.
+    Event { channel: String, payload: Value },
+    /// The daemon rejected the frame. `message` is human-readable.
+    Error { message: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonBootstrapAction {
     Reuse(DaemonEndpoint),
