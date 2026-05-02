@@ -1,5 +1,98 @@
 # Lessons Learned
 
+## 2026-05-03 — fix(daemon): SPEC-2077 Phase H1 GREEN review-driven hardening
+
+### 事象
+
+SPEC-2077 Phase H1 の daemon IPC 経路 (PR #2278〜#2300) を ship した
+ところ、 codex / coderabbit reviewer から P1 / P2 合計 12 件の race /
+leak / blocking 指摘を受け、 #2295〜#2300 の 6 PR で逐次修正することに
+なった。 主要なものは:
+
+- Subscribe ack 前の Event を `_ack` で吸収して取りこぼす race
+- Publish Ack と broadcast Event の send 順序が forwarder task の
+  spawn 順に依存して非決定的 (FSM 崩壊)
+- 接続終了時に forwarder task が `out_tx` clone を握り続けて writer
+  /connection task / ConnectionGuard が leak、 connections counter が
+  inflate
+- `BroadcastHub::publish` が channels mutex を hold しながら
+  `Sender::send` (内部で payload clone) を呼び、 cross-channel HOL
+  block
+- 非-Unix の `is_process_alive_pid` が常に true で stale endpoint が
+  永続的に「running」報告
+- protocol version 据え置きで旧 daemon と新 client が handshake 後に
+  schema mismatch
+- CLI 短命プロセスで detached publish thread が process exit と共に
+  kill され broadcast 喪失
+- daemon 起動時 readiness lines が `&mut String` buffer 経由で
+  shutdown 後にしか visible でない
+
+### 原因
+
+**根本原因の共通テーマは「async / 並列 primitive の lifetime と
+synchronization の組合せを設計時に詰めていない」ことだった。**
+
+具体的に言語化すると:
+
+1. **`Notify::notify_waiters` は fire-and-forget**: 待機者がいない
+   タイミングで notify すると永久に消える。 これに気づかず stop
+   signal として単独で使うと race window が残る。
+2. **broadcast `Sender::send` は payload clone**: ロックを跨いだ
+   呼び出しは fan-out 規模に応じて lock hold 時間が線形に伸びる。
+3. **mpsc の Sender clone は senders count を増やす**: 全 clone が
+   drop されないと receiver は close されない。 spawned task に
+   clone を渡す場合、 task 終了経路を必ず設計する。
+4. **Spawn 時 capture の値は immutable な snapshot**: daemon
+   restart のような外部状態変化を待ちたい場合、 closure が新値を
+   resolve できる resolver pattern にする。
+5. **detached thread は process lifetime に縛られる**: 短命 CLI
+   process では sync で完結させ、 長命 GUI process でのみ thread
+   spawn に逃がす。
+6. **wire schema 変更 は protocol version bump とセット**: handshake
+   は通って後段で frame parse 失敗、 という「中間状態互換」の罠。
+
+### 再発防止策
+
+新しい daemon 機能 / 並列 primitive を追加するときは、 review に
+出す前に以下を順に確認する:
+
+1. **Async cancellation pattern**: `tokio::sync::Notify` を stop
+   signal に使うときは必ず `Arc<AtomicBool>` と pair にし、 select
+   loop の先頭で flag を再 load する。 race window を closure 化
+   しない。
+2. **mpsc Sender lifetime**: spawned task に `out_tx.clone()` を
+   渡したら、 reader 終了時に「全 forwarder を起こす経路」
+   (select! の cancel arm + flag) を必ず実装する。 drop だけでは
+   broadcast 受信中の forwarder は永久に park する。
+3. **Mutex hold range**: 共有 mutex 配下で重い操作 (clone, send,
+   network I/O) を呼ばない。 必要なものを Arc clone で snapshot
+   して guard を drop してから動かす。
+4. **CLI / GUI thread spawn の分離**: 短命 CLI command path では
+   detached thread を使わず sync 完結。 Long-running GUI / daemon
+   path でのみ thread spawn を許す。 各 caller のプロセス
+   lifetime を意識する。
+5. **External state を closure で再 resolve**: long-lived consumer
+   (subscriber 等) が外部 endpoint / config に依存する場合、
+   constructor で endpoint を受け取るのではなく `Fn() -> Result<T>`
+   resolver を受け取り、 必要な瞬間に都度 resolve する。
+6. **Wire schema 変更 = protocol version bump**: post-handshake の
+   frame schema を typed enum に変える、 新 variant を追加する、
+   serde tag を変えるなどはすべて protocol version bump とセット。
+   bump で endpoint reuse を拒否させ、 強制 respawn で互換性を切る。
+7. **CLI buffered output**: long-running command (`gwtd daemon
+   start` のような) では readiness 出力を `&mut String` に貯めない。
+   `&mut dyn io::Write` を受け取って即時 flush することで supervising
+   script から observable にする。
+8. **Subscribe / RPC ack は frame 型を validate**: ack 待ちで最初の
+   1 フレームを `_ack: T` で discard すると、 race で先に来た
+   broadcast event を吸収する。 `read_frame::<DaemonFrame>()` を
+   loop して `match` で `Ack` を観測するまで他 frame は callback /
+   stdout に流す。
+
+これらは Phase H2-H4 (handle_runtime_output / hook_event /
+launch_complete) の daemon 移行でも同じ pattern が再出現するため、
+最初からテンプレに組み込んでから書く。
+
 ## 2026-04-30 — fix(skills): managed skills must not assume gwtd is on PATH
 
 ### 事象
