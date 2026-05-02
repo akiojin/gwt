@@ -160,6 +160,11 @@ pub enum DaemonCommand {
     Start,
     /// `gwtd daemon status` — print whether a daemon is registered for cwd scope.
     Status,
+    /// `gwtd daemon subscribe <channel>...` — connect to the running daemon,
+    /// subscribe to one or more broadcast channels, and print received events
+    /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
+    /// fan-out pipeline.
+    Subscribe { channels: Vec<String> },
 }
 
 /// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).

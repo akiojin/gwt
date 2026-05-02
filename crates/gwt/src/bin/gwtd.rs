@@ -99,6 +99,8 @@ fn format_daemon_help() -> String {
         "Subcommands:",
         "  start                                   Bootstrap and serve the runtime daemon",
         "  status                                  Report whether a daemon is registered + probe its socket",
+        "  subscribe <channel>...                  Connect to the running daemon, subscribe to channels,",
+        "                                          and stream received events as JSON to stdout",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
