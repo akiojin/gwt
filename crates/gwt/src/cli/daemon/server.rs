@@ -24,7 +24,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -228,6 +228,22 @@ async fn handle_connection(
     // and any broadcast forwarders can send concurrently without sharing
     // `write_half` directly.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<DaemonFrame>();
+    // Cancellation primitive fired when the reader exits (peer
+    // closed, EOF, or read error). Each per-channel forwarder spawns
+    // with a clone of `out_tx`, so without this signal the forwarders
+    // would stay parked on `rx.recv()` forever, keeping the writer
+    // task alive (out_rx still has senders) and leaking both the
+    // connection task and its `ConnectionGuard` — the connection
+    // counter in `DaemonStatus` would be permanently inflated.
+    //
+    // We use a `(AtomicBool, Notify)` pair instead of `Notify` alone
+    // because `notify_waiters` is fire-and-forget: a forwarder that
+    // is between `rx.recv()` and `out_tx.send()` when the cancel
+    // fires would miss the notification and re-enter `select!` on a
+    // fresh `notified()` future that never resolves. The atomic flag
+    // is checked at the top of each iteration to close that race.
+    let forwarder_cancel = Arc::new(AtomicBool::new(false));
+    let forwarder_notify = Arc::new(Notify::new());
     let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
             if let Err(err) = write_json_line(&mut write_half, &frame).await {
@@ -273,22 +289,39 @@ async fn handle_connection(
                     let mut rx = hub.subscribe(&channel);
                     let out_tx = out_tx.clone();
                     let channel_for_log = channel.clone();
+                    let cancel = Arc::clone(&forwarder_cancel);
+                    let notify = Arc::clone(&forwarder_notify);
                     tokio::spawn(async move {
                         loop {
-                            match rx.recv().await {
-                                Ok(frame) => {
-                                    if out_tx.send(frame).is_err() {
-                                        break;
+                            // Atomic flag check protects against the
+                            // race where `notify_waiters` fires while
+                            // we're in the match arm below; a fresh
+                            // `notified()` future created the next
+                            // iteration would otherwise miss the
+                            // notification and park forever.
+                            if cancel.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            tokio::select! {
+                                biased;
+                                _ = notify.notified() => break,
+                                result = rx.recv() => {
+                                    match result {
+                                        Ok(frame) => {
+                                            if out_tx.send(frame).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            tracing::debug!(
+                                                target: "gwtd::daemon",
+                                                channel = %channel_for_log,
+                                                error = %err,
+                                                "broadcast receiver closed"
+                                            );
+                                            break;
+                                        }
                                     }
-                                }
-                                Err(err) => {
-                                    tracing::debug!(
-                                        target: "gwtd::daemon",
-                                        channel = %channel_for_log,
-                                        error = %err,
-                                        "broadcast receiver closed"
-                                    );
-                                    break;
                                 }
                             }
                         }
@@ -352,6 +385,13 @@ async fn handle_connection(
         }
     }
 
+    // Reader exited (peer closed, EOF, or read error). Wake every
+    // active forwarder so they drop their `out_tx` clones; once all
+    // senders are dropped the writer task's `out_rx.recv()` returns
+    // `None` and the task ends, allowing this connection task (and
+    // its `ConnectionGuard`) to be released.
+    forwarder_cancel.store(true, Ordering::SeqCst);
+    forwarder_notify.notify_waiters();
     drop(out_tx);
     let _ = writer.await;
     Ok(())

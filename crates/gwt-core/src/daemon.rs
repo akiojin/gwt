@@ -15,7 +15,20 @@ use crate::{
 };
 
 /// Protocol version spoken by `gwt` and `gwtd`.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
+///
+/// Daemon endpoint reuse is keyed by this version, so a bump forces
+/// the bootstrap path to discard endpoints persisted by older daemons
+/// instead of accepting a connection that would later fail at the
+/// frame layer.
+///
+/// History:
+/// - `1`: initial untyped post-handshake frames (`{"ack":true}` etc).
+/// - `2`: typed `ClientFrame` / `DaemonFrame` post-handshake schema
+///   plus per-channel broadcast fan-out (SPEC-2077 Phase H1
+///   primitives + GREEN integration). Older clients/daemons will
+///   reject the handshake and force a respawn instead of attempting
+///   to exchange frames they cannot parse.
+pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
 
 /// Runtime backend target for daemon-managed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

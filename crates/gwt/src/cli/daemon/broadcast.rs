@@ -61,10 +61,20 @@ impl BroadcastHub {
     /// projection writer, runtime status aggregator). Until then the
     /// only callers live in tests, so the lib-only dead-code lint is
     /// suppressed.
+    ///
+    /// Critically, the global `channels` mutex is released *before*
+    /// `sender.send` runs. `tokio::sync::broadcast::Sender::send`
+    /// clones the payload for every subscriber, so retaining the lock
+    /// across that call would block unrelated subscribe / publish
+    /// activity on other channels for the duration of a (potentially
+    /// large) fan-out.
     #[allow(dead_code)]
     pub(crate) fn publish(&self, channel: &str, frame: DaemonFrame) -> usize {
-        let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
-        match guard.get(channel) {
+        let sender = {
+            let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
+            guard.get(channel).cloned()
+        };
+        match sender {
             Some(sender) => sender.send(frame).unwrap_or(0),
             None => 0,
         }
