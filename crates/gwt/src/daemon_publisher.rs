@@ -8,7 +8,7 @@
 //! The function:
 //!
 //! 1. Resolves the [`RuntimeScope`] for `project_root` and reads the
-//!    persisted [`DaemonEndpoint`].
+//!    persisted [`gwt_core::daemon::DaemonEndpoint`].
 //! 2. If no live daemon is registered, returns
 //!    `Err("daemon not running")` so the caller can continue with the
 //!    local file path as the source of truth.

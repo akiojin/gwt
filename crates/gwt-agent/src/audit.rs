@@ -28,7 +28,7 @@ const SECRET_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET"];
 ///
 /// Matching is case-insensitive. The following keys are considered secret:
 ///
-/// - Exact match against [`EXACT_SECRET_NAMES`].
+/// - Exact match against the module-level `EXACT_SECRET_NAMES` list.
 /// - Any key that ends with `_API_KEY`, `_TOKEN`, or `_SECRET`.
 ///
 /// Non-secret keys such as `ANTHROPIC_BASE_URL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`,

@@ -102,7 +102,7 @@ impl AIClient {
     /// Send chat messages via the Responses API and return the assistant's text.
     ///
     /// Retries transient failures (429, 5xx) with exponential back-off up to
-    /// [`MAX_RETRIES`] times.
+    /// 3 times (see the `MAX_RETRIES` constant in this module).
     pub fn create_response(&self, messages: Vec<ChatMessage>) -> Result<String, AIError> {
         if messages.is_empty() {
             return Err(AIError::ConfigError("No input messages".into()));

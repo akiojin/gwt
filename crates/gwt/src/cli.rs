@@ -478,7 +478,7 @@ fn ensure_no_remaining_args<'a>(
 ///
 /// Unknown names still parse (we don't maintain an allowlist here) so that
 /// newly added hooks don't need parser changes. Validation happens in
-/// [`run_hook`].
+/// [`crate::cli::hook::run_hook`].
 pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     Ok(CliCommand::Hook(HookCommand::Run {
