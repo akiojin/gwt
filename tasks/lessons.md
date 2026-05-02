@@ -1,5 +1,68 @@
 # Lessons Learned
 
+## 2026-05-04 — fix(daemon): broadcast forwarder treated RecvError::Lagged as fatal
+
+### 事象
+
+SPEC-2077 Phase H1 の per-channel broadcast forwarder
+(`crates/gwt/src/cli/daemon/server.rs`) が `broadcast::Receiver::recv()`
+の `Err(_)` をすべて fatal 扱いして loop break していたため、 slow
+subscriber が DEFAULT_CHANNEL_CAPACITY (64) を超えて lag した瞬間に
+購読が無音で終了する。 client 側は出口 EOF だけを観測し、 reconnect
+からのフル resubscribe が必要だった。
+
+### 原因
+
+`tokio::sync::broadcast::error::RecvError` には 2 variant あり、
+意味が完全に異なる:
+
+- `Lagged(u64)`: 「N frames を捨てたよ」という回復可能な warning
+  signal。 channel そのものは健全で、 次の `recv()` は新しい frame
+  を返す。
+- `Closed`: 全 Sender が drop された terminal 状態。 これ以降 frame
+  は来ない。
+
+両者を `Err(_)` でまとめて break すると、 lag burst で副次的に
+subscription 全体が落ちる。 capacity 64 は通常運用では十分だが、
+forwarder task が runtime 上の他タスクで一瞬 starve した間に publish
+バーストが来ると現実的に発生する。
+
+同じ落とし穴は他の async primitive にも潜む:
+
+- `mpsc::error::TryRecvError::Empty` (一時的に空) vs `Disconnected`
+  (terminal) を `Err(_)` でまとめると spurious wakeup を terminate
+  扱いしてしまう
+- `std::io::ErrorKind::WouldBlock` / `Interrupted` を `Err(_)` で
+  まとめると nonblocking IO で正常な再試行を諦める
+- `tokio::time::error::Elapsed` (timeout、 retry 可能) と underlying
+  IO error (terminal) を区別せず break する
+
+### 再発防止策
+
+並列 / 非同期 primitive の `Result::Err` を match するときは、
+**variant ごとに recoverable / terminal を明示分類する**:
+
+1. `RecvError`, `TryRecvError`, `io::ErrorKind`, `Elapsed` などの
+   error 型を `Err(_)` でまとめて catch しない。 必ず variant を
+   pattern match して各 variant の意味を確認する。
+2. recoverable variant (Lagged / WouldBlock / Interrupted /
+   Empty / Elapsed) は **continue + 観測のための warn log**、
+   terminal variant (Closed / Disconnected / 真の IO error) は
+   **break / 上位エラー化** に分岐する。
+3. forwarder のような producer-consumer pattern では、
+   recoverable error 経路を必ず unit test で pin する。 underlying
+   primitive (broadcast::Receiver, mpsc::Receiver) に対してオーバー
+   フロー / drain 試験を書き、 「subscription は alive のまま、
+   次の recv() で newer frame が返る」契約を assertion で固定する。
+4. defensive code は code comment で **どの variant が来うるか** /
+   **どう振り分けたか** を明記する。 単に `match err` だけだと
+   reviewer は「全 Err が同じ意味」と読みがち。
+
+これは Phase H2-H4 で `handle_runtime_output` / `handle_runtime_hook_event`
+を daemon 経由化するときも同じパターンが再出現する。 broadcast
+channel に乗せる別 channel を増やすたびに、 forwarder の error
+handling を見直すこと。
+
 ## 2026-05-03 — fix(daemon): SPEC-2077 Phase H1 GREEN review-driven hardening
 
 ### 事象
