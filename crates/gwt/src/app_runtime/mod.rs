@@ -2468,43 +2468,6 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn spawn_wizard_shell_window_async(
-        proxy: AppEventProxy,
-        project_root: String,
-        window_id: String,
-        mut config: ShellLaunchConfig,
-        profile_config_path: PathBuf,
-    ) {
-        let result = (|| {
-            proxy.send(UserEvent::LaunchProgress {
-                window_id: window_id.clone(),
-                message: "Preparing worktree...".to_string(),
-            });
-            resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
-            let worktree_path = config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(&project_root));
-            gwt_agent::LaunchEnvironment::from_active_profile(
-                &profile_config_path,
-                config.runtime_target,
-            )?
-            .with_project_root(&worktree_path)
-            .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
-
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                proxy.send(UserEvent::LaunchProgress {
-                    window_id: window_id.clone(),
-                    message: "Starting Docker service...".to_string(),
-                });
-            }
-
-            build_shell_process_launch(Path::new(&project_root), &mut config)
-        })();
-
-        proxy.send(UserEvent::ShellLaunchComplete { window_id, result });
-    }
-
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
             return;
