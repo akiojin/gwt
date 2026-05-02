@@ -146,13 +146,16 @@ impl AppRuntime {
             entry = entry.with_target_owners(targets);
         }
         match coordination::post_entry(&tab.project_root, entry) {
-            Ok(snapshot) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardEntries {
-                    id,
-                    entries: snapshot.board.entries,
-                },
-            )],
+            Ok(snapshot) => {
+                publish_board_change(&tab.project_root, snapshot.board.entries.len());
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardEntries {
+                        id,
+                        entries: snapshot.board.entries,
+                    },
+                )]
+            }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::BoardError {
@@ -162,6 +165,38 @@ impl AppRuntime {
             )],
         }
     }
+}
+
+/// Best-effort fan-out of a Board projection change to other gwt
+/// instances connected to the same daemon (SPEC-2077 Phase H1).
+///
+/// This is a side-channel notification: the local file watcher already
+/// triggers `UserEvent::BoardProjectionChanged` for the in-process GUI,
+/// and the on-disk projection remains the source of truth. The daemon
+/// publish gives **other** gwt instances on the same project a
+/// deterministic push (instead of relying on each instance's file
+/// watcher debounce). Any error is logged at debug level and ignored.
+#[cfg(unix)]
+fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
+    let result = gwt::daemon_publisher::publish_event(
+        project_root,
+        "board",
+        serde_json::json!({"entries_count": entries_count}),
+    );
+    if let Err(err) = result {
+        tracing::debug!(
+            error = %err,
+            project_root = %project_root.display(),
+            entries_count,
+            "board projection daemon publish failed (non-fatal)"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) {
+    // Daemon publishing is gated on Unix; the local file watcher
+    // continues to drive single-instance updates on other platforms.
 }
 
 fn sanitize_board_list(values: &[String]) -> Vec<String> {
