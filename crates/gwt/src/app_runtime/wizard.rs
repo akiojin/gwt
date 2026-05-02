@@ -26,9 +26,8 @@ use crate::UserEvent;
 
 use crate::ShellLaunchConfig;
 
-/// Map a knowledge bridge kind to the launch-wizard linked-issue kind so that
-/// branch names can be seeded as `{prefix}{kind}-{number}` per SPEC-2014 FR-024.
-/// `KnowledgeKind::Pr` returns `None` because Launch Agent is not exposed for PRs.
+/// `Pr => None` because Launch Agent is not exposed for PR bridges
+/// (`KnowledgeDetailView::launch_issue_number` stays `None` for PR entries).
 fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> Option<LinkedIssueKind> {
     match kind {
         KnowledgeKind::Issue => Some(LinkedIssueKind::Issue),
