@@ -35,6 +35,14 @@ use crate::cli::daemon::client::DaemonClient;
 const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
+/// Closure that produces the *current* daemon endpoint for each
+/// connect attempt. Returning `Err` puts the subscriber into
+/// retry-with-backoff mode (e.g. when no daemon is registered yet),
+/// while a successful resolve provides a fresh `DaemonEndpoint` —
+/// crucially, picking up any new `auth_token` / `bind` after a daemon
+/// restart.
+pub type EndpointResolver = dyn Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static;
+
 /// Owns the subscriber thread. Drop or call [`Self::stop`] to wind it
 /// down cleanly.
 pub struct DaemonSubscriber {
@@ -44,13 +52,34 @@ pub struct DaemonSubscriber {
 }
 
 impl DaemonSubscriber {
-    /// Spawn a subscriber thread for `endpoint`'s daemon. Each received
-    /// `DaemonFrame::Event { channel, payload }` invokes `on_event(channel,
-    /// payload)`. The callback runs on the subscriber thread; keep it
-    /// short and forward to your own queue (e.g. via a `Sender` clone)
-    /// if more work is needed.
+    /// Spawn a subscriber thread for a fixed `endpoint`. Convenience
+    /// shorthand for [`Self::spawn_with_resolver`] when the caller
+    /// guarantees the endpoint never changes (mostly tests with an
+    /// in-process daemon).
     pub fn spawn<F>(endpoint: DaemonEndpoint, channels: Vec<String>, on_event: F) -> Self
     where
+        F: Fn(String, serde_json::Value) + Send + Sync + 'static,
+    {
+        Self::spawn_with_resolver(move || Ok(endpoint.clone()), channels, on_event)
+    }
+
+    /// Spawn a subscriber thread that re-resolves its `DaemonEndpoint`
+    /// on every connect attempt. Each received
+    /// `DaemonFrame::Event { channel, payload }` invokes
+    /// `on_event(channel, payload)`. The callback runs on the
+    /// subscriber thread; keep it short and forward to your own queue
+    /// (e.g. via a `Sender` clone) if more work is needed.
+    ///
+    /// Re-resolving is what keeps subscribers healthy across daemon
+    /// restarts. When `gwtd daemon start` is killed and respawned, the
+    /// new daemon picks a fresh `auth_token`, so a subscriber that
+    /// caches the old endpoint would loop forever on handshake
+    /// rejection. Calling `resolver()` per session gives the caller a
+    /// chance to re-read the persisted endpoint file before each
+    /// reconnect.
+    pub fn spawn_with_resolver<R, F>(resolver: R, channels: Vec<String>, on_event: F) -> Self
+    where
+        R: Fn() -> Result<DaemonEndpoint, String> + Send + Sync + 'static,
         F: Fn(String, serde_json::Value) + Send + Sync + 'static,
     {
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -58,11 +87,12 @@ impl DaemonSubscriber {
         let stop_flag_inner = Arc::clone(&stop_flag);
         let shutdown_inner = Arc::clone(&shutdown);
         let callback = Arc::new(on_event);
+        let resolver: Arc<EndpointResolver> = Arc::new(resolver);
         let join_handle = thread::Builder::new()
             .name("gwt-daemon-subscriber".to_string())
             .spawn(move || {
                 run_loop(
-                    endpoint,
+                    resolver,
                     channels,
                     callback,
                     stop_flag_inner,
@@ -101,7 +131,7 @@ impl Drop for DaemonSubscriber {
 }
 
 fn run_loop(
-    endpoint: DaemonEndpoint,
+    resolver: Arc<EndpointResolver>,
     channels: Vec<String>,
     on_event: Arc<dyn Fn(String, serde_json::Value) + Send + Sync>,
     stop_flag: Arc<AtomicBool>,
@@ -120,14 +150,22 @@ fn run_loop(
 
     let mut backoff = RETRY_BACKOFF_MIN;
     while !stop_flag.load(Ordering::SeqCst) {
-        let endpoint_for_session = endpoint.clone();
+        let endpoint = match resolver() {
+            Ok(ep) => ep,
+            Err(err) => {
+                tracing::debug!(error = %err, "daemon subscriber: endpoint resolve failed, retrying");
+                sleep_with_stop(&stop_flag, &shutdown, backoff);
+                backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
+                continue;
+            }
+        };
         let channels_for_session = channels.clone();
         let callback_for_session = Arc::clone(&on_event);
         let shutdown_for_session = Arc::clone(&shutdown);
         let stop_flag_for_session = Arc::clone(&stop_flag);
         let session = runtime.block_on(async move {
             run_session(
-                endpoint_for_session,
+                endpoint,
                 channels_for_session,
                 callback_for_session,
                 shutdown_for_session,
@@ -355,6 +393,96 @@ mod tests {
         // Drop without sending any events; stop() must complete promptly.
         subscriber.stop();
 
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscriber_with_resolver_picks_up_endpoint_after_initial_failure() {
+        // Reflects the production race: a project tab opens before
+        // `gwtd daemon start` is invoked, so the first resolver call
+        // returns Err. Once the daemon comes up the resolver returns
+        // the live endpoint and the subscriber starts receiving
+        // events without needing a re-spawn.
+
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+        let endpoint = sample_endpoint(scope.clone(), &socket_path, "resolver-secret");
+
+        // The resolver returns Err the first 3 times, then Ok. This
+        // simulates the daemon coming up after the subscriber is
+        // already retrying.
+        let calls = Arc::new(Mutex::new(0usize));
+        let endpoint_for_resolver = endpoint.clone();
+        let calls_for_resolver = Arc::clone(&calls);
+        let resolver = move || -> Result<DaemonEndpoint, String> {
+            let mut guard = calls_for_resolver.lock().unwrap();
+            *guard += 1;
+            if *guard <= 3 {
+                Err("daemon not running".to_string())
+            } else {
+                Ok(endpoint_for_resolver.clone())
+            }
+        };
+
+        let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let received_for_cb = Arc::clone(&received);
+        let subscriber = DaemonSubscriber::spawn_with_resolver(
+            resolver,
+            vec!["board".to_string()],
+            move |channel, payload| {
+                received_for_cb.lock().unwrap().push((channel, payload));
+            },
+        );
+
+        // Now bring the daemon up. The resolver is on a backoff loop;
+        // wait long enough for it to call past the threshold and then
+        // start the server before the next backoff window.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let server_endpoint = endpoint.clone();
+        let server_socket = socket_path.clone();
+        let server_endpoint_path = endpoint_path.clone();
+        let hub = BroadcastHub::new();
+        let publisher = hub.clone();
+        let server_handle = tokio::spawn(async move {
+            server::run_server(server_endpoint, server_socket, server_endpoint_path, hub).await
+        });
+
+        // Wait for the daemon socket and then publish.
+        wait_for_socket(&socket_path).await;
+        let event = DaemonFrame::Event {
+            channel: "board".to_string(),
+            payload: json!({"entries": 11}),
+        };
+        for _ in 0..200 {
+            if publisher.publish("board", event.clone()) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Wait up to 5 s for the callback to record the event.
+        let mut delivered = false;
+        for _ in 0..500 {
+            if !received.lock().unwrap().is_empty() {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            delivered,
+            "expected resolver-based subscriber to receive event after daemon came up"
+        );
+        assert!(
+            *calls.lock().unwrap() >= 4,
+            "expected resolver to retry at least 3 times before succeeding"
+        );
+
+        subscriber.stop();
         server_handle.abort();
         let _ = server_handle.await;
     }

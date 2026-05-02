@@ -363,58 +363,57 @@ fn spawn_board_daemon_subscriber(
         DAEMON_PROTOCOL_VERSION,
     };
 
-    let scope = match RuntimeScope::from_project_root(&project_root, RuntimeTarget::Host) {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::debug!(
-                project_root = %project_root.display(),
-                error = %err,
-                "daemon subscriber: scope resolution failed"
-            );
-            return None;
-        }
-    };
-    let gwt_home = gwt_core::paths::gwt_home();
-    let action = match resolve_bootstrap_action(
-        &gwt_home,
-        &scope,
-        DAEMON_PROTOCOL_VERSION,
-        is_subscriber_pid_alive,
-    ) {
-        Ok(a) => a,
-        Err(err) => {
-            tracing::debug!(
-                project_root = %project_root.display(),
-                error = %err,
-                "daemon subscriber: bootstrap resolve failed"
-            );
-            return None;
-        }
-    };
-    let endpoint = match action {
-        DaemonBootstrapAction::Reuse(ep) => ep,
-        DaemonBootstrapAction::Spawn { .. } => {
-            tracing::debug!(
-                project_root = %project_root.display(),
-                "daemon subscriber: no daemon registered (will retry on next sync)"
-            );
-            return None;
+    // Validate that we *can* construct a `RuntimeScope` for this
+    // project before spawning the thread. Failures here are
+    // permanent (invalid path, etc) so there's no point retrying on
+    // every reconnect attempt.
+    if let Err(err) = RuntimeScope::from_project_root(&project_root, RuntimeTarget::Host) {
+        tracing::debug!(
+            project_root = %project_root.display(),
+            error = %err,
+            "daemon subscriber: scope resolution failed (subscriber not spawned)"
+        );
+        return None;
+    }
+
+    // Re-resolve the daemon endpoint on every connect attempt. This
+    // is essential because (a) a daemon that wasn't running when the
+    // tab opened may come up later, and (b) `gwtd daemon start` mints
+    // a fresh `auth_token` on every restart — caching the original
+    // endpoint would loop forever on handshake rejection.
+    let resolver_project_root = project_root.clone();
+    let resolver = move || -> Result<gwt_core::daemon::DaemonEndpoint, String> {
+        let scope = RuntimeScope::from_project_root(&resolver_project_root, RuntimeTarget::Host)
+            .map_err(|err| format!("scope: {err}"))?;
+        let gwt_home = gwt_core::paths::gwt_home();
+        let action = resolve_bootstrap_action(
+            &gwt_home,
+            &scope,
+            DAEMON_PROTOCOL_VERSION,
+            is_subscriber_pid_alive,
+        )
+        .map_err(|err| format!("bootstrap: {err}"))?;
+        match action {
+            DaemonBootstrapAction::Reuse(ep) => Ok(ep),
+            DaemonBootstrapAction::Spawn { .. } => Err("daemon not running".to_string()),
         }
     };
 
     let proxy_for_callback = proxy;
-    let project_root_for_callback = project_root.clone();
-    Some(gwt::daemon_subscriber::DaemonSubscriber::spawn(
-        endpoint,
-        vec!["board".to_string()],
-        move |channel, _payload| {
-            if channel == "board" {
-                let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
-                    project_root: project_root_for_callback.clone(),
-                });
-            }
-        },
-    ))
+    let project_root_for_callback = project_root;
+    Some(
+        gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+            resolver,
+            vec!["board".to_string()],
+            move |channel, _payload| {
+                if channel == "board" {
+                    let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
+                        project_root: project_root_for_callback.clone(),
+                    });
+                }
+            },
+        ),
+    )
 }
 
 #[cfg(unix)]

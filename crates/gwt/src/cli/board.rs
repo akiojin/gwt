@@ -100,28 +100,26 @@ pub(super) fn run<E: CliEnv>(
 /// level and ignored — local file is the source of truth.
 #[cfg(unix)]
 fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
-    // Fire-and-forget on a detached thread so `gwtd board post`
-    // returns immediately even if the daemon socket is briefly slow.
-    // The publish itself is bounded by the `daemon_publisher::
-    // publish_event` per-stage timeout (~200 ms).
-    let project_root_owned = project_root.to_path_buf();
-    let _ = std::thread::Builder::new()
-        .name("gwtd-board-daemon-publish".to_string())
-        .spawn(move || {
-            let result = crate::daemon_publisher::publish_event(
-                &project_root_owned,
-                "board",
-                serde_json::json!({"entries_count": entries_count}),
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root_owned.display(),
-                    entries_count,
-                    "gwtd board post: daemon publish failed (non-fatal)"
-                );
-            }
-        });
+    // CLI path runs in a short-lived process: `gwtd board post`
+    // returns to the shell immediately, so a detached publish thread
+    // would be killed before it finishes the connect/publish/ack
+    // round-trip (the daemon would then never see the broadcast).
+    // The publish is bounded by `daemon_publisher::publish_event`'s
+    // per-stage timeout (~200 ms, ~400 ms worst case), which is an
+    // acceptable amount of synchronous wall time for a CLI command.
+    let result = crate::daemon_publisher::publish_event(
+        project_root,
+        "board",
+        serde_json::json!({"entries_count": entries_count}),
+    );
+    if let Err(err) = result {
+        tracing::debug!(
+            error = %err,
+            project_root = %project_root.display(),
+            entries_count,
+            "gwtd board post: daemon publish failed (non-fatal)"
+        );
+    }
 }
 
 #[cfg(not(unix))]
