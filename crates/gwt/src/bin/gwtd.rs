@@ -98,12 +98,14 @@ fn format_daemon_help() -> String {
         "",
         "Subcommands:",
         "  start                                   Bootstrap and serve the runtime daemon",
-        "  status                                  Report whether a daemon is registered",
+        "  status                                  Report whether a daemon is registered + probe its socket",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
         "  - Endpoint metadata is persisted under ~/.gwt/projects/<repo>/runtime/daemon/.",
         "  - SIGINT / SIGTERM trigger graceful shutdown + endpoint file removal.",
+        "  - `status` reports `probe=ok` when the daemon's socket accepts a handshake within 1s,",
+        "    or `probe=failed:<reason>` when the endpoint file is stale or unreachable.",
         "",
     ]
     .join("\n")
