@@ -2990,6 +2990,13 @@
           status.classList.add("info");
         }
 
+        const stickyBottomThreshold = 64;
+        const previousScrollTop = timeline.scrollTop;
+        const previousScrollMax = timeline.scrollHeight - timeline.clientHeight;
+        const wasNearBottom =
+          previousScrollMax <= 0 ||
+          previousScrollMax - previousScrollTop <= stickyBottomThreshold;
+
         timeline.innerHTML = "";
         if (!state.loading && state.entries.length === 0) {
           timeline.appendChild(
@@ -3024,6 +3031,12 @@
           card.appendChild(meta);
           card.appendChild(createNode("div", "board-message-body", entry.body));
           timeline.appendChild(card);
+        }
+
+        if (wasNearBottom) {
+          timeline.scrollTop = timeline.scrollHeight;
+        } else {
+          timeline.scrollTop = previousScrollTop;
         }
 
         composer.innerHTML = "";
