@@ -31,7 +31,8 @@ use super::{
 };
 
 /// High-level runtime environment for the CLI. Kept as a trait so tests can
-/// inject a [`FakeIssueClient`] instead of spinning up real HTTP.
+/// inject a fake `IssueClient` (see `gwt-github`'s
+/// `client::fake::FakeIssueClient`) instead of spinning up real HTTP.
 pub trait CliEnv {
     type Client: IssueClient;
     fn client(&self) -> &Self::Client;

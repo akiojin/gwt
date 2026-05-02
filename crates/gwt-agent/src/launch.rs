@@ -53,7 +53,7 @@ fn compute_worktree_hash_for_dir(dir: &Path) -> Option<String> {
 pub struct ResolvedRunner {
     /// Executable to invoke (e.g., "claude", "bunx", "npx").
     pub executable: String,
-    /// Base args inserted before agent-specific args (e.g., ["@anthropic-ai/claude-code@1.2.3"]).
+    /// Base args inserted before agent-specific args (e.g., `["@anthropic-ai/claude-code@1.2.3"]`).
     pub base_args: Vec<String>,
 }
 
@@ -393,9 +393,9 @@ impl AgentLaunchBuilder {
 
     /// Supply a `CustomCodingAgent.env` table that should flow into the
     /// spawn env. Intended for SPEC-1921 FR-063: preset-seeded env tables
-    /// merge AFTER Common and agent-specific env, BEFORE [`env_overrides`],
-    /// so preset entries win over built-in defaults but never clobber
-    /// explicit caller overrides.
+    /// merge AFTER Common and agent-specific env, BEFORE the explicit
+    /// `env_overrides` field, so preset entries win over built-in
+    /// defaults but never clobber explicit caller overrides.
     pub fn custom_agent_env(mut self, env: HashMap<String, String>) -> Self {
         self.custom_agent_env = env;
         self

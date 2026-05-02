@@ -2,10 +2,10 @@
 //! `gwt-build-spec` skill (SPEC-1935 Phase 10, FR-014r).
 //!
 //! Mirrors the `skill_plan_spec_stop_check` structure but targets the
-//! `build-spec` state file. The shared decision body lives in
-//! [`super::skill_plan_spec_stop_check::decide`] so both handlers stay
-//! in lock-step regarding `stop_hook_active`, session isolation, and
-//! fail-open policy.
+//! `build-spec` state file. The shared decision body lives in the
+//! sibling `skill_plan_spec_stop_check::decide` (private) so both
+//! handlers stay in lock-step regarding `stop_hook_active`, session
+//! isolation, and fail-open policy.
 
 use std::{
     io::{self, Read},

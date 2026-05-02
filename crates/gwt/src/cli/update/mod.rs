@@ -3,7 +3,8 @@
 //! SPEC-1942 SC-027 split: `mod.rs` keeps the public CLI entry points
 //! (`UpdateRunMode`, `parse_args`, `run`, `run_internal_apply_update`,
 //! `run_internal_run_installer`). The `UpdateCliOps` trait and its production
-//! `RealUpdateCliOps` impl live in [`ops`]. Tests live in [`tests`].
+//! `RealUpdateCliOps` impl live in the private sibling `ops` module; tests
+//! live in the `#[cfg(test)] mod tests` sibling.
 
 mod ops;
 #[cfg(test)]

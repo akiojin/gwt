@@ -4,7 +4,7 @@
 //! hook dispatcher to talk to a running `gwtd` daemon over the local
 //! Unix domain socket.
 //!
-//! Wire format mirrors [`super::server::handle_connection`]:
+//! Wire format mirrors `super::server::handle_connection`:
 //!
 //! 1. Send one newline-delimited [`IpcHandshakeRequest`] line.
 //! 2. Read one newline-delimited [`IpcHandshakeResponse`] line.

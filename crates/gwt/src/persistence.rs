@@ -72,7 +72,7 @@ pub struct PersistedWindowState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     /// Wire-only color hint sent to the WebView. 送信直前に backend が
-    /// [`agent_id`] (または `preset` のフォールバック) から計算する。
+    /// `agent_id` フィールド (または `preset` のフォールバック) から計算する。
     /// disk には書かない (`skip_deserializing` + skip_serializing_if で
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
