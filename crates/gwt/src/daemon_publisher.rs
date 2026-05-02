@@ -37,17 +37,18 @@ use crate::cli::daemon::client::DaemonClient;
 
 /// Default per-stage timeout for the GUI / CLI hot path. 200 ms is
 /// generous for a local Unix-socket round-trip (typical is < 5 ms) but
-/// short enough that a hung daemon cannot freeze the UI for more than
-/// 400 ms total (connect + ack). Phase H1 GREEN handler integration
-/// trades the small worst-case stall for code-path simplicity.
-/// Callers needing a different budget should use
+/// short enough that a hung daemon cannot freeze the caller for more
+/// than 600 ms total (connect + send + ack — three independent
+/// stages, see [`publish_event_with_timeout`]). Phase H1 GREEN handler
+/// integration trades the small worst-case stall for code-path
+/// simplicity. Callers needing a different budget should use
 /// [`publish_event_with_timeout`].
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Publish `payload` to `channel` on the daemon for `project_root`.
 ///
-/// Default per-stage timeout (200 ms) bounds connect and ack
-/// independently, so total wall time is at most 400 ms even when the
+/// Default per-stage timeout (200 ms) bounds connect, send, and ack
+/// independently, so total wall time is at most 600 ms even when the
 /// daemon is hung. See [`publish_event_with_timeout`] when callers
 /// need a custom budget.
 pub fn publish_event(project_root: &Path, channel: &str, payload: Value) -> Result<(), String> {
