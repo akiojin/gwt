@@ -596,7 +596,9 @@ impl AppRuntime {
         let mut app = Self {
             tabs,
             active_tab_id,
-            recent_projects: dedupe_recent_projects(persisted.recent_projects),
+            recent_projects: prune_missing_recent_projects(dedupe_recent_projects(
+                persisted.recent_projects,
+            )),
             profile_selections: HashMap::new(),
             profile_config_path: None,
             runtimes: HashMap::new(),

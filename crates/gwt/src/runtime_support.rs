@@ -116,6 +116,26 @@ pub(crate) fn dedupe_recent_projects(
     deduped
 }
 
+/// Issue #1678: drop recent project entries whose paths no longer exist on
+/// disk. Called once at load time so subsequent `persist()` writes a clean
+/// list back. A separate function (rather than baked into `dedupe_*`) so
+/// tests and callers can exercise the path predicate without filesystem.
+pub(crate) fn prune_missing_recent_projects(
+    entries: Vec<gwt::RecentProjectEntry>,
+) -> Vec<gwt::RecentProjectEntry> {
+    prune_missing_recent_projects_with(entries, |path| path.exists())
+}
+
+pub(crate) fn prune_missing_recent_projects_with(
+    entries: Vec<gwt::RecentProjectEntry>,
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<gwt::RecentProjectEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| exists(&entry.path))
+        .collect()
+}
+
 pub(crate) fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
     ProjectOpenTarget {
         title: gwt::project_title_from_path(&path),
@@ -597,6 +617,8 @@ pub(crate) fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{front_door_route, FrontDoorRoute};
 
     fn argv(parts: &[&str]) -> Vec<String> {
@@ -775,6 +797,53 @@ mod tests {
             &super::RepoEnvOverrides::default(),
         );
         assert_eq!(coords, None);
+    }
+
+    #[test]
+    fn prune_missing_recent_projects_drops_entries_whose_paths_are_gone() {
+        // Issue #1678: stale entries must be removed before the next persist
+        // round-trip so disk state stops referring to deleted projects.
+        let exists_paths: std::collections::HashSet<String> = ["/tmp/exists-a", "/tmp/exists-b"]
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        let entries = vec![
+            gwt::RecentProjectEntry {
+                path: PathBuf::from("/tmp/exists-a"),
+                title: "alive a".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: PathBuf::from("/tmp/missing-x"),
+                title: "deleted x".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: PathBuf::from("/tmp/exists-b"),
+                title: "alive b".to_string(),
+                kind: gwt::ProjectKind::Bare,
+            },
+        ];
+
+        let pruned = super::prune_missing_recent_projects_with(entries, |path| {
+            exists_paths.contains(&path.to_string_lossy().to_string())
+        });
+
+        assert_eq!(pruned.len(), 2);
+        assert_eq!(pruned[0].title, "alive a");
+        assert_eq!(pruned[1].title, "alive b");
+    }
+
+    #[test]
+    fn prune_missing_recent_projects_returns_input_when_all_paths_exist() {
+        let entries = vec![gwt::RecentProjectEntry {
+            path: PathBuf::from("/tmp/here"),
+            title: "alive".to_string(),
+            kind: gwt::ProjectKind::Git,
+        }];
+        let pruned = super::prune_missing_recent_projects_with(entries.clone(), |_| true);
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].path, entries[0].path);
     }
 
     #[test]

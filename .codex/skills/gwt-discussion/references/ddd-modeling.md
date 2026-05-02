@@ -21,8 +21,8 @@ map to crate boundaries and major subsystems.
 | BC | Crate / Location | Responsibility |
 |---|---|---|
 | Core | `gwt-core` | Git operations, PTY management, configuration, data model |
-| TUI | `gwt-tui` | Terminal UI rendering, input handling, screen management |
-| Specs | `specs/` | Feature specification artifacts |
+| TUI | `gwt` | Terminal UI rendering, input handling, screen management |
+| Specs | GitHub Issue (`gwt-spec` label) | Feature specification artifacts |
 | Skills | `.claude/skills/` | Agent skill definitions |
 
 ### Identification process
@@ -93,7 +93,7 @@ and conversation. Prevents confusion from synonyms or overloaded terms.
 1. Extract domain terms from the intake memo and interview answers.
 2. Check each term against existing codebase usage:
    - Search with `gwt-project-search` for existing definitions.
-   - Check struct/enum/function names in `gwt-core` and `gwt-tui`.
+   - Check struct/enum/function names in `gwt-core` and `gwt`.
 3. For each term, write a one-sentence definition.
 4. Flag conflicts:
    - Term used differently in different parts of the codebase.
