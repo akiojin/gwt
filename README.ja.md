@@ -77,10 +77,18 @@ gwtd issue spec 1784 --section plan
 gwtd pr current
 gwtd board show
 gwtd hook workflow-policy
+gwtd daemon status            # プロジェクトごとの runtime daemon を確認
 ```
 
-managed hook と runtime 委譲は `gwtd` を使います。利用者が別の daemon
-プロセスを手動起動する必要はありません。
+managed hook と runtime 委譲は `gwtd` を使います。最初の `gwt` 実行や GUI
+起動時に、プロジェクトごとの runtime daemon が自動で立ち上がり、同じ
+リポジトリに繋がっている全 `gwt` インスタンスへイベントを fan-out
+します（例: 片方のウィンドウで Board に投稿した内容が、同じリポジトリの
+別インスタンスにも遅延なく届く）。GUI を閉じた後も daemon はバック
+グラウンドで動き続け、同じプロジェクトで次に `gwt` を起動した際は
+そのまま再利用されます。クラッシュ等で残った stale エントリは次回
+起動時に自動でクリーンアップされます。診断用に `gwtd daemon status`
+で現在の endpoint を確認できます。
 
 ## 基本フロー
 
