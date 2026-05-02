@@ -94,9 +94,9 @@ mod tests {
 
     use gwt_core::daemon::DaemonFrame;
     use serde_json::json;
-    use tokio::sync::broadcast::error::TryRecvError;
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-    use super::BroadcastHub;
+    use super::{BroadcastHub, DEFAULT_CHANNEL_CAPACITY};
 
     #[test]
     fn subscribe_creates_channel_lazily() {
@@ -185,5 +185,64 @@ mod tests {
 
         let received = rx.recv().await.expect("recv");
         assert_eq!(received, frame);
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_recovers_after_lag() {
+        // A subscriber that does not drain fast enough loses old
+        // frames once the publisher pushes more than
+        // `DEFAULT_CHANNEL_CAPACITY` items. The first post-lag
+        // `recv()` returns `RecvError::Lagged(skipped)`, but the
+        // subscription is NOT closed — the next `recv()` returns the
+        // newest still-buffered frame.
+        //
+        // The daemon's per-channel forwarder relies on this contract:
+        // it must distinguish `Lagged` (recoverable, log + continue)
+        // from `Closed` (terminal, break loop). A naive `match
+        // result { Err(_) => break }` would silently kill a slow
+        // subscriber's entire subscription on the very first lag,
+        // not just the dropped frames. This test pins the recovery
+        // semantic so the forwarder's `Lagged` branch stays correct.
+        let hub = BroadcastHub::new();
+        let mut rx = hub.subscribe("board");
+
+        // Push capacity + a few extras with no draining, forcing the
+        // broadcast channel to overwrite the oldest slots.
+        let overflow = DEFAULT_CHANNEL_CAPACITY + 4;
+        for i in 0..overflow {
+            hub.publish(
+                "board",
+                DaemonFrame::Event {
+                    channel: "board".into(),
+                    payload: json!({"seq": i}),
+                },
+            );
+        }
+
+        // First receive after overflow must surface the lag signal,
+        // not silently swallow or fail the subscription.
+        match rx.recv().await {
+            Err(RecvError::Lagged(skipped)) => {
+                assert!(
+                    skipped > 0,
+                    "expected a positive skipped count from RecvError::Lagged"
+                );
+            }
+            other => panic!("expected RecvError::Lagged, got {other:?}"),
+        }
+
+        // The subscription is still alive: the next recv returns a
+        // real frame. Confirms the forwarder's "log + continue"
+        // strategy will keep delivering the newest events.
+        match rx.recv().await {
+            Ok(DaemonFrame::Event { payload, .. }) => {
+                let seq = payload["seq"].as_u64().expect("seq u64");
+                assert!(
+                    seq < overflow as u64,
+                    "post-lag frame should still be from the recent burst"
+                );
+            }
+            other => panic!("expected event frame after lag recovery, got {other:?}"),
+        }
     }
 }

@@ -40,7 +40,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     runtime::Builder,
     signal::unix::{signal, SignalKind},
-    sync::{mpsc, Notify},
+    sync::{broadcast::error::RecvError, mpsc, Notify},
 };
 
 use super::broadcast::BroadcastHub;
@@ -319,11 +319,32 @@ async fn handle_connection(
                                                 break;
                                             }
                                         }
-                                        Err(err) => {
+                                        // `Lagged` is the broadcast
+                                        // channel's "you're behind by
+                                        // N frames" signal: capacity
+                                        // is `DEFAULT_CHANNEL_CAPACITY`
+                                        // (64) and a slow subscriber
+                                        // can drop frames if a publish
+                                        // burst overruns the
+                                        // forwarder's drain. The
+                                        // subscription itself is still
+                                        // healthy — keep reading the
+                                        // newer frames so the slow
+                                        // client recovers instead of
+                                        // silently losing the channel
+                                        // forever.
+                                        Err(RecvError::Lagged(skipped)) => {
+                                            tracing::warn!(
+                                                target: "gwtd::daemon",
+                                                channel = %channel_for_log,
+                                                skipped,
+                                                "broadcast receiver lagged; resuming with newer frames"
+                                            );
+                                        }
+                                        Err(RecvError::Closed) => {
                                             tracing::debug!(
                                                 target: "gwtd::daemon",
                                                 channel = %channel_for_log,
-                                                error = %err,
                                                 "broadcast receiver closed"
                                             );
                                             break;
