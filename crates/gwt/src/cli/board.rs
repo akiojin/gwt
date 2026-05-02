@@ -81,6 +81,7 @@ pub(super) fn run<E: CliEnv>(
             }
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
+            publish_board_change(env.repo_path(), snapshot.board.entries.len());
             out.push_str(&format!(
                 "board entries: {}\n",
                 snapshot.board.entries.len()
@@ -89,6 +90,35 @@ pub(super) fn run<E: CliEnv>(
         }
     };
     Ok(code)
+}
+
+/// Best-effort daemon broadcast after a CLI `gwtd board post` succeeds
+/// (SPEC-2077 Phase H1 GREEN). Mirrors the GUI handler in
+/// `app_runtime/board.rs`: notify subscribers via the daemon so other
+/// gwt instances on the same project see the new entry without
+/// waiting for their file watcher to fire. Errors are logged at debug
+/// level and ignored — local file is the source of truth.
+#[cfg(unix)]
+fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
+    let result = crate::daemon_publisher::publish_event(
+        project_root,
+        "board",
+        serde_json::json!({"entries_count": entries_count}),
+    );
+    if let Err(err) = result {
+        tracing::debug!(
+            error = %err,
+            project_root = %project_root.display(),
+            entries_count,
+            "gwtd board post: daemon publish failed (non-fatal)"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) {
+    // Daemon publishing is gated on Unix; CLI continues to drive the
+    // local file path on other platforms.
 }
 
 fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
