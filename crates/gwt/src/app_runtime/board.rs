@@ -178,19 +178,29 @@ impl AppRuntime {
 /// watcher debounce). Any error is logged at debug level and ignored.
 #[cfg(unix)]
 fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
-    let result = gwt::daemon_publisher::publish_event(
-        project_root,
-        "board",
-        serde_json::json!({"entries_count": entries_count}),
-    );
-    if let Err(err) = result {
-        tracing::debug!(
-            error = %err,
-            project_root = %project_root.display(),
-            entries_count,
-            "board projection daemon publish failed (non-fatal)"
-        );
-    }
+    // Fire-and-forget: spawn a detached thread so the GUI handler's
+    // `Vec<OutboundEvent>` return is never delayed by the daemon
+    // round-trip. The publish itself is bounded by the
+    // `daemon_publisher::publish_event` per-stage timeout (~200 ms),
+    // so the spawned thread can never linger long.
+    let project_root_owned = project_root.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("gwt-board-daemon-publish".to_string())
+        .spawn(move || {
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root_owned,
+                "board",
+                serde_json::json!({"entries_count": entries_count}),
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root_owned.display(),
+                    entries_count,
+                    "board projection daemon publish failed (non-fatal)"
+                );
+            }
+        });
 }
 
 #[cfg(not(unix))]
