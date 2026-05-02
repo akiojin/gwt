@@ -310,6 +310,29 @@ async fn handle_connection(
                     break;
                 }
             }
+            Ok(ClientFrame::Publish { channel, payload }) => {
+                // Fan the payload out to every subscriber of the
+                // channel. `publish` returns the number of receivers
+                // the daemon's broadcast::Sender queued to; we only log
+                // it, the publisher does not need delivery confirmation
+                // beyond the immediate Ack.
+                let queued = hub.publish(
+                    &channel,
+                    DaemonFrame::Event {
+                        channel: channel.clone(),
+                        payload,
+                    },
+                );
+                tracing::debug!(
+                    target: "gwtd::daemon",
+                    %channel,
+                    queued,
+                    "publish frame fanned out"
+                );
+                if out_tx.send(DaemonFrame::Ack).is_err() {
+                    break;
+                }
+            }
             Err(err) => {
                 tracing::warn!(target: "gwtd::daemon", frame = %trimmed, error = %err, "rejected unrecognized frame");
                 if out_tx
