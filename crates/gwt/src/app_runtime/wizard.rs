@@ -13,7 +13,10 @@
 //! handlers (Phase F2b / F3 scope) construct and mutate it; once those
 //! phases land the struct can move here too.
 
-use std::{path::Path, thread};
+use std::{
+    path::{Path, PathBuf},
+    thread,
+};
 
 use gwt::{
     KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
@@ -22,9 +25,7 @@ use gwt::{
 };
 use uuid::Uuid;
 
-use crate::UserEvent;
-
-use crate::ShellLaunchConfig;
+use crate::{ShellLaunchConfig, UserEvent};
 
 /// `Pr => None` because Launch Agent is not exposed for PR bridges
 /// (`KnowledgeDetailView::launch_issue_number` stays `None` for PR entries).
@@ -37,10 +38,11 @@ fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> Option<LinkedIssueKi
 }
 
 use super::{
-    branch_worktree_path, combined_window_id, detect_wizard_docker_context_and_status,
-    knowledge_error_event, knowledge_kind_for_preset, list_branch_entries_with_active_sessions,
-    normalize_branch_name, preferred_issue_launch_branch, synthetic_branch_entry, AppRuntime,
-    BackendEvent, IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent, WindowPreset,
+    branch_worktree_path, build_shell_process_launch, combined_window_id,
+    detect_wizard_docker_context_and_status, knowledge_error_event, knowledge_kind_for_preset,
+    list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
+    resolve_shell_launch_worktree, synthetic_branch_entry, AppEventProxy, AppRuntime, BackendEvent,
+    IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent, WindowPreset,
     WindowProcessStatus,
 };
 
@@ -483,6 +485,43 @@ impl AppRuntime {
         });
 
         Ok(events)
+    }
+
+    pub(crate) fn spawn_wizard_shell_window_async(
+        proxy: AppEventProxy,
+        project_root: String,
+        window_id: String,
+        mut config: ShellLaunchConfig,
+        profile_config_path: PathBuf,
+    ) {
+        let result = (|| {
+            proxy.send(UserEvent::LaunchProgress {
+                window_id: window_id.clone(),
+                message: "Preparing worktree...".to_string(),
+            });
+            resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
+            let worktree_path = config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&project_root));
+            gwt_agent::LaunchEnvironment::from_active_profile(
+                &profile_config_path,
+                config.runtime_target,
+            )?
+            .with_project_root(&worktree_path)
+            .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
+
+            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                proxy.send(UserEvent::LaunchProgress {
+                    window_id: window_id.clone(),
+                    message: "Starting Docker service...".to_string(),
+                });
+            }
+
+            build_shell_process_launch(Path::new(&project_root), &mut config)
+        })();
+
+        proxy.send(UserEvent::ShellLaunchComplete { window_id, result });
     }
 
     pub(super) fn refresh_open_launch_wizard_from_cache(&mut self) {
