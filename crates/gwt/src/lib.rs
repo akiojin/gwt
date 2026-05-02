@@ -55,7 +55,8 @@ pub use launch_wizard::{
     LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
     LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardPreviousProfile,
     LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
-    LaunchWizardView, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
+    ShellLaunchConfig,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]

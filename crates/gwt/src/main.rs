@@ -1000,6 +1000,7 @@ mod tests {
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 Vec::new(),
             ),
@@ -1105,6 +1106,7 @@ mod tests {
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
@@ -2307,14 +2309,32 @@ mod tests {
             prepared_ok[0].event,
             BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
-        assert!(
-            !runtime
-                .launch_wizard
-                .as_ref()
-                .expect("launch wizard")
-                .wizard
-                .is_hydrating
+        let issue_session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        assert!(!issue_session.wizard.is_hydrating);
+        assert_eq!(
+            issue_session.wizard.context.linked_issue_kind,
+            Some(gwt::LinkedIssueKind::Issue)
         );
+        assert_eq!(issue_session.wizard.context.linked_issue_number, Some(7));
+
+        runtime.launch_wizard = None;
+        let prepared_spec =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: "spec-1".to_string(),
+                knowledge_kind: KnowledgeKind::Spec,
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+                issue_number: 2014,
+                result: Ok("feature/demo".to_string()),
+            });
+        assert_eq!(prepared_spec.len(), 1);
+        let spec_session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        assert_eq!(
+            spec_session.wizard.context.linked_issue_kind,
+            Some(gwt::LinkedIssueKind::Spec)
+        );
+        assert_eq!(spec_session.wizard.context.linked_issue_number, Some(2014));
 
         runtime.launch_wizard = None;
         assert!(runtime
@@ -2404,6 +2424,7 @@ mod tests {
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 sample_wizard_stale_agent_options(),
                 Vec::new(),

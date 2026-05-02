@@ -3887,6 +3887,7 @@ exit 0
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 Vec::new(),
             ),
@@ -3940,6 +3941,7 @@ exit 0
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -4170,7 +4172,7 @@ exit 0
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
-            .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None)
+            .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
             .expect("open launch wizard");
 
         let view = runtime
@@ -4230,7 +4232,7 @@ exit 0
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
-            .open_launch_wizard_for_branch("tab-1", &repo, "feature/docker", None)
+            .open_launch_wizard_for_branch("tab-1", &repo, "feature/docker", None, None)
             .expect("open launch wizard");
 
         let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;

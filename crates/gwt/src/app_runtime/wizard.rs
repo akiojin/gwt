@@ -20,11 +20,23 @@ use std::{
 
 use gwt::{
     KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
-    LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView, WindowGeometry,
+    LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView, LinkedIssueKind,
+    WindowGeometry,
 };
 use uuid::Uuid;
 
 use crate::{ShellLaunchConfig, UserEvent};
+
+/// Map a knowledge bridge kind to the launch-wizard linked-issue kind so that
+/// branch names can be seeded as `{prefix}{kind}-{number}` per SPEC-2014 FR-024.
+/// `KnowledgeKind::Pr` returns `None` because Launch Agent is not exposed for PRs.
+fn linked_issue_kind_from_knowledge(kind: KnowledgeKind) -> Option<LinkedIssueKind> {
+    match kind {
+        KnowledgeKind::Issue => Some(LinkedIssueKind::Issue),
+        KnowledgeKind::Spec => Some(LinkedIssueKind::Spec),
+        KnowledgeKind::Pr => None,
+    }
+}
 
 use super::{
     branch_worktree_path, build_shell_process_launch, combined_window_id,
@@ -97,6 +109,7 @@ impl AppRuntime {
             &project_root,
             branch_name,
             linked_issue_number,
+            None,
         ) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
             Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
@@ -112,6 +125,7 @@ impl AppRuntime {
         project_root: &Path,
         branch_name: &str,
         linked_issue_number: Option<u64>,
+        linked_issue_kind: Option<LinkedIssueKind>,
     ) -> Result<(), String> {
         let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
@@ -140,6 +154,7 @@ impl AppRuntime {
                     docker_context,
                     docker_service_status,
                     linked_issue_number,
+                    linked_issue_kind,
                 },
                 agent_options,
                 quick_start_entries,
@@ -271,6 +286,7 @@ impl AppRuntime {
                 &project_root,
                 &branch_name,
                 Some(issue_number),
+                linked_issue_kind_from_knowledge(knowledge_kind),
             ) {
                 Ok(()) => vec![self.launch_wizard_state_outbound()],
                 Err(error) => vec![OutboundEvent::reply(
