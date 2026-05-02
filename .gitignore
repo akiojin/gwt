@@ -17,16 +17,10 @@ PLANS.md
 /target/
 **/*.rs.bk
 
-# Generated (Tauri build)
-/crates/gwt-tauri/gen/schemas/
-
 # npm wrapper (for bunx distribution)
 node_modules/
 bun.lock
 .pnpm-store/
-
-# Legacy npm lockfile (gwt-gui migrated to pnpm)
-gwt-gui/package-lock.json
 
 # Downloaded native binaries (postinstall downloads these)
 bin/gwt
@@ -73,9 +67,6 @@ temp/
 .tmp_pkg_extract/
 .worktrees/
 .tools/
-
-# MCP bridge lockfile (generated, not shared)
-gwt-mcp-bridge/pnpm-lock.yaml
 
 # Voice evaluation local assets
 tests/voice_eval/manifest.json
