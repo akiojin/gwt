@@ -515,8 +515,8 @@ mod tests {
         let (proxy, events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
-        let mut server = EmbeddedServer::start(&runtime, proxy, clients.clone(), pty_writers)
-            .expect("embedded server");
+        let mut server =
+            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("embedded server");
         let hook = server.hook_forward_target();
         let client = reqwest::blocking::Client::new();
 

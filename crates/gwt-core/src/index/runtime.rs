@@ -331,7 +331,7 @@ mod tests {
         std::fs::create_dir_all(&orphan).unwrap();
 
         let opts = ReconcileOptions {
-            index_root: idx.clone(),
+            index_root: idx,
             repo_hash: repo,
             active_worktree_paths: Vec::new(),
             legacy_worktree_dirs: Vec::new(),

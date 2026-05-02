@@ -2271,9 +2271,9 @@ impl AppRuntime {
             config.display_name,
             config.branch.as_ref().unwrap_or(&"workspace".to_string())
         );
-        let window =
-            tab.workspace
-                .add_window_with_title(WindowPreset::Agent, title.clone(), false, bounds);
+        let window = tab
+            .workspace
+            .add_window_with_title(WindowPreset::Agent, title, false, bounds);
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
@@ -5271,7 +5271,7 @@ exit 0
         runtime.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
             client_id: "client-1".to_string(),
             id: window_id.clone(),
-            project_root: repo.clone(),
+            project_root: repo,
             kind: gwt::KnowledgeKind::Issue,
             request_id: Some(33),
             selected_number: None,
@@ -5929,8 +5929,8 @@ exit 0
         fs::create_dir_all(&repo_a).expect("repo-a");
         fs::create_dir_all(&repo_b).expect("repo-b");
 
-        let pending = migration_pending_tab("tab-1", repo_a.clone());
-        let mut clean = sample_project_tab("tab-2", "Other", repo_b.clone(), ProjectKind::Git, &[]);
+        let pending = migration_pending_tab("tab-1", repo_a);
+        let mut clean = sample_project_tab("tab-2", "Other", repo_b, ProjectKind::Git, &[]);
         clean.migration_pending = false;
         let runtime = sample_runtime(temp.path(), vec![pending, clean], Some("tab-1"));
 
@@ -5953,7 +5953,7 @@ exit 0
         let new_worktree = project.join("develop");
         fs::create_dir_all(&new_worktree).expect("new worktree");
 
-        let tab = migration_pending_tab("tab-1", project.clone());
+        let tab = migration_pending_tab("tab-1", project);
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
         let events = runtime.handle_migration_done("tab-1", &new_worktree);

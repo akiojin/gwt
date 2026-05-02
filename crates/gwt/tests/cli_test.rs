@@ -1035,7 +1035,7 @@ fn red_97_dispatch_issue_view_prefers_warm_cache() {
     env.client.seed(IssueSnapshot {
         title: "Fetched title".to_string(),
         updated_at: UpdatedAt::new("fetched"),
-        ..snapshot.clone()
+        ..snapshot
     });
 
     let code = dispatch(&mut env, &argv(&["gwt", "issue", "view", "42"]));
@@ -1073,7 +1073,7 @@ fn red_98_dispatch_issue_view_refresh_fetches_and_rewrites_cache() {
     Cache::new(tmp.path().to_path_buf())
         .write_snapshot(&old_snapshot)
         .unwrap();
-    env.client.seed(new_snapshot.clone());
+    env.client.seed(new_snapshot);
 
     let code = dispatch(
         &mut env,

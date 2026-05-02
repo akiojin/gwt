@@ -922,15 +922,11 @@ mod tests {
 
         write_events(
             legacy_one.join(EVENTS_FILE_NAME).as_path(),
-            &[CoordinationEvent::MessageAppended {
-                entry: second.clone(),
-            }],
+            &[CoordinationEvent::MessageAppended { entry: second }],
         );
         write_events(
             legacy_two.join(EVENTS_FILE_NAME).as_path(),
-            &[CoordinationEvent::MessageAppended {
-                entry: first.clone(),
-            }],
+            &[CoordinationEvent::MessageAppended { entry: first }],
         );
 
         migrate_legacy_coordination_dirs(&project_dir, &[legacy_one.clone(), legacy_two.clone()])

@@ -416,7 +416,7 @@ mod tests {
                 PersistedSessionTabState {
                     id: "project-1".to_string(),
                     title: "demo".to_string(),
-                    project_root: project_root.clone(),
+                    project_root,
                     kind: ProjectKind::Git,
                 },
                 PersistedSessionTabState {

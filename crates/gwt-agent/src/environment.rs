@@ -31,7 +31,7 @@ const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
 
 /// Return the current host process environment with GUI-launch PATH gaps filled.
 pub fn host_process_env() -> HashMap<String, String> {
-    hydrate_host_base_env(std::env::vars().collect::<Vec<_>>())
+    hydrate_host_base_env(std::env::vars())
 }
 
 /// Fill common GUI-launch PATH gaps in a host base environment.

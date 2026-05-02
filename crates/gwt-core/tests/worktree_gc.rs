@@ -32,9 +32,9 @@ fn orphan_worktree_directory_is_removed() {
     fs::create_dir_all(&live_dir).unwrap();
 
     let opts = ReconcileOptions {
-        index_root: index_root.clone(),
-        repo_hash: repo.clone(),
-        active_worktree_paths: vec![live_wt.clone()],
+        index_root,
+        repo_hash: repo,
+        active_worktree_paths: vec![live_wt],
         legacy_worktree_dirs: Vec::new(),
     };
     reconcile_repo(&opts).unwrap();
@@ -57,7 +57,7 @@ fn legacy_dotgwt_index_directory_is_removed() {
         index_root: tmp.path().join("index"),
         repo_hash: repo,
         active_worktree_paths: vec![worktree.clone()],
-        legacy_worktree_dirs: vec![worktree.clone()],
+        legacy_worktree_dirs: vec![worktree],
     };
     reconcile_repo(&opts).unwrap();
 
@@ -113,7 +113,7 @@ fn legacy_worktree_scoped_specs_directory_is_removed_for_live_worktree() {
     fs::create_dir_all(&live_files).unwrap();
 
     let opts = ReconcileOptions {
-        index_root: index_root.clone(),
+        index_root,
         repo_hash: repo,
         active_worktree_paths: vec![live_wt],
         legacy_worktree_dirs: Vec::new(),

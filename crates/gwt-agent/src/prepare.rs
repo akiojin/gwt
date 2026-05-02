@@ -872,7 +872,7 @@ fn resolve_docker_package_runner(
         )
         .map_err(|err| err.to_string())?;
         if output.status.success() {
-            return Ok(candidate.into_exec_program(agent_args.clone()));
+            return Ok(candidate.into_exec_program(agent_args));
         }
     }
 

@@ -204,7 +204,7 @@ impl Cache {
         let snapshot = IssueSnapshot {
             number: IssueNumber(meta.number),
             title: meta.title.clone(),
-            body: body.clone(),
+            body,
             labels: meta.labels.clone(),
             state: match meta.state.as_str() {
                 "closed" => IssueState::Closed,

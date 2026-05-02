@@ -155,7 +155,7 @@ fn authenticated_handshake_accepts_matching_contract_and_rejects_mismatch() {
     let request = IpcHandshakeRequest {
         protocol_version: DAEMON_PROTOCOL_VERSION,
         auth_token: "secret-token".into(),
-        scope: scope.clone(),
+        scope,
     };
     let response = IpcHandshakeResponse {
         protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -334,7 +334,7 @@ fn validate_handshake_rejects_scope_mismatch() {
     )
     .unwrap();
     let endpoint = DaemonEndpoint::new(
-        scope_a.clone(),
+        scope_a,
         4242,
         "http://127.0.0.1:7777".into(),
         "secret-token".into(),
@@ -377,7 +377,7 @@ fn validate_handshake_rejects_with_reason() {
     let request = IpcHandshakeRequest {
         protocol_version: DAEMON_PROTOCOL_VERSION,
         auth_token: "secret-token".into(),
-        scope: scope.clone(),
+        scope,
     };
     let response = IpcHandshakeResponse {
         protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -412,7 +412,7 @@ fn validate_handshake_rejects_without_reason() {
     let request = IpcHandshakeRequest {
         protocol_version: DAEMON_PROTOCOL_VERSION,
         auth_token: "secret-token".into(),
-        scope: scope.clone(),
+        scope,
     };
     let response = IpcHandshakeResponse {
         protocol_version: DAEMON_PROTOCOL_VERSION,

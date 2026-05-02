@@ -592,7 +592,7 @@ mod tests {
         );
         legacy.insert(
             "display_name".into(),
-            toml::Value::String(session.display_name.clone()),
+            toml::Value::String(session.display_name),
         );
 
         std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
@@ -923,7 +923,7 @@ mod tests {
         );
         legacy.insert(
             "display_name".into(),
-            toml::Value::String(session.display_name.clone()),
+            toml::Value::String(session.display_name),
         );
 
         std::fs::write(path, toml::to_string(&legacy).unwrap()).unwrap();
