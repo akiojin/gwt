@@ -509,4 +509,122 @@ mod tests {
         server_handle.abort();
         let _ = server_handle.await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscriber_resolver_picks_up_new_token_between_sessions() {
+        // Production scenario: `gwtd daemon start` is killed and
+        // respawned. The new daemon picks a fresh `auth_token`, so a
+        // subscriber that cached the old endpoint at spawn time would
+        // loop forever on handshake rejection. `spawn_with_resolver`
+        // re-reads the persisted endpoint between sessions; this
+        // regression test exercises the contract that the auth_token
+        // is read FRESH per session, not cached at spawn.
+        //
+        // Locks in the Codex P1 fix from PR #2298.
+        //
+        // Test strategy: stand up exactly one daemon configured with
+        // the "live" token, but seed the resolver with a stale token
+        // first. The first connect attempt hits the daemon's
+        // handshake check and is rejected. After we swap the
+        // resolver's state to the live token, the next session
+        // (driven by run_loop's reconnect-on-error path) succeeds and
+        // events flow through.
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+
+        // The daemon expects "live-token". The resolver initially
+        // returns "stale-token", which mirrors a subscriber holding a
+        // pre-restart cache.
+        let live_endpoint = sample_endpoint(scope.clone(), &socket_path, "live-token");
+        let stale_endpoint = sample_endpoint(scope.clone(), &socket_path, "stale-token");
+
+        // Start the daemon with the live token.
+        let hub = BroadcastHub::new();
+        let publisher = hub.clone();
+        let server_endpoint = live_endpoint.clone();
+        let server_socket = socket_path.clone();
+        let server_endpoint_path = endpoint_path.clone();
+        let server_handle = tokio::spawn(async move {
+            server::run_server(server_endpoint, server_socket, server_endpoint_path, hub).await
+        });
+        wait_for_socket(&socket_path).await;
+
+        // Resolver state holds the currently-believed endpoint. We
+        // mutate it during the test to simulate
+        // `paths::gwt_home()` -> `endpoint.json` being rewritten by a
+        // restarted daemon.
+        let resolver_state = Arc::new(Mutex::new(stale_endpoint.clone()));
+        let resolver_state_for_resolver = Arc::clone(&resolver_state);
+        let resolver = move || -> Result<DaemonEndpoint, String> {
+            Ok(resolver_state_for_resolver.lock().unwrap().clone())
+        };
+
+        let received: Arc<Mutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let received_for_cb = Arc::clone(&received);
+        let subscriber = DaemonSubscriber::spawn_with_resolver(
+            resolver,
+            vec!["board".to_string()],
+            move |channel, payload| {
+                received_for_cb.lock().unwrap().push((channel, payload));
+            },
+        );
+
+        // Give the subscriber time to attempt at least one stale
+        // connect. The handshake will be rejected because the token
+        // doesn't match.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Sanity check: nothing has been received yet — the session
+        // never reached a Subscribe Ack because the handshake failed.
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "stale token must not deliver events"
+        );
+
+        // Simulate the daemon-restart endpoint refresh: rewrite the
+        // resolver's cache to the live token. The next reconnect
+        // attempt should now succeed.
+        *resolver_state.lock().unwrap() = live_endpoint.clone();
+
+        // Publish a marker event. The publish loop spins until the
+        // subscriber's Subscribe is processed and a forwarder is
+        // attached on the daemon side.
+        let event = DaemonFrame::Event {
+            channel: "board".to_string(),
+            payload: json!({"phase": "post-restart"}),
+        };
+        for _ in 0..400 {
+            if publisher.publish("board", event.clone()) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Wait up to 8 s for the callback to record the event. The
+        // reconnect path can backoff up to 5 s between sessions, so
+        // allow generous slack.
+        let mut delivered = false;
+        for _ in 0..800 {
+            if received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, payload)| payload == &json!({"phase": "post-restart"}))
+            {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            delivered,
+            "expected subscriber to reconnect with rotated auth_token and receive event"
+        );
+
+        subscriber.stop();
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
 }
