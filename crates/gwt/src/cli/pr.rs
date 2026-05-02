@@ -1,6 +1,7 @@
+use gwt_git::PrStatus;
 use gwt_github::SpecOpsError;
 
-use crate::cli::{CliEnv, CliParseError, PrCommand};
+use crate::cli::{CliEnv, CliParseError, PrChecksSummary, PrCommand, PrReview, PrReviewThread};
 
 pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
     let mut it = args.iter().peekable();
@@ -63,7 +64,7 @@ pub(super) fn run<E: CliEnv>(
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
-                Some(pr) => super::render_pr(out, &pr),
+                Some(pr) => render_pr(out, &pr),
                 None => out.push_str("no current pull request\n"),
             }
             0
@@ -81,7 +82,7 @@ pub(super) fn run<E: CliEnv>(
                 .create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
                 .map_err(super::io_as_api_error)?;
             out.push_str("created pull request\n");
-            super::render_pr(out, &pr);
+            render_pr(out, &pr);
             0
         }
         PrCommand::Edit {
@@ -98,12 +99,12 @@ pub(super) fn run<E: CliEnv>(
                 .edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
                 .map_err(super::io_as_api_error)?;
             out.push_str("updated pull request\n");
-            super::render_pr(out, &pr);
+            render_pr(out, &pr);
             0
         }
         PrCommand::View { number } => {
             let pr = env.fetch_pr(number).map_err(super::io_as_api_error)?;
-            super::render_pr(out, &pr);
+            render_pr(out, &pr);
             0
         }
         PrCommand::Comment { number, file } => {
@@ -117,14 +118,14 @@ pub(super) fn run<E: CliEnv>(
             let reviews = env
                 .fetch_pr_reviews(number)
                 .map_err(super::io_as_api_error)?;
-            super::render_pr_reviews(out, &reviews);
+            render_pr_reviews(out, &reviews);
             0
         }
         PrCommand::ReviewThreads { number } => {
             let threads = env
                 .fetch_pr_review_threads(number)
                 .map_err(super::io_as_api_error)?;
-            super::render_pr_review_threads(out, &threads);
+            render_pr_review_threads(out, &threads);
             0
         }
         PrCommand::ReviewThreadsReplyAndResolve { number, file } => {
@@ -141,7 +142,7 @@ pub(super) fn run<E: CliEnv>(
             let report = env
                 .fetch_pr_checks(number)
                 .map_err(super::io_as_api_error)?;
-            super::render_pr_checks(out, &report);
+            render_pr_checks(out, &report);
             0
         }
     };
@@ -255,6 +256,85 @@ fn parse_pr_edit_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
         file,
         add_labels,
     })
+}
+
+pub(super) fn render_pr(out: &mut String, pr: &PrStatus) {
+    out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
+    out.push_str(&format!("url: {}\n", pr.url));
+    out.push_str(&format!("ci: {}\n", pr.ci_status));
+    out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
+    out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
+    out.push_str(&format!("review: {}\n", pr.review_status));
+}
+
+pub(super) fn render_pr_checks(out: &mut String, summary: &PrChecksSummary) {
+    out.push_str(&format!("summary: {}\n", summary.summary));
+    out.push_str(&format!("ci: {}\n", summary.ci_status));
+    out.push_str(&format!("merge: {}\n", summary.merge_status));
+    out.push_str(&format!("review: {}\n", summary.review_status));
+    if summary.checks.is_empty() {
+        out.push_str("no checks\n");
+        return;
+    }
+    for check in &summary.checks {
+        out.push_str(&format!(
+            "- {} [{} / {}]\n",
+            check.name, check.state, check.conclusion
+        ));
+        if !check.workflow.is_empty() {
+            out.push_str(&format!("  workflow: {}\n", check.workflow));
+        }
+        if !check.url.is_empty() {
+            out.push_str(&format!("  url: {}\n", check.url));
+        }
+    }
+}
+
+pub(super) fn render_pr_reviews(out: &mut String, reviews: &[PrReview]) {
+    if reviews.is_empty() {
+        out.push_str("no reviews\n");
+        return;
+    }
+    for review in reviews {
+        out.push_str(&format!(
+            "=== review:{} [{}] by {} at {} ===\n",
+            review.id, review.state, review.author, review.submitted_at
+        ));
+        if !review.body.is_empty() {
+            out.push_str(&review.body);
+            out.push('\n');
+        }
+    }
+}
+
+pub(super) fn render_pr_review_threads(out: &mut String, threads: &[PrReviewThread]) {
+    if threads.is_empty() {
+        out.push_str("no review threads\n");
+        return;
+    }
+    for thread in threads {
+        out.push_str(&format!(
+            "=== thread:{} resolved={} outdated={} path={} line={} ===\n",
+            thread.id,
+            thread.is_resolved,
+            thread.is_outdated,
+            if thread.path.is_empty() {
+                "-"
+            } else {
+                thread.path.as_str()
+            },
+            thread
+                .line
+                .map(|line| line.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        ));
+        for comment in &thread.comments {
+            out.push_str(&format!(
+                "--- comment:{} by {} ({}) ---\n{}\n",
+                comment.id, comment.author, comment.updated_at, comment.body
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
