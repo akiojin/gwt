@@ -108,21 +108,9 @@ pub fn publish_event_with_timeout(
     })
 }
 
-fn is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    // SAFETY: kill(pid, 0) only probes the process; we never deliver a
-    // real signal. Returns 0 if alive, -1 with ESRCH otherwise.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
-}
+// Liveness probe shared with `cli::daemon` and `main`; see
+// `crate::process::is_process_alive`.
+use crate::process::is_process_alive as is_alive;
 
 #[cfg(test)]
 mod tests {

@@ -21,6 +21,7 @@ pub mod migration;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
+pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
 pub mod window_state;

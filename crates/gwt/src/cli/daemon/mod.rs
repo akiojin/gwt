@@ -325,37 +325,12 @@ fn start_daemon<E: CliEnv>(_env: &mut E, out: &mut String) -> Result<i32, SpecOp
     Ok(2)
 }
 
-fn is_process_alive_pid(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(pid, 0) returns 0 if the process exists, -1 with
-        // ESRCH if it does not. We never deliver a real signal.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        if rc == 0 {
-            return true;
-        }
-        let err = std::io::Error::last_os_error();
-        // EPERM means the process exists but we lack permission to signal it.
-        matches!(err.raw_os_error(), Some(libc::EPERM))
-    }
-    #[cfg(not(unix))]
-    {
-        // The long-running daemon currently only runs under cfg(unix);
-        // `start_daemon` is a stub on every other platform. Reporting
-        // every persisted endpoint as "alive" therefore surfaced
-        // permanent-stale entries in `gwtd daemon status`. Returning
-        // `false` here lets `resolve_bootstrap_action` treat the
-        // endpoint as dead on platforms where no daemon can actually
-        // be running, so the file gets cleaned up on the next status
-        // / start. When Windows named-pipe support lands, this branch
-        // should switch to a real liveness probe (e.g.
-        // `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...)`).
-        false
-    }
-}
+// Liveness probe lives in `crate::process::is_process_alive` so the
+// three daemon-related callers (this file, daemon_publisher, main)
+// share one definition. The narrow `|pid| pid == self.pid` predicate
+// used by `prepare_daemon_front_door_for_path` is intentionally NOT
+// the same function; see Issue #2338.
+use crate::process::is_process_alive as is_process_alive_pid;
 
 #[cfg(test)]
 mod tests {

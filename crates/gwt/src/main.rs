@@ -418,21 +418,10 @@ fn spawn_board_daemon_subscriber(
     )
 }
 
+// Liveness probe shared with `cli::daemon` and `daemon_publisher`;
+// see `gwt::process::is_process_alive`.
 #[cfg(unix)]
-fn is_subscriber_pid_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    // SAFETY: kill(pid, 0) only probes the process; no signal is delivered.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    matches!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM)
-    )
-}
+use gwt::process::is_process_alive as is_subscriber_pid_alive;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
