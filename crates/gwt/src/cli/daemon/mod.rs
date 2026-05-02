@@ -45,6 +45,13 @@ pub(super) fn parse(args: &[String]) -> Result<DaemonCommand, CliParseError> {
             ensure_no_extra_args(args.get(1..).unwrap_or(&[]))?;
             Ok(DaemonCommand::Status)
         }
+        Some("subscribe") => {
+            let channels: Vec<String> = args[1..].to_vec();
+            if channels.is_empty() {
+                return Err(CliParseError::Usage);
+            }
+            Ok(DaemonCommand::Subscribe { channels })
+        }
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -65,6 +72,7 @@ pub(super) fn run<E: CliEnv>(
     match cmd {
         DaemonCommand::Start => start_daemon(env, out),
         DaemonCommand::Status => report_status(env, out),
+        DaemonCommand::Subscribe { channels } => subscribe_command(env, channels, out),
     }
 }
 
@@ -160,6 +168,75 @@ fn probe_daemon_endpoint(
     _endpoint: &gwt_core::daemon::DaemonEndpoint,
 ) -> Result<DaemonStatus, String> {
     Err("probe not implemented on this platform".to_string())
+}
+
+#[cfg(unix)]
+fn subscribe_command<E: CliEnv>(
+    env: &mut E,
+    channels: Vec<String>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let scope = resolve_scope(env)?;
+    let gwt_home = gwt_core::paths::gwt_home();
+    let action = resolve_bootstrap_action(
+        &gwt_home,
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        is_process_alive_pid,
+    )
+    .map_err(|err| config_error(err.to_string()))?;
+
+    let endpoint = match action {
+        DaemonBootstrapAction::Reuse(endpoint) => endpoint,
+        DaemonBootstrapAction::Spawn { endpoint_path } => {
+            out.push_str(&format!(
+                "gwtd daemon subscribe: no daemon registered (endpoint={})\n",
+                endpoint_path.display()
+            ));
+            return Ok(2);
+        }
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| config_error(format!("tokio runtime build failed: {err}")))?;
+    runtime.block_on(async {
+        let mut client = client::DaemonClient::connect(&endpoint)
+            .await
+            .map_err(|err| config_error(format!("daemon connect failed: {err}")))?;
+        client
+            .send_frame(&ClientFrame::Subscribe { channels })
+            .await
+            .map_err(|err| config_error(format!("subscribe send failed: {err}")))?;
+        let _ack: DaemonFrame = client
+            .read_frame()
+            .await
+            .map_err(|err| config_error(format!("subscribe ack failed: {err}")))?;
+        loop {
+            let frame: DaemonFrame = client
+                .read_frame()
+                .await
+                .map_err(|err| config_error(format!("read event failed: {err}")))?;
+            let line = serde_json::to_string(&frame)
+                .map_err(|err| config_error(format!("serialize event failed: {err}")))?;
+            writeln!(env.stdout(), "{line}")
+                .map_err(|err| config_error(format!("write stdout failed: {err}")))?;
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn subscribe_command<E: CliEnv>(
+    _env: &mut E,
+    _channels: Vec<String>,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    out.push_str(
+        "gwtd daemon subscribe: not implemented on this platform; \
+         subscribe support requires Unix domain sockets.\n",
+    );
+    Ok(2)
 }
 
 #[cfg(unix)]
@@ -267,6 +344,23 @@ mod tests {
     fn parse_recognises_status() {
         let cmd = parse(&[s("status")]).expect("parse");
         assert_eq!(cmd, DaemonCommand::Status);
+    }
+
+    #[test]
+    fn parse_recognises_subscribe_with_channels() {
+        let cmd = parse(&[s("subscribe"), s("board"), s("runtime-status")]).expect("parse");
+        assert_eq!(
+            cmd,
+            DaemonCommand::Subscribe {
+                channels: vec!["board".to_string(), "runtime-status".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_rejects_subscribe_without_channels() {
+        let err = parse(&[s("subscribe")]).unwrap_err();
+        assert!(matches!(err, CliParseError::Usage));
     }
 
     #[test]
