@@ -1,6 +1,6 @@
-use gwt_github::{Cache, IssueClient, IssueNumber, SpecOpsError};
+use gwt_github::{Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState, SpecOpsError};
 
-use crate::cli::{CliEnv, CliParseError, IssueCommand};
+use crate::cli::{CliEnv, CliParseError, IssueCommand, LinkedPrSummary};
 
 pub(super) fn parse(args: &[String]) -> Result<IssueCommand, CliParseError> {
     let mut it = args.iter().peekable();
@@ -43,17 +43,17 @@ pub(super) fn run<E: CliEnv>(
     let code = match cmd {
         IssueCommand::View { number, refresh } => {
             let entry = super::load_or_refresh_issue(env, IssueNumber(number), refresh)?;
-            super::render_issue(out, &entry.snapshot);
+            render_issue(out, &entry.snapshot);
             0
         }
         IssueCommand::Comments { number, refresh } => {
             let entry = super::load_or_refresh_issue(env, IssueNumber(number), refresh)?;
-            super::render_issue_comments(out, &entry.snapshot);
+            render_issue_comments(out, &entry.snapshot);
             0
         }
         IssueCommand::LinkedPrs { number, refresh } => {
             let linked_prs = super::load_or_refresh_linked_prs(env, IssueNumber(number), refresh)?;
-            super::render_linked_prs(out, &linked_prs);
+            render_linked_prs(out, &linked_prs);
             0
         }
         IssueCommand::Create {
@@ -159,6 +159,56 @@ fn parse_issue_comment_args(args: &[&String]) -> Result<IssueCommand, CliParseEr
             file: args[2].clone(),
         }),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
+    }
+}
+
+pub(super) fn issue_state_label(state: IssueState) -> &'static str {
+    match state {
+        IssueState::Open => "OPEN",
+        IssueState::Closed => "CLOSED",
+    }
+}
+
+pub(super) fn render_issue(out: &mut String, snapshot: &IssueSnapshot) {
+    out.push_str(&format!(
+        "#{} [{}] {}\n",
+        snapshot.number.0,
+        issue_state_label(snapshot.state),
+        snapshot.title
+    ));
+    if !snapshot.labels.is_empty() {
+        out.push_str(&format!("labels: {}\n", snapshot.labels.join(", ")));
+    }
+    out.push_str(&format!("updated_at: {}\n\n", snapshot.updated_at.0));
+    if !snapshot.body.is_empty() {
+        out.push_str(snapshot.body.trim_end_matches('\n'));
+        out.push('\n');
+    }
+}
+
+pub(super) fn render_issue_comments(out: &mut String, snapshot: &IssueSnapshot) {
+    if snapshot.comments.is_empty() {
+        out.push_str("no comments\n");
+        return;
+    }
+    for comment in &snapshot.comments {
+        out.push_str(&format!(
+            "=== comment:{} ({}) ===\n{}\n",
+            comment.id.0, comment.updated_at.0, comment.body
+        ));
+    }
+}
+
+pub(super) fn render_linked_prs(out: &mut String, linked_prs: &[LinkedPrSummary]) {
+    if linked_prs.is_empty() {
+        out.push_str("no linked pull requests\n");
+        return;
+    }
+    for pr in linked_prs {
+        out.push_str(&format!(
+            "#{} [{}] {}\n{}\n",
+            pr.number, pr.state, pr.title, pr.url
+        ));
     }
 }
 

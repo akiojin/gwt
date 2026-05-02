@@ -42,10 +42,7 @@ use std::{
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
 use gwt_git::PrStatus;
-use gwt_github::{
-    cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, IssueSnapshot, IssueState,
-    SpecOpsError,
-};
+use gwt_github::{cache::write_atomic, ApiError, Cache, IssueClient, IssueNumber, SpecOpsError};
 
 /// Compact linked PR summary used by `gwtd issue linked-prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -597,135 +594,6 @@ fn io_as_api_error(err: io::Error) -> SpecOpsError {
 pub(crate) fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-fn issue_state_label(state: IssueState) -> &'static str {
-    match state {
-        IssueState::Open => "OPEN",
-        IssueState::Closed => "CLOSED",
-    }
-}
-
-fn render_issue(out: &mut String, snapshot: &IssueSnapshot) {
-    out.push_str(&format!(
-        "#{} [{}] {}\n",
-        snapshot.number.0,
-        issue_state_label(snapshot.state),
-        snapshot.title
-    ));
-    if !snapshot.labels.is_empty() {
-        out.push_str(&format!("labels: {}\n", snapshot.labels.join(", ")));
-    }
-    out.push_str(&format!("updated_at: {}\n\n", snapshot.updated_at.0));
-    if !snapshot.body.is_empty() {
-        out.push_str(snapshot.body.trim_end_matches('\n'));
-        out.push('\n');
-    }
-}
-
-fn render_issue_comments(out: &mut String, snapshot: &IssueSnapshot) {
-    if snapshot.comments.is_empty() {
-        out.push_str("no comments\n");
-        return;
-    }
-    for comment in &snapshot.comments {
-        out.push_str(&format!(
-            "=== comment:{} ({}) ===\n{}\n",
-            comment.id.0, comment.updated_at.0, comment.body
-        ));
-    }
-}
-
-fn render_linked_prs(out: &mut String, linked_prs: &[LinkedPrSummary]) {
-    if linked_prs.is_empty() {
-        out.push_str("no linked pull requests\n");
-        return;
-    }
-    for pr in linked_prs {
-        out.push_str(&format!(
-            "#{} [{}] {}\n{}\n",
-            pr.number, pr.state, pr.title, pr.url
-        ));
-    }
-}
-
-fn render_pr(out: &mut String, pr: &PrStatus) {
-    out.push_str(&format!("#{} [{}] {}\n", pr.number, pr.state, pr.title));
-    out.push_str(&format!("url: {}\n", pr.url));
-    out.push_str(&format!("ci: {}\n", pr.ci_status));
-    out.push_str(&format!("mergeable: {}\n", pr.effective_merge_status()));
-    out.push_str(&format!("merge_state: {}\n", pr.merge_state_status));
-    out.push_str(&format!("review: {}\n", pr.review_status));
-}
-
-fn render_pr_checks(out: &mut String, summary: &PrChecksSummary) {
-    out.push_str(&format!("summary: {}\n", summary.summary));
-    out.push_str(&format!("ci: {}\n", summary.ci_status));
-    out.push_str(&format!("merge: {}\n", summary.merge_status));
-    out.push_str(&format!("review: {}\n", summary.review_status));
-    if summary.checks.is_empty() {
-        out.push_str("no checks\n");
-        return;
-    }
-    for check in &summary.checks {
-        out.push_str(&format!(
-            "- {} [{} / {}]\n",
-            check.name, check.state, check.conclusion
-        ));
-        if !check.workflow.is_empty() {
-            out.push_str(&format!("  workflow: {}\n", check.workflow));
-        }
-        if !check.url.is_empty() {
-            out.push_str(&format!("  url: {}\n", check.url));
-        }
-    }
-}
-
-fn render_pr_reviews(out: &mut String, reviews: &[PrReview]) {
-    if reviews.is_empty() {
-        out.push_str("no reviews\n");
-        return;
-    }
-    for review in reviews {
-        out.push_str(&format!(
-            "=== review:{} [{}] by {} at {} ===\n",
-            review.id, review.state, review.author, review.submitted_at
-        ));
-        if !review.body.is_empty() {
-            out.push_str(&review.body);
-            out.push('\n');
-        }
-    }
-}
-
-fn render_pr_review_threads(out: &mut String, threads: &[PrReviewThread]) {
-    if threads.is_empty() {
-        out.push_str("no review threads\n");
-        return;
-    }
-    for thread in threads {
-        out.push_str(&format!(
-            "=== thread:{} resolved={} outdated={} path={} line={} ===\n",
-            thread.id,
-            thread.is_resolved,
-            thread.is_outdated,
-            if thread.path.is_empty() {
-                "-"
-            } else {
-                thread.path.as_str()
-            },
-            thread
-                .line
-                .map(|line| line.to_string())
-                .unwrap_or_else(|| "-".to_string())
-        ));
-        for comment in &thread.comments {
-            out.push_str(&format!(
-                "--- comment:{} by {} ({}) ---\n{}\n",
-                comment.id, comment.author, comment.updated_at, comment.body
-            ));
-        }
-    }
 }
 
 fn load_or_refresh_issue<E: CliEnv>(
@@ -2097,9 +1965,9 @@ fn main() -> ExitCode {
         let issue = sample_issue_snapshot();
         let pr = sample_pr_status();
 
-        render_issue(&mut out, &issue);
-        render_issue_comments(&mut out, &issue);
-        render_linked_prs(
+        crate::cli::issue::render_issue(&mut out, &issue);
+        crate::cli::issue::render_issue_comments(&mut out, &issue);
+        crate::cli::issue::render_linked_prs(
             &mut out,
             &[LinkedPrSummary {
                 number: 128,
@@ -2108,8 +1976,8 @@ fn main() -> ExitCode {
                 url: pr.url.clone(),
             }],
         );
-        render_pr(&mut out, &pr);
-        render_pr_checks(
+        crate::cli::pr::render_pr(&mut out, &pr);
+        crate::cli::pr::render_pr_checks(
             &mut out,
             &PrChecksSummary {
                 summary: "All checks passed".to_string(),
@@ -2127,7 +1995,7 @@ fn main() -> ExitCode {
                 }],
             },
         );
-        render_pr_reviews(
+        crate::cli::pr::render_pr_reviews(
             &mut out,
             &[PrReview {
                 id: "review-1".to_string(),
@@ -2137,7 +2005,7 @@ fn main() -> ExitCode {
                 body: "Looks good.".to_string(),
             }],
         );
-        render_pr_review_threads(
+        crate::cli::pr::render_pr_review_threads(
             &mut out,
             &[PrReviewThread {
                 comments: vec![PrReviewThreadComment {
@@ -2344,7 +2212,10 @@ fn main() -> ExitCode {
         assert!(ensure_no_remaining_args([check].iter()).is_err());
 
         assert!(matches!(parse_hook_args(&[]), Err(CliParseError::Usage)));
-        assert_eq!(issue_state_label(IssueState::Closed), "CLOSED");
+        assert_eq!(
+            crate::cli::issue::issue_state_label(IssueState::Closed),
+            "CLOSED"
+        );
         assert!(io_as_api_error(io::Error::other("boom"))
             .to_string()
             .contains("boom"));
@@ -2393,9 +2264,9 @@ fn main() -> ExitCode {
         };
         let mut out = String::new();
 
-        render_issue_comments(&mut out, &issue);
-        render_linked_prs(&mut out, &[]);
-        render_pr_checks(
+        crate::cli::issue::render_issue_comments(&mut out, &issue);
+        crate::cli::issue::render_linked_prs(&mut out, &[]);
+        crate::cli::pr::render_pr_checks(
             &mut out,
             &PrChecksSummary {
                 summary: "pending".to_string(),
@@ -2405,8 +2276,8 @@ fn main() -> ExitCode {
                 checks: Vec::new(),
             },
         );
-        render_pr_reviews(&mut out, &[]);
-        render_pr_review_threads(&mut out, &[]);
+        crate::cli::pr::render_pr_reviews(&mut out, &[]);
+        crate::cli::pr::render_pr_review_threads(&mut out, &[]);
 
         assert!(out.contains("no comments"));
         assert!(out.contains("no linked pull requests"));
