@@ -12,7 +12,9 @@
 //! enter the listen loop.
 
 #[cfg(unix)]
-mod server;
+pub mod client;
+#[cfg(unix)]
+pub(super) mod server;
 
 use std::path::PathBuf;
 
