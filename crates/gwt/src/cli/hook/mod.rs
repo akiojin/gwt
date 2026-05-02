@@ -127,3 +127,225 @@ pub enum HookError {
     #[error("invalid hook event: {0}")]
     InvalidEvent(String),
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-1942 Phase 4: in-process hook dispatch + daemon-front-door bootstrap
+// (moved here from cli.rs as part of family helper migration). All entry
+// points stay reachable via super::hook::* from cli.rs and env.rs.
+// ---------------------------------------------------------------------------
+
+use gwt_github::{client::ApiError, SpecOpsError};
+
+use crate::cli::CliEnv;
+
+fn io_as_api_error(err: io::Error) -> SpecOpsError {
+    SpecOpsError::from(ApiError::Network(err.to_string()))
+}
+
+pub fn run_hook<E: CliEnv>(env: &mut E, name: &str, rest: &[String]) -> Result<i32, SpecOpsError> {
+    run_daemon_hook(env, name, rest)
+}
+
+#[cfg(test)]
+pub(crate) fn daemon_hook_argv(name: &str, rest: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "gwtd".to_string(),
+        "__internal".to_string(),
+        "daemon-hook".to_string(),
+        name.to_string(),
+    ];
+    argv.extend(rest.iter().cloned());
+    argv
+}
+
+#[cfg(test)]
+pub(crate) fn write_internal_command_output<E: CliEnv>(
+    env: &mut E,
+    output: crate::cli::env::InternalCommandOutput,
+) -> Result<i32, SpecOpsError> {
+    env.stdout()
+        .write_all(&output.stdout)
+        .map_err(io_as_api_error)?;
+    env.stdout().flush().map_err(io_as_api_error)?;
+    env.stderr()
+        .write_all(&output.stderr)
+        .map_err(io_as_api_error)?;
+    env.stderr().flush().map_err(io_as_api_error)?;
+    Ok(output.status)
+}
+
+pub fn prepare_daemon_front_door_for_path(project_root: &std::path::Path) -> Result<(), String> {
+    if !project_root.exists() {
+        return Ok(());
+    }
+
+    refresh_managed_assets_for_hook_front_door(project_root)?;
+
+    crate::index_worker::bootstrap_project_index_for_path(project_root)?;
+
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        project_root,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .map_err(|err| err.to_string())?;
+    let gwt_home = gwt_core::paths::gwt_home();
+    let action = gwt_core::daemon::resolve_bootstrap_action(
+        &gwt_home,
+        &scope,
+        gwt_core::daemon::DAEMON_PROTOCOL_VERSION,
+        |pid| pid == std::process::id(),
+    )
+    .map_err(|err| err.to_string())?;
+
+    if let gwt_core::daemon::DaemonBootstrapAction::Spawn { endpoint_path } = action {
+        let endpoint = gwt_core::daemon::DaemonEndpoint::new(
+            scope,
+            std::process::id(),
+            "internal://gwt-front-door".to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+        gwt_core::daemon::persist_endpoint(&endpoint_path, &endpoint)
+            .map_err(|err| err.to_string())?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn refresh_managed_assets_for_hook_front_door(
+    project_root: &std::path::Path,
+) -> Result<(), String> {
+    if gwt_git::Repository::discover(project_root).is_err() {
+        return Ok(());
+    }
+    crate::managed_assets::refresh_managed_gwt_assets_for_worktree(project_root)
+        .map_err(|err| err.to_string())
+}
+
+pub fn run_daemon_hook<E: CliEnv>(
+    env: &mut E,
+    name: &str,
+    rest: &[String],
+) -> Result<i32, SpecOpsError> {
+    use crate::cli::hook::{
+        block_bash_policy, event_dispatcher, skill_build_spec_stop_check,
+        skill_discussion_stop_check, skill_plan_spec_stop_check, workflow_policy, HookKind,
+        HookOutput,
+    };
+
+    let Some(kind) = HookKind::from_name(name) else {
+        let _ = writeln!(env.stderr(), "gwtd hook: unknown hook '{name}'");
+        return Ok(2);
+    };
+    let stdin = env.read_stdin().map_err(io_as_api_error)?;
+
+    fn emit_hook_output<E: CliEnv>(env: &mut E, output: &HookOutput) -> i32 {
+        match output.serialize_to(env.stdout()) {
+            Ok(()) => output.exit_code(),
+            Err(err) => {
+                let _ = writeln!(env.stderr(), "gwtd hook: failed to serialize output: {err}");
+                1
+            }
+        }
+    }
+    fn emit_hook_error<E: CliEnv>(env: &mut E, name: &str, err: impl std::fmt::Display) -> i32 {
+        let _ = writeln!(env.stderr(), "gwtd hook {name}: {err}");
+        1
+    }
+
+    match kind {
+        HookKind::Event => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(env.stderr(), "gwtd hook event: missing <event> argument");
+                return Ok(2);
+            };
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            match event_dispatcher::handle_with_input(
+                event,
+                &stdin,
+                &cwd,
+                current_session.as_deref(),
+            ) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::RuntimeState => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwtd hook runtime-state: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match crate::daemon_runtime::handle_runtime_state(event, &stdin) {
+                Ok(()) => Ok(0),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::CoordinationEvent => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwtd hook coordination-event: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match crate::daemon_runtime::handle_coordination_event(event, &stdin) {
+                Ok(()) => Ok(0),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::BoardReminder => {
+            let Some(event) = rest.first() else {
+                let _ = writeln!(
+                    env.stderr(),
+                    "gwtd hook board-reminder: missing <event> argument"
+                );
+                return Ok(2);
+            };
+            match crate::cli::hook::board_reminder::handle_with_input(event, &stdin) {
+                Ok(output) => Ok(emit_hook_output(env, &output)),
+                Err(err) => Ok(emit_hook_error(env, name, err)),
+            }
+        }
+        HookKind::BlockBashPolicy => match block_bash_policy::handle_with_input(&stdin) {
+            Ok(output) => Ok(emit_hook_output(env, &output)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::WorkflowPolicy => match workflow_policy::handle_with_input(&stdin) {
+            Ok(output) => Ok(emit_hook_output(env, &output)),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::Forward => match crate::daemon_runtime::handle_forward(&stdin) {
+            Ok(()) => Ok(0),
+            Err(err) => Ok(emit_hook_error(env, name, err)),
+        },
+        HookKind::SkillDiscussionStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let output = skill_discussion_stop_check::handle_with_input(&cwd, &stdin);
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillPlanSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_plan_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
+        HookKind::SkillBuildSpecStopCheck => {
+            let cwd = env.repo_path().to_path_buf();
+            let current_session = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok();
+            let output = skill_build_spec_stop_check::handle_with_input(
+                &cwd,
+                &stdin,
+                current_session.as_deref(),
+            );
+            Ok(emit_hook_output(env, &output))
+        }
+    }
+}
