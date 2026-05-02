@@ -19,30 +19,30 @@ In SPEC mode, it reconciles all artifacts. In standalone mode, it verifies user 
 
 ### 3. Checklist verification
 
-#### checklists/acceptance.md
+#### Acceptance verification (tasks section)
 
 - Each acceptance criterion reflects actual tested behavior.
 - No criterion is marked "accepted" without a corresponding passing test.
 
-#### checklists/tdd.md
+#### TDD verification (tasks section)
 
 - Each entry reflects actual verification evidence (test names, command output).
 - No entry claims coverage that does not exist.
 
-### 4. progress.md consistency
+### 4. tasks section consistency
 
-- Progress entries do not claim completion that artifacts or code do not support.
-- The final progress entry summarizes the overall implementation state accurately.
+- tasks セクションのチェックボックスがアーティファクトやコードで裏付けられていない完了を主張していない。
+- 最終的な tasks セクションの状態が全体の実装状況を正確に要約している。
 
 ### 5. Code verification
 
 Run all verification commands and confirm success:
 
 ```bash
-cargo test -p gwt-core -p gwt-tui
+cargo test -p gwt-core -p gwt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt -- --check
-cargo build -p gwt-tui
+cargo build -p gwt
 ```
 
 ## Standalone mode checks

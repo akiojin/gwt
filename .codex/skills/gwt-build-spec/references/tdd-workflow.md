@@ -97,4 +97,4 @@ When in doubt, write the test. A skipped test is a potential regression.
 
 - Narrow scope first: `cargo test -p gwt-core -- test_name`
 - Module scope: `cargo test -p gwt-core`
-- Full suite: `cargo test -p gwt-core -p gwt-tui`
+- Full suite: `cargo test -p gwt-core -p gwt`
