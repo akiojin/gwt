@@ -311,11 +311,19 @@ async fn handle_connection(
                 }
             }
             Ok(ClientFrame::Publish { channel, payload }) => {
-                // Fan the payload out to every subscriber of the
-                // channel. `publish` returns the number of receivers
-                // the daemon's broadcast::Sender queued to; we only log
-                // it, the publisher does not need delivery confirmation
-                // beyond the immediate Ack.
+                // Enqueue the Ack into our `out_tx` *before* the
+                // broadcast fan-out so a client that is both
+                // subscribed and publishing on the same connection
+                // never observes its own broadcast Event arrive
+                // before the Ack for the Publish that triggered it.
+                // Without this ordering the spawned per-channel
+                // forwarder task can race the Publish reader and
+                // push `DaemonFrame::Event` into `out_tx` first,
+                // desynchronizing any caller doing a simple
+                // `send_frame(Publish) -> read_frame::<Ack>` flow.
+                if out_tx.send(DaemonFrame::Ack).is_err() {
+                    break;
+                }
                 let queued = hub.publish(
                     &channel,
                     DaemonFrame::Event {
@@ -329,9 +337,6 @@ async fn handle_connection(
                     queued,
                     "publish frame fanned out"
                 );
-                if out_tx.send(DaemonFrame::Ack).is_err() {
-                    break;
-                }
             }
             Err(err) => {
                 tracing::warn!(target: "gwtd::daemon", frame = %trimmed, error = %err, "rejected unrecognized frame");
