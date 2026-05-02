@@ -10,12 +10,18 @@
 //! 2. Read one newline-delimited [`IpcHandshakeResponse`] line.
 //! 3. Validate using [`validate_handshake`]; bail if the daemon
 //!    rejected the handshake or reported a protocol mismatch.
-//! 4. After handshake, [`DaemonClient::send_frame`] writes a JSON line
-//!    and [`DaemonClient::read_ack`] reads the daemon's ack line.
+//! 4. After handshake, [`DaemonClient::send_frame`] writes a typed
+//!    `ClientFrame` JSON line and [`DaemonClient::read_frame`]
+//!    deserializes the daemon's response (`DaemonFrame::Ack` /
+//!    `Event` / `Error` / `Status`).
 //!
-//! Phase H1〜H4 will graft hook-envelope routing onto the post-handshake
-//! frame loop. For Phase 2 the client only needs to *prove* end-to-end
-//! IPC works so future phases can route real payloads through it.
+//! Phase H1 (board projection daemon broadcast) uses this client
+//! through [`crate::daemon_publisher::publish_event`] and
+//! [`crate::daemon_subscriber::DaemonSubscriber`]. Phase H2-H4 will
+//! reuse the same primitives for runtime status / hook events /
+//! launch lifecycle without changing this module's surface — the
+//! typed frame schema is already extensible via new
+//! `ClientFrame` / `DaemonFrame` variants.
 
 #![cfg(unix)]
 
@@ -74,16 +80,9 @@ impl DaemonClient {
         write_json_line(&mut self.writer, value).await
     }
 
-    /// Read the daemon's ack frame as a generic JSON value. Phase H
-    /// callers will replace this with typed responses keyed off
-    /// [`gwt_core::daemon::HookEnvelope`] result types.
-    pub async fn read_ack(&mut self) -> Result<serde_json::Value, String> {
-        read_json_line(&mut self.reader)
-            .await?
-            .ok_or_else(|| "daemon closed connection while awaiting ack".to_string())
-    }
-
-    /// Convenience: read a typed JSON frame from the daemon.
+    /// Read a typed JSON frame from the daemon. The caller picks the
+    /// concrete `T` (typically `DaemonFrame`) so the deserializer
+    /// validates the wire shape against the protocol enum.
     pub async fn read_frame<T: serde::de::DeserializeOwned>(&mut self) -> Result<T, String> {
         read_json_line(&mut self.reader)
             .await?
