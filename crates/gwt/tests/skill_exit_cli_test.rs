@@ -11,7 +11,7 @@ use gwt_core::skill_state::{self, SkillState};
 use tempfile::TempDir;
 
 fn argv(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
+    parts.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn new_env() -> (TestEnv, TempDir) {

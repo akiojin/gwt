@@ -75,7 +75,7 @@ fn repeated_writes_overwrite_and_leave_no_tmp_residue() {
     // Only the canonical file should exist — no `.tmp-*` siblings.
     let mut entries: Vec<String> = fs::read_dir(dir.path())
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();

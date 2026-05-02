@@ -42,7 +42,7 @@ impl ClientHub {
         let (tx, rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         self.clients
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(client_id, tx);
         rx
     }
@@ -50,12 +50,15 @@ impl ClientHub {
     pub(super) fn unregister(&self, client_id: &str) {
         self.clients
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(client_id);
     }
 
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let mut clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stale_clients = Vec::new();
         for outbound in events {
             let payload = serde_json::to_string(&outbound.event).expect("backend event json");
@@ -440,7 +443,9 @@ mod tests {
             FrontendEvent::FrontendReady,
         );
 
-        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
             [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady }]
@@ -463,7 +468,9 @@ mod tests {
             },
         );
 
-        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
             [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data } }]
@@ -486,7 +493,10 @@ mod tests {
             )]);
         }
 
-        let clients = hub.clients.lock().unwrap_or_else(|p| p.into_inner());
+        let clients = hub
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             !clients.contains_key("slow-client"),
             "lagging websocket client should be unregistered once its queue is full"
@@ -641,7 +651,9 @@ mod tests {
             .expect("authorized hook request");
         assert_eq!(accepted.status(), HttpStatusCode::NO_CONTENT);
 
-        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(recorded.iter().any(|user_event| {
             matches!(
                 user_event,

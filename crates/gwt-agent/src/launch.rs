@@ -705,7 +705,7 @@ impl AgentLaunchBuilder {
             .get(GWT_SESSION_RUNTIME_PATH_ENV)
             .or_else(|| env_vars.get(GWT_SESSION_RUNTIME_PATH_ENV))
             .map(PathBuf::from)
-            .and_then(|runtime_path| runtime_path.parent().map(|dir| dir.to_path_buf()))
+            .and_then(|runtime_path| runtime_path.parent().map(std::path::Path::to_path_buf))
             .map(|dir| dir.to_string_lossy().into_owned())
     }
 

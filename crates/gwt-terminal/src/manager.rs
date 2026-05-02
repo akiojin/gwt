@@ -119,7 +119,7 @@ impl PaneManager {
 
     /// List all pane IDs.
     pub fn list_panes(&self) -> Vec<&str> {
-        self.panes.keys().map(|s| s.as_str()).collect()
+        self.panes.keys().map(std::string::String::as_str).collect()
     }
 
     /// Number of active panes.

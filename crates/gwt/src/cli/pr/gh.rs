@@ -183,7 +183,7 @@ pub(crate) fn fetch_pr_reviews_via_gh(
         .map(|value| PrReview {
             id: value
                 .get("id")
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .map(|v| v.to_string())
                 .or_else(|| {
                     value
@@ -291,18 +291,18 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 .to_string(),
             is_resolved: node
                 .get("isResolved")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             is_outdated: node
                 .get("isOutdated")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
             path: node
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            line: node.get("line").and_then(|v| v.as_u64()),
+            line: node.get("line").and_then(serde_json::Value::as_u64),
             comments: node
                 .get("comments")
                 .and_then(|v| v.get("nodes"))

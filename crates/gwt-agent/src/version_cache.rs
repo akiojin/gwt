@@ -162,7 +162,7 @@ impl VersionCache {
         });
 
         for version in versions {
-            if entry.versions.last().map(|v| v.as_str()) == Some(version.as_str()) {
+            if entry.versions.last().map(std::string::String::as_str) == Some(version.as_str()) {
                 continue;
             }
             entry.versions.push(version);

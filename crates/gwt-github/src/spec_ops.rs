@@ -324,7 +324,7 @@ fn strip_body_section(body: &str, name: &SectionName) -> String {
 fn rewrite_index_map(body: &str, index: &SectionsIndex) -> String {
     // Render a new index block and replace the existing one.
     let mut rendered = String::from("<!-- sections:\n");
-    for (name, location) in index.0.iter() {
+    for (name, location) in &index.0 {
         match location {
             SectionLocation::Body => {
                 rendered.push_str(&format!("{}=body\n", name.0));
@@ -365,7 +365,7 @@ fn render_body(
         meta.id, meta.version
     ));
     out.push_str("<!-- sections:\n");
-    for (name, location) in routing.0.iter() {
+    for (name, location) in &routing.0 {
         match location {
             SectionLocation::Body => {
                 out.push_str(&format!("{}=body\n", name.0));
@@ -387,7 +387,7 @@ fn render_body(
     }
     out.push_str("-->\n\n");
 
-    for (name, location) in routing.0.iter() {
+    for (name, location) in &routing.0 {
         if let SectionLocation::Body = location {
             if let Some(content) = sections.get(name) {
                 out.push_str(&format!("<!-- artifact:{} BEGIN -->\n", name.0));

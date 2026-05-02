@@ -195,7 +195,9 @@ fn parse_flag_u32_parses_number() {
 
 #[test]
 fn run_check_only_returns_zero_in_ci() {
-    let _guard = CI_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = CI_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("CI", "true");
     let code = run(UpdateRunMode::CheckOnly);
     std::env::remove_var("CI");
@@ -204,7 +206,9 @@ fn run_check_only_returns_zero_in_ci() {
 
 #[test]
 fn run_apply_returns_zero_in_ci() {
-    let _guard = CI_ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = CI_ENV_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("CI", "true");
     let code = run(UpdateRunMode::Apply);
     std::env::remove_var("CI");

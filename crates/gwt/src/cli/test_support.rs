@@ -185,7 +185,7 @@ fn main() -> ExitCode {
 pub(crate) fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     let _lock = fake_gh_test_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     compile_fake_gh(temp.path());
 

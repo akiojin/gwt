@@ -3033,7 +3033,7 @@ pub fn build_builtin_agent_options(
                 installed_version: detected.and_then(|detected| detected.version.clone()),
                 versions: cache
                     .get(&agent_id)
-                    .map(|versions| versions.to_vec())
+                    .map(<[std::string::String]>::to_vec)
                     .unwrap_or_default(),
                 custom_agent: None,
             }
@@ -4227,7 +4227,7 @@ mod tests {
 
         state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
         state.apply(LaunchWizardAction::SetBranchName {
-            value: "".to_string(),
+            value: String::new(),
         });
         state.apply(LaunchWizardAction::Submit);
 

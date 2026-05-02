@@ -123,7 +123,7 @@ pub(crate) fn dedupe_recent_projects(
 pub(crate) fn prune_missing_recent_projects(
     entries: Vec<gwt::RecentProjectEntry>,
 ) -> Vec<gwt::RecentProjectEntry> {
-    prune_missing_recent_projects_with(entries, |path| path.exists())
+    prune_missing_recent_projects_with(entries, std::path::Path::exists)
 }
 
 pub(crate) fn prune_missing_recent_projects_with(
@@ -622,7 +622,7 @@ mod tests {
     use super::{front_door_route, FrontDoorRoute};
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|part| part.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

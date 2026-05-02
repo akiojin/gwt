@@ -115,7 +115,7 @@ impl AppRuntime {
             return Vec::new();
         }
         if let Some(tab) = self.tab(&tab_id) {
-            for window in tab.workspace.persisted().windows.iter() {
+            for window in &tab.workspace.persisted().windows {
                 self.resize_runtime_to_window(&combined_window_id(&tab_id, &window.id));
             }
         }

@@ -406,7 +406,7 @@ mod tests {
     fn hook_front_door_refresh_migrates_stale_multi_hook_settings() {
         let _env_lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let status = gwt_core::process::hidden_command("git")
             .arg("init")

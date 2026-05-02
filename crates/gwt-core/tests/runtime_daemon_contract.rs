@@ -289,7 +289,7 @@ fn daemon_endpoint_is_usable_returns_false_for_empty_auth_token() {
         scope.clone(),
         4242,
         "http://127.0.0.1:7777".into(),
-        "".into(),
+        String::new(),
         "0.1.0".into(),
     );
     assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION, |_| true));

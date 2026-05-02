@@ -18,7 +18,7 @@ use gwt::cli::hook::{event_dispatcher, HookOutput};
 use gwt::cli::{dispatch, TestEnv};
 
 fn argv(strs: &[&str]) -> Vec<String> {
-    strs.iter().map(|s| s.to_string()).collect()
+    strs.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -82,7 +82,7 @@ fn runtime_state_missing_event_argument_exits_two() {
 fn runtime_state_invalid_event_exits_one() {
     let _env_lock = env_test_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Set GWT_SESSION_RUNTIME_PATH so `handle` gets past the silent
     // no-op branch and actually calls `write_for_event`, which in turn
     // surfaces `InvalidEvent`.
@@ -196,7 +196,7 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
 fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
     let _env_lock = env_test_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let tmp = tempfile::tempdir().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
@@ -237,7 +237,7 @@ fn event_dispatcher_preserves_pre_tool_use_block_json_contract() {
 fn event_dispatcher_non_blocking_events_are_silent_without_live_runtime() {
     let _env_lock = env_test_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
     let _session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
     let tmp = tempfile::tempdir().unwrap();

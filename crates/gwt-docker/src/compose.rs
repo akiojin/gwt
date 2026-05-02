@@ -62,18 +62,18 @@ fn parse_compose_content(content: &str) -> Result<Vec<ComposeService>> {
         let image = value
             .get("image")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let platform = value
             .get("platform")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         let ports = value
             .get("ports")
             .and_then(|v| v.as_sequence())
             .map(|seq| {
                 seq.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                     .collect()
             })
             .unwrap_or_default();
@@ -82,7 +82,7 @@ fn parse_compose_content(content: &str) -> Result<Vec<ComposeService>> {
         let working_dir = value
             .get("working_dir")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let volumes = extract_volumes(value);
 
         result.push(ComposeService {
@@ -109,11 +109,11 @@ fn extract_depends_on(service: &Value) -> Vec<String> {
     match service.get("depends_on") {
         Some(Value::Sequence(seq)) => seq
             .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
             .collect(),
         Some(Value::Mapping(map)) => map
             .keys()
-            .filter_map(|k| k.as_str().map(|s| s.to_string()))
+            .filter_map(|k| k.as_str().map(std::string::ToString::to_string))
             .collect(),
         _ => Vec::new(),
     }
@@ -144,7 +144,7 @@ fn extract_volumes(service: &Value) -> Vec<ComposeVolumeMount> {
                                 target: target.to_string(),
                                 mode: map
                                     .get(Value::String("read_only".to_string()))
-                                    .and_then(|v| v.as_bool())
+                                    .and_then(serde_yaml::Value::as_bool)
                                     .filter(|read_only| *read_only)
                                     .map(|_| "ro".to_string()),
                             })

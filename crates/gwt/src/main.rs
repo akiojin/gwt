@@ -243,7 +243,9 @@ fn spawn_board_projection_watcher(
         let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
             return;
         };
-        let Some(projection_file_name) = projection_path.file_name().map(|name| name.to_owned())
+        let Some(projection_file_name) = projection_path
+            .file_name()
+            .map(std::borrow::ToOwned::to_owned)
         else {
             return;
         };

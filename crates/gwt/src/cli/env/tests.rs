@@ -140,7 +140,7 @@ match args.as_slice() {
 fn with_fake_gh<T>(test: impl FnOnce(&Path) -> T) -> T {
     let _lock = crate::cli::test_support::fake_gh_test_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
     compile_fake_gh(temp.path());
 
