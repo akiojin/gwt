@@ -1,5 +1,76 @@
 # Lessons Learned
 
+## 2026-05-04 — review feedback: claims must be verified against the actual code path
+
+### 事象
+
+このセッションで codex review が同じパターンの P2 finding を 3 回連続で
+出した。 PR #2305 (regression test の `tokio::time::sleep(300ms)` で
+stale-token attempt が起きる前に rotation が走る race)、 PR #2310
+(README が daemon auto-bootstrap を全プラットフォーム共通として記述)、
+PR #2311 (Windows note が `gwtd daemon status` も unavailable と記述)。
+すべて「自分が書いた claim が actual code path で本当に成立するか」
+を verify せずに ship したのが共通原因。
+
+### 原因
+
+3 件の root cause:
+
+1. **PR #2305 (test race)**: subscriber thread が CI 上で遅れて起動した
+   場合、 sleep 後の resolver flip より前に thread が動かないので、
+   `stale token → rejected → reconnect with live token` の regression
+   path が exercise されない。 「sleep 300ms すれば必ず stale 試行が
+   先に走る」という暗黙の前提が壊れる。
+2. **PR #2310 (README scope)**: daemon の auto-bootstrap / fan-out は
+   `#[cfg(unix)]` only。 Windows では `gwtd daemon start` は "not
+   yet implemented" を返すだけ。 README で無条件に "auto-bootstraps
+   a per-project runtime daemon" と書くと Windows ユーザーが期待
+   外動作に当たる。
+3. **PR #2311 (Windows note overscope)**: `gwtd daemon status` 自体は
+   全プラットフォームでコンパイルされる (`crates/gwt/src/cli/daemon/mod.rs::run`
+   の Status arm に cfg gate が無い)。 Windows でも実行できて
+   `stopped scope=...` を返すが、 README で "unavailable" と書くと
+   ユーザーが diagnostic command を skip してしまう。
+
+3 件とも「claim を書く時に grep / read で対応箇所を確認」していれば
+review 前に気づけた:
+
+- (1) 「sleep が必ず先に観測される」は TIMING の claim → resolver の
+  call counter で観測可能な signal にできる
+- (2) 「全プラットフォームで auto-bootstraps」は PLATFORM の claim →
+  `#[cfg(unix)]` を grep すれば限定範囲が分かる
+- (3) 「Windows で daemon status は unavailable」は AVAILABILITY の
+  claim → `report_status` の cfg を確認すれば全プラットフォーム可と
+  分かる
+
+### 再発防止策
+
+test や docs を書く前に「自分の claim を 1 つに絞り、 actual code
+path で verify する」step を必須にする:
+
+1. **Test の wait condition は wall-clock sleep ではなく observable
+   signal**: 「N ms 待てば X が起きているはず」は CI の負荷で容易に
+   崩れる。 代わりに `AtomicUsize` の counter / `Notify` /
+   `RwLock<Vec<Event>>` などで「観測したい遷移そのもの」を polling
+   する loop を書く。 wait の上限は CI slow path 用に generous に。
+2. **Platform / cfg の claim は cfg を grep して verify**: docs や
+   user-facing comment に「X is available on Y」と書く前に、
+   `grep -n "cfg.*<platform>" path/to/source.rs` で対応する `#[cfg(...)]`
+   を確認する。 unsupported / partially-supported を分けて書く。
+3. **"Available" vs "Useful" を区別**: コマンドが compile されるか
+   と、 そのコマンドが意味のある結果を返すかは別。 Windows daemon
+   status は compile される (available) が、 daemon が動かないので
+   結果は常に `stopped` (limited usefulness)。 docs では両方を分けて
+   表現する。
+4. **Review 前 self-check**: 自分が書いた claim を 1 つずつ抜き出し、
+   「これを否定する code path はないか」を確認する。 sleep が race
+   を隠していないか、 cfg gate が範囲を狭めていないか、 「unavailable」
+   claim が実は compile される command を含めていないか。
+
+これらは Phase H2-H4 や future README 更新でも同じ落とし穴が再現する
+ため、 docs を書く前 / regression test を書く前にチェックリスト化
+する。
+
 ## 2026-05-04 — fix(daemon): broadcast forwarder treated RecvError::Lagged as fatal
 
 ### 事象
