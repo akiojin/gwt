@@ -223,7 +223,7 @@ impl VersionCache {
             AgentId::Gemini => "gemini".to_string(),
             AgentId::OpenCode => "opencode".to_string(),
             AgentId::Copilot => "copilot".to_string(),
-            AgentId::Custom(name) => format!("custom-{}", name),
+            AgentId::Custom(name) => format!("custom-{name}"),
         }
     }
 

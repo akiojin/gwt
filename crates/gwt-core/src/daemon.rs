@@ -278,8 +278,7 @@ pub fn validate_handshake(
             .as_deref()
             .unwrap_or("unknown rejection");
         return Err(GwtError::Agent(format!(
-            "daemon handshake rejected: {}",
-            reason
+            "daemon handshake rejected: {reason}"
         )));
     }
 
@@ -295,7 +294,7 @@ pub fn persist_endpoint(path: &Path, endpoint: &DaemonEndpoint) -> Result<()> {
     })?;
     ensure_dir(parent)?;
     let payload = serde_json::to_vec_pretty(endpoint)
-        .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {}", e)))?;
+        .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {e}")))?;
     fs::write(path, payload)?;
     Ok(())
 }
@@ -328,7 +327,7 @@ where
 fn load_endpoint(path: &Path) -> Result<DaemonEndpoint> {
     let payload = fs::read(path)?;
     serde_json::from_slice(&payload)
-        .map_err(|e| GwtError::Other(format!("parse daemon endpoint failed: {}", e)))
+        .map_err(|e| GwtError::Other(format!("parse daemon endpoint failed: {e}")))
 }
 
 fn remove_endpoint_file(path: &Path) -> Result<()> {
