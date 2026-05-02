@@ -4681,7 +4681,19 @@ exit 0
 
     #[test]
     fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
+        // Persistence flows through `workspace_state_path()` which is
+        // HOME-based, so we must serialize against other HOME-touching
+        // tests and pin HOME to this test's tempdir for the duration.
+        // Without this guard, parallel tests that mutate HOME race
+        // with our persist + load pair and the workspace file ends up
+        // missing (or pointing at another test's already-cleaned
+        // tempdir).
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab_with_window_at(
