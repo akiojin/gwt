@@ -209,10 +209,35 @@ fn subscribe_command<E: CliEnv>(
             .send_frame(&ClientFrame::Subscribe { channels })
             .await
             .map_err(|err| config_error(format!("subscribe send failed: {err}")))?;
-        let _ack: DaemonFrame = client
-            .read_frame()
-            .await
-            .map_err(|err| config_error(format!("subscribe ack failed: {err}")))?;
+
+        // Drain frames until we observe the daemon's Subscribe ack.
+        // Frames received before the Ack can be real `Event` payloads
+        // because the per-channel forwarder is spawned before the
+        // server enqueues the Ack — silently dropping the first frame
+        // would cost the user the earliest event in the stream they
+        // are watching.
+        let writer = env.stdout();
+        loop {
+            let frame: DaemonFrame = client
+                .read_frame()
+                .await
+                .map_err(|err| config_error(format!("subscribe ack failed: {err}")))?;
+            match frame {
+                DaemonFrame::Ack => break,
+                DaemonFrame::Error { message } => {
+                    return Err(config_error(format!(
+                        "daemon rejected subscribe: {message}"
+                    )));
+                }
+                other => {
+                    let line = serde_json::to_string(&other)
+                        .map_err(|err| config_error(format!("serialize event failed: {err}")))?;
+                    writeln!(writer, "{line}")
+                        .map_err(|err| config_error(format!("write stdout failed: {err}")))?;
+                }
+            }
+        }
+
         loop {
             let frame: DaemonFrame = client
                 .read_frame()
@@ -220,7 +245,7 @@ fn subscribe_command<E: CliEnv>(
                 .map_err(|err| config_error(format!("read event failed: {err}")))?;
             let line = serde_json::to_string(&frame)
                 .map_err(|err| config_error(format!("serialize event failed: {err}")))?;
-            writeln!(env.stdout(), "{line}")
+            writeln!(writer, "{line}")
                 .map_err(|err| config_error(format!("write stdout failed: {err}")))?;
         }
     })
