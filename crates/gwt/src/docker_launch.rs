@@ -65,8 +65,6 @@ pub(crate) struct DevContainerLaunchDefaults {
     pub(crate) service: Option<String>,
     pub(crate) workspace_folder: Option<String>,
     pub(crate) compose_files: Vec<PathBuf>,
-    #[allow(dead_code)]
-    pub(crate) compose_file: Option<PathBuf>,
 }
 
 impl DockerLaunchPlan {
@@ -676,7 +674,6 @@ pub(crate) fn docker_devcontainer_defaults(
     Some(DevContainerLaunchDefaults {
         service: config.service,
         workspace_folder: config.workspace_folder,
-        compose_file: compose_files.first().cloned(),
         compose_files,
     })
 }
