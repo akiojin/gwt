@@ -305,6 +305,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_status_request_returns_daemon_snapshot() {
+        let temp = TempDir::new().expect("tempdir");
+        let scope = sample_scope(&temp);
+        let socket_path = temp.path().join("daemon.sock");
+        let endpoint_path = temp.path().join("endpoint.json");
+        let endpoint = sample_endpoint(scope.clone(), &socket_path, "status-secret");
+
+        let server_endpoint = endpoint.clone();
+        let server_socket = socket_path.clone();
+        let server_endpoint_path = endpoint_path.clone();
+        let server_hub = BroadcastHub::new();
+        // Pre-create one channel so the snapshot has a known nonzero
+        // value to assert against.
+        let _initial_rx = server_hub.subscribe("warmup");
+        let server_handle = tokio::spawn(async move {
+            server::run_server(
+                server_endpoint,
+                server_socket,
+                server_endpoint_path,
+                server_hub,
+            )
+            .await
+        });
+
+        wait_for_socket(&socket_path).await;
+
+        let mut client = DaemonClient::connect(&endpoint)
+            .await
+            .expect("client connects");
+
+        client
+            .send_frame(&ClientFrame::Status)
+            .await
+            .expect("send status");
+        let frame: DaemonFrame = client.read_frame().await.expect("read status");
+        match frame {
+            DaemonFrame::Status(status) => {
+                assert_eq!(status.protocol_version, DAEMON_PROTOCOL_VERSION);
+                assert_eq!(status.daemon_version, "test-daemon");
+                // uptime_seconds may be 0 for very fast tests; just check
+                // that the field exists in the response by reading it.
+                let _uptime = status.uptime_seconds;
+                assert!(
+                    status.broadcast_channels >= 1,
+                    "expected at least the warmup channel, got {}",
+                    status.broadcast_channels
+                );
+            }
+            other => panic!("expected Status frame, got: {other:?}"),
+        }
+
+        drop(client);
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
     async fn subscribed_client_receives_published_broadcast_events() {
         let temp = TempDir::new().expect("tempdir");
         let scope = sample_scope(&temp);

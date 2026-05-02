@@ -24,11 +24,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gwt_core::daemon::{
-    persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame,
+    persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
     IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
 };
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -116,6 +116,7 @@ pub(super) async fn run_server(
     spawn_signal_watcher(Arc::clone(&shutdown));
 
     let endpoint = Arc::new(endpoint);
+    let started_at = Instant::now();
     let _endpoint_path = endpoint_path; // retained for symmetry with future watch flows
     loop {
         tokio::select! {
@@ -130,7 +131,9 @@ pub(super) async fn run_server(
                         let endpoint = Arc::clone(&endpoint);
                         let hub = hub.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_connection(stream, endpoint, hub).await {
+                            if let Err(err) =
+                                handle_connection(stream, endpoint, hub, started_at).await
+                            {
                                 tracing::warn!("gwtd daemon: connection error: {err}");
                             }
                         });
@@ -176,6 +179,7 @@ async fn handle_connection(
     stream: UnixStream,
     endpoint: Arc<DaemonEndpoint>,
     hub: BroadcastHub,
+    started_at: Instant,
 ) -> Result<(), String> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -260,6 +264,17 @@ async fn handle_connection(
                     });
                 }
                 if out_tx.send(DaemonFrame::Ack).is_err() {
+                    break;
+                }
+            }
+            Ok(ClientFrame::Status) => {
+                let snapshot = DaemonStatus {
+                    protocol_version: endpoint.protocol_version,
+                    daemon_version: endpoint.daemon_version.clone(),
+                    uptime_seconds: started_at.elapsed().as_secs(),
+                    broadcast_channels: hub.channel_count(),
+                };
+                if out_tx.send(DaemonFrame::Status(snapshot)).is_err() {
                     break;
                 }
             }
