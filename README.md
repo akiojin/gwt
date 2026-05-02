@@ -81,15 +81,22 @@ gwtd hook workflow-policy
 gwtd daemon status            # inspect the per-project runtime daemon
 ```
 
-Managed hooks and runtime delegation use `gwtd`. The first `gwt` command
-or GUI launch auto-bootstraps a per-project runtime daemon so events can
-fan out to every `gwt` instance attached to the same project (e.g. Board
-posts you make in one window appear in another instance opened on the
-same repo without a polling delay). The daemon keeps running in the
+Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
+the first `gwt` command or GUI launch auto-bootstraps a per-project
+runtime daemon (Unix-domain socket IPC) so events can fan out to every
+`gwt` instance attached to the same project — for example, Board posts
+you make in one window appear in another instance opened on the same
+repo without a polling delay. The daemon keeps running in the
 background after you close the GUI; subsequent `gwt` invocations on the
 same project reuse it, and a stale entry from a crashed daemon is
 cleaned up automatically on the next launch. `gwtd daemon status`
 prints the live endpoint for diagnostics.
+
+Windows currently has no long-running daemon: `gwtd daemon start`
+exits with "not yet implemented", and managed hooks fall back to
+synchronous `gwt hook ...` dispatch. Multi-instance fan-out and
+`gwtd daemon status` are unavailable on Windows pending follow-up
+work.
 
 ## Main Workflow
 
