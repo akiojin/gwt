@@ -311,6 +311,128 @@ fn spawn_board_projection_watcher(
     })
 }
 
+/// Daemon broadcast subscriber registry — one [`DaemonSubscriber`]
+/// per active project. Mirrors [`BoardProjectionWatcherRegistry`] but
+/// listens for `DaemonFrame::Event { channel: "board" }` from a running
+/// `gwtd` daemon instead of file system events. SPEC-2077 Phase H1
+/// GREEN subscribe path: pushes `UserEvent::BoardProjectionChanged`
+/// when another gwt instance posts a Board entry through the same
+/// daemon scope.
+///
+/// When the daemon is not running, [`spawn_board_daemon_subscriber`]
+/// returns `None` and the entry stays unfilled. The next time
+/// [`Self::sync`] runs (after a project tab change) we retry the
+/// resolve, so a daemon that comes up later is picked up automatically.
+#[cfg(unix)]
+#[derive(Default)]
+struct BoardDaemonSubscriberRegistry {
+    subscribers: HashMap<PathBuf, gwt::daemon_subscriber::DaemonSubscriber>,
+}
+
+#[cfg(unix)]
+impl BoardDaemonSubscriberRegistry {
+    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+        let mut active_roots = HashSet::new();
+        for tab in &app.tabs {
+            let project_root = tab.project_root.clone();
+            let key = board_projection_watch_key(&project_root);
+            active_roots.insert(key.clone());
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.subscribers.entry(key) {
+                if let Some(subscriber) = spawn_board_daemon_subscriber(project_root, proxy.clone())
+                {
+                    entry.insert(subscriber);
+                }
+            }
+        }
+        self.subscribers
+            .retain(|project_root, _| active_roots.contains(project_root));
+    }
+
+    fn shutdown(&mut self) {
+        self.subscribers.clear();
+    }
+}
+
+#[cfg(unix)]
+fn spawn_board_daemon_subscriber(
+    project_root: PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<gwt::daemon_subscriber::DaemonSubscriber> {
+    use gwt_core::daemon::{
+        resolve_bootstrap_action, DaemonBootstrapAction, RuntimeScope, RuntimeTarget,
+        DAEMON_PROTOCOL_VERSION,
+    };
+
+    let scope = match RuntimeScope::from_project_root(&project_root, RuntimeTarget::Host) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::debug!(
+                project_root = %project_root.display(),
+                error = %err,
+                "daemon subscriber: scope resolution failed"
+            );
+            return None;
+        }
+    };
+    let gwt_home = gwt_core::paths::gwt_home();
+    let action = match resolve_bootstrap_action(
+        &gwt_home,
+        &scope,
+        DAEMON_PROTOCOL_VERSION,
+        is_subscriber_pid_alive,
+    ) {
+        Ok(a) => a,
+        Err(err) => {
+            tracing::debug!(
+                project_root = %project_root.display(),
+                error = %err,
+                "daemon subscriber: bootstrap resolve failed"
+            );
+            return None;
+        }
+    };
+    let endpoint = match action {
+        DaemonBootstrapAction::Reuse(ep) => ep,
+        DaemonBootstrapAction::Spawn { .. } => {
+            tracing::debug!(
+                project_root = %project_root.display(),
+                "daemon subscriber: no daemon registered (will retry on next sync)"
+            );
+            return None;
+        }
+    };
+
+    let proxy_for_callback = proxy;
+    let project_root_for_callback = project_root.clone();
+    Some(gwt::daemon_subscriber::DaemonSubscriber::spawn(
+        endpoint,
+        vec!["board".to_string()],
+        move |channel, _payload| {
+            if channel == "board" {
+                let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
+                    project_root: project_root_for_callback.clone(),
+                });
+            }
+        },
+    ))
+}
+
+#[cfg(unix)]
+fn is_subscriber_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: kill(pid, 0) only probes the process; no signal is delivered.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -4378,6 +4500,10 @@ fn main() -> wry::Result<()> {
     app.bootstrap();
     let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
     board_projection_watchers.sync(&app, proxy.clone());
+    #[cfg(unix)]
+    let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
+    #[cfg(unix)]
+    board_daemon_subscribers.sync(&app, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
             let log_proxy = proxy.clone();
@@ -4454,6 +4580,8 @@ fn main() -> wry::Result<()> {
                 // child process outlives the window.
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                #[cfg(unix)]
+                board_daemon_subscribers.shutdown();
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
@@ -4463,6 +4591,8 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_frontend_event(client_id, event);
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
+                    #[cfg(unix)]
+                    board_daemon_subscribers.sync(&app, proxy.clone());
                 }
                 clients.dispatch(events);
                 if refresh_index_status {
@@ -4544,6 +4674,8 @@ fn main() -> wry::Result<()> {
             }) => {
                 let events = app.handle_migration_done(&tab_id, &branch_worktree_path);
                 board_projection_watchers.sync(&app, proxy.clone());
+                #[cfg(unix)]
+                board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::MigrationError {
@@ -4563,6 +4695,8 @@ fn main() -> wry::Result<()> {
                         NativeMenuCommand::OpenProject => {
                             let events = app.open_project_dialog_events();
                             board_projection_watchers.sync(&app, proxy.clone());
+                            #[cfg(unix)]
+                            board_daemon_subscribers.sync(&app, proxy.clone());
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
@@ -4578,6 +4712,8 @@ fn main() -> wry::Result<()> {
                 // path other than CloseRequested, still release PTY children.
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                #[cfg(unix)]
+                board_daemon_subscribers.shutdown();
                 server.shutdown();
             }
             _ => {}
