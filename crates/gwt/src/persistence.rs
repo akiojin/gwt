@@ -102,7 +102,7 @@ pub struct RecentProjectEntry {
     pub kind: ProjectKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSessionTabState {
     pub id: String,
     pub title: String,
@@ -110,7 +110,7 @@ pub struct PersistedSessionTabState {
     pub kind: ProjectKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSessionState {
     #[serde(default)]
     pub tabs: Vec<PersistedSessionTabState>,
