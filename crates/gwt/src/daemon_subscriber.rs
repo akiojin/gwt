@@ -97,7 +97,7 @@ impl DaemonSubscriber {
                     callback,
                     stop_flag_inner,
                     shutdown_inner,
-                )
+                );
             })
             .expect("daemon subscriber thread spawn");
         Self {

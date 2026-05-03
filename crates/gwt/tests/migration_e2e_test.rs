@@ -269,7 +269,7 @@ fn t100_e2e_progress_callback_walks_phases() {
 
     let mut seen: Vec<MigrationPhase> = Vec::new();
     execute_migration(project.path(), MigrationOptions::default(), |phase, _| {
-        seen.push(phase)
+        seen.push(phase);
     })
     .expect("execute_migration");
 

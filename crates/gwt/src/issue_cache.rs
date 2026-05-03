@@ -225,7 +225,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
 
 fn parse_issue_state(value: Option<&str>) -> IssueState {
     match value {
-        Some("CLOSED") | Some("closed") => IssueState::Closed,
+        Some("CLOSED" | "closed") => IssueState::Closed,
         _ => IssueState::Open,
     }
 }

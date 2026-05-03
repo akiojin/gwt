@@ -3403,8 +3403,8 @@ mod tests {
         )]);
         assert!(matches!(
             client_one.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-                | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected
+                | tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
         assert!(client_two
             .try_recv()
