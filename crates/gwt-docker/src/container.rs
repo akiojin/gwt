@@ -928,7 +928,10 @@ mod tests {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     // File doesn't exist yet — same FS flush window.
                 }
-                Err(err) => panic!("read invocation log (attempt {attempt}): {err}"),
+                Err(err) => panic!(
+                    "read invocation log {} (attempt {attempt}): {err}",
+                    path.display()
+                ),
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
