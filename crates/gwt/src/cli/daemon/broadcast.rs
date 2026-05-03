@@ -36,7 +36,7 @@ pub(super) const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 /// single short-lived [`Mutex`]. Channels are created on-demand the
 /// first time `subscribe` or `publish` references them.
 #[derive(Clone, Default)]
-pub(crate) struct BroadcastHub {
+pub struct BroadcastHub {
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<DaemonFrame>>>>,
 }
 

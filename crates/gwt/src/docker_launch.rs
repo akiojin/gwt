@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn detect_wizard_docker_context_and_status(
+pub fn detect_wizard_docker_context_and_status(
     project_root: &Path,
 ) -> (
     Option<DockerWizardContext>,
@@ -34,7 +34,7 @@ pub(crate) fn detect_wizard_docker_context_and_status(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DockerLaunchPlan {
+pub struct DockerLaunchPlan {
     pub(crate) compose_files: Vec<PathBuf>,
     pub(crate) compose_file: PathBuf,
     pub(crate) override_file: PathBuf,
@@ -55,13 +55,13 @@ struct DockerPackageRunnerCandidate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PackageRunnerProgram {
+pub struct PackageRunnerProgram {
     pub(crate) executable: String,
     pub(crate) args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct DevContainerLaunchDefaults {
+pub struct DevContainerLaunchDefaults {
     pub(crate) service: Option<String>,
     pub(crate) workspace_folder: Option<String>,
     pub(crate) compose_files: Vec<PathBuf>,
@@ -77,7 +77,7 @@ impl DockerLaunchPlan {
     }
 }
 
-pub(crate) fn apply_docker_runtime_to_launch_config(
+pub fn apply_docker_runtime_to_launch_config(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
@@ -105,7 +105,7 @@ pub(crate) fn apply_docker_runtime_to_launch_config(
     Ok(())
 }
 
-pub(crate) fn finalize_docker_agent_launch_config(
+pub fn finalize_docker_agent_launch_config(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
@@ -150,7 +150,7 @@ fn resolve_user_home_dir() -> Result<PathBuf, String> {
     Ok(home)
 }
 
-pub(crate) fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
+pub fn docker_bundle_mounts_for_home(home: &Path) -> DockerBundleMounts {
     let gwt_bin_dir = home.join(".gwt").join("bin");
     DockerBundleMounts {
         host_gwt: gwt_bin_dir.join(DOCKER_HOST_GWT_BIN_NAME),
@@ -162,7 +162,7 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-pub(crate) fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+pub fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
     format!(
         concat!(
@@ -179,7 +179,7 @@ pub(crate) fn docker_bundle_override_content(service: &str, bundle: &DockerBundl
     )
 }
 
-pub(crate) fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<(), String> {
+pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<(), String> {
     use std::fs;
 
     let home = resolve_user_home_dir()?;
@@ -249,7 +249,7 @@ fn maybe_inject_docker_sandbox_env(
     Ok(())
 }
 
-pub(crate) fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<String> {
+pub fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<String> {
     let mut keys = env_vars.keys().collect::<Vec<_>>();
     keys.sort();
 
@@ -266,7 +266,7 @@ pub(crate) fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -
     args
 }
 
-pub(crate) fn is_valid_docker_env_key(key: &str) -> bool {
+pub fn is_valid_docker_env_key(key: &str) -> bool {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -289,7 +289,7 @@ fn resolve_docker_exec_program(
     resolve_docker_package_runner(launch, config, &version_spec)
 }
 
-pub(crate) fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
+pub fn package_runner_version_spec(config: &gwt_agent::LaunchConfig) -> Option<String> {
     let package = config.agent_id.package_name()?;
     let version = config.tool_version.as_deref()?;
     if version == "installed" || version.is_empty() {
@@ -338,7 +338,7 @@ fn resolve_docker_package_runner(
     ))
 }
 
-pub(crate) fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
+pub fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
     if args.first().is_some_and(|first| first == "--yes")
         && args.get(1).is_some_and(|arg| arg == version_spec)
     {
@@ -350,7 +350,7 @@ pub(crate) fn strip_package_runner_args(args: &[String], version_spec: &str) -> 
     args.to_vec()
 }
 
-pub(crate) fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String, String> {
+pub fn resolve_docker_shell_command(launch: &DockerLaunchPlan) -> Result<String, String> {
     for candidate in ["bash", "sh"] {
         let available = gwt_docker::compose_service_has_command_with_files(
             &launch.compose_files_for_runtime(),
@@ -407,7 +407,7 @@ impl DockerPackageRunnerCandidate {
     }
 }
 
-pub(crate) fn ensure_docker_launch_service_ready(
+pub fn ensure_docker_launch_service_ready(
     launch: &DockerLaunchPlan,
     intent: gwt_agent::DockerLifecycleIntent,
 ) -> Result<(), String> {
@@ -433,14 +433,14 @@ pub(crate) fn ensure_docker_launch_service_ready(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DockerLaunchServiceAction {
+pub enum DockerLaunchServiceAction {
     Connect,
     Start,
     Restart,
     Recreate,
 }
 
-pub(crate) fn normalize_docker_launch_action(
+pub fn normalize_docker_launch_action(
     intent: gwt_agent::DockerLifecycleIntent,
     status: gwt_docker::ComposeServiceStatus,
 ) -> DockerLaunchServiceAction {
@@ -546,7 +546,7 @@ fn looks_like_relative_bind_mount(source: &str) -> bool {
         || source.starts_with("..\\")
 }
 
-pub(crate) fn resolve_docker_launch_plan(
+pub fn resolve_docker_launch_plan(
     worktree: &Path,
     selected_service: Option<&str>,
 ) -> Result<DockerLaunchPlan, String> {
@@ -608,11 +608,11 @@ pub(crate) fn resolve_docker_launch_plan(
     })
 }
 
-pub(crate) fn docker_binary_for_launch() -> String {
+pub fn docker_binary_for_launch() -> String {
     std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string())
 }
 
-pub(crate) fn docker_compose_files_for_launch(
+pub fn docker_compose_files_for_launch(
     project_root: &Path,
     files: &gwt_docker::DockerFiles,
 ) -> Result<Vec<PathBuf>, String> {
@@ -625,7 +625,7 @@ pub(crate) fn docker_compose_files_for_launch(
 }
 
 #[allow(dead_code)]
-pub(crate) fn docker_compose_file_for_launch(
+pub fn docker_compose_file_for_launch(
     project_root: &Path,
     files: &gwt_docker::DockerFiles,
 ) -> Result<Option<PathBuf>, String> {
@@ -634,7 +634,7 @@ pub(crate) fn docker_compose_file_for_launch(
         .next())
 }
 
-pub(crate) fn docker_devcontainer_defaults(
+pub fn docker_devcontainer_defaults(
     project_root: &Path,
     files: &gwt_docker::DockerFiles,
 ) -> Option<DevContainerLaunchDefaults> {
@@ -678,7 +678,7 @@ pub(crate) fn docker_devcontainer_defaults(
     })
 }
 
-pub(crate) fn compose_workspace_mount_target(
+pub fn compose_workspace_mount_target(
     project_root: &Path,
     service: &gwt_docker::ComposeService,
 ) -> Option<String> {
@@ -689,7 +689,7 @@ pub(crate) fn compose_workspace_mount_target(
         .map(|mount| mount.target.clone())
 }
 
-pub(crate) fn mount_source_matches_project_root(source: &str, project_root: &Path) -> bool {
+pub fn mount_source_matches_project_root(source: &str, project_root: &Path) -> bool {
     let normalized = source
         .trim()
         .trim_end_matches(['/', '\\'])

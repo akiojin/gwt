@@ -20,7 +20,7 @@ use gwt_core::coordination::{self, BoardEntryKind};
 use super::{AppRuntime, BackendEvent, OutboundEvent, WindowPreset};
 
 #[derive(Debug, Clone)]
-pub(crate) struct BoardPostRequest {
+pub struct BoardPostRequest {
     pub(crate) id: String,
     pub(crate) entry_kind: BoardEntryKind,
     pub(crate) body: String,

@@ -9,14 +9,14 @@ use std::{
 use crate::{app_runtime::AppEventProxy, UserEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProjectIndexBootstrapRequest {
+pub enum ProjectIndexBootstrapRequest {
     Spawned,
     AlreadyRunning,
     SpawnFailed,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ProjectIndexBootstrapService {
+pub struct ProjectIndexBootstrapService {
     in_flight: Arc<Mutex<HashSet<PathBuf>>>,
 }
 

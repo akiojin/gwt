@@ -8,9 +8,9 @@ use gwt_github::SpecOpsError;
 use super::skill_state_runtime;
 use crate::cli::{CliEnv, SkillStateAction};
 
-pub(crate) const SKILL_NAME: &str = "plan-spec";
-pub(crate) const SKILL_DISPLAY: &str = "gwt-plan-spec";
-pub(crate) const VERB: &str = "plan";
+pub const SKILL_NAME: &str = "plan-spec";
+pub const SKILL_DISPLAY: &str = "gwt-plan-spec";
+pub const VERB: &str = "plan";
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,

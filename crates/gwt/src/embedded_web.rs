@@ -3,74 +3,74 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
-pub(crate) fn index_html() -> &'static str {
+pub fn index_html() -> &'static str {
     include_str!("../web/index.html")
 }
 
-pub(crate) fn app_js() -> &'static str {
+pub fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
-pub(crate) fn branch_cleanup_modal_js() -> &'static str {
+pub fn branch_cleanup_modal_js() -> &'static str {
     include_str!("../web/branch-cleanup-modal.js")
 }
 
-pub(crate) fn migration_modal_js() -> &'static str {
+pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
 
-pub(crate) fn xterm_js() -> &'static str {
+pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
 
-pub(crate) fn xterm_fit_js() -> &'static str {
+pub fn xterm_fit_js() -> &'static str {
     include_str!("../web/vendor/xterm/addon-fit.mjs")
 }
 
-pub(crate) fn xterm_css() -> &'static str {
+pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
 }
 
-pub(crate) async fn index_handler() -> Html<&'static str> {
+pub async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
 
-pub(crate) async fn app_js_handler() -> impl IntoResponse {
+pub async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
     )
 }
 
-pub(crate) async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
+pub async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         branch_cleanup_modal_js(),
     )
 }
 
-pub(crate) async fn migration_modal_js_handler() -> impl IntoResponse {
+pub async fn migration_modal_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         migration_modal_js(),
     )
 }
 
-pub(crate) async fn xterm_js_handler() -> impl IntoResponse {
+pub async fn xterm_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         xterm_js(),
     )
 }
 
-pub(crate) async fn xterm_fit_js_handler() -> impl IntoResponse {
+pub async fn xterm_fit_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         xterm_fit_js(),
     )
 }
 
-pub(crate) async fn xterm_css_handler() -> impl IntoResponse {
+pub async fn xterm_css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),

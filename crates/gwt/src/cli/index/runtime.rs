@@ -149,7 +149,7 @@ pub(super) fn parse_runner_json(stdout: &[u8]) -> Result<Value, SpecOpsError> {
     })
 }
 
-pub(crate) fn render_index_status(
+pub fn render_index_status(
     out: &mut String,
     report: &gwt_core::runtime::ProjectIndexRuntimeReport,
     payload: &Value,

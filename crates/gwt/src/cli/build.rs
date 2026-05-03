@@ -8,9 +8,9 @@ use gwt_github::SpecOpsError;
 use super::skill_state_runtime;
 use crate::cli::{CliEnv, SkillStateAction};
 
-pub(crate) const SKILL_NAME: &str = "build-spec";
-pub(crate) const SKILL_DISPLAY: &str = "gwt-build-spec";
-pub(crate) const VERB: &str = "build";
+pub const SKILL_NAME: &str = "build-spec";
+pub const SKILL_DISPLAY: &str = "gwt-build-spec";
+pub const VERB: &str = "build";
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,

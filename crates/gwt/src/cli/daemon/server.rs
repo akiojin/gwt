@@ -113,7 +113,7 @@ pub(super) fn serve_blocking<W: std::io::Write + ?Sized>(
     result
 }
 
-pub(crate) async fn run_server(
+pub async fn run_server(
     endpoint: DaemonEndpoint,
     socket_path: PathBuf,
     endpoint_path: PathBuf,

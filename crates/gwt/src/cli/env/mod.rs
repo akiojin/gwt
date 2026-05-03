@@ -16,7 +16,7 @@ mod tests;
 
 pub use default::DefaultCliEnv;
 #[cfg(test)]
-pub(crate) use default::{IssueClientFactory, LazyIssueClient};
+pub use default::{IssueClientFactory, LazyIssueClient};
 pub use test_env::TestEnv;
 
 use std::{
@@ -95,7 +95,7 @@ pub struct InternalCommandCall {
 // ClientRef: a borrow wrapper that still implements IssueClient
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ClientRef<'a, C: IssueClient> {
+pub struct ClientRef<'a, C: IssueClient> {
     pub(crate) inner: &'a C,
 }
 

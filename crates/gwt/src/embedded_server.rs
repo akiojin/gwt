@@ -33,7 +33,7 @@ type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Default)]
-pub(super) struct ClientHub {
+pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
 }
 
@@ -93,7 +93,7 @@ struct ServerState {
     pty_writers: PtyWriterRegistry,
 }
 
-pub(super) struct EmbeddedServer {
+pub struct EmbeddedServer {
     url: String,
     hook_forward_token: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -178,7 +178,7 @@ impl EmbeddedServer {
     }
 }
 
-pub(super) async fn health_handler() -> &'static str {
+pub async fn health_handler() -> &'static str {
     "ok"
 }
 
@@ -363,7 +363,7 @@ fn handle_frontend_message(
     );
 }
 
-pub(super) fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+pub fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -371,7 +371,7 @@ pub(super) fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str)
         .is_some_and(|token| token == expected_token)
 }
 
-pub(super) fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
+pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
         return true;
     };
@@ -390,7 +390,7 @@ pub(super) fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
 }
 
 #[cfg(test)]
-pub(super) fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
+pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
     clients.dispatch(vec![OutboundEvent::broadcast(
         gwt::BackendEvent::RuntimeHookEvent { event },
     )]);
