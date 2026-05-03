@@ -481,7 +481,7 @@ impl AppRuntime {
                 window_id,
                 config,
                 profile_config_path,
-            )
+            );
         });
 
         Ok(events)

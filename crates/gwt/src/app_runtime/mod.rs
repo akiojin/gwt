@@ -2302,7 +2302,7 @@ impl AppRuntime {
                 config,
                 profile_config_path,
                 hook_forward_target,
-            )
+            );
         });
 
         Ok(events)

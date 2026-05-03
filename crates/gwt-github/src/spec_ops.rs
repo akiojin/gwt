@@ -118,8 +118,7 @@ impl<C: IssueClient> SpecOps<C> {
 
         match (&prev_location, &new_location) {
             // Stay in body: rewrite the section between the markers, then patch.
-            (Some(SectionLocation::Body), SectionLocation::Body)
-            | (None, SectionLocation::Body) => {
+            (Some(SectionLocation::Body) | None, SectionLocation::Body) => {
                 issue_body = rewrite_body_section(&issue_body, name, content);
                 new_sections_index
                     .0
@@ -129,8 +128,7 @@ impl<C: IssueClient> SpecOps<C> {
             }
             // Body -> Comment promotion: create a new comment, drop the
             // body-inline markers, then patch the body with the new index map.
-            (Some(SectionLocation::Body), SectionLocation::Comments(_))
-            | (None, SectionLocation::Comments(_)) => {
+            (Some(SectionLocation::Body) | None, SectionLocation::Comments(_)) => {
                 let comment_body = wrap_comment_body(name, content);
                 let comment: CommentSnapshot = self.client.create_comment(number, &comment_body)?;
                 new_sections_index

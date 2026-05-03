@@ -401,7 +401,7 @@ fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<S
     }
 
     let version_spec = match args.first().map(String::as_str) {
-        Some("--yes") | Some("-y") => args.get(1)?,
+        Some("--yes" | "-y") => args.get(1)?,
         _ => args.first()?,
     };
     if version_spec.is_empty() || version_spec.starts_with('-') {
