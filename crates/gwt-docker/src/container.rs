@@ -905,7 +905,37 @@ mod tests {
     }
 
     fn read_invocation(path: &PathBuf) -> String {
-        fs::read_to_string(path).expect("read invocation log")
+        // Issue #2349: `compose_restart_invokes_docker_with_expected_arguments`
+        // (and a few sibling compose_* tests using the same fake-docker
+        // pattern) flake intermittently. The leading hypothesis is FS
+        // flush latency between the fake docker shell script's `> file`
+        // close and the parent test's read — kernels generally make
+        // writes-via-closed-fd visible to a subsequent read on the same
+        // host, but slow CI runners or APFS / tmpfs eventual-consistency
+        // edge cases occasionally observe an empty file.
+        //
+        // Retry up to 50 times × 10 ms (= 500 ms total) before giving
+        // up. The healthy path returns on the first attempt; the retry
+        // tail is invisible during normal runs and only kicks in when
+        // the file genuinely needs the OS a moment longer to settle.
+        for attempt in 0..50 {
+            match fs::read_to_string(path) {
+                Ok(content) if !content.is_empty() => return content,
+                Ok(_) => {
+                    // File exists but empty — fake docker may not have
+                    // flushed yet. Wait and retry.
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // File doesn't exist yet — same FS flush window.
+                }
+                Err(err) => panic!("read invocation log (attempt {attempt}): {err}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "read invocation log: file at {} still empty / missing after 500ms",
+            path.display()
+        );
     }
 
     #[test]
