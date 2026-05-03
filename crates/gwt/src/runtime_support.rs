@@ -1,10 +1,10 @@
 use super::*;
 
-pub(crate) fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
+pub fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
 }
 
-pub(crate) fn should_auto_close_agent_window(
+pub fn should_auto_close_agent_window(
     active_agent_sessions: &HashMap<String, ActiveAgentSession>,
     window_id: &str,
     status: &WindowProcessStatus,
@@ -12,7 +12,7 @@ pub(crate) fn should_auto_close_agent_window(
     matches!(status, WindowProcessStatus::Stopped) && active_agent_sessions.contains_key(window_id)
 }
 
-pub(crate) fn close_window_from_workspace(
+pub fn close_window_from_workspace(
     tabs: &mut [ProjectTabRuntime],
     window_lookup: &mut HashMap<String, WindowAddress>,
     window_details: &mut HashMap<String, String>,
@@ -32,15 +32,15 @@ pub(crate) fn close_window_from_workspace(
     true
 }
 
-pub(crate) fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
+pub fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
     window.preset.requires_process() && window.status == WindowProcessStatus::Running
 }
 
-pub(crate) fn current_app_version() -> &'static str {
+pub fn current_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-pub(crate) fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
     gwt::WorkspaceView {
         viewport: tab.workspace.persisted().viewport.clone(),
         windows: tab
@@ -57,7 +57,7 @@ pub(crate) fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceV
     }
 }
 
-pub(crate) fn app_state_view_from_parts(
+pub fn app_state_view_from_parts(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<&str>,
     recent_projects: &[gwt::RecentProjectEntry],
@@ -86,7 +86,7 @@ pub(crate) fn app_state_view_from_parts(
     }
 }
 
-pub(crate) fn normalize_active_tab_id(
+pub fn normalize_active_tab_id(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<String>,
 ) -> Option<String> {
@@ -100,7 +100,7 @@ pub(crate) fn normalize_active_tab_id(
     }
 }
 
-pub(crate) fn dedupe_recent_projects(
+pub fn dedupe_recent_projects(
     entries: Vec<gwt::RecentProjectEntry>,
 ) -> Vec<gwt::RecentProjectEntry> {
     let mut deduped: Vec<gwt::RecentProjectEntry> = Vec::new();
@@ -120,13 +120,13 @@ pub(crate) fn dedupe_recent_projects(
 /// disk. Called once at load time so subsequent `persist()` writes a clean
 /// list back. A separate function (rather than baked into `dedupe_*`) so
 /// tests and callers can exercise the path predicate without filesystem.
-pub(crate) fn prune_missing_recent_projects(
+pub fn prune_missing_recent_projects(
     entries: Vec<gwt::RecentProjectEntry>,
 ) -> Vec<gwt::RecentProjectEntry> {
     prune_missing_recent_projects_with(entries, std::path::Path::exists)
 }
 
-pub(crate) fn prune_missing_recent_projects_with(
+pub fn prune_missing_recent_projects_with(
     entries: Vec<gwt::RecentProjectEntry>,
     exists: impl Fn(&Path) -> bool,
 ) -> Vec<gwt::RecentProjectEntry> {
@@ -136,7 +136,7 @@ pub(crate) fn prune_missing_recent_projects_with(
         .collect()
 }
 
-pub(crate) fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
+pub fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
     ProjectOpenTarget {
         title: gwt::project_title_from_path(&path),
         project_root: path,
@@ -145,7 +145,7 @@ pub(crate) fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
     }
 }
 
-pub(crate) fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
+pub fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
     let canonical = dunce::canonicalize(path)
         .map_err(|error| format!("failed to open project {}: {error}", path.display()))?;
     if !canonical.is_dir() {
@@ -186,7 +186,7 @@ pub(crate) fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, S
     })
 }
 
-pub(crate) fn normalize_branch_name(branch_name: &str) -> String {
+pub fn normalize_branch_name(branch_name: &str) -> String {
     if let Some(name) = branch_name.strip_prefix("refs/remotes/") {
         return name.strip_prefix("origin/").unwrap_or(name).to_string();
     }
@@ -196,7 +196,7 @@ pub(crate) fn normalize_branch_name(branch_name: &str) -> String {
     branch_name.to_string()
 }
 
-pub(crate) fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
+pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
     BranchListEntry {
         name: branch_name.to_string(),
         scope: gwt::BranchScope::Local,
@@ -210,7 +210,7 @@ pub(crate) fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
     }
 }
 
-pub(crate) fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
+pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
         WindowPreset::Issue => Some(KnowledgeKind::Issue),
         WindowPreset::Spec => Some(KnowledgeKind::Spec),
@@ -219,7 +219,7 @@ pub(crate) fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<Knowledg
     }
 }
 
-pub(crate) fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
+pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
     if current_git_branch(repo_path)
         .as_ref()
         .is_ok_and(|current| current == branch_name)
@@ -237,7 +237,7 @@ pub(crate) fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Optio
         .map(|worktree| worktree.path)
 }
 
-pub(crate) fn first_available_worktree_path(
+pub fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],
 ) -> Option<PathBuf> {
@@ -255,20 +255,20 @@ pub(crate) fn first_available_worktree_path(
     None
 }
 
-pub(crate) fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+pub fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_str()?;
     let mut candidate = path.to_path_buf();
     candidate.set_file_name(format!("{file_name}-{suffix}"));
     Some(candidate)
 }
 
-pub(crate) fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+pub fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
     worktrees
         .iter()
         .any(|worktree| same_worktree_path(&worktree.path, path))
 }
 
-pub(crate) fn same_worktree_path(left: &Path, right: &Path) -> bool {
+pub fn same_worktree_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
@@ -279,7 +279,7 @@ pub(crate) fn same_worktree_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-pub(crate) fn origin_remote_ref(branch_name: &str) -> String {
+pub fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
     } else if branch_name.starts_with("origin/") {
@@ -289,7 +289,7 @@ pub(crate) fn origin_remote_ref(branch_name: &str) -> String {
     }
 }
 
-pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
+pub fn current_git_branch(repo_path: &Path) -> Result<String, String> {
     let output = gwt_core::process::hidden_command("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
@@ -310,7 +310,7 @@ pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
     }
 }
 
-pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
+pub fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
     let output = gwt_core::process::hidden_command("git")
         .args([
             "show-ref",
@@ -333,7 +333,7 @@ pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result
     }
 }
 
-pub(crate) fn resolve_launch_spec_with_fallback(
+pub fn resolve_launch_spec_with_fallback(
     preset: WindowPreset,
     shell: &gwt::ShellProgram,
 ) -> Result<gwt::LaunchSpec, gwt::PresetResolveError> {
@@ -342,27 +342,27 @@ pub(crate) fn resolve_launch_spec_with_fallback(
 }
 
 #[cfg(test)]
-pub(crate) fn spawn_env() -> HashMap<String, String> {
+pub fn spawn_env() -> HashMap<String, String> {
     let (env, _) =
         gwt_agent::LaunchEnvironment::from_base_env(gwt_agent::environment::host_process_env())
             .into_parts();
     env
 }
 
-pub(crate) fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
+pub fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
     let cols = ((geometry.width.max(420.0) - 26.0) / 8.4).floor() as u16;
     let rows = ((geometry.height.max(260.0) - 58.0) / 18.0).floor() as u16;
     (cols.max(20), rows.max(6))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FrontDoorRoute {
+pub enum FrontDoorRoute {
     Gui,
     RepoBackedCli,
     DetachedCli,
 }
 
-pub(crate) fn front_door_route(argv: &[String]) -> FrontDoorRoute {
+pub fn front_door_route(argv: &[String]) -> FrontDoorRoute {
     match argv.get(1).map(String::as_str) {
         Some("issue" | "pr" | "actions") => FrontDoorRoute::RepoBackedCli,
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
@@ -382,9 +382,9 @@ pub(crate) fn attach_parent_console_for_cli() {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn attach_parent_console_for_cli() {}
+pub fn attach_parent_console_for_cli() {}
 
-pub(crate) fn run_cli(argv: &[String]) -> io::Result<()> {
+pub fn run_cli(argv: &[String]) -> io::Result<()> {
     match front_door_route(argv) {
         FrontDoorRoute::RepoBackedCli => {
             let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -483,7 +483,7 @@ mod windows_console {
     }
 }
 
-pub(crate) fn resolve_repo_coordinates() -> Option<(String, String)> {
+pub fn resolve_repo_coordinates() -> Option<(String, String)> {
     // Issue #2054: support multi-remote git repos where `origin` points at a
     // local mirror and the GitHub URL lives under a different remote name.
     // Resolution order:
@@ -496,7 +496,7 @@ pub(crate) fn resolve_repo_coordinates() -> Option<(String, String)> {
 
 /// Pure resolver kept independent of git invocation so it can be unit-tested
 /// against synthetic remote fixtures.
-pub(crate) fn select_repo_coordinates(
+pub fn select_repo_coordinates(
     remotes: &[(String, String)],
     overrides: &RepoEnvOverrides,
 ) -> Option<(String, String)> {
@@ -531,7 +531,7 @@ pub(crate) fn select_repo_coordinates(
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct RepoEnvOverrides {
+pub struct RepoEnvOverrides {
     pub github_repo: Option<String>,
     pub remote: Option<String>,
 }
@@ -558,7 +558,7 @@ fn load_remote_urls() -> Vec<(String, String)> {
     parse_git_remote_v(&String::from_utf8_lossy(&output.stdout))
 }
 
-pub(crate) fn parse_git_remote_v(text: &str) -> Vec<(String, String)> {
+pub fn parse_git_remote_v(text: &str) -> Vec<(String, String)> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for line in text.lines() {
@@ -589,7 +589,7 @@ fn parse_owner_repo_pair(value: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
-pub(crate) fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
+pub fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
     if let Some(rest) = url.strip_prefix("git@github.com:") {
         let trimmed = rest.trim_end_matches(".git");
         let mut parts = trimmed.splitn(2, '/');

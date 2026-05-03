@@ -17,12 +17,12 @@ use tempfile::tempdir;
 
 use super::PrReviewThread;
 
-pub(crate) fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
+pub fn fake_gh_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-pub(crate) fn compile_fake_gh(bin_dir: &Path) {
+pub fn compile_fake_gh(bin_dir: &Path) {
     let source = r###"
 use std::{env, fs, process::ExitCode};
 
@@ -182,7 +182,7 @@ fn main() -> ExitCode {
     assert!(status.success(), "fake gh compilation failed");
 }
 
-pub(crate) fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
+pub fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     let _lock = fake_gh_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -223,7 +223,7 @@ pub(crate) fn with_fake_gh<T>(mode: &str, test: impl FnOnce(&Path) -> T) -> T {
     result
 }
 
-pub(crate) fn sample_thread() -> PrReviewThread {
+pub fn sample_thread() -> PrReviewThread {
     PrReviewThread {
         id: "thread-1".to_string(),
         is_resolved: false,
@@ -234,7 +234,7 @@ pub(crate) fn sample_thread() -> PrReviewThread {
     }
 }
 
-pub(crate) fn sample_issue_snapshot() -> IssueSnapshot {
+pub fn sample_issue_snapshot() -> IssueSnapshot {
     IssueSnapshot {
         number: IssueNumber(42),
         title: "Coverage gate".to_string(),
@@ -250,7 +250,7 @@ pub(crate) fn sample_issue_snapshot() -> IssueSnapshot {
     }
 }
 
-pub(crate) fn sample_pr_status() -> gwt_git::PrStatus {
+pub fn sample_pr_status() -> gwt_git::PrStatus {
     gwt_git::PrStatus {
         number: 128,
         title: "Enforce coverage".to_string(),
@@ -263,7 +263,7 @@ pub(crate) fn sample_pr_status() -> gwt_git::PrStatus {
     }
 }
 
-pub(crate) struct ScopedEnvVar {
+pub struct ScopedEnvVar {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
@@ -286,7 +286,7 @@ impl Drop for ScopedEnvVar {
     }
 }
 
-pub(crate) fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<&'a str> {
+pub fn commands_for_event<'a>(value: &'a serde_json::Value, event: &str) -> Vec<&'a str> {
     value["hooks"][event]
         .as_array()
         .unwrap_or_else(|| panic!("hooks missing for event {event}"))

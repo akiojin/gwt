@@ -175,7 +175,7 @@ pub fn build_resume_prompt(pending: &PendingDiscussionResume) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProposalStatus {
+pub enum ProposalStatus {
     Active,
     Parked,
     Rejected,
@@ -184,7 +184,7 @@ pub(crate) enum ProposalStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedProposal {
+pub struct ParsedProposal {
     pub(crate) header_line_index: usize,
     pub(crate) label: String,
     pub(crate) title: String,
@@ -192,7 +192,7 @@ pub(crate) struct ParsedProposal {
     pub(crate) next_question: Option<String>,
 }
 
-pub(crate) fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
+pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
     let mut proposals: Vec<ParsedProposal> = Vec::new();
 
     for (index, raw_line) in content.lines().enumerate() {

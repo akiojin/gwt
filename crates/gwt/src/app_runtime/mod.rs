@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-pub(crate) enum AppEventProxy {
+pub enum AppEventProxy {
     Real(EventLoopProxy<UserEvent>),
     #[cfg(test)]
     Stub(Arc<Mutex<Vec<UserEvent>>>),
@@ -34,7 +34,7 @@ impl AppEventProxy {
 }
 
 #[derive(Clone)]
-pub(crate) enum BlockingTaskSpawner {
+pub enum BlockingTaskSpawner {
     Tokio(tokio::runtime::Handle),
     #[cfg(test)]
     Thread,
@@ -69,7 +69,7 @@ impl BlockingTaskSpawner {
     }
 }
 
-pub(crate) struct KnowledgeSearchRequest<'a> {
+pub struct KnowledgeSearchRequest<'a> {
     pub(crate) id: &'a str,
     pub(crate) kind: KnowledgeKind,
     pub(crate) query: &'a str,
@@ -78,7 +78,7 @@ pub(crate) struct KnowledgeSearchRequest<'a> {
     pub(crate) list_scope: gwt::KnowledgeListScope,
 }
 
-pub(crate) struct KnowledgeLoadRequest<'a> {
+pub struct KnowledgeLoadRequest<'a> {
     pub(crate) id: &'a str,
     pub(crate) kind: KnowledgeKind,
     pub(crate) request_id: Option<u64>,
@@ -109,7 +109,7 @@ struct KnowledgeSearchTask {
     list_scope: gwt::KnowledgeListScope,
 }
 
-pub(crate) struct WindowRuntime {
+pub struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
@@ -122,7 +122,7 @@ pub(crate) struct WindowRuntime {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProcessLaunch {
+pub struct ProcessLaunch {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
     pub(crate) env: HashMap<String, String>,
@@ -130,7 +130,7 @@ pub(crate) struct ProcessLaunch {
     pub(crate) cwd: Option<PathBuf>,
 }
 
-pub(crate) type AgentLaunchCompletion = (
+pub type AgentLaunchCompletion = (
     ProcessLaunch,
     String,
     String,
@@ -140,7 +140,7 @@ pub(crate) type AgentLaunchCompletion = (
     Option<u64>,
 );
 
-pub(crate) type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
+pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
 mod board;
 mod memory;
@@ -148,7 +148,7 @@ mod migration;
 mod profile;
 mod window;
 mod wizard;
-pub(crate) use board::BoardPostRequest;
+pub use board::BoardPostRequest;
 use profile::ProfileSaveRequest;
 
 fn dispatch_agent_launch_success<F>(
@@ -168,7 +168,7 @@ fn dispatch_agent_launch_success<F>(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveAgentSession {
+pub struct ActiveAgentSession {
     pub(crate) window_id: String,
     pub(crate) session_id: String,
     pub(crate) agent_id: String,
@@ -179,7 +179,7 @@ pub(crate) struct ActiveAgentSession {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LaunchWizardMemoryCache {
+pub struct LaunchWizardMemoryCache {
     sessions: Vec<gwt_agent::Session>,
     agent_options: Vec<gwt::AgentOption>,
 }
@@ -277,13 +277,13 @@ struct IssueBranchLinkStore {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum DispatchTarget {
+pub enum DispatchTarget {
     Broadcast,
     Client(ClientId),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct OutboundEvent {
+pub struct OutboundEvent {
     pub(crate) target: DispatchTarget,
     pub(crate) event: BackendEvent,
 }
@@ -357,7 +357,7 @@ fn knowledge_view_events(
     ]
 }
 
-pub(crate) fn build_frontend_sync_events(
+pub fn build_frontend_sync_events(
     client_id: &str,
     workspace: gwt::AppStateView,
     terminal_statuses: Vec<(String, WindowProcessStatus, String)>,
@@ -411,7 +411,7 @@ pub(crate) fn build_frontend_sync_events(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectTabRuntime {
+pub struct ProjectTabRuntime {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) project_root: PathBuf,
@@ -484,20 +484,20 @@ fn detect_locked_worktrees(project_root: &Path) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WindowAddress {
+pub struct WindowAddress {
     pub(crate) tab_id: String,
     pub(crate) raw_id: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LaunchWizardSession {
+pub struct LaunchWizardSession {
     pub(crate) tab_id: String,
     pub(crate) wizard_id: String,
     pub(crate) wizard: LaunchWizardState,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct IssueLaunchWizardPrepared {
+pub struct IssueLaunchWizardPrepared {
     pub(crate) client_id: ClientId,
     pub(crate) id: String,
     pub(crate) knowledge_kind: KnowledgeKind,
@@ -508,7 +508,7 @@ pub(crate) struct IssueLaunchWizardPrepared {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectOpenTarget {
+pub struct ProjectOpenTarget {
     pub(crate) project_root: PathBuf,
     pub(crate) title: String,
     pub(crate) kind: gwt::ProjectKind,
@@ -517,7 +517,7 @@ pub(crate) struct ProjectOpenTarget {
     pub(crate) needs_migration: bool,
 }
 
-pub(crate) struct AppRuntime {
+pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
     pub(crate) recent_projects: Vec<gwt::RecentProjectEntry>,

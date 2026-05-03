@@ -16,7 +16,7 @@ use crate::cli::{
     PrCheckItem, PrChecksSummary, PrCreateCall, PrReview, PrReviewThread, PrReviewThreadComment,
 };
 
-pub(crate) fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
+pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
     let output = gwt_core::process::hidden_command("gh")
         .args([
             "pr",
@@ -46,7 +46,7 @@ pub(crate) fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result
     Ok(Some(pr))
 }
 
-pub(crate) fn create_pr_via_gh(
+pub fn create_pr_via_gh(
     repo_slug: &str,
     repo_path: &std::path::Path,
     request: &PrCreateCall,
@@ -94,7 +94,7 @@ pub(crate) fn create_pr_via_gh(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-pub(crate) fn edit_pr_via_gh(
+pub fn edit_pr_via_gh(
     repo_slug: &str,
     repo_path: &std::path::Path,
     number: u64,
@@ -130,7 +130,7 @@ pub(crate) fn edit_pr_via_gh(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-pub(crate) fn extract_pr_url(stdout: &str) -> Option<String> {
+pub fn extract_pr_url(stdout: &str) -> Option<String> {
     stdout
         .lines()
         .map(str::trim)
@@ -138,11 +138,11 @@ pub(crate) fn extract_pr_url(stdout: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-pub(crate) fn parse_pr_number_from_url(url: &str) -> Option<u64> {
+pub fn parse_pr_number_from_url(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
-pub(crate) fn comment_on_pr_via_gh(
+pub fn comment_on_pr_via_gh(
     repo_path: &std::path::Path,
     number: u64,
     body: &str,
@@ -160,11 +160,7 @@ pub(crate) fn comment_on_pr_via_gh(
     Ok(())
 }
 
-pub(crate) fn fetch_pr_reviews_via_gh(
-    owner: &str,
-    repo: &str,
-    number: u64,
-) -> io::Result<Vec<PrReview>> {
+pub fn fetch_pr_reviews_via_gh(owner: &str, repo: &str, number: u64) -> io::Result<Vec<PrReview>> {
     let endpoint = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
     let output = gwt_core::process::hidden_command("gh")
         .args(["api", &endpoint])
@@ -217,7 +213,7 @@ pub(crate) fn fetch_pr_reviews_via_gh(
         .collect())
 }
 
-pub(crate) fn fetch_pr_review_threads_via_gh(
+pub fn fetch_pr_review_threads_via_gh(
     owner: &str,
     repo: &str,
     number: u64,
@@ -343,7 +339,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         .collect())
 }
 
-pub(crate) fn reply_and_resolve_pr_review_threads_via_gh(
+pub fn reply_and_resolve_pr_review_threads_via_gh(
     owner: &str,
     repo: &str,
     number: u64,
@@ -433,7 +429,7 @@ mutation($threadId: ID!) {
     Ok(resolved_count)
 }
 
-pub(crate) fn fetch_pr_checks_via_gh(
+pub fn fetch_pr_checks_via_gh(
     repo_slug: &str,
     repo_path: &std::path::Path,
     number: u64,
@@ -510,7 +506,7 @@ pub(crate) fn fetch_pr_checks_via_gh(
     })
 }
 
-pub(crate) fn fetch_pr_review_thread_state_via_gh(
+pub fn fetch_pr_review_thread_state_via_gh(
     owner: &str,
     repo: &str,
     number: u64,
@@ -521,21 +517,19 @@ pub(crate) fn fetch_pr_review_thread_state_via_gh(
         .find(|thread| thread.id == thread_id))
 }
 
-pub(crate) fn review_thread_has_comment_body(thread: &PrReviewThread, body: &str) -> bool {
+pub fn review_thread_has_comment_body(thread: &PrReviewThread, body: &str) -> bool {
     thread.comments.iter().any(|comment| comment.body == body)
 }
 
-pub(crate) fn should_reply_to_review_thread(thread: &PrReviewThread, body: &str) -> bool {
+pub fn should_reply_to_review_thread(thread: &PrReviewThread, body: &str) -> bool {
     should_resolve_review_thread(thread) && !review_thread_has_comment_body(thread, body)
 }
 
-pub(crate) fn should_resolve_review_thread(thread: &PrReviewThread) -> bool {
+pub fn should_resolve_review_thread(thread: &PrReviewThread) -> bool {
     !thread.is_resolved && !thread.is_outdated
 }
 
-pub(crate) fn parse_pr_checks_items_json(
-    json: &str,
-) -> Result<Vec<PrCheckItem>, serde_json::Error> {
+pub fn parse_pr_checks_items_json(json: &str) -> Result<Vec<PrCheckItem>, serde_json::Error> {
     let values: Vec<serde_json::Value> = serde_json::from_str(json)?;
     Ok(values
         .into_iter()
@@ -582,7 +576,7 @@ pub(crate) fn parse_pr_checks_items_json(
         .collect())
 }
 
-pub(crate) fn parse_pr_checks_items_response(
+pub fn parse_pr_checks_items_response(
     stdout: &str,
     stderr: &str,
     success: bool,
@@ -595,7 +589,7 @@ pub(crate) fn parse_pr_checks_items_response(
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
-pub(crate) fn parse_available_fields(message: &str) -> Vec<String> {
+pub fn parse_available_fields(message: &str) -> Vec<String> {
     let mut fields = Vec::new();
     let mut collecting = false;
     for line in message.lines() {
@@ -615,7 +609,7 @@ pub(crate) fn parse_available_fields(message: &str) -> Vec<String> {
     fields
 }
 
-pub(crate) fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
+pub fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
     if owner.is_empty() || repo.is_empty() {
         return Err(io::Error::other(
             "missing repository context for PR create/edit operation",

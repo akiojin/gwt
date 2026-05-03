@@ -21,7 +21,7 @@ use super::{CliEnv, InternalCommandOutput};
 
 use crate::cli::{LinkedPrSummary, PrChecksSummary, PrCreateCall, PrReview, PrReviewThread};
 
-pub(crate) type IssueClientFactory =
+pub type IssueClientFactory =
     dyn Fn(&str, &str) -> Result<HttpIssueClient, gwt_github::client::ApiError> + Send + Sync;
 
 pub struct LazyIssueClient {

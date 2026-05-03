@@ -10,7 +10,7 @@ use gwt::{
     BranchEntriesPhase, BranchListEntry, BranchScope,
 };
 
-pub(crate) fn spawn_branch_load_async(
+pub fn spawn_branch_load_async(
     proxy: AppEventProxy,
     client_id: ClientId,
     window_id: String,
@@ -28,7 +28,7 @@ pub(crate) fn spawn_branch_load_async(
     });
 }
 
-pub(crate) fn preferred_issue_launch_branch(entries: &[BranchListEntry]) -> Option<String> {
+pub fn preferred_issue_launch_branch(entries: &[BranchListEntry]) -> Option<String> {
     let mut locals = entries
         .iter()
         .filter(|entry| entry.scope == BranchScope::Local)

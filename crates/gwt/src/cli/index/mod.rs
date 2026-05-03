@@ -10,7 +10,7 @@
 //!   `index rebuild`.
 
 mod audit;
-pub(crate) mod runtime;
+pub mod runtime;
 
 use gwt_github::{client::ApiError, SpecOpsError};
 

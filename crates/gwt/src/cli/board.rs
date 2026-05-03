@@ -9,7 +9,7 @@ use gwt_github::SpecOpsError;
 
 use crate::cli::{BoardCommand, CliEnv, CliParseError};
 
-pub(crate) fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
+pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
         Some("show") => {
