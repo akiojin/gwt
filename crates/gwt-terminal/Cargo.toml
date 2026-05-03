@@ -19,7 +19,7 @@ nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(windows)'.dependencies]
 serde_json.workspace = true
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
