@@ -1341,3 +1341,13 @@ kbd.op-kbd {
 .project-bar {
   position: relative; /* anchor the ::after accent line */
 }
+
+.op-palette__empty {
+  list-style: none;
+  padding: var(--space-4) var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  text-align: center;
+}
