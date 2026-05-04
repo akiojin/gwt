@@ -1,5 +1,9 @@
 use chrono::{DateTime, Utc};
-use std::path::Path;
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 3] =
     ["origin/develop", "origin/main", "origin/master"];
@@ -7,6 +11,7 @@ pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 3] =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartWorkError {
     MissingBaseBranch,
+    ReservationIo(String),
 }
 
 impl std::fmt::Display for StartWorkError {
@@ -15,6 +20,9 @@ impl std::fmt::Display for StartWorkError {
             Self::MissingBaseBranch => f.write_str(
                 "No default base branch found (origin/develop, origin/main, origin/master)",
             ),
+            Self::ReservationIo(error) => {
+                write!(f, "Failed to reserve Start Work branch name: {error}")
+            }
         }
     }
 }
@@ -62,6 +70,67 @@ pub fn reserve_start_work_branch_name(repo_path: &Path, now: DateTime<Utc>) -> S
     })
 }
 
+pub fn reserve_start_work_branch_name_for_project(
+    repo_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<String, StartWorkError> {
+    let reservations_dir = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("workspace")
+        .join("start-work-reservations");
+    reserve_start_work_branch_name_with_reservations(
+        now,
+        |candidate| {
+            git_ref_exists(repo_path, &format!("refs/heads/{candidate}"))
+                || git_ref_exists(repo_path, &format!("refs/remotes/origin/{candidate}"))
+        },
+        &reservations_dir,
+    )
+}
+
+pub fn reserve_start_work_branch_name_with_reservations(
+    now: DateTime<Utc>,
+    mut branch_exists: impl FnMut(&str) -> bool,
+    reservations_dir: &Path,
+) -> Result<String, StartWorkError> {
+    fs::create_dir_all(reservations_dir)
+        .map_err(|error| StartWorkError::ReservationIo(error.to_string()))?;
+    let base = format!("work/{}", now.format("%Y%m%d-%H%M"));
+    for suffix in 1usize.. {
+        let candidate = if suffix == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        if branch_exists(&candidate) {
+            continue;
+        }
+        match create_reservation(reservations_dir, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(StartWorkError::ReservationIo(error.to_string())),
+        }
+    }
+    unreachable!("unbounded suffix search should always return")
+}
+
+fn create_reservation(reservations_dir: &Path, branch_name: &str) -> std::io::Result<()> {
+    let path = reservation_path(reservations_dir, branch_name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(branch_name.as_bytes())?;
+    file.sync_all()
+}
+
+fn reservation_path(reservations_dir: &Path, branch_name: &str) -> PathBuf {
+    branch_name
+        .split('/')
+        .fold(reservations_dir.to_path_buf(), |path, segment| {
+            path.join(segment)
+        })
+}
+
 fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
     gwt_core::process::hidden_command("git")
         .args(["show-ref", "--verify", "--quiet", ref_name])
@@ -77,7 +146,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        reserve_start_work_branch_name_with, resolve_start_work_base_branch_with, StartWorkError,
+        reserve_start_work_branch_name_with, reserve_start_work_branch_name_with_reservations,
+        resolve_start_work_base_branch_with, StartWorkError,
     };
 
     #[test]
@@ -109,5 +179,26 @@ mod tests {
             reserve_start_work_branch_name_with(now, |candidate| existing.contains(candidate));
 
         assert_eq!(branch, "work/20260504-1234-3");
+    }
+
+    #[test]
+    fn start_work_branch_name_tracks_pending_reservations_without_git_refs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reservations_dir = temp.path().join("reservations");
+        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
+
+        let first =
+            reserve_start_work_branch_name_with_reservations(now, |_| false, &reservations_dir)
+                .expect("first reservation");
+        let second =
+            reserve_start_work_branch_name_with_reservations(now, |_| false, &reservations_dir)
+                .expect("second reservation");
+
+        assert_eq!(first, "work/20260504-1234");
+        assert_eq!(second, "work/20260504-1234-2");
+        assert!(
+            reservations_dir.join("work").join("20260504-1234").exists(),
+            "reservation should be stored without creating a Git ref"
+        );
     }
 }
