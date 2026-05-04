@@ -1762,3 +1762,29 @@ kbd.op-kbd {
 :root[data-theme] .project-tab {
   position: relative;
 }
+
+/* SPEC-2356 — Operator divider utility class.
+   `.op-divider` renders a 1px horizontal line that picks up the
+   `--color-border` token. Use it in dialogs / drawers / panels to
+   carve sections apart while staying token-driven. The vertical
+   variant `.op-divider--vertical` is 1px wide for inline use. */
+:root[data-theme] .op-divider {
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: var(--color-border);
+  border: 0;
+  margin: var(--space-2) 0;
+}
+
+:root[data-theme] .op-divider--strong {
+  background: var(--color-border-strong);
+}
+
+:root[data-theme] .op-divider--vertical {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  margin: 0 var(--space-2);
+  vertical-align: middle;
+}
