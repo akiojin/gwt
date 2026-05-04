@@ -5987,6 +5987,16 @@
             state.notice = "";
             syncBranchSelectionState(state);
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+            // SPEC-2356 — feed git layer count into the Operator Status Strip.
+            try {
+              const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
+              window.__operatorShell?.applyTelemetryCounts?.({
+                branches: branchesCount,
+                git: branchesCount,
+              });
+            } catch (e) {
+              console.warn("operator branch telemetry failed", e);
+            }
             break;
           }
           case "memo_notes": {
