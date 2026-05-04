@@ -14,7 +14,7 @@
     "test": "cargo test -p gwt-core -p gwt --all-features",
     "test:frontend-bundle": "node --check crates/gwt/web/app.js && node --check crates/gwt/web/branch-cleanup-modal.js && node --check crates/gwt/web/migration-modal.js && node --check crates/gwt/web/theme-manager.js && node --check crates/gwt/web/hotkey.js && node --check crates/gwt/web/operator-shell.js",
     "test:frontend-smoke": "node --test crates/gwt/web/__tests__/branch-cleanup.smoke.test.mjs crates/gwt/web/__tests__/migration-modal.smoke.test.mjs",
-    "test:frontend-unit": "node --test crates/gwt/web/__tests__/contrast.test.mjs crates/gwt/web/__tests__/theme-manager.test.mjs crates/gwt/web/__tests__/hotkey.test.mjs",
+    "test:frontend-unit": "node --test crates/gwt/web/__tests__/contrast.test.mjs crates/gwt/web/__tests__/theme-manager.test.mjs crates/gwt/web/__tests__/hotkey.test.mjs crates/gwt/web/__tests__/operator-chrome-structure.test.mjs",
     "test:visual": "playwright test --config crates/gwt/playwright/playwright.config.ts",
     "test:release-assets": "node scripts/test_release_assets.cjs",
     "test:release-flow": "bash scripts/check-release-flow.sh",
