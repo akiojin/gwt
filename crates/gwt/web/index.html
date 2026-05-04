@@ -2993,10 +2993,10 @@
           </div>
         </aside>
         <div class="canvas-area">
-          <div class="hint">
-            <span class="connection-dot" id="connection-dot"></span>
-            <span id="connection-label">Connecting</span>
-            <span>Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
+          <div class="hint" role="status" aria-live="polite">
+            <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label" aria-label="Connection state">Connecting</span>
+            <span class="hint__copy">Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
           </div>
           <div class="canvas" id="canvas">
             <div class="canvas-stage" id="canvas-stage"></div>
