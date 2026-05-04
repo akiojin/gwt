@@ -269,6 +269,7 @@ Contrast) では system colors にフォールバックします。
 | `⌘G` | Git (Branches) サーフェスを focus |
 | `⌘L` | Logs サーフェスを focus |
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
+| `⌘\` | Sidebar Layers を折り畳み / 復帰 |
 | `Esc` | 開いている Palette / Overlay / Drawer を閉じる |
 
 ## SPEC と runtime クイックリファレンス
