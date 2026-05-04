@@ -1513,3 +1513,21 @@ kbd.op-kbd {
   color: var(--color-state-active);
   border-color: var(--color-state-active);
 }
+
+/* SPEC-2356 — universal focus ring on input/select/textarea elements
+   without their own dedicated focus rule. Token-driven, never overrides
+   surface-specific input rules that already use border-color. */
+:root[data-theme] input:focus-visible,
+:root[data-theme] select:focus-visible,
+:root[data-theme] textarea:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] input:focus-visible,
+  :root[data-theme] select:focus-visible,
+  :root[data-theme] textarea:focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
