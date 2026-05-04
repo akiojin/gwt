@@ -128,12 +128,18 @@ test("Branches remains a branch browser, not a planning workspace", () => {
   );
 });
 
-test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc", () => {
+test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc plus the layout toggle", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
   const text = overlay.textContent.replace(/\s+/g, " ");
-  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "Esc"]) {
+  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "⌘ \\", "Esc"]) {
     assert.ok(text.includes(phrase), `expected ${phrase} in hotkey overlay`);
+  }
+  const groups = Array.from(overlay.querySelectorAll(".op-hotkey-card__group-title")).map((el) =>
+    el.textContent?.trim().toLowerCase(),
+  );
+  for (const expected of ["navigation", "layout", "help"]) {
+    assert.ok(groups.includes(expected), `expected hotkey overlay group "${expected}", got ${groups.join("/")}`);
   }
 });
 
