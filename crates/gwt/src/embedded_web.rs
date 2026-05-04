@@ -1638,7 +1638,14 @@ mod tests {
             ),
             (
                 ".workspace-empty-state {",
-                &["padding: 16px 12px", "font-size: 12px", "color: #64748b"],
+                // SPEC-2356 — empty state typography flows through tokens so
+                // the surface respects dual-theme text colour and the body
+                // font scale. The numeric pixel value moved into `--type-sm`.
+                &[
+                    "padding: 16px 12px",
+                    "font-size: var(--type-sm)",
+                    "color: var(--color-text-muted)",
+                ],
             ),
         ];
 
