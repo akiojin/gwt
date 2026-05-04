@@ -137,8 +137,19 @@ impl WorkspaceProjection {
                 agent.last_board_entry_id = Some(entry.id.clone());
                 agent.current_focus = Some(entry.body.clone());
                 agent.updated_at = entry.updated_at;
-                if entry.kind == BoardEntryKind::Blocked {
-                    agent.status_category = WorkspaceStatusCategory::Blocked;
+                match entry.kind {
+                    BoardEntryKind::Blocked => {
+                        agent.status_category = WorkspaceStatusCategory::Blocked;
+                    }
+                    BoardEntryKind::Status
+                    | BoardEntryKind::Claim
+                    | BoardEntryKind::Handoff
+                    | BoardEntryKind::Decision
+                    | BoardEntryKind::Next => {
+                        agent.status_category = WorkspaceStatusCategory::Active;
+                    }
+                    BoardEntryKind::Request | BoardEntryKind::Impact | BoardEntryKind::Question => {
+                    }
                 }
             }
         }
@@ -335,6 +346,62 @@ mod tests {
         assert_eq!(
             projection.board_refs,
             vec!["next-1".to_string(), "blocked-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn board_milestone_restores_blocked_agent_to_active_on_progress() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "sess-1".to_string(),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            updated_at: Utc::now(),
+        });
+        let mut blocked = BoardEntry::new(
+            crate::coordination::AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Blocked,
+            "Waiting for credentials",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_origin_session_id("sess-1");
+        blocked.id = "blocked-1".to_string();
+        projection.record_board_milestone(&blocked);
+
+        let mut status = BoardEntry::new(
+            crate::coordination::AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "Credentials are configured",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_origin_session_id("sess-1");
+        status.id = "status-1".to_string();
+        projection.record_board_milestone(&status);
+
+        assert_eq!(
+            projection.agents[0].status_category,
+            WorkspaceStatusCategory::Active
+        );
+        assert_eq!(
+            projection.agents[0].current_focus.as_deref(),
+            Some("Credentials are configured")
+        );
+        assert_eq!(
+            projection.effective_status_category(),
+            WorkspaceStatusCategory::Active
         );
     }
 }
