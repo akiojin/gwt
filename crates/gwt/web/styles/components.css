@@ -1573,3 +1573,19 @@ kbd.op-kbd {
 :root[data-theme] .op-status-strip--offline .op-status-strip__value {
   color: var(--color-text-muted);
 }
+
+/* SPEC-2356 — small kbd hint chips inside Command Palette + Hotkey Overlay
+   for keyboard shortcuts that the user can press while inside the overlay.
+   Uses Mona Sans body for consistency with the surrounding text and
+   inverts to muted on hover. */
+:root[data-theme] .op-palette__input::placeholder {
+  color: var(--color-text-muted);
+}
+
+:root[data-theme] .op-palette__list {
+  scroll-padding-top: var(--space-2);
+}
+
+:root[data-theme] .op-palette__row[data-selected="true"] .op-palette__hint {
+  color: var(--color-state-active);
+}
