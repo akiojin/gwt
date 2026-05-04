@@ -343,6 +343,8 @@ pub struct ActiveWorkAgentView {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub last_board_entry_id: Option<String>,
+    pub last_board_entry_kind: Option<String>,
+    pub coordination_scope: Option<String>,
     pub updated_at: String,
 }
 
@@ -718,6 +720,8 @@ mod tests {
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                     last_board_entry_id: Some("board-1".to_string()),
+                    last_board_entry_kind: Some("handoff".to_string()),
+                    coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
                 }],
             },
@@ -742,6 +746,18 @@ mod tests {
                 .pointer("/projection/agents/0/last_board_entry_id")
                 .and_then(Value::as_str),
             Some("board-1")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/last_board_entry_kind")
+                .and_then(Value::as_str),
+            Some("handoff")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/coordination_scope")
+                .and_then(Value::as_str),
+            Some("SPEC-2359 / start-work")
         );
     }
 

@@ -470,8 +470,8 @@ fn active_work_projection_from_saved(
         .map(active_work_agent_view_from_summary)
         .collect::<Vec<_>>();
     agents.sort_by(|left, right| {
-        active_work_agent_status_rank(&left.status_category)
-            .cmp(&active_work_agent_status_rank(&right.status_category))
+        active_work_agent_priority_rank(left)
+            .cmp(&active_work_agent_priority_rank(right))
             .then_with(|| left.display_name.cmp(&right.display_name))
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
@@ -493,13 +493,20 @@ fn active_work_projection_from_saved(
     }
 }
 
-fn active_work_agent_status_rank(status_category: &str) -> u8 {
-    match status_category {
+fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
+    match agent.status_category.as_str() {
         "blocked" => 0,
-        "active" => 1,
-        "idle" => 2,
-        "done" => 3,
-        _ => 4,
+        "active" => match agent.last_board_entry_kind.as_deref() {
+            Some("handoff") => 1,
+            Some("next") => 2,
+            Some("claim") => 3,
+            Some("decision") => 4,
+            Some("status") => 5,
+            _ => 6,
+        },
+        "idle" => 7,
+        "done" => 8,
+        _ => 9,
     }
 }
 
@@ -519,6 +526,11 @@ fn active_work_agent_view_from_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         last_board_entry_id: agent.last_board_entry_id.clone(),
+        last_board_entry_kind: agent
+            .last_board_entry_kind
+            .as_ref()
+            .map(|kind| kind.as_str().to_string()),
+        coordination_scope: agent.coordination_scope.clone(),
         updated_at: agent.updated_at.to_rfc3339(),
     }
 }
@@ -537,6 +549,8 @@ fn active_agent_summary_from_session(
         worktree_path: Some(session.worktree_path.clone()),
         branch: Some(session.branch_name.clone()),
         last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
         updated_at,
     }
 }
@@ -564,6 +578,12 @@ fn upsert_workspace_agent(
         }
         if summary.last_board_entry_id.is_some() {
             existing.last_board_entry_id = summary.last_board_entry_id;
+        }
+        if summary.last_board_entry_kind.is_some() {
+            existing.last_board_entry_kind = summary.last_board_entry_kind;
+        }
+        if summary.coordination_scope.is_some() {
+            existing.coordination_scope = summary.coordination_scope;
         }
         if summary.updated_at > existing.updated_at {
             existing.updated_at = summary.updated_at;
@@ -3689,11 +3709,11 @@ mod tests {
     use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     use super::{
-        dispatch_agent_launch_success, save_start_work_workspace_projection, ActiveAgentSession,
-        AgentLaunchCompletion, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
-        ProjectTabRuntime, UserEvent, WindowRuntime,
+        active_work_projection_from_saved, dispatch_agent_launch_success,
+        save_start_work_workspace_projection, ActiveAgentSession, AgentLaunchCompletion,
+        AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
+        KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardMemoryCache, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
     use crate::{combined_window_id, same_worktree_path, PtyWriterRegistry};
 
@@ -6874,6 +6894,56 @@ exit 0
                 && projection.board_refs == vec![blocked.id.clone()]
                 && projection.next_action.as_deref() == Some("Resolve blocker")
         ));
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_prioritizes_handoff_agents() {
+        use gwt_core::workspace_projection::{
+            WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
+        };
+
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let now = chrono::Utc::now();
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-active".to_string(),
+            window_id: Some("tab-1::agent-active".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Alpha".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Implementing tests".to_string()),
+            worktree_path: None,
+            branch: Some("work/20260504-1234".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: now,
+        });
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-handoff".to_string(),
+            window_id: Some("tab-1::agent-handoff".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Zulu".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Review visual state coverage".to_string()),
+            worktree_path: None,
+            branch: Some("work/20260504-1234".to_string()),
+            last_board_entry_id: Some("board-handoff".to_string()),
+            last_board_entry_kind: Some(BoardEntryKind::Handoff),
+            coordination_scope: Some("SPEC-2359 / workspace-ux".to_string()),
+            updated_at: now,
+        });
+
+        let view = active_work_projection_from_saved(projection);
+
+        assert_eq!(view.agents[0].session_id, "session-handoff");
+        assert_eq!(
+            view.agents[0].last_board_entry_kind.as_deref(),
+            Some("handoff")
+        );
+        assert_eq!(
+            view.agents[0].coordination_scope.as_deref(),
+            Some("SPEC-2359 / workspace-ux")
+        );
     }
 
     #[test]

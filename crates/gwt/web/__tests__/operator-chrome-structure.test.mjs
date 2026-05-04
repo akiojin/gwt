@@ -89,6 +89,34 @@ test("Workspace sidebar exposes active work and per-agent overview", () => {
   );
 });
 
+test("Workspace active work overview behaves like a command center", () => {
+  assert.match(
+    appSource,
+    /Add Agent to This Work/,
+    "expected Workspace-origin launch copy to make same-work agent addition explicit",
+  );
+  assert.match(
+    appSource,
+    /last_board_entry_kind/,
+    "expected agent cards to expose the latest coordination milestone kind",
+  );
+  assert.match(
+    appSource,
+    /coordination_scope/,
+    "expected agent cards to expose owner/topic scope for each agent",
+  );
+  assert.match(
+    appSource,
+    /function\s+focusBoardEntry\(/,
+    "expected Board actions to deep-link to the referenced coordination entry",
+  );
+  assert.match(
+    appSource,
+    /data-board-entry-id/,
+    "expected Board timeline entries to be addressable from Workspace links",
+  );
+});
+
 test("Branches remains a branch browser, not a planning workspace", () => {
   const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
   assert.ok(branchPreset, "expected Branches preset to remain available");

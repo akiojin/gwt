@@ -344,6 +344,11 @@ body::after {
   border-color: var(--color-state-active);
 }
 
+.op-agent-card[data-kind="handoff"] {
+  border-color: var(--agent-codex);
+  box-shadow: inset 3px 0 0 var(--agent-codex);
+}
+
 .op-agent-head {
   display: flex;
   align-items: center;
@@ -360,7 +365,15 @@ body::after {
   white-space: nowrap;
 }
 
-.op-agent-state {
+.op-agent-chips {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.op-agent-state,
+.op-agent-kind {
   flex-shrink: 0;
   border-radius: var(--radius-pill);
   border: 1px solid var(--color-border);
@@ -372,6 +385,11 @@ body::after {
   text-transform: uppercase;
 }
 
+.op-agent-kind {
+  border-color: color-mix(in oklab, var(--agent-codex) 62%, transparent);
+  color: var(--agent-codex);
+}
+
 .op-agent-card[data-state="blocked"] .op-agent-state {
   border-color: var(--color-state-blocked);
   color: var(--color-state-blocked);
@@ -380,6 +398,14 @@ body::after {
 .op-agent-card[data-state="active"] .op-agent-state {
   border-color: var(--color-state-active);
   color: var(--color-state-active);
+}
+
+.op-agent-scope {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  overflow-wrap: anywhere;
 }
 
 .op-agent-focus {
