@@ -910,14 +910,28 @@ fn projection_needs_rebuild(projection: &BoardProjection, manifest: &EventSegmen
     if projection.newest_entry_id != projection.entries.last().map(|entry| entry.id.clone()) {
         return true;
     }
-    if let Some(expected_newest_entry_id) = manifest
+    if let Some((last_appended_entry_id, last_appended_created_at)) = manifest
         .segments
         .iter()
         .rev()
         .find(|segment| segment.entries > 0)
-        .and_then(|segment| segment.last_entry_id.as_deref())
+        .and_then(|segment| {
+            Some((
+                segment.last_entry_id.as_deref()?,
+                segment.last_created_at.as_ref()?,
+            ))
+        })
     {
-        if projection.newest_entry_id.as_deref() != Some(expected_newest_entry_id) {
+        let last_append_should_be_hot = projection
+            .entries
+            .first()
+            .is_some_and(|oldest| last_appended_created_at >= &oldest.created_at);
+        if last_append_should_be_hot
+            && !projection
+                .entries
+                .iter()
+                .any(|entry| entry.id == last_appended_entry_id)
+        {
             return true;
         }
     }
@@ -1799,6 +1813,80 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["entry-segmented", "entry-late-legacy"]
         );
+    }
+
+    #[test]
+    fn backdated_late_legacy_import_is_not_repaired_repeatedly() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut newer_segmented = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "newer segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        newer_segmented.id = "entry-newer-segmented".to_string();
+        newer_segmented.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 2, 0).unwrap();
+        newer_segmented.updated_at = newer_segmented.created_at;
+        post_entry(dir.path(), newer_segmented).unwrap();
+
+        let mut older_legacy = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Decision,
+            "older late legacy entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        older_legacy.id = "entry-older-legacy".to_string();
+        older_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        older_legacy.updated_at = older_legacy.created_at;
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: older_legacy.clone(),
+            }],
+        );
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &build_hot_projection(vec![older_legacy], Utc::now()),
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        let projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        let manifest = load_event_manifest(dir.path()).unwrap();
+
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-older-legacy", "entry-newer-segmented"]
+        );
+        assert_eq!(
+            manifest
+                .segments
+                .iter()
+                .rev()
+                .find(|segment| segment.entries > 0)
+                .and_then(|segment| segment.last_entry_id.as_deref()),
+            Some("entry-older-legacy")
+        );
+        assert_eq!(
+            projection.newest_entry_id.as_deref(),
+            Some("entry-newer-segmented")
+        );
+        assert!(!projection_needs_rebuild(&projection, &manifest));
     }
 
     #[test]
