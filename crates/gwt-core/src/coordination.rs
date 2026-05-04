@@ -238,6 +238,8 @@ struct EventSegmentMeta {
     #[serde(default)]
     last_created_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    max_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     first_entry_id: Option<String>,
     #[serde(default)]
     last_entry_id: Option<String>,
@@ -508,6 +510,7 @@ fn initial_event_manifest() -> EventSegmentManifest {
             bytes: 0,
             first_created_at: None,
             last_created_at: None,
+            max_updated_at: None,
             first_entry_id: None,
             last_entry_id: None,
         }],
@@ -580,6 +583,7 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
             bytes: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
             first_created_at: None,
             last_created_at: None,
+            max_updated_at: None,
             first_entry_id: None,
             last_entry_id: None,
         };
@@ -591,6 +595,10 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
                 meta.first_entry_id = Some(entry.id.clone());
             }
             meta.last_created_at = Some(entry.created_at);
+            meta.max_updated_at = Some(
+                meta.max_updated_at
+                    .map_or(entry.updated_at, |current| current.max(entry.updated_at)),
+            );
             meta.last_entry_id = Some(entry.id);
         }
         segments.push(meta);
@@ -762,6 +770,7 @@ fn append_event_to_segments_root(
             bytes: 0,
             first_created_at: None,
             last_created_at: None,
+            max_updated_at: None,
             first_entry_id: None,
             last_entry_id: None,
         });
@@ -806,6 +815,11 @@ fn update_segment_meta(segment: &mut EventSegmentMeta, event: &CoordinationEvent
         segment.first_entry_id = Some(entry.id.clone());
     }
     segment.last_created_at = Some(entry.created_at);
+    segment.max_updated_at = Some(
+        segment
+            .max_updated_at
+            .map_or(entry.updated_at, |current| current.max(entry.updated_at)),
+    );
     segment.last_entry_id = Some(entry.id.clone());
 }
 
@@ -1026,8 +1040,8 @@ pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<
     let mut entries = Vec::new();
     for segment in manifest.segments {
         if segment
-            .last_created_at
-            .is_some_and(|last_created_at| last_created_at <= since)
+            .max_updated_at
+            .is_some_and(|max_updated_at| max_updated_at <= since)
         {
             continue;
         }
@@ -1052,11 +1066,8 @@ pub fn has_recent_post_by(
     kind: &BoardEntryKind,
     within: chrono::Duration,
 ) -> Result<bool> {
-    let snapshot = load_snapshot(worktree_root)?;
     let threshold = Utc::now() - within;
-    Ok(snapshot
-        .board
-        .entries
+    Ok(load_entries_since(worktree_root, threshold)?
         .iter()
         .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
 }
@@ -1774,6 +1785,45 @@ mod tests {
     }
 
     #[test]
+    fn load_entries_since_handles_non_monotonic_segment_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "newer post appended first",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+        post_entry(dir.path(), new_entry).unwrap();
+
+        let mut old_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "older post appended last",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        old_entry.updated_at = old_entry.created_at;
+        post_entry(dir.path(), old_entry).unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "newer post appended first");
+    }
+
+    #[test]
     fn has_recent_post_by_respects_within_window() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1821,6 +1871,61 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Decision,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn has_recent_post_by_checks_segment_history_beyond_hot_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let base = chrono::Utc::now() - chrono::Duration::minutes(9);
+        let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
+        let mut target = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "recent status outside hot projection",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        target.created_at = base;
+        target.updated_at = base;
+        let target_id = target.id.clone();
+        events.push(CoordinationEvent::MessageAppended { entry: target });
+
+        for offset in 1..=HOT_PROJECTION_ENTRY_LIMIT {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Claude",
+                BoardEntryKind::Status,
+                format!("filler {offset}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.created_at = base + chrono::Duration::seconds(offset as i64);
+            entry.updated_at = entry.created_at;
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+        write_events(&coordination_events_path(dir.path()), &events);
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
+        assert!(!snapshot
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == target_id));
+
+        assert!(has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
             chrono::Duration::minutes(10)
         )
         .unwrap());
