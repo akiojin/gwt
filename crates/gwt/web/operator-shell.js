@@ -210,13 +210,31 @@ function wireMissionBriefing({ doc, win }) {
   overlay.removeAttribute("aria-hidden");
   overlay.hidden = false;
 
-  setTimeout(() => {
+  // SPEC-2356 — let the user dismiss the splash early by pressing any
+  // key or clicking through it. The splash is purely decorative and
+  // shouldn't block users who want to get into the canvas immediately.
+  let exited = false;
+  const exitNow = () => {
+    if (exited) return;
+    exited = true;
     overlay.dataset.state = "exiting";
     setTimeout(() => {
       overlay.hidden = true;
       try { win.sessionStorage.setItem(BRIEFING_KEY, "1"); } catch { /* no-op */ }
     }, reduced.matches ? 0 : 360);
-  }, totalDelay);
+  };
+
+  const earlyDismiss = (event) => {
+    if (overlay.hidden) return;
+    // Only fast-forward once, after the staged lines have started rendering
+    // so the user actually sees that something happened.
+    if (event && event.type === "keydown" && event.key === "Tab") return;
+    exitNow();
+  };
+  doc.addEventListener("keydown", earlyDismiss, { once: true });
+  overlay.addEventListener("click", earlyDismiss, { once: true });
+
+  setTimeout(exitNow, totalDelay);
 }
 
 // ------------------------------------------------------------
