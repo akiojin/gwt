@@ -1,5 +1,34 @@
 # Lessons Learned
 
+## 2026-05-04 — Board projection guards must distinguish append order from chronology
+
+### 事象
+
+PR #2390 の Codex review で、 `projection_needs_rebuild` が
+`manifest.last_entry_id` を Board projection の `newest_entry_id` と
+比較している点を指摘された。 late legacy `events.jsonl` import では、
+古い `created_at` の legacy entry が新しい segmented entry の後に
+append されうる。その場合、 projection は時系列順で正しく
+`newest_entry_id = newer segmented entry` を指すが、 manifest の
+last append は older legacy entry になる。
+
+### 原因
+
+Board の hot projection は chronological order の view だが、 segment
+manifest の `last_entry_id` は append order の metadata。 両者を同じ
+"newest" として扱ったため、 backdated legacy import 後に整合済み
+projection を毎回不整合扱いし、 load hot path で不要な rebuild を
+繰り返す可能性があった。
+
+### 再発防止策
+
+storage metadata を guard に使う前に、 その metadata が **append
+order / chronological order / update order** のどれを表すかを明示する。
+異なる order 軸を比較しない。 hot projection の整合性を見る場合は、
+最後に append された entry が projection の時系列 window に入るとき
+だけ「projection 内に存在するか」を検査し、 chronological newest ID
+とは比較しない。
+
 ## 2026-05-04 — multi-round correction loops on the same docs are a smell, not a feature
 
 ### 事象
