@@ -1330,6 +1330,23 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            !html.contains(r#"data-preset="shell""#)
+                && !html.contains(r#"data-preset="claude""#)
+                && !html.contains(r#"data-preset="codex""#),
+            "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
+        );
+        assert!(
+            html.contains(r#"data-preset="branches""#)
+                && html.contains("Browse repository branches and launch agents"),
+            "expected Add window modal to keep the Branches launch-agent path visible",
+        );
+    }
+
+    #[test]
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
@@ -1392,7 +1409,7 @@ mod tests {
         assert!(
             html.contains("Open a project")
                 && html.contains("Restore previous workspaces or choose a new folder.")
-                && html.contains("Open a standard shell terminal")
+                && html.contains("Browse repository branches and launch agents")
                 && html.contains("Launch Agent")
                 && html.contains("Connected")
                 && html.contains("Reconnecting"),

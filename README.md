@@ -104,13 +104,12 @@ the named-pipe path lands.
 1. Open a repository directory or restore the previous project.
 2. Use the canvas to arrange floating windows.
 3. Open `Branches`, select a branch, and double-click to open Launch Agent.
-4. Start `Shell` or `Agent` windows on the selected branch/worktree.
-5. Inspect the repository with the read-only `File Tree` window.
+4. Start `Agent` windows from Launch Agent on the selected branch/worktree.
+5. Use the add-window button for supporting workspace windows such as `File Tree`.
 
-Available windows include:
+Common windows include:
 
-- `Shell`
-- `Agent`
+- `Agent` (created through Launch Agent)
 - `Branches`
 - `File Tree`
 - `Settings`
@@ -122,13 +121,13 @@ Available windows include:
 - `Board`
 - `PR`
 
-`Shell` and `Agent` are live process windows. `File Tree` is a live read-only
-tree view. The remaining windows are currently mock surfaces where production
-behavior has not been wired yet.
+`Agent` is the live process window for coding-agent sessions. `File Tree` is a
+live read-only tree view. The remaining windows are currently mock surfaces
+where production behavior has not been wired yet.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
-PowerShell, or PowerShell 7. The selected shell applies to both `Shell` and
-`Agent` windows; Docker launches continue to use the container shell.
+PowerShell, or PowerShell 7. Docker launches continue to use the container
+shell.
 
 In terminal windows, drag to select text and release the mouse button to copy.
 On Windows and Linux, `Ctrl+Shift+C` also copies the current terminal
