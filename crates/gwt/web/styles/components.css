@@ -1682,3 +1682,23 @@ kbd.op-kbd {
     transition: none;
   }
 }
+
+/* SPEC-2356 — when sidebar is collapsed, the chrome should hint the
+   "expand" affordance via a small accent strip on the left edge of the
+   project bar, so users with no kbd shortcut memory still notice the
+   sidebar can come back. */
+:root[data-theme][data-op-sidebar="collapsed"] .project-bar {
+  box-shadow: inset 3px 0 0 var(--color-state-active);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
+    box-shadow: inset 3px 0 0 var(--color-state-active);
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
+    box-shadow: inset 3px 0 0 Highlight;
+  }
+}
