@@ -2916,13 +2916,18 @@
           </div>
         </div>
       </div>
-      <div class="modal-backdrop" id="branch-cleanup-modal">
-        <div class="modal-shell"></div>
+      <div class="modal-backdrop is-drawer" id="branch-cleanup-modal">
+        <div class="modal-shell is-drawer-shell"></div>
       </div>
       <!-- SPEC-1934 US-6: confirmation modal shown when a Normal Git layout
            is detected at startup. Renderer lives in /migration-modal.js. -->
-      <div class="modal-backdrop" id="migration-modal">
-        <div class="modal-shell"></div>
+      <!-- SPEC-2356 US-4 AS-5: branch-cleanup / migration modals adopt the
+           Drawer (slide-over) presentation while keeping the legacy
+           `.modal-backdrop` / `.modal-shell` classes so existing renderers
+           and smoke tests stay unchanged. The `is-drawer` opt-in class flips
+           layout in components.css. -->
+      <div class="modal-backdrop is-drawer" id="migration-modal">
+        <div class="modal-shell is-drawer-shell"></div>
       </div>
     </div>
 

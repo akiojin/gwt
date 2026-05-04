@@ -954,3 +954,44 @@ kbd.op-kbd {
 }
 :root[data-theme] .connection-dot.connected { background: var(--color-state-active); }
 :root[data-theme] .connection-dot.error { background: var(--color-state-blocked); }
+
+/* ============================================================
+   Drawer bridge — opt-in slide-over for legacy `.modal-backdrop`.
+
+   `<div class="modal-backdrop is-drawer">` keeps its smoke-test
+   contract (visibility toggled via `.open`, content lives in
+   `.modal-shell`) but renders as a Drawer (slide-over from the
+   right, full-height) instead of a centred modal.
+   ============================================================ */
+.modal-backdrop.is-drawer {
+  align-items: stretch;
+  justify-content: flex-end;
+  background: var(--color-overlay);
+  backdrop-filter: blur(2px);
+}
+.modal-backdrop.is-drawer.open {
+  display: flex;
+}
+.modal-backdrop.is-drawer .modal-shell.is-drawer-shell {
+  width: min(560px, 90vw);
+  max-width: 90vw;
+  max-height: 100vh;
+  margin: 0;
+  border-radius: 0;
+  border-left: 1px solid var(--color-border-strong);
+  border-right: none;
+  border-top: none;
+  border-bottom: none;
+  box-shadow: var(--shadow-2);
+  transform: translateX(100%);
+  transition: transform var(--motion-medium) var(--motion-curve);
+}
+.modal-backdrop.is-drawer.open .modal-shell.is-drawer-shell {
+  transform: translateX(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal-backdrop.is-drawer .modal-shell.is-drawer-shell {
+    transition: none;
+    transform: translateX(0);
+  }
+}
