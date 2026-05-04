@@ -350,9 +350,13 @@ body::after {
 }
 
 [data-agent-state="idle"] {
-  --agent-color: var(--color-state-idle);
+  /* SPEC-2356 — idle state tints with the agent colour at 50% chroma so
+     observers can still identify the agent (claude/codex/gemini/...) even
+     when nothing is happening. The pulse animation is suppressed; only a
+     static rim remains. */
+  --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 55%, var(--color-state-idle));
   box-shadow: 0 0 0 1px var(--agent-color);
-  opacity: 0.78;
+  opacity: 0.82;
 }
 
 [data-agent-state="blocked"] {
