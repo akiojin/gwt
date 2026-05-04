@@ -4462,3 +4462,36 @@ SPEC / Issue ウィンドウを開く、または検索文字を入力すると 
 1. `~/.gwt` 派生 path を使うテストは、env を変更しない場合でも `env_test_lock` を取得する。
 2. lock を取得した後に `HOME` / `USERPROFILE` をテスト専用 temp dir へ固定し、guard は lock より先に drop される順序で宣言する。
 3. `cargo test -p gwt-core -p gwt` は既定並列実行でも確認し、`--test-threads=1` だけを成功条件にしない。
+
+## 2026-05-04 — Phase 0 setup pattern for design-system SPEC
+
+### 事象
+
+SPEC-2356 (Operator Design System) の Phase 0 Setup を実行する際、 フォント取得と
+Playwright 導入を一気にやろうとして、 GitHub の repo 構造が想定と違って何度か
+リダイレクトを踏んだ:
+
+- `github/mona-sans` の Variable WOFF2 は `fonts/webfonts/variable/MonaSansVF[wdth,wght].woff2` (URL エンコード必要)
+- `github/hubot-sans` には Variable WOFF2 が存在しない (TTF のみ) → Bold + Condensed-Bold + Regular の static WOFF2 で代替
+- `JetBrains/JetBrainsMono` の Variable WOFF2 は `fonts/webfonts/JetBrainsMono[wght].woff2`
+
+### 再発防止策
+
+- フォント追加が要件にある SPEC では、 「実際にダウンロードできる URL を確認してから tasks に書く」を Phase 0 の最初に行う。 推測 URL のまま tasks を確定させない。
+- Variable font を要件にした場合、 該当 family が WOFF2 で variable を配布しているかを最初に確認。 配布していない場合、 static weight の組合せで代替する案を early に提案。
+- フォントは OFL ライセンス本文も同階層に置く (リポジトリ自身の LICENSE / OFL.txt をそのままコピー)。
+- WOFF2 → TTF 変換ツール (`woff2_compress`) は CI / dev 環境に存在する保証がない。 コンバージョンを工程に組み込まない。
+
+## 2026-05-04 — フロントテストランナー: Node native + Playwright の二段構え
+
+### 事象
+
+SPEC-2356 で frontend の自動検証を増やす際、 既存は `node --test`
+(smoke) のみだった。 設計上、 contrast / theme manager / hotkey は
+ロジック単体で `node --test` に載るが、 visual regression は
+Playwright が必須。
+
+### 再発防止策
+
+- 新しいフロントテストは「ロジック単体は `node --test`、 描画 / インタラクションは Playwright」に二分する。 ブラウザ起動が必要かをロジックレベルで判定する。
+- `package.json` には `test:frontend-unit` (Node native) と `test:visual` (Playwright) を分離して定義する。 CI も別ジョブで実行し、 失敗箇所が一目で分かるようにする。

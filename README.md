@@ -104,13 +104,12 @@ the named-pipe path lands.
 1. Open a repository directory or restore the previous project.
 2. Use the canvas to arrange floating windows.
 3. Open `Branches`, select a branch, and double-click to open Launch Agent.
-4. Start `Shell` or `Agent` windows on the selected branch/worktree.
-5. Inspect the repository with the read-only `File Tree` window.
+4. Start `Agent` windows from Launch Agent on the selected branch/worktree.
+5. Use the add-window button for supporting workspace windows such as `File Tree`.
 
-Available windows include:
+Common windows include:
 
-- `Shell`
-- `Agent`
+- `Agent` (created through Launch Agent)
 - `Branches`
 - `File Tree`
 - `Settings`
@@ -122,13 +121,13 @@ Available windows include:
 - `Board`
 - `PR`
 
-`Shell` and `Agent` are live process windows. `File Tree` is a live read-only
-tree view. The remaining windows are currently mock surfaces where production
-behavior has not been wired yet.
+`Agent` is the live process window for coding-agent sessions. `File Tree` is a
+live read-only tree view. The remaining windows are currently mock surfaces
+where production behavior has not been wired yet.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
-PowerShell, or PowerShell 7. The selected shell applies to both `Shell` and
-`Agent` windows; Docker launches continue to use the container shell.
+PowerShell, or PowerShell 7. Docker launches continue to use the container
+shell.
 
 In terminal windows, drag to select text and release the mouse button to copy.
 On Windows and Linux, `Ctrl+Shift+C` also copies the current terminal
@@ -175,6 +174,39 @@ confirmation modal with three actions:
 - Use `Stack` to cascade windows with overlap
 - Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
   focused window is recentered
+
+## Operator Design Language (SPEC-2356)
+
+Starting with the Operator Design System update, gwt is themed as a single
+mission-control surface with editorial-industrial typography (`Mona Sans` for
+body, `Hubot Sans` condensed for display, `JetBrains Mono` for terminal /
+counters). Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
+Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
+single token system that ships in two flagship themes:
+
+- **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
+  for long sessions
+- **Light Operator** (Drafting Table / bone + ink) — for bright environments
+
+The active theme follows your OS `prefers-color-scheme`, but the **Theme**
+toggle in the Project Bar lets you cycle `auto → dark → light → auto`. The
+choice is persisted in browser storage and survives restarts. xterm terminal
+panes follow the overall theme automatically. `prefers-reduced-motion: reduce`
+disables the Living Telemetry pulse rim, status strip ticking, and Mission
+Briefing intro reveal so the UI stays usable in motion-sensitive environments.
+`forced-colors: active` (Windows High Contrast / macOS Increase Contrast)
+falls back to system colors so accessibility is preserved.
+
+### Hotkeys
+
+| Combo | Action |
+| --- | --- |
+| `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
+| `⌘B` | Focus the Board surface |
+| `⌘G` | Focus the Git (Branches) surface |
+| `⌘L` | Focus the Logs surface |
+| `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
+| `Esc` | Close any open palette / overlay / drawer |
 
 ## Managed Hooks and SPEC Cache
 

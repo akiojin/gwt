@@ -2,6 +2,30 @@
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
+      import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
+
+      // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
+      // module loads so the theme toggle, command palette, hotkey overlay,
+      // status strip clock, and Mission Briefing intro are wired before the
+      // rest of app.js continues bootstrapping the legacy surfaces.
+      const __op = initOperatorShell();
+      const xtermThemeAdapters = new Set();
+      __op.themeManager.subscribe((effective) => {
+        for (const adapter of xtermThemeAdapters) {
+          try { adapter(effective); } catch (e) { console.error("xterm theme adapter threw", e); }
+        }
+      });
+      window.__operatorShell = {
+        themeManager: __op.themeManager,
+        hotkey: __op.hotkey,
+        palette: __op.palette,
+        registerXtermThemeAdapter: (fn) => {
+          xtermThemeAdapters.add(fn);
+          try { fn(__op.themeManager.getEffective()); } catch (_e) { /* ignore */ }
+          return () => xtermThemeAdapters.delete(fn);
+        },
+        applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
+      };
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -924,6 +948,48 @@
         });
       }
 
+      // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
+      // Aggregates `data-agent-state` across all open windows and pushes the
+      // counts into the bottom strip. We also expose agent count to the
+      // sidebar layer for the "Quick" section's hint.
+      function recomputeOperatorTelemetry() {
+        if (!window.__operatorShell?.applyTelemetryCounts) return;
+        const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
+        for (const el of windowMap.values()) {
+          const state = el?.dataset?.agentState;
+          if (!state) continue;
+          if (state in counts) counts[state] += 1;
+          counts.agents += 1;
+        }
+        try {
+          window.__operatorShell.applyTelemetryCounts(counts);
+        } catch (e) {
+          console.warn("operator telemetry update failed", e);
+        }
+      }
+
+      // SPEC-2356 — translate legacy runtime state vocabulary to Living
+      // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
+      // intentionally narrow so future runtime states surface as
+      // `idle` until the design language explicitly handles them.
+      function mapAgentTelemetryState(runtimeState) {
+        switch (runtimeState) {
+          case "starting":
+          case "running":
+          case "waiting":
+            return "active";
+          case "ready":
+            return "idle";
+          case "stopped":
+          case "exited":
+            return "done";
+          case "error":
+            return "blocked";
+          default:
+            return "idle";
+        }
+      }
+
       function applyStatus(windowId, status, detail) {
         const windowData = workspaceWindowById(windowId);
         const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
@@ -951,6 +1017,10 @@
           "error",
         );
         chip.classList.add(runtimeState);
+        // SPEC-2356 — Living Telemetry: project the runtime state onto a stable
+        // `data-agent-state` attribute the components.css layer animates.
+        element.dataset.agentState = mapAgentTelemetryState(runtimeState);
+        recomputeOperatorTelemetry();
         label.textContent = windowRuntimeLabel(runtimeState);
         const effectiveDetail = detailMap.get(windowId);
         if (overlay) {
@@ -1265,39 +1335,73 @@
         };
       }
 
+      // SPEC-2356 — xterm theme palettes follow the Operator overall theme.
+      // Each palette satisfies WCAG AA against its own canvas in DevTools spot
+      // checks; the dark variant is unchanged from the historical default.
+      const XTERM_THEME_DARK = {
+        background: "#0a0d12",
+        foreground: "#e8eaed",
+        cursor: "#f8fafc",
+        selectionBackground: "#1e293b",
+        black: "#0f172a",
+        red: "#ef4444",
+        green: "#22c55e",
+        yellow: "#f59e0b",
+        blue: "#3b82f6",
+        magenta: "#a855f7",
+        cyan: "#06b6d4",
+        white: "#cbd5e1",
+        brightBlack: "#334155",
+        brightRed: "#f87171",
+        brightGreen: "#4ade80",
+        brightYellow: "#fbbf24",
+        brightBlue: "#60a5fa",
+        brightMagenta: "#c084fc",
+        brightCyan: "#22d3ee",
+        brightWhite: "#f8fafc",
+      };
+      const XTERM_THEME_LIGHT = {
+        background: "#f5f3ee",
+        foreground: "#1a1d24",
+        cursor: "#1a1d24",
+        selectionBackground: "#dcd9d2",
+        black: "#1f2937",
+        red: "#b91c1c",
+        green: "#15803d",
+        yellow: "#a16207",
+        blue: "#1d4ed8",
+        magenta: "#86198f",
+        cyan: "#0e7490",
+        white: "#4b5563",
+        brightBlack: "#374151",
+        brightRed: "#dc2626",
+        brightGreen: "#166534",
+        brightYellow: "#b45309",
+        brightBlue: "#1e40af",
+        brightMagenta: "#a21caf",
+        brightCyan: "#155e75",
+        brightWhite: "#1f2937",
+      };
+      const xtermThemeFor = (mode) =>
+        mode === "light" ? XTERM_THEME_LIGHT : XTERM_THEME_DARK;
+
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
         }
+        const initialMode = window.__operatorShell?.themeManager?.getEffective() ?? "dark";
         const terminal = new Terminal({
           cursorBlink: true,
           convertEol: true,
-          theme: {
-            background: "#020617",
-            foreground: "#e2e8f0",
-            cursor: "#f8fafc",
-            black: "#0f172a",
-            red: "#ef4444",
-            green: "#22c55e",
-            yellow: "#f59e0b",
-            blue: "#3b82f6",
-            magenta: "#a855f7",
-            cyan: "#06b6d4",
-            white: "#cbd5e1",
-            brightBlack: "#334155",
-            brightRed: "#f87171",
-            brightGreen: "#4ade80",
-            brightYellow: "#fbbf24",
-            brightBlue: "#60a5fa",
-            brightMagenta: "#c084fc",
-            brightCyan: "#22d3ee",
-            brightWhite: "#f8fafc",
-          },
+          theme: xtermThemeFor(initialMode),
           fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+            "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 13,
           lineHeight: 1.2,
           scrollback: 5000,
+        });
+        const themeUnsubscribe = window.__operatorShell?.registerXtermThemeAdapter?.((mode) => {
+          try { terminal.options.theme = xtermThemeFor(mode); } catch (e) { console.warn("xterm theme update failed", e); }
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -1307,6 +1411,7 @@
         const cleanup = () => {
           copyCleanup();
           viewportRefreshCleanup();
+          themeUnsubscribe?.();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;
@@ -6510,6 +6615,77 @@
           closeModal();
         });
       }
+
+      // SPEC-2356 — bridge Command Palette + hotkey commands into existing
+      // surface dispatch. Each command either focuses an existing window or
+      // creates a new one through the same socket transport the preset
+      // buttons use, so they share the legacy invariants.
+      function focusOrSpawnPreset(preset) {
+        const allWindows = activeWorkspace().windows || [];
+        const existing = allWindows.find(
+          (w) => w.preset === preset && !w.minimized,
+        );
+        if (existing) {
+          frontendUnits.socketTransport.send({
+            kind: "focus_window",
+            id: existing.id,
+          });
+          return;
+        }
+        frontendUnits.socketTransport.send({
+          kind: "create_window",
+          preset,
+          bounds: visibleBounds(),
+        });
+      }
+
+      document.addEventListener("op:command", (event) => {
+        const id = event.detail?.id;
+        if (!id) return;
+        switch (id) {
+          case "open-board":
+            focusOrSpawnPreset("board");
+            return;
+          case "open-git":
+            focusOrSpawnPreset("branches");
+            return;
+          case "open-logs":
+            focusOrSpawnPreset("logs");
+            return;
+          case "open-branches":
+            focusOrSpawnPreset("branches");
+            return;
+          case "open-files":
+            focusOrSpawnPreset("file_tree");
+            return;
+          case "spawn-shell":
+            focusOrSpawnPreset("shell");
+            return;
+          case "spawn-agent":
+            focusOrSpawnPreset("claude");
+            return;
+          case "theme-cycle": {
+            const tm = window.__operatorShell?.themeManager;
+            if (!tm) return;
+            const cycle = { auto: "dark", dark: "light", light: "auto" };
+            tm.setTheme(cycle[tm.getPreference()] ?? "auto");
+            return;
+          }
+          case "open-help": {
+            const overlay = document.getElementById("op-hotkey-overlay");
+            if (overlay) {
+              overlay.dataset.open = overlay.dataset.open === "true" ? "" : "true";
+              overlay.setAttribute(
+                "aria-hidden",
+                overlay.dataset.open === "true" ? "false" : "true",
+              );
+            }
+            return;
+          }
+          default:
+            console.debug("op:command unknown id", id);
+        }
+      });
 
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       frontendUnits.socketTransport.connect();

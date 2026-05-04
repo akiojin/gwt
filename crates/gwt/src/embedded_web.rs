@@ -31,6 +31,52 @@ pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
 }
 
+// SPEC-2356 Operator Design System — module assets.
+pub fn theme_manager_js() -> &'static str {
+    include_str!("../web/theme-manager.js")
+}
+
+pub fn hotkey_js() -> &'static str {
+    include_str!("../web/hotkey.js")
+}
+
+pub fn operator_shell_js() -> &'static str {
+    include_str!("../web/operator-shell.js")
+}
+
+pub fn styles_tokens_css() -> &'static str {
+    include_str!("../web/styles/tokens.css")
+}
+
+pub fn styles_typography_css() -> &'static str {
+    include_str!("../web/styles/typography.css")
+}
+
+pub fn styles_components_css() -> &'static str {
+    include_str!("../web/styles/components.css")
+}
+
+// SPEC-2356 Operator Design System — fonts (binary).
+pub fn font_mona_sans() -> &'static [u8] {
+    include_bytes!("../web/fonts/MonaSans.woff2")
+}
+
+pub fn font_hubot_regular() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSans-Regular.woff2")
+}
+
+pub fn font_hubot_bold() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSans-Bold.woff2")
+}
+
+pub fn font_hubot_condensed_bold() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSansCondensed-Bold.woff2")
+}
+
+pub fn font_jetbrains_mono() -> &'static [u8] {
+    include_bytes!("../web/fonts/JetBrainsMono.woff2")
+}
+
 pub async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
@@ -75,6 +121,79 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
     )
+}
+
+// SPEC-2356 — Operator Design System: module + style + font handlers.
+pub async fn theme_manager_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        theme_manager_js(),
+    )
+}
+
+pub async fn hotkey_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        hotkey_js(),
+    )
+}
+
+pub async fn operator_shell_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        operator_shell_js(),
+    )
+}
+
+pub async fn styles_tokens_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_tokens_css(),
+    )
+}
+
+pub async fn styles_typography_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_typography_css(),
+    )
+}
+
+pub async fn styles_components_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_components_css(),
+    )
+}
+
+fn font_response(bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+}
+
+pub async fn font_mona_sans_handler() -> impl IntoResponse {
+    font_response(font_mona_sans())
+}
+
+pub async fn font_hubot_regular_handler() -> impl IntoResponse {
+    font_response(font_hubot_regular())
+}
+
+pub async fn font_hubot_bold_handler() -> impl IntoResponse {
+    font_response(font_hubot_bold())
+}
+
+pub async fn font_hubot_condensed_bold_handler() -> impl IntoResponse {
+    font_response(font_hubot_condensed_bold())
+}
+
+pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
+    font_response(font_jetbrains_mono())
 }
 
 #[cfg(test)]
@@ -1211,6 +1330,23 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            !html.contains(r#"data-preset="shell""#)
+                && !html.contains(r#"data-preset="claude""#)
+                && !html.contains(r#"data-preset="codex""#),
+            "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
+        );
+        assert!(
+            html.contains(r#"data-preset="branches""#)
+                && html.contains("Browse repository branches and launch agents"),
+            "expected Add window modal to keep the Branches launch-agent path visible",
+        );
+    }
+
+    #[test]
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
@@ -1273,7 +1409,7 @@ mod tests {
         assert!(
             html.contains("Open a project")
                 && html.contains("Restore previous workspaces or choose a new folder.")
-                && html.contains("Open a standard shell terminal")
+                && html.contains("Browse repository branches and launch agents")
                 && html.contains("Launch Agent")
                 && html.contains("Connected")
                 && html.contains("Reconnecting"),
@@ -1602,6 +1738,9 @@ mod tests {
     fn embedded_web_modal_frame_primitives_define_shared_contracts() {
         let html = index_html();
 
+        // SPEC-2356 FR-001: modal frame primitives must reference design
+        // tokens from `tokens.css` instead of raw colour literals so the
+        // Operator dark/light dual flagship can theme them via CSS variables.
         let primitives: [(&str, &[&str]); 5] = [
             (
                 ".modal-backdrop {",
@@ -1610,7 +1749,7 @@ mod tests {
                     "inset: 0",
                     "align-items: center",
                     "justify-content: center",
-                    "background: rgba(15, 23, 42",
+                    "background: var(--color-overlay)",
                 ],
             ),
             (
@@ -1618,8 +1757,8 @@ mod tests {
                 &[
                     "max-height: calc(100vh - 48px)",
                     "overflow: auto",
-                    "border-radius: 6px",
-                    "background: #ffffff",
+                    "border-radius: var(--radius-lg)",
+                    "background: var(--color-surface-elevated)",
                     "border: 1px solid",
                 ],
             ),

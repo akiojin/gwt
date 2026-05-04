@@ -1,0 +1,997 @@
+/* SPEC-2356 Operator Design System — Components.
+ *
+ * Operator Chrome Shell + Living Telemetry + Drawer + Command Palette +
+ * Hotkey Overlay + Mission Briefing intro + Backdrop + Bracket ornament.
+ *
+ * All values consume tokens.css. No raw color literals here so dual-theme
+ * switching is purely a token resolution.
+ */
+
+/* ============================================================
+   Page-level reset / Operator backdrop
+   ============================================================ */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-base);
+  line-height: 1.5;
+}
+
+body {
+  overflow: hidden;
+  position: relative;
+}
+
+/* Scan-grid backdrop (subtle, behind everything else) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+  opacity: 0.55;
+}
+
+/* Grain overlay (pseudo-CRT texture, very subtle) */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.91 0 0 0 0 0.92 0 0 0 0 0.93 0 0 0 0.45 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.5'/></svg>");
+  mix-blend-mode: overlay;
+  opacity: 0.28;
+}
+
+#app {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(220px, 240px) 1fr;
+  grid-template-rows: 44px 1fr 28px;
+  grid-template-areas:
+    "projectbar projectbar"
+    "sidebar    canvas"
+    "strip      strip";
+  background: var(--bg-depth-glow), transparent;
+}
+
+/* ============================================================
+   Project Bar — top chrome
+   ============================================================ */
+
+.project-shell {
+  display: contents;
+}
+
+.project-bar {
+  grid-area: projectbar;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-4);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  z-index: 10;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  font-size: var(--type-sm);
+  color: var(--color-display-fg);
+}
+
+.project-bar::before {
+  content: "GWT · OPERATOR";
+  margin-right: var(--space-4);
+  color: var(--color-display-fg);
+}
+
+.project-tabs {
+  display: flex;
+  gap: var(--space-2);
+  flex: 1;
+  align-items: center;
+  overflow: hidden;
+  font-stretch: 100%;
+  letter-spacing: var(--tracking-wide);
+  text-transform: none;
+  font-weight: 500;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  color: var(--color-text);
+}
+
+.project-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  letter-spacing: var(--tracking-mono);
+  text-transform: none;
+  font-weight: 500;
+}
+
+/* Theme toggle button (Project Bar trailing) */
+.op-theme-toggle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text);
+  height: 26px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--motion-curve),
+              color var(--motion-fast) var(--motion-curve),
+              background var(--motion-fast) var(--motion-curve);
+}
+
+.op-theme-toggle:hover,
+.op-theme-toggle:focus-visible {
+  outline: none;
+  border-color: var(--color-focus-ring);
+  color: var(--color-focus-ring);
+}
+
+.op-theme-toggle__label {
+  margin-right: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+/* ============================================================
+   Sidebar Layers — left chrome
+   ============================================================ */
+
+.op-sidebar {
+  grid-area: sidebar;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  z-index: 9;
+}
+
+.op-sidebar__section {
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-3) var(--space-4);
+}
+
+.op-sidebar__heading {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-2) 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.op-sidebar__count {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.op-layer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  color: var(--color-text);
+}
+
+.op-layer__indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid var(--color-border-strong);
+  background: transparent;
+  flex-shrink: 0;
+  transition: background var(--motion-fast) var(--motion-curve);
+}
+
+.op-layer[aria-pressed="true"] .op-layer__indicator {
+  background: var(--color-state-active);
+  border-color: var(--color-state-active);
+}
+
+.op-layer__label {
+  flex: 1;
+}
+
+.op-layer__count {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+/* ============================================================
+   Status Strip — bottom chrome
+   ============================================================ */
+
+.op-status-strip {
+  grid-area: strip;
+  background: var(--color-status-strip-bg);
+  color: var(--color-status-strip-fg);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  border-top: 1px solid var(--color-border);
+  z-index: 10;
+  gap: var(--space-3);
+}
+
+.op-status-strip__cell {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--color-status-strip-divider);
+}
+
+.op-status-strip__cell:last-child {
+  border-right: none;
+  margin-left: auto;
+  padding-right: 0;
+}
+
+.op-status-strip__label {
+  color: color-mix(in oklab, var(--color-status-strip-fg) 70%, transparent);
+}
+
+.op-status-strip__value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.op-status-strip__live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-state-active);
+  display: inline-block;
+  margin-right: var(--space-1);
+  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+@keyframes op-live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.op-status-strip__cell--blocked .op-status-strip__value {
+  color: var(--color-state-blocked);
+}
+
+/* ============================================================
+   Canvas area — Operator overrides on existing layout
+   ============================================================ */
+
+.canvas-area {
+  grid-area: canvas;
+  position: relative;
+  background: transparent;
+}
+
+.canvas {
+  background: transparent;
+}
+
+/* Existing floating actions become Operator-styled */
+.floating-actions .arrange-button,
+.floating-actions .add-button {
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  border: 1px solid var(--color-button-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  transition: background var(--motion-fast) var(--motion-curve);
+}
+
+.floating-actions .arrange-button:hover,
+.floating-actions .add-button:hover {
+  background: var(--color-button-bg-hover);
+}
+
+/* ============================================================
+   Living Telemetry — agent pulse rim on active windows
+   ============================================================ */
+
+[data-agent-state] {
+  --agent-color: var(--color-state-active);
+  position: relative;
+  isolation: isolate;
+}
+
+[data-agent-state="active"] {
+  --agent-color: var(--current-agent, var(--color-state-active));
+  box-shadow: var(--shadow-glow-active);
+  animation: op-rim-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+[data-agent-state="idle"] {
+  --agent-color: var(--color-state-idle);
+  box-shadow: 0 0 0 1px var(--agent-color);
+  opacity: 0.78;
+}
+
+[data-agent-state="blocked"] {
+  --agent-color: var(--color-state-blocked);
+  box-shadow: 0 0 0 1px var(--agent-color),
+              0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
+  animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+}
+
+[data-agent-state="done"] {
+  --agent-color: var(--color-state-done);
+  box-shadow: 0 0 0 1px var(--agent-color);
+  opacity: 0.65;
+}
+
+@keyframes op-rim-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
+                          0 0 12px 0 color-mix(in oklab, var(--agent-color) 35%, transparent); }
+  50% { box-shadow: 0 0 0 1px var(--agent-color),
+                     0 0 22px 2px color-mix(in oklab, var(--agent-color) 55%, transparent); }
+}
+
+@keyframes op-rim-blocked {
+  0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
+                          0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent); }
+  50%      { box-shadow: 0 0 0 2px var(--agent-color),
+                          0 0 22px 1px color-mix(in oklab, var(--agent-color) 70%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-agent-state="active"],
+  [data-agent-state="blocked"] {
+    animation: none;
+  }
+}
+
+/* ============================================================
+   Bracket ornament — corner brackets `⌜⌟` decoration
+   ============================================================ */
+
+.has-brackets {
+  position: relative;
+  padding: var(--space-1) var(--space-3);
+}
+
+.has-brackets::before,
+.has-brackets::after {
+  position: absolute;
+  font-family: var(--font-mono);
+  color: var(--color-border-strong);
+  pointer-events: none;
+  font-size: 1em;
+  line-height: 1;
+}
+
+.has-brackets::before {
+  content: "⌜";
+  top: 0;
+  left: 0;
+}
+
+.has-brackets::after {
+  content: "⌟";
+  bottom: 0;
+  right: 0;
+}
+
+/* ============================================================
+   Drawer pattern — slide-over modal replacement
+   ============================================================ */
+
+.op-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  backdrop-filter: blur(2px);
+  z-index: 30;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-medium) var(--motion-curve);
+}
+
+.op-drawer-backdrop[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.op-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(560px, 90vw);
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-left: 1px solid var(--color-border-strong);
+  box-shadow: var(--shadow-2);
+  z-index: 31;
+  transform: translateX(100%);
+  transition: transform var(--motion-medium) var(--motion-curve);
+  display: flex;
+  flex-direction: column;
+}
+
+.op-drawer[data-open="true"] {
+  transform: translateX(0);
+}
+
+.op-drawer__header {
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.op-drawer__title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+  font-size: var(--type-md);
+  margin: 0;
+  color: var(--color-display-fg);
+}
+
+.op-drawer__close {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: var(--type-base);
+}
+
+.op-drawer__close:hover { color: var(--color-text); }
+
+.op-drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+}
+
+.op-drawer__footer {
+  padding: var(--space-4);
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+}
+
+/* ============================================================
+   Command Palette — ⌘P overlay
+   ============================================================ */
+
+.op-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--color-scrim);
+  backdrop-filter: blur(4px);
+  z-index: 40;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--motion-curve);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+
+.op-palette-backdrop[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.op-palette {
+  width: min(640px, 90vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+.op-palette__input {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--type-md);
+  padding: var(--space-3) var(--space-4);
+  outline: none;
+}
+
+.op-palette__input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.op-palette__list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-2) 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.op-palette__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+}
+
+.op-palette__row[data-selected="true"] {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+}
+
+.op-palette__hint {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.op-palette__group {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: var(--space-2) var(--space-4) var(--space-1);
+}
+
+/* ============================================================
+   Hotkey Overlay — ⌘? cheat sheet
+   ============================================================ */
+
+.op-hotkey-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-scrim);
+  backdrop-filter: blur(4px);
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--motion-curve);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.op-hotkey-overlay[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.op-hotkey-card {
+  width: min(720px, 90vw);
+  max-height: 80vh;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  padding: var(--space-6);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-6);
+  overflow: auto;
+}
+
+.op-hotkey-card__title {
+  grid-column: 1 / -1;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+  font-size: var(--type-lg);
+  margin: 0 0 var(--space-2) 0;
+  color: var(--color-display-fg);
+}
+
+.op-hotkey-card__group {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.op-hotkey-card__group-title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.op-hotkey-card__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+}
+
+kbd.op-kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-button-border);
+  letter-spacing: var(--tracking-mono);
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Mission Briefing intro — staged splash
+   ============================================================ */
+
+.op-briefing {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--color-canvas);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity var(--motion-slow) var(--motion-curve);
+}
+
+.op-briefing[data-state="exiting"] {
+  opacity: 0;
+}
+
+.op-briefing[hidden] {
+  display: none;
+}
+
+.op-briefing__title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+  color: var(--color-display-fg);
+  font-size: var(--type-3xl);
+  margin: 0 0 var(--space-6);
+}
+
+.op-briefing__lines {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-bottom: var(--space-6);
+}
+
+.op-briefing__line {
+  opacity: 0;
+  animation: op-briefing-line-in var(--motion-slow) var(--motion-curve) forwards;
+}
+
+.op-briefing__line[data-state="ok"]::after {
+  content: " ok";
+  color: var(--color-state-active);
+}
+
+.op-briefing__online {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  color: var(--color-state-active);
+  font-size: var(--type-md);
+  text-transform: uppercase;
+  opacity: 0;
+  animation: op-briefing-online-in var(--motion-slow) ease-out forwards;
+  animation-delay: calc(var(--motion-slow) * 4);
+}
+
+@keyframes op-briefing-line-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes op-briefing-online-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-briefing__line,
+  .op-briefing__online {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .op-briefing { transition: none; }
+}
+
+/* ============================================================
+   Forced colors — let system colors win
+   ============================================================ */
+
+@media (forced-colors: active) {
+  body::before, body::after { display: none; }
+  [data-agent-state] { animation: none; }
+  .op-status-strip__live-dot { animation: none; }
+}
+
+/* ============================================================
+   Phase 3 Per-surface Adoption — legacy class theming bridge.
+
+   Existing surfaces inside index.html still ship a 2k-line
+   `<style>` block with hard-coded slate / sky colours from the
+   pre-Operator era. Rewriting every selector would be a massive
+   regression risk, so we add this token-driven adapter that
+   overrides the most prominent legacy classes on a theme-by-theme
+   basis. Each rule scopes through `:root[data-theme]` so it never
+   bleeds outside Operator and the legacy CSS keeps working in
+   environments where data-theme is unset (e.g. forced colors).
+   ============================================================ */
+
+:root[data-theme] .project-tab {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+:root[data-theme] .project-tab:hover {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface-elevated));
+}
+:root[data-theme] .project-tab.active {
+  background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface-elevated));
+  color: var(--color-text-strong);
+  border-color: var(--color-state-active);
+}
+:root[data-theme] .project-tab-close {
+  background: color-mix(in oklab, var(--color-text) 14%, transparent);
+  color: var(--color-text);
+}
+:root[data-theme] .project-tab-close:hover {
+  background: color-mix(in oklab, var(--color-text) 24%, transparent);
+}
+
+:root[data-theme] .app-version,
+:root[data-theme] .index-status {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+:root[data-theme] .index-status.ready { color: var(--color-state-active); border-color: var(--color-state-active); }
+:root[data-theme] .index-status.repair_required,
+:root[data-theme] .index-status.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
+
+:root[data-theme] .hint {
+  color: var(--color-text-muted);
+  background: color-mix(in oklab, var(--color-surface) 80%, transparent);
+}
+
+:root[data-theme] .arrange-button,
+:root[data-theme] .add-button,
+:root[data-theme] .wizard-button {
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  border-color: var(--color-button-border);
+}
+:root[data-theme] .arrange-button:hover,
+:root[data-theme] .add-button:hover,
+:root[data-theme] .wizard-button:hover {
+  background: var(--color-button-bg-hover);
+}
+:root[data-theme] .wizard-button.primary {
+  background: var(--color-state-active);
+  color: var(--color-canvas);
+  border-color: var(--color-state-active);
+}
+
+/* Floating window chrome */
+:root[data-theme] .window {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-2);
+}
+:root[data-theme] .window .title-bar,
+:root[data-theme] .window .window-header {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border);
+}
+:root[data-theme] .title-text {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  font-size: var(--type-xs);
+  color: var(--color-display-fg);
+}
+:root[data-theme] .status-chip {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+:root[data-theme] .status-chip.starting,
+:root[data-theme] .status-chip.running,
+:root[data-theme] .status-chip.waiting { color: var(--color-state-active); border-color: var(--color-state-active); }
+:root[data-theme] .status-chip.ready { color: var(--color-state-idle); border-color: var(--color-state-idle); }
+:root[data-theme] .status-chip.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
+:root[data-theme] .status-chip.stopped,
+:root[data-theme] .status-chip.exited { color: var(--color-state-done); border-color: var(--color-state-done); }
+
+/* Project picker / onboarding cards */
+:root[data-theme] .project-picker,
+:root[data-theme] .project-onboarding {
+  background: var(--color-overlay);
+  backdrop-filter: blur(2px);
+}
+:root[data-theme] .project-picker-card,
+:root[data-theme] .project-onboarding-card {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  box-shadow: var(--shadow-2);
+}
+:root[data-theme] .project-picker-title,
+:root[data-theme] .project-onboarding-title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+  color: var(--color-display-fg);
+}
+
+/* Preset modal (Add window) */
+:root[data-theme] .preset-section-label {
+  color: var(--color-text-muted);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+}
+:root[data-theme] .preset-button {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+:root[data-theme] .preset-button:hover {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-state-active);
+}
+:root[data-theme] .preset-button strong {
+  color: var(--color-text-strong);
+}
+
+/* Window list panel (in floating actions) */
+:root[data-theme] .window-list-panel {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  box-shadow: var(--shadow-2);
+}
+
+/* Connection dot */
+:root[data-theme] .connection-dot {
+  background: var(--color-state-idle);
+}
+:root[data-theme] .connection-dot.connected { background: var(--color-state-active); }
+:root[data-theme] .connection-dot.error { background: var(--color-state-blocked); }
+
+/* ============================================================
+   Drawer bridge — opt-in slide-over for legacy `.modal-backdrop`.
+
+   `<div class="modal-backdrop is-drawer">` keeps its smoke-test
+   contract (visibility toggled via `.open`, content lives in
+   `.modal-shell`) but renders as a Drawer (slide-over from the
+   right, full-height) instead of a centred modal.
+   ============================================================ */
+.modal-backdrop.is-drawer {
+  align-items: stretch;
+  justify-content: flex-end;
+  background: var(--color-overlay);
+  backdrop-filter: blur(2px);
+}
+.modal-backdrop.is-drawer.open {
+  display: flex;
+}
+.modal-backdrop.is-drawer .modal-shell.is-drawer-shell {
+  width: min(560px, 90vw);
+  max-width: 90vw;
+  max-height: 100vh;
+  margin: 0;
+  border-radius: 0;
+  border-left: 1px solid var(--color-border-strong);
+  border-right: none;
+  border-top: none;
+  border-bottom: none;
+  box-shadow: var(--shadow-2);
+  transform: translateX(100%);
+  transition: transform var(--motion-medium) var(--motion-curve);
+}
+.modal-backdrop.is-drawer.open .modal-shell.is-drawer-shell {
+  transform: translateX(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .modal-backdrop.is-drawer .modal-shell.is-drawer-shell {
+    transition: none;
+    transform: translateX(0);
+  }
+}
