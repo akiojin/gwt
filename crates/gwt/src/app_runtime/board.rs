@@ -108,25 +108,21 @@ impl AppRuntime {
         let owners = sanitize_board_list(&owners);
         let targets = sanitize_board_list(&targets);
 
-        let snapshot = match coordination::load_snapshot(&tab.project_root) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardError {
-                        id,
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
         if let Some(parent_id) = parent_id.as_deref() {
-            if !snapshot
-                .board
-                .entries
-                .iter()
-                .any(|entry| entry.id == parent_id)
+            let parent_exists = match coordination::board_entry_exists(&tab.project_root, parent_id)
             {
+                Ok(parent_exists) => parent_exists,
+                Err(error) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::BoardError {
+                            id,
+                            message: error.to_string(),
+                        },
+                    )];
+                }
+            };
+            if !parent_exists {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::BoardError {
@@ -159,6 +155,7 @@ impl AppRuntime {
                     BackendEvent::BoardEntries {
                         id,
                         entries: snapshot.board.entries,
+                        has_more_before: snapshot.board.has_more_before,
                     },
                 )];
                 if let Some(entry) = latest_entry.as_ref() {

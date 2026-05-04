@@ -1269,10 +1269,12 @@ mod tests {
         assert!(
             html.contains("pendingSubmit: null")
                 && html.contains("existingEntryIds: new Set")
-                && html.contains("const completedSubmit = Boolean(state.pendingSubmit")
-                && html.contains("!state.pendingSubmit.existingEntryIds.has(entry.id)")
+                && html.contains("const pendingSubmit = state.pendingSubmit;")
+                && html.contains("const completedSubmit = Boolean(pendingSubmit")
+                && html.contains("!pendingSubmit.existingEntryIds.has(entry.id)")
                 && html.contains("state.composerBody = \"\";")
-                && html.contains("state.pendingSubmit = null;"),
+                && html.contains("state.pendingSubmit = null;")
+                && html.contains("state.pendingSelfPostScroll = true;"),
             "expected Board post success to clear drafts only after matching submitted entry appears",
         );
         assert!(

@@ -881,6 +881,11 @@ impl AppRuntime {
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
+            FrontendEvent::LoadBoardHistory {
+                id,
+                before_entry_id,
+                limit,
+            } => self.load_board_history_events(&client_id, &id, before_entry_id.as_deref(), limit),
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
             FrontendEvent::LoadMemo { id } => self.load_memo_events(&client_id, &id),
             FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
@@ -1563,6 +1568,71 @@ impl AppRuntime {
                 BackendEvent::BoardEntries {
                     id: id.to_string(),
                     entries: snapshot.board.entries,
+                    has_more_before: snapshot.board.has_more_before,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn load_board_history_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        before_entry_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Board {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window is not a Board surface".to_string(),
+                },
+            )];
+        }
+
+        match gwt_core::coordination::load_entries_before(&tab.project_root, before_entry_id, limit)
+        {
+            Ok(page) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardHistoryPage {
+                    id: id.to_string(),
+                    entries: page.entries,
+                    has_more_before: page.has_more_before,
                 },
             )],
             Err(error) => vec![OutboundEvent::reply(
@@ -1652,6 +1722,7 @@ impl AppRuntime {
                 events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
                     id: combined_window_id(&tab.id, &window.id),
                     entries: snapshot.board.entries.clone(),
+                    has_more_before: snapshot.board.has_more_before,
                 }));
             }
         }
@@ -5411,11 +5482,72 @@ exit 0
             &events[..],
             [OutboundEvent {
                 target: DispatchTarget::Client(client_id),
-                event: BackendEvent::BoardEntries { id, entries },
+                event: BackendEvent::BoardEntries { id, entries, .. },
             }] if client_id == "client-1"
                 && id == &window_id
                 && entries.len() == 1
                 && entries[0].body == "Need review"
+        ));
+    }
+
+    #[test]
+    fn app_runtime_load_board_history_replies_with_older_page() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        for idx in 0..4 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at = chrono::Utc::now() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            post_entry(&repo, entry).expect("seed board entry");
+        }
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo,
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadBoardHistory {
+                id: window_id.clone(),
+                before_entry_id: Some("entry-3".to_string()),
+                limit: 2,
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardHistoryPage {
+                    id,
+                    entries,
+                    has_more_before,
+                },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>() == vec!["entry-1", "entry-2"]
+                && *has_more_before
         ));
     }
 
@@ -6407,7 +6539,7 @@ exit 0
             event,
             OutboundEvent {
                 target: DispatchTarget::Client(client_id),
-                event: BackendEvent::BoardEntries { id, entries },
+                event: BackendEvent::BoardEntries { id, entries, .. },
             } if client_id == "client-1"
                 && id == &window_id
                 && entries.iter().any(|entry|
@@ -6424,6 +6556,76 @@ exit 0
             && entry.parent_id.as_deref() == Some(parent.id.as_str())
             && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
             && entry.related_owners == vec!["2018".to_string()]));
+    }
+
+    #[test]
+    fn app_runtime_post_board_entry_accepts_reply_to_history_parent() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let parent_id = "history-parent".to_string();
+        for idx in 0..505 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                format!("history entry {idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            if idx == 0 {
+                entry.id = parent_id.clone();
+            }
+            post_entry(&repo, entry).expect("seed board entry");
+        }
+        let snapshot = load_snapshot(&repo).expect("load board snapshot");
+        assert!(!snapshot
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == parent_id));
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo.clone(),
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::PostBoardEntry {
+                id: window_id.clone(),
+                entry_kind: BoardEntryKind::Next,
+                body: "Reply to older context".to_string(),
+                parent_id: Some(parent_id.clone()),
+                topics: vec![],
+                owners: vec![],
+                targets: Vec::new(),
+            },
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardEntries { id, entries, .. },
+            } if client_id == "client-1"
+                && id == &window_id
+                && entries.iter().any(|entry|
+                    entry.body == "Reply to older context"
+                    && entry.parent_id.as_deref() == Some(parent_id.as_str())
+                )
+        )));
     }
 
     #[test]
@@ -6788,7 +6990,7 @@ exit 0
                 event,
                 OutboundEvent {
                     target: DispatchTarget::Broadcast,
-                    event: BackendEvent::BoardEntries { id, entries },
+                    event: BackendEvent::BoardEntries { id, entries, .. },
                 } if *id == expected_id
                     && entries.len() == 1
                     && entries[0].body == "External update"
