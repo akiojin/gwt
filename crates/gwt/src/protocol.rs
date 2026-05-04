@@ -107,6 +107,12 @@ pub enum FrontendEvent {
     LoadBoard {
         id: String,
     },
+    LoadBoardHistory {
+        id: String,
+        before_entry_id: Option<String>,
+        #[serde(default = "default_board_history_limit")]
+        limit: usize,
+    },
     LoadProfile {
         id: String,
     },
@@ -264,6 +270,10 @@ pub enum FrontendEvent {
     },
 }
 
+fn default_board_history_limit() -> usize {
+    50
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
@@ -381,6 +391,13 @@ pub enum BackendEvent {
     BoardEntries {
         id: String,
         entries: Vec<BoardEntry>,
+        #[serde(default)]
+        has_more_before: bool,
+    },
+    BoardHistoryPage {
+        id: String,
+        entries: Vec<BoardEntry>,
+        has_more_before: bool,
     },
     ProfileSnapshot {
         id: String,
@@ -710,6 +727,7 @@ mod tests {
                 vec!["coordination".to_string()],
                 vec!["2018".to_string()],
             )],
+            has_more_before: false,
         };
 
         let value = serde_json::to_value(&event).expect("serialize board entries");
@@ -726,6 +744,50 @@ mod tests {
             value["entries"][0]["related_topics"][0],
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
+        );
+    }
+
+    #[test]
+    fn board_history_page_serializes_cursor_contract() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_board_history",
+            "id": "board-1",
+            "before_entry_id": "entry-3",
+            "limit": 50
+        }))
+        .expect("deserialize board history request");
+        assert!(matches!(
+            frontend,
+            FrontendEvent::LoadBoardHistory {
+                id,
+                before_entry_id: Some(before_entry_id),
+                limit
+            } if id == "board-1" && before_entry_id == "entry-3" && limit == 50
+        ));
+
+        let backend = BackendEvent::BoardHistoryPage {
+            id: "board-1".to_string(),
+            entries: vec![BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Older update",
+                None,
+                None,
+                vec![],
+                vec![],
+            )],
+            has_more_before: true,
+        };
+        let value = serde_json::to_value(&backend).expect("serialize board history page");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("board_history_page".to_string()))
+        );
+        assert_eq!(value["has_more_before"], Value::Bool(true));
+        assert_eq!(
+            value["entries"][0]["body"],
+            Value::String("Older update".into())
         );
     }
 

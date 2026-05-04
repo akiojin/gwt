@@ -1437,6 +1437,29 @@
         gap: 12px;
       }
 
+      .board-load-older {
+        align-self: center;
+        min-height: 30px;
+        padding: 6px 12px;
+        border: 1px solid var(--color-border-strong);
+        border-radius: var(--radius-md);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        color: var(--color-text-muted);
+        background: var(--color-surface-elevated);
+        cursor: pointer;
+      }
+
+      .board-load-older:hover:not(:disabled) {
+        color: var(--color-text);
+        border-color: var(--color-focus-ring);
+      }
+
+      .board-load-older:disabled {
+        cursor: default;
+        opacity: 0.72;
+      }
+
       .board-composer-bar {
         border-top: 1px solid var(--color-border);
         background: color-mix(in oklab, var(--color-surface) 94%, transparent);

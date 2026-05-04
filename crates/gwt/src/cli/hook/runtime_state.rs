@@ -163,9 +163,26 @@ fn sessions_dir_for_current_runtime() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use gwt_agent::{AgentId, Session};
-    use gwt_core::coordination::load_snapshot;
+    use gwt_core::coordination::{coordination_events_segments_dir, load_snapshot};
 
     use super::*;
+
+    fn assert_no_board_entries_or_events(root: &std::path::Path) {
+        let snapshot = load_snapshot(root).unwrap();
+        assert!(snapshot.board.entries.is_empty());
+        let event_lines = std::fs::read_dir(coordination_events_segments_dir(root))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+            .map(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .unwrap()
+                    .lines()
+                    .count()
+            })
+            .sum::<usize>();
+        assert_eq!(event_lines, 0);
+    }
 
     #[test]
     fn pending_discussion_for_session_reads_active_discussion_candidate() {
@@ -249,11 +266,7 @@ mod tests {
 
         sync_coordination_for_session(&session, "PreToolUse");
 
-        let snapshot = load_snapshot(dir.path()).unwrap();
-        assert!(snapshot.board.entries.is_empty());
-        let events =
-            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
-        assert_eq!(events.lines().count(), 0);
+        assert_no_board_entries_or_events(dir.path());
     }
 
     #[test]
@@ -263,12 +276,7 @@ mod tests {
 
         sync_coordination_for_session(&session, "SessionStart");
 
-        let snapshot = load_snapshot(dir.path()).unwrap();
-        assert!(snapshot.board.entries.is_empty());
-
-        let events =
-            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
-        assert_eq!(events.lines().count(), 0);
+        assert_no_board_entries_or_events(dir.path());
     }
 
     #[test]
@@ -278,12 +286,7 @@ mod tests {
 
         sync_coordination_for_session(&session, "Stop");
 
-        let snapshot = load_snapshot(dir.path()).unwrap();
-        assert!(snapshot.board.entries.is_empty());
-
-        let events =
-            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
-        assert_eq!(events.lines().count(), 0);
+        assert_no_board_entries_or_events(dir.path());
     }
 
     #[test]
@@ -294,12 +297,7 @@ mod tests {
         sync_coordination_for_session(&session, "PreToolUse");
         sync_coordination_for_session(&session, "PostToolUse");
 
-        let snapshot = load_snapshot(dir.path()).unwrap();
-        assert!(snapshot.board.entries.is_empty());
-
-        let events =
-            std::fs::read_to_string(dir.path().join(".gwt/coordination/events.jsonl")).unwrap();
-        assert_eq!(events.lines().count(), 0);
+        assert_no_board_entries_or_events(dir.path());
     }
 
     #[test]

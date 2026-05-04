@@ -157,6 +157,7 @@
             "ensureBoardState",
             "renderBoard",
             "requestBoard",
+            "requestOlderBoardEntries",
             "submitBoardEntry",
           ]),
         }),
@@ -1718,6 +1719,13 @@
             composerKind: "status",
             composerBody: "",
             pendingSubmit: null,
+            hasMoreBefore: false,
+            oldestEntryId: null,
+            loadingOlder: false,
+            pendingSelfPostScroll: false,
+            preserveBoardScrollPosition: false,
+            shouldFollowBoardBottom: true,
+            newEntriesAvailable: false,
           });
         }
         return boardStateMap.get(windowId);
@@ -1784,6 +1792,25 @@
         send({
           kind: "load_board",
           id: windowId,
+        });
+      }
+
+      function requestOlderBoardEntries(windowId) {
+        const state = ensureBoardState(windowId);
+        if (state.loading || state.loadingOlder || !state.hasMoreBefore) {
+          return;
+        }
+        const beforeEntryId = state.oldestEntryId || state.entries[0]?.id || null;
+        if (!beforeEntryId) {
+          return;
+        }
+        state.loadingOlder = true;
+        state.error = "";
+        send({
+          kind: "load_board_history",
+          id: windowId,
+          before_entry_id: beforeEntryId,
+          limit: 50,
         });
       }
 
@@ -3055,6 +3082,35 @@
         renderBoard(windowId);
       }
 
+      function forceBoardScrollToBottom(scroller) {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+
+      function preserveBoardScrollPosition(scroller, previousScrollTop, previousScrollHeight) {
+        const delta = scroller.scrollHeight - previousScrollHeight;
+        scroller.scrollTop = previousScrollTop + Math.max(0, delta);
+      }
+
+      function mergeBoardEntries(existingEntries, incomingEntries) {
+        const merged = new Map();
+        for (const entry of existingEntries || []) {
+          if (entry.id) {
+            merged.set(entry.id, entry);
+          }
+        }
+        for (const entry of incomingEntries || []) {
+          if (entry.id) {
+            merged.set(entry.id, entry);
+          }
+        }
+        return Array.from(merged.values()).sort((left, right) => {
+          const leftKey = String(left.created_at || left.updated_at || "");
+          const rightKey = String(right.created_at || right.updated_at || "");
+          return leftKey.localeCompare(rightKey)
+            || String(left.id || "").localeCompare(String(right.id || ""));
+        });
+      }
+
       function handleBoardHookEvent(event) {
         const hookEvent = event.event;
         if (!hookEvent || hookEvent.kind !== "coordination_event") {
@@ -3096,13 +3152,18 @@
           return;
         }
 
+        const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
           ? state.error
           : state.loading
             ? state.submitting
               ? "Saving entry..."
               : "Loading coordination..."
-            : `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
+            : state.loadingOlder
+              ? `Loading earlier entries... - ${entryCountLabel}`
+              : state.newEntriesAvailable
+                ? `${entryCountLabel} - New updates`
+                : entryCountLabel;
         status.className = "board-status";
         if (state.error) {
           status.classList.add("error");
@@ -3117,15 +3178,43 @@
         const scroller = timeline.parentElement;
         const stickyBottomThreshold = 64;
         const previousScrollTop = scroller ? scroller.scrollTop : 0;
+        const previousScrollHeight = scroller ? scroller.scrollHeight : 0;
         const previousScrollMax = scroller
           ? scroller.scrollHeight - scroller.clientHeight
           : 0;
-        const wasNearBottom =
+        const shouldFollowBoardBottom =
           !scroller ||
           previousScrollMax <= 0 ||
           previousScrollMax - previousScrollTop <= stickyBottomThreshold;
+        state.shouldFollowBoardBottom = shouldFollowBoardBottom;
+        if (scroller && scroller.dataset.boardScrollBound !== "true") {
+          scroller.dataset.boardScrollBound = "true";
+          scroller.addEventListener("scroll", () => {
+            const scrollMax = scroller.scrollHeight - scroller.clientHeight;
+            const isNearBottom =
+              scrollMax <= 0 || scrollMax - scroller.scrollTop <= stickyBottomThreshold;
+            state.shouldFollowBoardBottom = isNearBottom;
+            if (isNearBottom) {
+              state.newEntriesAvailable = false;
+            }
+            if (scroller.scrollTop <= 48) {
+              requestOlderBoardEntries(windowId);
+            }
+          });
+        }
 
         timeline.innerHTML = "";
+        if (state.hasMoreBefore) {
+          const loadOlder = createNode(
+            "button",
+            "board-load-older",
+            state.loadingOlder ? "Loading earlier entries..." : "Load earlier entries",
+          );
+          loadOlder.type = "button";
+          loadOlder.disabled = state.loadingOlder;
+          loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
+          timeline.appendChild(loadOlder);
+        }
         if (!state.loading && state.entries.length === 0) {
           timeline.appendChild(
             createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
@@ -3162,8 +3251,16 @@
         }
 
         if (scroller) {
-          if (wasNearBottom) {
-            scroller.scrollTop = scroller.scrollHeight;
+          if (state.pendingSelfPostScroll) {
+            forceBoardScrollToBottom(scroller);
+            state.pendingSelfPostScroll = false;
+            state.newEntriesAvailable = false;
+          } else if (state.preserveBoardScrollPosition) {
+            preserveBoardScrollPosition(scroller, previousScrollTop, previousScrollHeight);
+            state.preserveBoardScrollPosition = false;
+          } else if (shouldFollowBoardBottom) {
+            forceBoardScrollToBottom(scroller);
+            state.newEntriesAvailable = false;
           } else {
             scroller.scrollTop = previousScrollTop;
           }
@@ -5771,6 +5868,7 @@
       const boardSurface = Object.freeze({
         ensureBoardState,
         requestBoard,
+        requestOlderBoardEntries,
         renderBoard,
         submitBoardEntry,
         handleRuntimeHookEvent: handleBoardHookEvent,
@@ -5930,16 +6028,29 @@
           case "board_entries": {
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
             const incomingEntries = event.entries || [];
-            const completedSubmit = Boolean(state.pendingSubmit)
+            const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
+            const incomingEntryIds = new Set(incomingEntries.map((entry) => entry.id));
+            const retainedHistory = state.entries.some(
+              (entry) => Boolean(entry.id) && !incomingEntryIds.has(entry.id),
+            );
+            const addedEntry = incomingEntries.some(
+              (entry) => Boolean(entry.id) && !existingEntryIds.has(entry.id),
+            );
+            const pendingSubmit = state.pendingSubmit;
+            const completedSubmit = Boolean(pendingSubmit)
               && incomingEntries.some((entry) => {
                 const parentId = entry.parent_id || null;
                 return Boolean(entry.id)
-                  && !state.pendingSubmit.existingEntryIds.has(entry.id)
-                  && parentId === state.pendingSubmit.parentId
+                  && !pendingSubmit.existingEntryIds.has(entry.id)
+                  && parentId === pendingSubmit.parentId
                   && String(entry.author_kind || "").toLowerCase() === "user"
-                  && String(entry.body || "").trim() === state.pendingSubmit.body;
+                  && String(entry.body || "").trim() === pendingSubmit.body;
               });
-            state.entries = incomingEntries;
+            state.entries = mergeBoardEntries(state.entries, incomingEntries);
+            state.hasMoreBefore = retainedHistory
+              ? state.hasMoreBefore
+              : Boolean(event.has_more_before);
+            state.oldestEntryId = state.entries[0]?.id || null;
             if (
               state.replyParentId &&
               !state.entries.some((entry) => entry.id === state.replyParentId)
@@ -5947,14 +6058,32 @@
               state.replyParentId = null;
             }
             if (completedSubmit) {
-              if (state.composerBody.trim() === state.pendingSubmit.body) {
+              if (state.composerBody.trim() === pendingSubmit.body) {
                 state.composerBody = "";
               }
               state.replyParentId = null;
               state.pendingSubmit = null;
               state.submitting = false;
+              state.pendingSelfPostScroll = true;
+            } else if (addedEntry && !state.shouldFollowBoardBottom) {
+              state.newEntriesAvailable = true;
             }
             state.loading = false;
+            state.error = "";
+            frontendUnits.boardSurface.renderBoard(event.id);
+            break;
+          }
+          case "board_history_page": {
+            const state = frontendUnits.boardSurface.ensureBoardState(event.id);
+            const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
+            const olderEntries = (event.entries || []).filter(
+              (entry) => !entry.id || !existingEntryIds.has(entry.id),
+            );
+            state.entries = olderEntries.concat(state.entries);
+            state.hasMoreBefore = Boolean(event.has_more_before);
+            state.oldestEntryId = state.entries[0]?.id || null;
+            state.loadingOlder = false;
+            state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
             break;
@@ -6147,6 +6276,7 @@
           case "board_error": {
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
             state.loading = false;
+            state.loadingOlder = false;
             state.submitting = false;
             state.pendingSubmit = null;
             state.error = event.message;
