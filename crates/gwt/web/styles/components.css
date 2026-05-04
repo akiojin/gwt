@@ -1454,3 +1454,21 @@ kbd.op-kbd {
 @media (forced-colors: active) {
   .op-briefing__progress { display: none; }
 }
+
+/* SPEC-2356 — Sidebar Layer "live" hint:
+   when applyTelemetryCounts marks a layer with `data-live="true"` (e.g.
+   agents > 0 active windows, git > 0 branches), the layer label receives
+   a small leading dot tinted with `--color-state-active`. */
+:root[data-theme] .op-layer[data-live="true"] .op-layer__label::before {
+  content: "● ";
+  color: var(--color-state-active);
+  margin-right: 0;
+  font-size: 0.7em;
+  vertical-align: middle;
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .op-layer[data-live="true"] .op-layer__label::before {
+    color: Highlight;
+  }
+}

@@ -139,6 +139,17 @@ export function applyTelemetryCounts(doc, counts = {}) {
     const el = doc.getElementById(id);
     if (el) el.textContent = String(v);
   };
+  // SPEC-2356 — paint a Sidebar Layer's status hint based on whether the
+  // resource is "live" (active > 0). This lets the agents/git rows light up
+  // even when the user is not looking at the Status Strip.
+  const markLive = (layer, isLive) => {
+    const row = doc.querySelector(`.op-layer[data-layer="${layer}"]`);
+    if (!row) return;
+    if (isLive) row.dataset.live = "true";
+    else delete row.dataset.live;
+  };
+  if ("active" in counts) markLive("agents", (counts.active ?? 0) > 0);
+  if ("branches" in counts) markLive("git", (counts.branches ?? 0) > 0);
   setText("op-strip-active", counts.active ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
   setText("op-strip-blocked", counts.blocked ?? 0);
