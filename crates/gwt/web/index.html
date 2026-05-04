@@ -1765,35 +1765,36 @@
         width: 24px;
         height: 24px;
         margin-top: 2px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #ffffff;
-        color: #475569;
-        font-size: 13px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-strong);
+        background: var(--color-surface);
+        color: var(--color-text-muted);
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
         font-weight: 700;
         cursor: pointer;
       }
 
       .branch-cleanup-toggle.safe {
-        color: #047857;
+        color: var(--color-state-active);
       }
 
       .branch-cleanup-toggle.risky {
-        color: #b45309;
+        color: var(--agent-claude);
       }
 
       .branch-cleanup-toggle.blocked {
-        color: #94a3b8;
+        color: var(--color-state-idle);
       }
 
       .branch-cleanup-toggle.loading {
-        color: #64748b;
+        color: var(--color-text-muted);
       }
 
       .branch-cleanup-toggle.selected {
-        background: #0f172a;
-        border-color: #0f172a;
-        color: #ffffff;
+        background: var(--color-button-bg);
+        border-color: var(--color-button-bg);
+        color: var(--color-button-fg);
       }
 
       .branch-main {
@@ -1806,9 +1807,10 @@
         gap: 8px;
         min-width: 0;
         margin-bottom: 4px;
-        font-size: 13px;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
         font-weight: 600;
-        color: #0f172a;
+        color: var(--color-text-strong);
       }
 
       .branch-name-text {
@@ -1820,26 +1822,31 @@
 
       .branch-head {
         padding: 2px 6px;
-        border-radius: 999px;
-        background: rgba(16, 185, 129, 0.12);
-        color: #047857;
-        font-size: 10px;
+        border-radius: var(--radius-pill);
+        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+        color: var(--color-state-active);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
       }
 
       .branch-upstream,
       .branch-date {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .branch-cleanup-detail {
         margin-top: 4px;
-        font-size: 11px;
-        color: #64748b;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text-muted);
       }
 
       .branch-cleanup-detail.blocked {
-        color: #b45309;
+        color: var(--agent-claude);
       }
 
       .branch-meta {
@@ -1852,32 +1859,36 @@
 
       .branch-scope {
         padding: 4px 8px;
-        border-radius: 999px;
-        background: rgba(59, 130, 246, 0.1);
-        color: #1d4ed8;
-        font-size: 11px;
+        border-radius: var(--radius-pill);
+        background: color-mix(in oklab, var(--agent-codex) 18%, transparent);
+        color: var(--agent-codex);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
       }
 
       .branch-cleanup-badge {
         padding: 4px 8px;
-        border-radius: 999px;
-        font-size: 11px;
-        text-transform: capitalize;
+        border-radius: var(--radius-pill);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        text-transform: uppercase;
       }
 
       .branch-cleanup-badge.safe {
-        background: rgba(16, 185, 129, 0.12);
-        color: #047857;
+        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+        color: var(--color-state-active);
       }
 
       .branch-cleanup-badge.risky {
-        background: rgba(245, 158, 11, 0.14);
-        color: #b45309;
+        background: color-mix(in oklab, var(--agent-claude) 18%, transparent);
+        color: var(--agent-claude);
       }
 
       .branch-cleanup-badge.blocked {
-        background: rgba(148, 163, 184, 0.18);
-        color: #475569;
+        background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
+        color: var(--color-text-muted);
       }
 
       .branch-cleanup-badge.loading {
