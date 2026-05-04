@@ -165,6 +165,42 @@ impl AppRuntime {
         Ok(())
     }
 
+    pub(crate) fn open_active_work_launch_wizard(
+        &mut self,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: "Open a project before adding an agent".to_string(),
+            })];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: "Project tab not found".to_string(),
+            })];
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: "Add Agent requires a Git project".to_string(),
+            })];
+        }
+
+        let project_root = tab.project_root.clone();
+        match self.open_launch_wizard_for_branch(
+            &tab_id,
+            &project_root,
+            branch_name,
+            linked_issue_number,
+            None,
+        ) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: error,
+            })],
+        }
+    }
+
     pub(crate) fn open_start_work(&mut self) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {

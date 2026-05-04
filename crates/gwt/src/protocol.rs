@@ -213,6 +213,10 @@ pub enum FrontendEvent {
         branch_name: String,
         linked_issue_number: Option<u64>,
     },
+    OpenActiveWorkLaunchWizard {
+        branch_name: String,
+        linked_issue_number: Option<u64>,
+    },
     LaunchWizardAction {
         action: LaunchWizardAction,
         bounds: Option<WindowGeometry>,
@@ -329,6 +333,20 @@ pub struct AppStateView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkAgentView {
+    pub session_id: String,
+    pub window_id: Option<String>,
+    pub agent_id: String,
+    pub display_name: String,
+    pub status_category: String,
+    pub current_focus: Option<String>,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub last_board_entry_id: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
     pub title: String,
@@ -342,6 +360,7 @@ pub struct ActiveWorkProjectionView {
     pub worktree_path: Option<String>,
     pub pr_number: Option<u64>,
     pub board_refs: Vec<String>,
+    pub agents: Vec<ActiveWorkAgentView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -689,6 +708,18 @@ mod tests {
                 worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                 pr_number: None,
                 board_refs: vec!["board-1".to_string()],
+                agents: vec![super::ActiveWorkAgentView {
+                    session_id: "session-1".to_string(),
+                    window_id: Some("tab-1::agent-1".to_string()),
+                    agent_id: "codex".to_string(),
+                    display_name: "Codex".to_string(),
+                    status_category: "active".to_string(),
+                    current_focus: Some("Run launch tests".to_string()),
+                    branch: Some("work/20260504-1200".to_string()),
+                    worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    last_board_entry_id: Some("board-1".to_string()),
+                    updated_at: "2026-05-04T12:00:00Z".to_string(),
+                }],
             },
         };
 
@@ -698,6 +729,19 @@ mod tests {
             value.get("kind"),
             Some(&Value::String("active_work_projection".to_string())),
             "active work projection must not reuse canvas workspace_state"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/display_name")
+                .and_then(Value::as_str),
+            Some("Codex"),
+            "active work projection must expose per-agent summaries for Workspace UI"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/last_board_entry_id")
+                .and_then(Value::as_str),
+            Some("board-1")
         );
     }
 
@@ -710,6 +754,27 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_workspace_add_agent_command() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "open_active_work_launch_wizard",
+            "branch_name": "work/20260504-1200",
+            "linked_issue_number": null
+        }))
+        .expect("deserialize workspace add-agent launch");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::OpenActiveWorkLaunchWizard {
+                    branch_name,
+                    linked_issue_number: None,
+                } if branch_name == "work/20260504-1200"
+            ),
+            "Workspace Add Agent must not depend on a Branches window id"
         );
     }
 

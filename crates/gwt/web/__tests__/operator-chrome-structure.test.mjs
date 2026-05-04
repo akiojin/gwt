@@ -68,6 +68,27 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
+test("Workspace sidebar exposes active work and per-agent overview", () => {
+  assert.ok(
+    document.querySelector("#op-active-work"),
+    "expected Workspace shell to expose an active work overview region",
+  );
+  assert.ok(
+    document.querySelector("#op-active-work-agents"),
+    "expected Workspace shell to expose a per-agent list region",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkProjection\.agents/,
+    "expected frontend to render per-agent projection data, not only aggregate counters",
+  );
+  assert.match(
+    appSource,
+    /op-agent-card[\s\S]+last_board_entry_id/,
+    "expected agent cards to preserve board linkage for handoff/debugging",
+  );
+});
+
 test("Branches remains a branch browser, not a planning workspace", () => {
   const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
   assert.ok(branchPreset, "expected Branches preset to remain available");
