@@ -1702,3 +1702,12 @@ kbd.op-kbd {
     box-shadow: inset 3px 0 0 Highlight;
   }
 }
+
+/* SPEC-2356 — Theme toggle value + label distinct typography.
+   The "AUTO ▮" / "DARK" / "LIGHT" value is mono cyan to match
+   Operator-state semantics; the leading "Theme" label stays muted.
+   This makes the toggle read like a rotary switch indicator. */
+:root[data-theme] #op-theme-toggle-value {
+  color: var(--color-state-active);
+  font-weight: 700;
+}
