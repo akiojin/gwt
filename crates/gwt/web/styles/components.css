@@ -95,9 +95,15 @@ body::after {
 }
 
 .project-bar::before {
-  content: "GWT · OPERATOR";
+  /* SPEC-2356 — Operator brand prefix.
+     A bracket-flanked GWT mark, painted with the Hubot Sans Condensed
+     display family inherited from .project-bar. The bracket characters
+     pick up the focus-ring colour so the brand reads as an indicator
+     light, not just plain text. */
+  content: "⌜ GWT · OPERATOR ⌟";
   margin-right: var(--space-4);
   color: var(--color-display-fg);
+  text-shadow: 0 0 6px color-mix(in oklab, var(--agent-codex) 40%, transparent);
 }
 
 .project-tabs {
