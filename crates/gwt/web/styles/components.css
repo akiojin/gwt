@@ -1742,3 +1742,23 @@ kbd.op-kbd {
     background: Highlight;
   }
 }
+
+/* SPEC-2356 — Project Tab hover bottom indicator
+   active tab gets a strong accent strip already; hovered (non-active)
+   tabs get a soft hint so the user knows tab switching is possible.
+   Keeps Mission Control visual vocabulary consistent. */
+:root[data-theme] .project-tab:hover:not(.active)::after {
+  content: "";
+  position: absolute;
+  left: 25%;
+  right: 25%;
+  bottom: -1px;
+  height: 1px;
+  background: color-mix(in oklab, var(--color-state-active) 50%, transparent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+:root[data-theme] .project-tab {
+  position: relative;
+}
