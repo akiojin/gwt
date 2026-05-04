@@ -1,7 +1,7 @@
 //! Repo-local coordination storage for a shared board chat timeline.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -17,7 +17,12 @@ use crate::{paths::gwt_project_dir_for_repo_path, GwtError, Result};
 pub const COORDINATION_RELATIVE_DIR: &str = ".gwt/coordination";
 pub const EVENTS_FILE_NAME: &str = "events.jsonl";
 pub const BOARD_PROJECTION_FILE_NAME: &str = "board.latest.json";
+pub const EVENTS_MANIFEST_FILE_NAME: &str = "events.manifest.json";
+pub const EVENTS_SEGMENTS_DIR_NAME: &str = "events";
+pub const HOT_PROJECTION_ENTRY_LIMIT: usize = 500;
+pub const EVENT_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
+const EVENT_MANIFEST_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -174,6 +179,14 @@ pub enum CoordinationEvent {
 pub struct BoardProjection {
     #[serde(default)]
     pub entries: Vec<BoardEntry>,
+    #[serde(default)]
+    pub has_more_before: bool,
+    #[serde(default)]
+    pub oldest_entry_id: Option<String>,
+    #[serde(default)]
+    pub newest_entry_id: Option<String>,
+    #[serde(default)]
+    pub total_entries: usize,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -181,9 +194,55 @@ impl Default for BoardProjection {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
+            has_more_before: false,
+            oldest_entry_id: None,
+            newest_entry_id: None,
+            total_entries: 0,
             updated_at: Utc::now(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardHistoryPage {
+    #[serde(default)]
+    pub entries: Vec<BoardEntry>,
+    #[serde(default)]
+    pub has_more_before: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct EventSegmentManifest {
+    version: u32,
+    active_segment: String,
+    #[serde(default)]
+    segments: Vec<EventSegmentMeta>,
+    updated_at: DateTime<Utc>,
+}
+
+impl EventSegmentManifest {
+    fn total_entries(&self) -> usize {
+        self.segments.iter().map(|segment| segment.entries).sum()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EventSegmentMeta {
+    file: String,
+    #[serde(default)]
+    entries: usize,
+    #[serde(default)]
+    bytes: u64,
+    #[serde(default)]
+    first_created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    max_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    first_entry_id: Option<String>,
+    #[serde(default)]
+    last_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -198,6 +257,14 @@ pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
 
 pub fn coordination_events_path(worktree_root: &Path) -> PathBuf {
     coordination_dir(worktree_root).join(EVENTS_FILE_NAME)
+}
+
+pub fn coordination_events_segments_dir(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join(EVENTS_SEGMENTS_DIR_NAME)
+}
+
+pub fn coordination_events_manifest_path(worktree_root: &Path) -> PathBuf {
+    coordination_dir(worktree_root).join(EVENTS_MANIFEST_FILE_NAME)
 }
 
 pub fn coordination_board_projection_path(worktree_root: &Path) -> PathBuf {
@@ -216,14 +283,12 @@ pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
 
     let dir = coordination_dir(worktree_root);
     std::fs::create_dir_all(&dir)?;
-
-    if !coordination_events_path(worktree_root).exists() {
-        File::create(coordination_events_path(worktree_root))?;
-    }
+    ensure_segment_storage(&dir)?;
     if !coordination_board_projection_path(worktree_root).exists() {
+        let snapshot = rebuild_snapshot_from_segments_root(&dir)?;
         write_atomic_json(
             &coordination_board_projection_path(worktree_root),
-            &BoardProjection::default(),
+            &snapshot.board,
         )?;
     }
 
@@ -232,9 +297,16 @@ pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
 
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
-    Ok(CoordinationSnapshot {
-        board: load_json_or_default(&coordination_board_projection_path(worktree_root))?,
-    })
+    let coordination_root = coordination_dir(worktree_root);
+    let projection: BoardProjection =
+        load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    if legacy_event_log_needs_import(&coordination_root)?
+        || projection_needs_rebuild(&projection, &manifest)
+    {
+        return with_coordination_lock(worktree_root, || repair_snapshot_locked(worktree_root));
+    }
+    Ok(CoordinationSnapshot { board: projection })
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
@@ -246,6 +318,13 @@ pub fn append_event(
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
+    with_coordination_lock(worktree_root, || append_event_locked(worktree_root, event))
+}
+
+fn with_coordination_lock<T>(
+    worktree_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let lock = OpenOptions::new()
         .create(true)
         .read(true)
@@ -254,10 +333,10 @@ pub fn append_event(
         .open(coordination_lock_path(worktree_root))?;
     lock.lock_exclusive()?;
 
-    let result = append_event_locked(worktree_root, event);
+    let result = operation();
     let unlock_result = lock.unlock();
     match (result, unlock_result) {
-        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Ok(value), Ok(())) => Ok(value),
         (Err(err), _) => Err(err),
         (Ok(_), Err(err)) => Err(err.into()),
     }
@@ -267,16 +346,43 @@ fn append_event_locked(
     worktree_root: &Path,
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
-    let event_path = coordination_events_path(worktree_root);
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&event_path)?;
-    serde_json::to_writer(&mut file, event).map_err(json_error)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
+    let coordination_root = coordination_dir(worktree_root);
+    let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
+    let manifest =
+        append_event_to_segments_root(&coordination_root, event, EVENT_SEGMENT_MAX_BYTES)?;
+    let mut projection: BoardProjection =
+        load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+    match event {
+        CoordinationEvent::MessageAppended { entry } => {
+            projection.entries.push(entry.clone());
+            projection.entries.sort_by_key(|entry| entry.created_at);
+            if projection.entries.len() > HOT_PROJECTION_ENTRY_LIMIT {
+                let start = projection.entries.len() - HOT_PROJECTION_ENTRY_LIMIT;
+                projection.entries = projection.entries.split_off(start);
+            }
+            projection.total_entries = manifest.total_entries();
+            projection.has_more_before = projection.total_entries > projection.entries.len();
+            projection.oldest_entry_id = projection.entries.first().map(|entry| entry.id.clone());
+            projection.newest_entry_id = projection.entries.last().map(|entry| entry.id.clone());
+            projection.updated_at = Utc::now();
+        }
+    }
+    let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
+        rebuild_snapshot_from_segments_root(&coordination_root)?
+    } else {
+        CoordinationSnapshot { board: projection }
+    };
+    write_atomic_json(
+        &coordination_board_projection_path(worktree_root),
+        &snapshot.board,
+    )?;
+    Ok(snapshot)
+}
 
-    let snapshot = rebuild_snapshot_from_events(&event_path)?;
+fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> {
+    let coordination_root = coordination_dir(worktree_root);
+    import_late_legacy_event_log_locked(&coordination_root)?;
+    let snapshot = rebuild_snapshot_from_segments_root(&coordination_root)?;
     write_atomic_json(
         &coordination_board_projection_path(worktree_root),
         &snapshot.board,
@@ -288,44 +394,56 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
     if !event_path.exists() {
         File::create(event_path)?;
     }
-    let file = OpenOptions::new().read(true).open(event_path)?;
-    let reader = BufReader::new(file);
-
-    let mut board_entries = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Parse as a generic Value first so legacy event types (e.g. the
-        // retired `agent_card_upsert` from the pre-shared-chat era) can be
-        // skipped without failing the whole rebuild.
-        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(json_error)?;
-        let event_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        match event_type {
-            "message_appended" | "board_post" => {
-                let event: CoordinationEvent = serde_json::from_value(value).map_err(json_error)?;
-                let CoordinationEvent::MessageAppended { entry } = event;
-                board_entries.push(entry);
-            }
-            _ => continue,
-        }
-    }
+    let mut board_entries = load_legacy_board_events_from_path(event_path)?
+        .into_iter()
+        .map(|event| {
+            let CoordinationEvent::MessageAppended { entry } = event;
+            entry
+        })
+        .collect::<Vec<_>>();
 
     board_entries.sort_by_key(|entry| entry.created_at);
 
     let now = Utc::now();
 
     Ok(CoordinationSnapshot {
-        board: BoardProjection {
-            entries: board_entries,
-            updated_at: now,
-        },
+        board: build_hot_projection(board_entries, now),
     })
+}
+
+pub fn rebuild_snapshot_from_segments(worktree_root: &Path) -> Result<CoordinationSnapshot> {
+    ensure_repo_local_files(worktree_root)?;
+    rebuild_snapshot_from_segments_root(&coordination_dir(worktree_root))
+}
+
+fn rebuild_snapshot_from_segments_root(coordination_root: &Path) -> Result<CoordinationSnapshot> {
+    let entries = load_board_entries_from_segments_root(coordination_root)?;
+    Ok(CoordinationSnapshot {
+        board: build_hot_projection(entries, Utc::now()),
+    })
+}
+
+fn build_hot_projection(
+    mut entries: Vec<BoardEntry>,
+    updated_at: DateTime<Utc>,
+) -> BoardProjection {
+    entries.sort_by_key(|entry| entry.created_at);
+    let total_entries = entries.len();
+    let has_more_before = total_entries > HOT_PROJECTION_ENTRY_LIMIT;
+    if has_more_before {
+        let start = total_entries - HOT_PROJECTION_ENTRY_LIMIT;
+        entries = entries.split_off(start);
+    }
+    let oldest_entry_id = entries.first().map(|entry| entry.id.clone());
+    let newest_entry_id = entries.last().map(|entry| entry.id.clone());
+    BoardProjection {
+        entries,
+        has_more_before,
+        oldest_entry_id,
+        newest_entry_id,
+        total_entries,
+        updated_at,
+    }
 }
 
 fn load_json_or_default<T>(path: &Path) -> Result<T>
@@ -373,6 +491,143 @@ fn coordination_migration_marker_path(project_dir: &Path) -> PathBuf {
     project_dir.join(MIGRATION_MARKER_FILE_NAME)
 }
 
+fn coordination_events_segments_dir_from_root(coordination_root: &Path) -> PathBuf {
+    coordination_root.join(EVENTS_SEGMENTS_DIR_NAME)
+}
+
+fn coordination_events_manifest_path_from_root(coordination_root: &Path) -> PathBuf {
+    coordination_root.join(EVENTS_MANIFEST_FILE_NAME)
+}
+
+fn coordination_legacy_events_path_from_root(coordination_root: &Path) -> PathBuf {
+    coordination_root.join(EVENTS_FILE_NAME)
+}
+
+fn initial_segment_file_name() -> String {
+    segment_file_name(1)
+}
+
+fn segment_file_name(index: usize) -> String {
+    format!("{index:016}.jsonl")
+}
+
+fn initial_event_manifest() -> EventSegmentManifest {
+    let active_segment = initial_segment_file_name();
+    EventSegmentManifest {
+        version: EVENT_MANIFEST_VERSION,
+        active_segment: active_segment.clone(),
+        segments: vec![EventSegmentMeta {
+            file: active_segment,
+            entries: 0,
+            bytes: 0,
+            first_created_at: None,
+            last_created_at: None,
+            max_updated_at: None,
+            first_entry_id: None,
+            last_entry_id: None,
+        }],
+        updated_at: Utc::now(),
+    }
+}
+
+fn ensure_segment_storage(coordination_root: &Path) -> Result<()> {
+    std::fs::create_dir_all(coordination_root)?;
+    let manifest_path = coordination_events_manifest_path_from_root(coordination_root);
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    let legacy_events_path = coordination_legacy_events_path_from_root(coordination_root);
+
+    if manifest_path.exists() {
+        let manifest = load_event_manifest_from_dir(coordination_root)?;
+        std::fs::create_dir_all(&segments_dir)?;
+        let active_path = segments_dir.join(&manifest.active_segment);
+        if !active_path.exists() {
+            File::create(active_path)?;
+        }
+        return Ok(());
+    }
+
+    if legacy_events_path.exists() {
+        migrate_legacy_event_log_to_segments(coordination_root)?;
+        return Ok(());
+    }
+
+    if segments_dir.exists() {
+        let manifest = rebuild_event_manifest_from_segments(coordination_root)?;
+        write_event_manifest(coordination_root, &manifest)?;
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&segments_dir)?;
+    let manifest = initial_event_manifest();
+    File::create(segments_dir.join(&manifest.active_segment))?;
+    write_event_manifest(coordination_root, &manifest)
+}
+
+fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<EventSegmentManifest> {
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    std::fs::create_dir_all(&segments_dir)?;
+    let mut segment_files = std::fs::read_dir(&segments_dir)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let file_name = path.file_name()?.to_str()?.to_string();
+            Some(file_name)
+        })
+        .collect::<Vec<_>>();
+    segment_files.sort();
+
+    if segment_files.is_empty() {
+        let manifest = initial_event_manifest();
+        File::create(segments_dir.join(&manifest.active_segment))?;
+        return Ok(manifest);
+    }
+
+    let mut segments = Vec::with_capacity(segment_files.len());
+    for file in segment_files {
+        let path = segments_dir.join(&file);
+        let events = load_events_from_path(&path)?;
+        let mut meta = EventSegmentMeta {
+            file,
+            entries: 0,
+            bytes: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+            first_created_at: None,
+            last_created_at: None,
+            max_updated_at: None,
+            first_entry_id: None,
+            last_entry_id: None,
+        };
+        for event in events {
+            let CoordinationEvent::MessageAppended { entry } = event;
+            meta.entries += 1;
+            if meta.first_created_at.is_none() {
+                meta.first_created_at = Some(entry.created_at);
+                meta.first_entry_id = Some(entry.id.clone());
+            }
+            meta.last_created_at = Some(entry.created_at);
+            meta.max_updated_at = Some(
+                meta.max_updated_at
+                    .map_or(entry.updated_at, |current| current.max(entry.updated_at)),
+            );
+            meta.last_entry_id = Some(entry.id);
+        }
+        segments.push(meta);
+    }
+
+    let active_segment = segments
+        .last()
+        .map(|segment| segment.file.clone())
+        .unwrap_or_else(initial_segment_file_name);
+    Ok(EventSegmentManifest {
+        version: EVENT_MANIFEST_VERSION,
+        active_segment,
+        segments,
+        updated_at: Utc::now(),
+    })
+}
+
 fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     let mut cmd = crate::process::hidden_command("git");
     cmd.args(["worktree", "list", "--porcelain"])
@@ -404,7 +659,7 @@ fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf])
     std::fs::create_dir_all(project_dir)?;
     let event_path = project_dir.join(EVENTS_FILE_NAME);
     let mut events = if event_path.exists() {
-        load_events_from_path(&event_path)?
+        load_legacy_board_events_from_path(&event_path)?
     } else {
         Vec::new()
     };
@@ -418,7 +673,7 @@ fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf])
         if !legacy_event_path.exists() {
             continue;
         }
-        events.extend(load_events_from_path(&legacy_event_path)?);
+        events.extend(load_legacy_board_events_from_path(&legacy_event_path)?);
         consumed_dirs.push(legacy_dir.clone());
     }
 
@@ -439,6 +694,275 @@ fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf])
     Ok(())
 }
 
+fn migrate_legacy_event_log_to_segments(coordination_root: &Path) -> Result<()> {
+    if coordination_events_manifest_path_from_root(coordination_root).exists() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(coordination_root)?;
+    let legacy_events_path = coordination_legacy_events_path_from_root(coordination_root);
+    let mut events = if legacy_events_path.exists() {
+        load_legacy_board_events_from_path(&legacy_events_path)?
+    } else {
+        Vec::new()
+    };
+    events.sort_by_key(coordination_event_timestamp);
+    write_events_to_segments(coordination_root, &events, EVENT_SEGMENT_MAX_BYTES)?;
+    if legacy_events_path.exists() {
+        std::fs::remove_file(legacy_events_path)?;
+    }
+    let snapshot = rebuild_snapshot_from_segments_root(coordination_root)?;
+    write_atomic_json(
+        &coordination_root.join(BOARD_PROJECTION_FILE_NAME),
+        &snapshot.board,
+    )?;
+    Ok(())
+}
+
+fn write_events_to_segments(
+    coordination_root: &Path,
+    events: &[CoordinationEvent],
+    max_segment_bytes: u64,
+) -> Result<EventSegmentManifest> {
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    if segments_dir.exists() {
+        std::fs::remove_dir_all(&segments_dir)?;
+    }
+    std::fs::create_dir_all(&segments_dir)?;
+    let mut manifest = initial_event_manifest();
+    File::create(segments_dir.join(&manifest.active_segment))?;
+    write_event_manifest(coordination_root, &manifest)?;
+
+    for event in events {
+        append_event_to_segments_root(coordination_root, event, max_segment_bytes)?;
+    }
+    manifest = load_event_manifest_from_dir(coordination_root)?;
+    Ok(manifest)
+}
+
+#[cfg(test)]
+fn append_event_to_segments(
+    worktree_root: &Path,
+    event: &CoordinationEvent,
+    max_segment_bytes: u64,
+) -> Result<EventSegmentManifest> {
+    let coordination_root = coordination_dir(worktree_root);
+    append_event_to_segments_root(&coordination_root, event, max_segment_bytes)
+}
+
+fn append_event_to_segments_root(
+    coordination_root: &Path,
+    event: &CoordinationEvent,
+    max_segment_bytes: u64,
+) -> Result<EventSegmentManifest> {
+    ensure_segment_storage(coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    let mut manifest = load_event_manifest_from_dir(coordination_root)?;
+    let event_bytes = serialized_event_line(event)?;
+
+    if manifest.segments.is_empty() {
+        manifest = initial_event_manifest();
+        File::create(segments_dir.join(&manifest.active_segment))?;
+    }
+
+    let active_index = manifest
+        .segments
+        .iter()
+        .position(|segment| segment.file == manifest.active_segment)
+        .unwrap_or(manifest.segments.len() - 1);
+
+    let active_bytes = manifest.segments[active_index].bytes;
+    if manifest.segments[active_index].entries > 0
+        && active_bytes + event_bytes.len() as u64 > max_segment_bytes
+    {
+        let next_file = segment_file_name(manifest.segments.len() + 1);
+        manifest.active_segment = next_file.clone();
+        manifest.segments.push(EventSegmentMeta {
+            file: next_file.clone(),
+            entries: 0,
+            bytes: 0,
+            first_created_at: None,
+            last_created_at: None,
+            max_updated_at: None,
+            first_entry_id: None,
+            last_entry_id: None,
+        });
+        File::create(segments_dir.join(next_file))?;
+    }
+
+    let active_index = manifest
+        .segments
+        .iter()
+        .position(|segment| segment.file == manifest.active_segment)
+        .unwrap_or(manifest.segments.len() - 1);
+    let active_path = segments_dir.join(&manifest.active_segment);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&active_path)?;
+    file.write_all(&event_bytes)?;
+    file.sync_all()?;
+
+    update_segment_meta(
+        &mut manifest.segments[active_index],
+        event,
+        event_bytes.len() as u64,
+    );
+    manifest.updated_at = Utc::now();
+    write_event_manifest(coordination_root, &manifest)?;
+    Ok(manifest)
+}
+
+fn serialized_event_line(event: &CoordinationEvent) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(event).map_err(json_error)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn update_segment_meta(segment: &mut EventSegmentMeta, event: &CoordinationEvent, bytes: u64) {
+    segment.entries += 1;
+    segment.bytes += bytes;
+    let CoordinationEvent::MessageAppended { entry } = event;
+    if segment.first_created_at.is_none() {
+        segment.first_created_at = Some(entry.created_at);
+        segment.first_entry_id = Some(entry.id.clone());
+    }
+    segment.last_created_at = Some(entry.created_at);
+    segment.max_updated_at = Some(
+        segment
+            .max_updated_at
+            .map_or(entry.updated_at, |current| current.max(entry.updated_at)),
+    );
+    segment.last_entry_id = Some(entry.id.clone());
+}
+
+#[cfg(test)]
+fn load_event_manifest(worktree_root: &Path) -> Result<EventSegmentManifest> {
+    ensure_repo_local_files(worktree_root)?;
+    load_event_manifest_from_dir(&coordination_dir(worktree_root))
+}
+
+fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegmentManifest> {
+    let path = coordination_events_manifest_path_from_root(coordination_root);
+    let manifest: EventSegmentManifest = load_json_or_default(&path)?;
+    if manifest.version == 0 || manifest.segments.is_empty() {
+        Ok(initial_event_manifest())
+    } else if manifest
+        .segments
+        .iter()
+        .any(|segment| segment.entries > 0 && segment.max_updated_at.is_none())
+    {
+        rebuild_event_manifest_from_segments(coordination_root)
+    } else {
+        Ok(manifest)
+    }
+}
+
+fn legacy_event_log_needs_import(coordination_root: &Path) -> Result<bool> {
+    let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
+    if !legacy_path.exists() {
+        return Ok(false);
+    }
+    Ok(legacy_path.metadata()?.len() > 0)
+}
+
+fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool> {
+    let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
+    if !legacy_path.exists() {
+        return Ok(false);
+    }
+
+    let mut legacy_events = load_legacy_board_events_from_path(&legacy_path)?;
+    legacy_events.sort_by_key(coordination_event_timestamp);
+
+    let mut seen_entry_ids = load_board_entries_from_segments_root(coordination_root)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<HashSet<_>>();
+    let mut imported = false;
+    for event in legacy_events {
+        let entry_id = coordination_event_entry_id(&event).to_string();
+        if !seen_entry_ids.insert(entry_id) {
+            continue;
+        }
+        append_event_to_segments_root(coordination_root, &event, EVENT_SEGMENT_MAX_BYTES)?;
+        imported = true;
+    }
+    std::fs::remove_file(legacy_path)?;
+    Ok(imported)
+}
+
+fn projection_needs_rebuild(projection: &BoardProjection, manifest: &EventSegmentManifest) -> bool {
+    let total_entries = manifest.total_entries();
+    let expected_entries = total_entries.min(HOT_PROJECTION_ENTRY_LIMIT);
+    if projection.total_entries != total_entries {
+        return true;
+    }
+    if projection.entries.len() != expected_entries {
+        return true;
+    }
+    if projection.has_more_before != (total_entries > projection.entries.len()) {
+        return true;
+    }
+    if projection.oldest_entry_id != projection.entries.first().map(|entry| entry.id.clone()) {
+        return true;
+    }
+    if projection.newest_entry_id != projection.entries.last().map(|entry| entry.id.clone()) {
+        return true;
+    }
+    if let Some((last_appended_entry_id, last_appended_created_at)) = manifest
+        .segments
+        .iter()
+        .rev()
+        .find(|segment| segment.entries > 0)
+        .and_then(|segment| {
+            Some((
+                segment.last_entry_id.as_deref()?,
+                segment.last_created_at.as_ref()?,
+            ))
+        })
+    {
+        let last_append_should_be_hot = projection
+            .entries
+            .first()
+            .is_some_and(|oldest| last_appended_created_at >= &oldest.created_at);
+        if last_append_should_be_hot
+            && !projection
+                .entries
+                .iter()
+                .any(|entry| entry.id == last_appended_entry_id)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn write_event_manifest(coordination_root: &Path, manifest: &EventSegmentManifest) -> Result<()> {
+    write_atomic_json(
+        &coordination_events_manifest_path_from_root(coordination_root),
+        manifest,
+    )
+}
+
+fn load_board_entries_from_segments_root(coordination_root: &Path) -> Result<Vec<BoardEntry>> {
+    let manifest = load_event_manifest_from_dir(coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    let mut entries = Vec::new();
+    for segment in manifest.segments {
+        let path = segments_dir.join(segment.file);
+        if !path.exists() {
+            continue;
+        }
+        for event in load_events_from_path(&path)? {
+            let CoordinationEvent::MessageAppended { entry } = event;
+            entries.push(entry);
+        }
+    }
+    entries.sort_by_key(|entry| entry.created_at);
+    Ok(entries)
+}
+
 fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -453,6 +977,34 @@ fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
             continue;
         }
         events.push(serde_json::from_str(trimmed).map_err(json_error)?);
+    }
+    Ok(events)
+}
+
+fn load_legacy_board_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = OpenOptions::new().read(true).open(path)?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(json_error)?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match event_type {
+            "message_appended" | "board_post" => {
+                events.push(serde_json::from_value(value).map_err(json_error)?);
+            }
+            _ => continue,
+        }
     }
     Ok(events)
 }
@@ -484,6 +1036,12 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
 fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
     match event {
         CoordinationEvent::MessageAppended { entry } => entry.created_at,
+    }
+}
+
+fn coordination_event_entry_id(event: &CoordinationEvent) -> &str {
+    match event {
+        CoordinationEvent::MessageAppended { entry } => &entry.id,
     }
 }
 
@@ -608,13 +1166,28 @@ pub fn write_reminders_state(
 /// Return Board entries whose `updated_at` is strictly later than `since`,
 /// sorted chronologically (same ordering as the projection).
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
-    let snapshot = load_snapshot(worktree_root)?;
-    Ok(snapshot
-        .board
-        .entries
-        .into_iter()
-        .filter(|entry| entry.updated_at > since)
-        .collect())
+    ensure_repo_local_files(worktree_root)?;
+    let coordination_root = coordination_dir(worktree_root);
+    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    let mut entries = Vec::new();
+    for segment in manifest.segments {
+        if segment
+            .max_updated_at
+            .is_some_and(|max_updated_at| max_updated_at <= since)
+        {
+            continue;
+        }
+        let path = segments_dir.join(segment.file);
+        for event in load_events_from_path(&path)? {
+            let CoordinationEvent::MessageAppended { entry } = event;
+            if entry.updated_at > since {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.sort_by_key(|entry| entry.created_at);
+    Ok(entries)
 }
 
 /// Check whether `author` has posted a message of the given `kind` within the
@@ -626,13 +1199,55 @@ pub fn has_recent_post_by(
     kind: &BoardEntryKind,
     within: chrono::Duration,
 ) -> Result<bool> {
-    let snapshot = load_snapshot(worktree_root)?;
     let threshold = Utc::now() - within;
-    Ok(snapshot
-        .board
-        .entries
+    Ok(load_entries_since(worktree_root, threshold)?
         .iter()
         .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
+}
+
+pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
+    ensure_repo_local_files(worktree_root)?;
+    let entry_id = entry_id.trim();
+    if entry_id.is_empty() {
+        return Ok(false);
+    }
+
+    let coordination_root = coordination_dir(worktree_root);
+    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    for segment in manifest.segments.into_iter().rev() {
+        let path = segments_dir.join(segment.file);
+        for event in load_events_from_path(&path)? {
+            let CoordinationEvent::MessageAppended { entry } = event;
+            if entry.id == entry_id {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub fn load_entries_before(
+    worktree_root: &Path,
+    before_entry_id: Option<&str>,
+    limit: usize,
+) -> Result<BoardHistoryPage> {
+    ensure_repo_local_files(worktree_root)?;
+    if limit == 0 {
+        return Ok(BoardHistoryPage::default());
+    }
+
+    let entries = load_board_entries_from_segments_root(&coordination_dir(worktree_root))?;
+    let cutoff = before_entry_id
+        .and_then(|id| entries.iter().position(|entry| entry.id == id))
+        .unwrap_or(entries.len());
+    let older = &entries[..cutoff];
+    let has_more_before = older.len() > limit;
+    let start = older.len().saturating_sub(limit);
+    Ok(BoardHistoryPage {
+        entries: older[start..].to_vec(),
+        has_more_before,
+    })
 }
 
 #[cfg(test)]
@@ -652,11 +1267,70 @@ mod tests {
         let snapshot = load_snapshot(dir.path()).unwrap();
 
         assert!(snapshot.board.entries.is_empty());
-        assert!(coordination_events_path(dir.path()).exists());
+        assert!(coordination_events_manifest_path(dir.path()).exists());
+        assert!(coordination_events_segments_dir(dir.path()).is_dir());
         assert!(coordination_board_projection_path(dir.path()).exists());
         assert!(!coordination_dir(dir.path())
             .join("cards.latest.json")
             .exists());
+    }
+
+    #[test]
+    fn legacy_events_jsonl_migrates_to_segments_on_first_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let events_path = coordination_events_path(dir.path());
+        let mut first = BoardEntry::new(
+            AuthorKind::User,
+            "user",
+            BoardEntryKind::Request,
+            "legacy first",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        first.id = "entry-1".to_string();
+        first.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        first.updated_at = first.created_at;
+        let mut second = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "legacy second",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        second.id = "entry-2".to_string();
+        second.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        second.updated_at = second.created_at;
+        write_events(
+            &events_path,
+            &[
+                CoordinationEvent::MessageAppended { entry: first },
+                CoordinationEvent::MessageAppended { entry: second },
+            ],
+        );
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["legacy first", "legacy second"]
+        );
+        assert!(!events_path.exists());
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        assert_eq!(manifest.total_entries(), 2);
+        assert_eq!(manifest.segments.len(), 1);
+        assert!(coordination_events_segments_dir(dir.path())
+            .join(&manifest.segments[0].file)
+            .is_file());
     }
 
     #[test]
@@ -735,7 +1409,11 @@ mod tests {
             snapshot.board.entries[0].body,
             "Need a coordination surface"
         );
-        let raw = std::fs::read_to_string(coordination_events_path(dir.path())).unwrap();
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        let raw = std::fs::read_to_string(
+            coordination_events_segments_dir(dir.path()).join(&manifest.segments[0].file),
+        )
+        .unwrap();
         assert!(raw.contains("\"type\":\"message_appended\""));
     }
 
@@ -776,11 +1454,473 @@ mod tests {
         )
         .unwrap();
 
-        let rebuilt = rebuild_snapshot_from_events(&coordination_events_path(dir.path())).unwrap();
+        let rebuilt = rebuild_snapshot_from_segments(dir.path()).unwrap();
 
         assert_eq!(rebuilt.board.entries.len(), 2);
         assert_eq!(rebuilt.board.entries[0].body, "Initial request");
         assert_eq!(rebuilt.board.entries[1].body, "Investigating");
+    }
+
+    #[test]
+    fn hot_projection_keeps_latest_entries_with_history_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut events = Vec::new();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 1) {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap()
+                + chrono::Duration::seconds(idx as i64);
+            entry.updated_at = entry.created_at;
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+        write_events_to_segments(
+            &coordination_dir(dir.path()),
+            &events,
+            EVENT_SEGMENT_MAX_BYTES,
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+
+        assert_eq!(snapshot.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
+        assert!(snapshot.board.has_more_before);
+        assert_eq!(snapshot.board.total_entries, HOT_PROJECTION_ENTRY_LIMIT + 1);
+        assert_eq!(snapshot.board.oldest_entry_id.as_deref(), Some("entry-1"));
+        assert_eq!(
+            snapshot.board.newest_entry_id.as_deref(),
+            Some(format!("entry-{HOT_PROJECTION_ENTRY_LIMIT}").as_str())
+        );
+    }
+
+    #[test]
+    fn board_entry_exists_checks_segment_history_outside_hot_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut events = Vec::new();
+        for idx in 0..(HOT_PROJECTION_ENTRY_LIMIT + 1) {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap()
+                + chrono::Duration::seconds(idx as i64);
+            entry.updated_at = entry.created_at;
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+        write_events_to_segments(
+            &coordination_dir(dir.path()),
+            &events,
+            EVENT_SEGMENT_MAX_BYTES,
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert!(!snapshot
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == "entry-0"));
+        assert!(board_entry_exists(dir.path(), "entry-0").unwrap());
+        assert!(!board_entry_exists(dir.path(), "missing-entry").unwrap());
+    }
+
+    #[test]
+    fn append_event_to_segments_rotates_when_max_bytes_is_exceeded() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+
+        for idx in 0..3 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}-{}", "x".repeat(80)),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at =
+                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            append_event_to_segments(
+                dir.path(),
+                &CoordinationEvent::MessageAppended { entry },
+                128,
+            )
+            .unwrap();
+        }
+
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        assert!(
+            manifest.segments.len() >= 2,
+            "expected at least 2 segments, got {:?}",
+            manifest.segments
+        );
+        assert_eq!(manifest.total_entries(), 3);
+    }
+
+    #[test]
+    fn missing_manifest_and_projection_rebuild_from_existing_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo_local_files(dir.path()).unwrap();
+
+        for idx in 0..6 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}-{}", "x".repeat(80)),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at =
+                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            append_event_to_segments(
+                dir.path(),
+                &CoordinationEvent::MessageAppended { entry },
+                128,
+            )
+            .unwrap();
+        }
+        std::fs::remove_file(coordination_events_manifest_path(dir.path())).unwrap();
+        std::fs::remove_file(coordination_board_projection_path(dir.path())).unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        let manifest = load_event_manifest(dir.path()).unwrap();
+
+        assert!(manifest.segments.len() >= 2);
+        assert_eq!(manifest.total_entries(), 6);
+        assert_eq!(snapshot.board.total_entries, 6);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-0", "entry-1", "entry-2", "entry-3", "entry-4", "entry-5"]
+        );
+    }
+
+    #[test]
+    fn post_entry_repairs_truncated_hot_projection_from_segments() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for idx in 0..3 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at =
+                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            post_entry(dir.path(), entry).unwrap();
+        }
+
+        let mut truncated = load_snapshot(dir.path()).unwrap().board;
+        truncated.entries = truncated.entries.split_off(2);
+        truncated.oldest_entry_id = truncated.entries.first().map(|entry| entry.id.clone());
+        truncated.newest_entry_id = truncated.entries.last().map(|entry| entry.id.clone());
+        truncated.has_more_before = true;
+        write_atomic_json(&coordination_board_projection_path(dir.path()), &truncated).unwrap();
+
+        let mut appended = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "entry-3",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        appended.id = "entry-3".to_string();
+        appended.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 3).unwrap();
+        appended.updated_at = appended.created_at;
+
+        let snapshot = post_entry(dir.path(), appended).unwrap();
+
+        assert_eq!(snapshot.board.total_entries, 4);
+        assert!(!snapshot.board.has_more_before);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-0", "entry-1", "entry-2", "entry-3"]
+        );
+    }
+
+    #[test]
+    fn post_entry_imports_late_legacy_events_jsonl_and_repairs_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut first = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        first.id = "entry-segmented".to_string();
+        first.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        first.updated_at = first.created_at;
+        post_entry(dir.path(), first).unwrap();
+
+        let mut late_legacy = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Decision,
+            "late legacy entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        late_legacy.id = "entry-late-legacy".to_string();
+        late_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        late_legacy.updated_at = late_legacy.created_at;
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: late_legacy.clone(),
+            }],
+        );
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &build_hot_projection(vec![late_legacy], Utc::now()),
+        )
+        .unwrap();
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "new segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.id = "entry-new".to_string();
+        new_entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 2, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+
+        let snapshot = post_entry(dir.path(), new_entry).unwrap();
+
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 3);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-segmented", "entry-late-legacy", "entry-new"]
+        );
+    }
+
+    #[test]
+    fn load_snapshot_imports_late_legacy_events_jsonl_and_repairs_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut segmented = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        segmented.id = "entry-segmented".to_string();
+        segmented.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        segmented.updated_at = segmented.created_at;
+        post_entry(dir.path(), segmented).unwrap();
+
+        let mut late_legacy = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Decision,
+            "late legacy entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        late_legacy.id = "entry-late-legacy".to_string();
+        late_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        late_legacy.updated_at = late_legacy.created_at;
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: late_legacy.clone(),
+            }],
+        );
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &build_hot_projection(vec![late_legacy], Utc::now()),
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-segmented", "entry-late-legacy"]
+        );
+    }
+
+    #[test]
+    fn backdated_late_legacy_import_is_not_repaired_repeatedly() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut newer_segmented = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "newer segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        newer_segmented.id = "entry-newer-segmented".to_string();
+        newer_segmented.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 2, 0).unwrap();
+        newer_segmented.updated_at = newer_segmented.created_at;
+        post_entry(dir.path(), newer_segmented).unwrap();
+
+        let mut older_legacy = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Decision,
+            "older late legacy entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        older_legacy.id = "entry-older-legacy".to_string();
+        older_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        older_legacy.updated_at = older_legacy.created_at;
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: older_legacy.clone(),
+            }],
+        );
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &build_hot_projection(vec![older_legacy], Utc::now()),
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        let projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(dir.path())).unwrap();
+        let manifest = load_event_manifest(dir.path()).unwrap();
+
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-older-legacy", "entry-newer-segmented"]
+        );
+        assert_eq!(
+            manifest
+                .segments
+                .iter()
+                .rev()
+                .find(|segment| segment.entries > 0)
+                .and_then(|segment| segment.last_entry_id.as_deref()),
+            Some("entry-older-legacy")
+        );
+        assert_eq!(
+            projection.newest_entry_id.as_deref(),
+            Some("entry-newer-segmented")
+        );
+        assert!(!projection_needs_rebuild(&projection, &manifest));
+    }
+
+    #[test]
+    fn load_entries_before_returns_older_entries_in_chronological_order() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for idx in 0..5 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at =
+                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            post_entry(dir.path(), entry).unwrap();
+        }
+
+        let page = load_entries_before(dir.path(), Some("entry-3"), 2).unwrap();
+
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-1", "entry-2"]
+        );
+        assert!(page.has_more_before);
     }
 
     #[test]
@@ -843,7 +1983,8 @@ mod tests {
 
         let project_dir = gwt_project_dir_for_repo_path(&repo).join("coordination");
         assert_eq!(coordination_dir(&repo), project_dir);
-        assert!(project_dir.join(EVENTS_FILE_NAME).exists());
+        assert!(project_dir.join(EVENTS_MANIFEST_FILE_NAME).exists());
+        assert!(project_dir.join(EVENTS_SEGMENTS_DIR_NAME).is_dir());
         assert!(project_dir.join(BOARD_PROJECTION_FILE_NAME).exists());
         assert!(!legacy_coordination_dir(&repo).exists());
     }
@@ -881,7 +2022,8 @@ mod tests {
             vec![
                 ".lock".to_string(),
                 "board.latest.json".to_string(),
-                "events.jsonl".to_string(),
+                "events".to_string(),
+                "events.manifest.json".to_string(),
             ]
         );
     }
@@ -934,7 +2076,8 @@ mod tests {
         migrate_legacy_coordination_dirs(&project_dir, &[legacy_one.clone(), legacy_two.clone()])
             .unwrap();
 
-        let snapshot = rebuild_snapshot_from_events(&project_dir.join(EVENTS_FILE_NAME)).unwrap();
+        migrate_legacy_event_log_to_segments(&project_dir).unwrap();
+        let snapshot = rebuild_snapshot_from_segments_root(&project_dir).unwrap();
         assert_eq!(
             snapshot
                 .board
@@ -974,11 +2117,15 @@ mod tests {
 
         migrate_legacy_coordination_dirs(&project_dir, std::slice::from_ref(&legacy_dir)).unwrap();
 
-        let raw = std::fs::read_to_string(project_dir.join(EVENTS_FILE_NAME)).unwrap();
+        migrate_legacy_event_log_to_segments(&project_dir).unwrap();
+        let manifest = load_event_manifest_from_dir(&project_dir).unwrap();
+        let raw =
+            std::fs::read_to_string(project_dir.join("events").join(&manifest.segments[0].file))
+                .unwrap();
         assert!(raw.contains("\"type\":\"message_appended\""));
         assert!(!raw.contains("\"type\":\"board_post\""));
 
-        let snapshot = rebuild_snapshot_from_events(&project_dir.join(EVENTS_FILE_NAME)).unwrap();
+        let snapshot = rebuild_snapshot_from_segments_root(&project_dir).unwrap();
         assert_eq!(snapshot.board.entries.len(), 1);
         assert_eq!(snapshot.board.entries[0].body, "legacy board post");
         assert!(!legacy_dir.exists());
@@ -1035,6 +2182,209 @@ mod tests {
     }
 
     #[test]
+    fn load_entries_since_handles_non_monotonic_segment_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "newer post appended first",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+        post_entry(dir.path(), new_entry).unwrap();
+
+        let mut old_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "older post appended last",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        old_entry.updated_at = old_entry.created_at;
+        post_entry(dir.path(), old_entry).unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "newer post appended first");
+    }
+
+    #[test]
+    fn legacy_segment_manifest_backfill_read_path_does_not_rewrite_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment_file = initial_segment_file_name();
+        let segment_path = coordination_events_segments_dir(dir.path()).join(&segment_file);
+
+        let mut newer_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "newer pre-upgrade post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        newer_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        newer_entry.updated_at = newer_entry.created_at;
+
+        let mut older_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "older pre-upgrade post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        older_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        older_entry.updated_at = older_entry.created_at;
+
+        write_events(
+            &segment_path,
+            &[
+                CoordinationEvent::MessageAppended {
+                    entry: newer_entry.clone(),
+                },
+                CoordinationEvent::MessageAppended { entry: older_entry },
+            ],
+        );
+        let bytes = segment_path.metadata().unwrap().len();
+        let legacy_manifest = serde_json::json!({
+            "version": EVENT_MANIFEST_VERSION,
+            "active_segment": segment_file,
+            "segments": [{
+                "file": segment_file,
+                "entries": 2,
+                "bytes": bytes,
+                "first_created_at": newer_entry.created_at,
+                "last_created_at": chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap(),
+                "first_entry_id": newer_entry.id,
+                "last_entry_id": "legacy-old"
+            }],
+            "updated_at": chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 1).unwrap()
+        });
+        std::fs::write(
+            coordination_events_manifest_path(dir.path()),
+            serde_json::to_vec_pretty(&legacy_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "newer pre-upgrade post");
+
+        let persisted_manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(coordination_events_manifest_path(dir.path())).unwrap(),
+        )
+        .unwrap();
+        assert!(persisted_manifest["segments"][0]
+            .get("max_updated_at")
+            .is_none());
+    }
+
+    #[test]
+    fn legacy_segment_manifest_backfills_max_updated_at_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment_file = initial_segment_file_name();
+        let segment_path = coordination_events_segments_dir(dir.path()).join(&segment_file);
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "newer pre-upgrade post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+
+        let mut old_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "older pre-upgrade post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        old_entry.updated_at = old_entry.created_at;
+
+        write_events(
+            &segment_path,
+            &[
+                CoordinationEvent::MessageAppended {
+                    entry: new_entry.clone(),
+                },
+                CoordinationEvent::MessageAppended { entry: old_entry },
+            ],
+        );
+        let bytes = segment_path.metadata().unwrap().len();
+        let legacy_manifest = serde_json::json!({
+            "version": EVENT_MANIFEST_VERSION,
+            "active_segment": segment_file,
+            "segments": [{
+                "file": segment_file,
+                "entries": 2,
+                "bytes": bytes,
+                "first_created_at": new_entry.created_at,
+                "last_created_at": chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap(),
+                "first_entry_id": new_entry.id,
+                "last_entry_id": "legacy-old"
+            }],
+            "updated_at": chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 1).unwrap()
+        });
+        std::fs::write(
+            coordination_events_manifest_path(dir.path()),
+            serde_json::to_vec_pretty(&legacy_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let mut skewed_append = BoardEntry::new(
+            AuthorKind::Agent,
+            "Gemini",
+            BoardEntryKind::Status,
+            "skewed post-upgrade append",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        skewed_append.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+        skewed_append.updated_at = skewed_append.created_at;
+        post_entry(dir.path(), skewed_append).unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "newer pre-upgrade post");
+
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        assert_eq!(
+            manifest.segments[0].max_updated_at,
+            Some(entries[0].updated_at)
+        );
+    }
+
+    #[test]
     fn has_recent_post_by_respects_within_window() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1082,6 +2432,61 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Decision,
+            chrono::Duration::minutes(10)
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn has_recent_post_by_checks_segment_history_beyond_hot_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let base = chrono::Utc::now() - chrono::Duration::minutes(9);
+        let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
+        let mut target = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "recent status outside hot projection",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        target.created_at = base;
+        target.updated_at = base;
+        let target_id = target.id.clone();
+        events.push(CoordinationEvent::MessageAppended { entry: target });
+
+        for offset in 1..=HOT_PROJECTION_ENTRY_LIMIT {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Claude",
+                BoardEntryKind::Status,
+                format!("filler {offset}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.created_at = base + chrono::Duration::seconds(offset as i64);
+            entry.updated_at = entry.created_at;
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+        write_events(&coordination_events_path(dir.path()), &events);
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
+        assert!(!snapshot
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == target_id));
+
+        assert!(has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
             chrono::Duration::minutes(10)
         )
         .unwrap());

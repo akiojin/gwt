@@ -31,6 +31,52 @@ pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
 }
 
+// SPEC-2356 Operator Design System — module assets.
+pub fn theme_manager_js() -> &'static str {
+    include_str!("../web/theme-manager.js")
+}
+
+pub fn hotkey_js() -> &'static str {
+    include_str!("../web/hotkey.js")
+}
+
+pub fn operator_shell_js() -> &'static str {
+    include_str!("../web/operator-shell.js")
+}
+
+pub fn styles_tokens_css() -> &'static str {
+    include_str!("../web/styles/tokens.css")
+}
+
+pub fn styles_typography_css() -> &'static str {
+    include_str!("../web/styles/typography.css")
+}
+
+pub fn styles_components_css() -> &'static str {
+    include_str!("../web/styles/components.css")
+}
+
+// SPEC-2356 Operator Design System — fonts (binary).
+pub fn font_mona_sans() -> &'static [u8] {
+    include_bytes!("../web/fonts/MonaSans.woff2")
+}
+
+pub fn font_hubot_regular() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSans-Regular.woff2")
+}
+
+pub fn font_hubot_bold() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSans-Bold.woff2")
+}
+
+pub fn font_hubot_condensed_bold() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSansCondensed-Bold.woff2")
+}
+
+pub fn font_jetbrains_mono() -> &'static [u8] {
+    include_bytes!("../web/fonts/JetBrainsMono.woff2")
+}
+
 pub async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
@@ -75,6 +121,79 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
     )
+}
+
+// SPEC-2356 — Operator Design System: module + style + font handlers.
+pub async fn theme_manager_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        theme_manager_js(),
+    )
+}
+
+pub async fn hotkey_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        hotkey_js(),
+    )
+}
+
+pub async fn operator_shell_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        operator_shell_js(),
+    )
+}
+
+pub async fn styles_tokens_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_tokens_css(),
+    )
+}
+
+pub async fn styles_typography_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_typography_css(),
+    )
+}
+
+pub async fn styles_components_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_components_css(),
+    )
+}
+
+fn font_response(bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+}
+
+pub async fn font_mona_sans_handler() -> impl IntoResponse {
+    font_response(font_mona_sans())
+}
+
+pub async fn font_hubot_regular_handler() -> impl IntoResponse {
+    font_response(font_hubot_regular())
+}
+
+pub async fn font_hubot_bold_handler() -> impl IntoResponse {
+    font_response(font_hubot_bold())
+}
+
+pub async fn font_hubot_condensed_bold_handler() -> impl IntoResponse {
+    font_response(font_hubot_condensed_bold())
+}
+
+pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
+    font_response(font_jetbrains_mono())
 }
 
 #[cfg(test)]
@@ -772,6 +891,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_branches_surface_remains_branch_browser() {
+        let html = frontend_bundle_source();
+        let branches_block = html
+            .split("if (surface === \"branches\")")
+            .nth(1)
+            .and_then(|tail| tail.split("if (surface === \"memo\")").next())
+            .expect("branches render block");
+
+        assert!(
+            branches_block.contains("Repository branches")
+                && branches_block.contains("branch-list")
+                && branches_block.contains("open-branch-cleanup"),
+            "expected Branches surface to stay branch-list oriented",
+        );
+        assert!(
+            !branches_block.contains("Planning Session")
+                && !branches_block.contains("active_work_projection")
+                && !branches_block.contains("workspace-card"),
+            "expected Branches surface not to render Workspace or Planning Session cards",
+        );
+    }
+
+    #[test]
     fn embedded_web_serves_every_root_module_import() {
         let js = app_js();
         let embedded_web_source = include_str!("embedded_web.rs");
@@ -1063,6 +1205,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_surface_does_not_render_workspace_or_planning_cards() {
+        let html = frontend_bundle_source();
+        let board_block = html
+            .split("if (surface === \"board\")")
+            .nth(1)
+            .and_then(|tail| tail.split("if (surface === \"logs\")").next())
+            .expect("board render block");
+
+        assert!(
+            board_block.contains("board-chat-shell")
+                && board_block.contains("board-timeline")
+                && board_block.contains("board-composer"),
+            "expected Board surface to remain a chat/event log",
+        );
+        assert!(
+            !board_block.contains("Planning Session")
+                && !board_block.contains("workspace-card")
+                && !board_block.contains("active_work_projection"),
+            "expected Board surface not to render Workspace or Planning Session cards",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_messages_put_user_on_right_and_agent_on_left() {
         let html = frontend_bundle_source();
         fn css_block<'a>(html: &'a str, selector: &str) -> &'a str {
@@ -1104,10 +1269,12 @@ mod tests {
         assert!(
             html.contains("pendingSubmit: null")
                 && html.contains("existingEntryIds: new Set")
-                && html.contains("const completedSubmit = Boolean(state.pendingSubmit")
-                && html.contains("!state.pendingSubmit.existingEntryIds.has(entry.id)")
+                && html.contains("const pendingSubmit = state.pendingSubmit;")
+                && html.contains("const completedSubmit = Boolean(pendingSubmit")
+                && html.contains("!pendingSubmit.existingEntryIds.has(entry.id)")
                 && html.contains("state.composerBody = \"\";")
-                && html.contains("state.pendingSubmit = null;"),
+                && html.contains("state.pendingSubmit = null;")
+                && html.contains("state.pendingSelfPostScroll = true;"),
             "expected Board post success to clear drafts only after matching submitted entry appears",
         );
         assert!(
@@ -1211,6 +1378,23 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            !html.contains(r#"data-preset="shell""#)
+                && !html.contains(r#"data-preset="claude""#)
+                && !html.contains(r#"data-preset="codex""#),
+            "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
+        );
+        assert!(
+            html.contains(r#"data-preset="branches""#)
+                && html.contains("Browse repository branches and launch agents"),
+            "expected Add window modal to keep the Branches launch-agent path visible",
+        );
+    }
+
+    #[test]
     fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         let html = frontend_bundle_source();
         let submit_bounds = regex::Regex::new(
@@ -1266,6 +1450,31 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains(r#"case "start-work":"#) && html.contains(r#"kind: "open_start_work""#),
+            "expected Start Work to use a global command instead of a Branches window action",
+        );
+        assert!(
+            html.contains("launchWizard.show_branch_controls !== false")
+                && html.contains("Workspace launch"),
+            "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
+        );
+        assert!(
+            html.contains("isStartWorkMode")
+                && html.contains("is-drawer")
+                && html.contains("is-drawer-shell"),
+            "expected Start Work wizard mode to opt into the SPEC-2356 drawer bridge",
+        );
+        assert!(
+            html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
+            "expected Start Work to keep the existing Agent settings renderer available",
+        );
+    }
+
+    #[test]
     fn embedded_web_shared_bundle_keeps_user_facing_copy_english_only() {
         let html = frontend_bundle_source();
         let japanese_scripts = regex::Regex::new(r"[ぁ-んァ-ン一-龯]").expect("valid regex");
@@ -1273,7 +1482,7 @@ mod tests {
         assert!(
             html.contains("Open a project")
                 && html.contains("Restore previous workspaces or choose a new folder.")
-                && html.contains("Open a standard shell terminal")
+                && html.contains("Browse repository branches and launch agents")
                 && html.contains("Launch Agent")
                 && html.contains("Connected")
                 && html.contains("Reconnecting"),
@@ -1502,7 +1711,14 @@ mod tests {
             ),
             (
                 ".workspace-empty-state {",
-                &["padding: 16px 12px", "font-size: 12px", "color: #64748b"],
+                // SPEC-2356 — empty state typography flows through tokens so
+                // the surface respects dual-theme text colour and the body
+                // font scale. The numeric pixel value moved into `--type-sm`.
+                &[
+                    "padding: 16px 12px",
+                    "font-size: var(--type-sm)",
+                    "color: var(--color-text-muted)",
+                ],
             ),
         ];
 
@@ -1602,6 +1818,9 @@ mod tests {
     fn embedded_web_modal_frame_primitives_define_shared_contracts() {
         let html = index_html();
 
+        // SPEC-2356 FR-001: modal frame primitives must reference design
+        // tokens from `tokens.css` instead of raw colour literals so the
+        // Operator dark/light dual flagship can theme them via CSS variables.
         let primitives: [(&str, &[&str]); 5] = [
             (
                 ".modal-backdrop {",
@@ -1610,7 +1829,7 @@ mod tests {
                     "inset: 0",
                     "align-items: center",
                     "justify-content: center",
-                    "background: rgba(15, 23, 42",
+                    "background: var(--color-overlay)",
                 ],
             ),
             (
@@ -1618,8 +1837,8 @@ mod tests {
                 &[
                     "max-height: calc(100vh - 48px)",
                     "overflow: auto",
-                    "border-radius: 6px",
-                    "background: #ffffff",
+                    "border-radius: var(--radius-lg)",
+                    "background: var(--color-surface-elevated)",
                     "border: 1px solid",
                 ],
             ),

@@ -21,6 +21,7 @@ pub mod skill_state;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod update;
+pub mod workspace_projection;
 pub mod worktree_hash;
 
 pub use error::{GwtError, Result};

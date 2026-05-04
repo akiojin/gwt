@@ -2,6 +2,30 @@
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
+      import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
+
+      // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
+      // module loads so the theme toggle, command palette, hotkey overlay,
+      // status strip clock, and Mission Briefing intro are wired before the
+      // rest of app.js continues bootstrapping the legacy surfaces.
+      const __op = initOperatorShell();
+      const xtermThemeAdapters = new Set();
+      __op.themeManager.subscribe((effective) => {
+        for (const adapter of xtermThemeAdapters) {
+          try { adapter(effective); } catch (e) { console.error("xterm theme adapter threw", e); }
+        }
+      });
+      window.__operatorShell = {
+        themeManager: __op.themeManager,
+        hotkey: __op.hotkey,
+        palette: __op.palette,
+        registerXtermThemeAdapter: (fn) => {
+          xtermThemeAdapters.add(fn);
+          try { fn(__op.themeManager.getEffective()); } catch (_e) { /* ignore */ }
+          return () => xtermThemeAdapters.delete(fn);
+        },
+        applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
+      };
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");
@@ -26,12 +50,17 @@
       const stackButton = document.getElementById("stack-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
+      const activeWorkCount = document.getElementById("op-active-work-count");
+      const activeWorkSummary = document.getElementById("op-active-work-summary");
+      const activeWorkAgents = document.getElementById("op-active-work-agents");
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
       const wizardModal = document.getElementById("wizard-modal");
+      const wizardDialog = wizardModal.querySelector(".modal-shell");
+      const wizardTitle = document.getElementById("wizard-title");
       const wizardMeta = document.getElementById("wizard-meta");
       const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
@@ -131,7 +160,9 @@
             "ensureBoardState",
             "renderBoard",
             "requestBoard",
+            "requestOlderBoardEntries",
             "submitBoardEntry",
+            "focusBoardEntry",
           ]),
         }),
         logStateMap: Object.freeze({
@@ -203,6 +234,8 @@
       let viewport = { x: 0, y: 0, zoom: 1 };
       let viewportRasterTimer = null;
       let launchWizard = null;
+      let activeWorkProjection = null;
+      let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
       let wizardAdvancedOpen = false;
       let wizardBranchDraft = "";
@@ -924,6 +957,252 @@
         });
       }
 
+      // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
+      // Aggregates `data-agent-state` across all open windows and pushes the
+      // counts into the bottom strip. We also expose agent count to the
+      // sidebar layer for the "Quick" section's hint.
+      function recomputeOperatorTelemetry() {
+        if (!window.__operatorShell?.applyTelemetryCounts) return;
+        const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
+        for (const el of windowMap.values()) {
+          const state = el?.dataset?.agentState;
+          if (!state) continue;
+          if (state in counts) counts[state] += 1;
+          counts.agents += 1;
+        }
+        if (activeWorkProjection) {
+          const category = activeWorkProjection.status_category || "unknown";
+          const activeAgents = Number(activeWorkProjection.active_agents || 0);
+          const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
+          if (category === "active") counts.active = Math.max(counts.active, activeAgents || 1);
+          if (category === "idle") counts.idle = Math.max(counts.idle, 1);
+          if (category === "blocked") counts.blocked = Math.max(counts.blocked, blockedAgents || 1);
+          if (category === "done") counts.done = Math.max(counts.done, 1);
+          counts.blocked = Math.max(counts.blocked, blockedAgents);
+          counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
+          counts.branches = activeWorkProjection.branch ? 1 : "—";
+        }
+        try {
+          window.__operatorShell.applyTelemetryCounts(counts);
+        } catch (e) {
+          console.warn("operator telemetry update failed", e);
+        }
+      }
+
+      function activeWorkAgentCount(projection) {
+        const agents = Array.isArray(projection?.agents) ? projection.agents : [];
+        if (agents.length > 0) return agents.length;
+        return Number(projection?.active_agents || 0) + Number(projection?.blocked_agents || 0);
+      }
+
+      function projectionIssueNumber(projection) {
+        const owner = String(projection?.owner || "");
+        const match = owner.match(/^Issue\s+#(\d+)$/i);
+        return match ? Number(match[1]) : null;
+      }
+
+      function compactPathLabel(value) {
+        if (!value) return "";
+        const parts = String(value).split(/[\\/]+/).filter(Boolean);
+        if (parts.length <= 2) return String(value);
+        return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+      }
+
+      function appendMeta(container, value) {
+        if (!value) return;
+        container.appendChild(createNode("span", "", value));
+      }
+
+      function coordinationKindLabel(kind) {
+        switch (String(kind || "").toLowerCase()) {
+          case "blocked":
+            return "Blocked";
+          case "handoff":
+            return "Handoff";
+          case "next":
+            return "Next";
+          case "claim":
+            return "Claim";
+          case "decision":
+            return "Decision";
+          case "status":
+            return "Status";
+          default:
+            return "";
+        }
+      }
+
+      function activeBoardWindowIds() {
+        return (activeWorkspace().windows || [])
+          .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
+          .map((windowData) => windowData.id);
+      }
+
+      function focusBoardEntry(entryId) {
+        if (!entryId) {
+          focusOrSpawnPreset("board");
+          return;
+        }
+        pendingBoardEntryFocusId = entryId;
+        for (const windowId of activeBoardWindowIds()) {
+          const state = ensureBoardState(windowId);
+          state.focusEntryId = entryId;
+          state.pendingFocusScroll = true;
+          renderBoard(windowId);
+        }
+        focusOrSpawnPreset("board");
+      }
+
+      function renderActiveWorkOverview() {
+        if (!activeWorkSummary || !activeWorkAgents) return;
+        activeWorkSummary.innerHTML = "";
+        activeWorkAgents.innerHTML = "";
+
+        if (!activeWorkProjection) {
+          if (activeWorkCount) activeWorkCount.textContent = "0";
+          activeWorkSummary.appendChild(createNode("div", "op-work-empty", "No active work"));
+          return;
+        }
+
+        const agents = Array.isArray(activeWorkProjection.agents)
+          ? activeWorkProjection.agents
+          : [];
+        const agentCount = activeWorkAgentCount(activeWorkProjection);
+        if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
+
+        activeWorkSummary.appendChild(
+          createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
+        );
+        const meta = createNode("div", "op-work-meta");
+        appendMeta(meta, activeWorkProjection.owner);
+        appendMeta(meta, activeWorkProjection.branch);
+        appendMeta(meta, activeWorkProjection.pr_number ? `PR #${activeWorkProjection.pr_number}` : "");
+        activeWorkSummary.appendChild(meta);
+        activeWorkSummary.appendChild(
+          createNode(
+            "div",
+            "op-work-status",
+            activeWorkProjection.next_action ||
+              activeWorkProjection.status_text ||
+              "Work is active",
+          ),
+        );
+
+        const actions = createNode("div", "op-work-actions");
+        if (activeWorkProjection.branch) {
+          const addAgent = createNode("button", "op-work-action", "Add Agent to This Work");
+          addAgent.type = "button";
+          addAgent.addEventListener("click", () => {
+            send({
+              kind: "open_active_work_launch_wizard",
+              branch_name: activeWorkProjection.branch,
+              linked_issue_number: projectionIssueNumber(activeWorkProjection),
+            });
+          });
+          actions.appendChild(addAgent);
+        }
+        const boardRefs = activeWorkProjection.board_refs || [];
+        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
+        if (latestBoardRef) {
+          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
+          openBoard.type = "button";
+          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
+          actions.appendChild(openBoard);
+        }
+        if (actions.childNodes.length > 0) {
+          activeWorkSummary.appendChild(actions);
+        }
+
+        if (agents.length === 0) {
+          activeWorkAgents.appendChild(
+            createNode("div", "op-work-empty", "Agent details unavailable"),
+          );
+          return;
+        }
+
+        for (const agent of agents) {
+          const state = agent.status_category || "unknown";
+          const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
+          const coordinationLabel = coordinationKindLabel(coordinationKind);
+          const card = createNode("article", "op-agent-card");
+          card.dataset.state = state;
+          if (coordinationKind) card.dataset.kind = coordinationKind;
+          if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
+
+          const head = createNode("div", "op-agent-head");
+          head.appendChild(
+            createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
+          );
+          const chips = createNode("div", "op-agent-chips");
+          if (coordinationLabel) {
+            chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
+          }
+          chips.appendChild(createNode("div", "op-agent-state", state));
+          head.appendChild(chips);
+          card.appendChild(head);
+
+          const agentMeta = createNode("div", "op-agent-meta");
+          appendMeta(agentMeta, agent.branch);
+          appendMeta(agentMeta, compactPathLabel(agent.worktree_path));
+          appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
+          card.appendChild(agentMeta);
+
+          if (agent.coordination_scope) {
+            card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
+          }
+
+          if (agent.current_focus) {
+            const focusText = coordinationLabel
+              ? `${coordinationLabel}: ${agent.current_focus}`
+              : agent.current_focus;
+            card.appendChild(createNode("div", "op-agent-focus", focusText));
+          }
+
+          const agentActions = createNode("div", "op-agent-actions");
+          if (agent.window_id) {
+            const focusButton = createNode("button", "op-agent-action", "Focus");
+            focusButton.type = "button";
+            focusButton.addEventListener("click", () => {
+              focusWindowRemotely(agent.window_id, { center: true });
+            });
+            agentActions.appendChild(focusButton);
+          }
+          if (agent.last_board_entry_id) {
+            const boardButton = createNode("button", "op-agent-action", "Open Entry");
+            boardButton.type = "button";
+            boardButton.addEventListener("click", () => focusBoardEntry(agent.last_board_entry_id));
+            agentActions.appendChild(boardButton);
+          }
+          if (agentActions.childNodes.length > 0) {
+            card.appendChild(agentActions);
+          }
+
+          activeWorkAgents.appendChild(card);
+        }
+      }
+
+      // SPEC-2356 — translate legacy runtime state vocabulary to Living
+      // Telemetry semantic states (`active|idle|blocked|done`). The mapping is
+      // intentionally narrow so future runtime states surface as
+      // `idle` until the design language explicitly handles them.
+      function mapAgentTelemetryState(runtimeState) {
+        switch (runtimeState) {
+          case "starting":
+          case "running":
+          case "waiting":
+            return "active";
+          case "ready":
+            return "idle";
+          case "stopped":
+          case "exited":
+            return "done";
+          case "error":
+            return "blocked";
+          default:
+            return "idle";
+        }
+      }
+
       function applyStatus(windowId, status, detail) {
         const windowData = workspaceWindowById(windowId);
         const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
@@ -951,6 +1230,10 @@
           "error",
         );
         chip.classList.add(runtimeState);
+        // SPEC-2356 — Living Telemetry: project the runtime state onto a stable
+        // `data-agent-state` attribute the components.css layer animates.
+        element.dataset.agentState = mapAgentTelemetryState(runtimeState);
+        recomputeOperatorTelemetry();
         label.textContent = windowRuntimeLabel(runtimeState);
         const effectiveDetail = detailMap.get(windowId);
         if (overlay) {
@@ -1265,39 +1548,73 @@
         };
       }
 
+      // SPEC-2356 — xterm theme palettes follow the Operator overall theme.
+      // Each palette satisfies WCAG AA against its own canvas in DevTools spot
+      // checks; the dark variant is unchanged from the historical default.
+      const XTERM_THEME_DARK = {
+        background: "#0a0d12",
+        foreground: "#e8eaed",
+        cursor: "#f8fafc",
+        selectionBackground: "#1e293b",
+        black: "#0f172a",
+        red: "#ef4444",
+        green: "#22c55e",
+        yellow: "#f59e0b",
+        blue: "#3b82f6",
+        magenta: "#a855f7",
+        cyan: "#06b6d4",
+        white: "#cbd5e1",
+        brightBlack: "#334155",
+        brightRed: "#f87171",
+        brightGreen: "#4ade80",
+        brightYellow: "#fbbf24",
+        brightBlue: "#60a5fa",
+        brightMagenta: "#c084fc",
+        brightCyan: "#22d3ee",
+        brightWhite: "#f8fafc",
+      };
+      const XTERM_THEME_LIGHT = {
+        background: "#f5f3ee",
+        foreground: "#1a1d24",
+        cursor: "#1a1d24",
+        selectionBackground: "#dcd9d2",
+        black: "#1f2937",
+        red: "#b91c1c",
+        green: "#15803d",
+        yellow: "#a16207",
+        blue: "#1d4ed8",
+        magenta: "#86198f",
+        cyan: "#0e7490",
+        white: "#4b5563",
+        brightBlack: "#374151",
+        brightRed: "#dc2626",
+        brightGreen: "#166534",
+        brightYellow: "#b45309",
+        brightBlue: "#1e40af",
+        brightMagenta: "#a21caf",
+        brightCyan: "#155e75",
+        brightWhite: "#1f2937",
+      };
+      const xtermThemeFor = (mode) =>
+        mode === "light" ? XTERM_THEME_LIGHT : XTERM_THEME_DARK;
+
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
         }
+        const initialMode = window.__operatorShell?.themeManager?.getEffective() ?? "dark";
         const terminal = new Terminal({
           cursorBlink: true,
           convertEol: true,
-          theme: {
-            background: "#020617",
-            foreground: "#e2e8f0",
-            cursor: "#f8fafc",
-            black: "#0f172a",
-            red: "#ef4444",
-            green: "#22c55e",
-            yellow: "#f59e0b",
-            blue: "#3b82f6",
-            magenta: "#a855f7",
-            cyan: "#06b6d4",
-            white: "#cbd5e1",
-            brightBlack: "#334155",
-            brightRed: "#f87171",
-            brightGreen: "#4ade80",
-            brightYellow: "#fbbf24",
-            brightBlue: "#60a5fa",
-            brightMagenta: "#c084fc",
-            brightCyan: "#22d3ee",
-            brightWhite: "#f8fafc",
-          },
+          theme: xtermThemeFor(initialMode),
           fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+            "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 13,
           lineHeight: 1.2,
           scrollback: 5000,
+        });
+        const themeUnsubscribe = window.__operatorShell?.registerXtermThemeAdapter?.((mode) => {
+          try { terminal.options.theme = xtermThemeFor(mode); } catch (e) { console.warn("xterm theme update failed", e); }
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -1307,6 +1624,7 @@
         const cleanup = () => {
           copyCleanup();
           viewportRefreshCleanup();
+          themeUnsubscribe?.();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;
@@ -1598,6 +1916,15 @@
             composerKind: "status",
             composerBody: "",
             pendingSubmit: null,
+            hasMoreBefore: false,
+            oldestEntryId: null,
+            loadingOlder: false,
+            pendingSelfPostScroll: false,
+            preserveBoardScrollPosition: false,
+            shouldFollowBoardBottom: true,
+            newEntriesAvailable: false,
+            focusEntryId: null,
+            pendingFocusScroll: false,
           });
         }
         return boardStateMap.get(windowId);
@@ -1664,6 +1991,25 @@
         send({
           kind: "load_board",
           id: windowId,
+        });
+      }
+
+      function requestOlderBoardEntries(windowId) {
+        const state = ensureBoardState(windowId);
+        if (state.loading || state.loadingOlder || !state.hasMoreBefore) {
+          return;
+        }
+        const beforeEntryId = state.oldestEntryId || state.entries[0]?.id || null;
+        if (!beforeEntryId) {
+          return;
+        }
+        state.loadingOlder = true;
+        state.error = "";
+        send({
+          kind: "load_board_history",
+          id: windowId,
+          before_entry_id: beforeEntryId,
+          limit: 50,
         });
       }
 
@@ -2935,6 +3281,35 @@
         renderBoard(windowId);
       }
 
+      function forceBoardScrollToBottom(scroller) {
+        scroller.scrollTop = scroller.scrollHeight;
+      }
+
+      function preserveBoardScrollPosition(scroller, previousScrollTop, previousScrollHeight) {
+        const delta = scroller.scrollHeight - previousScrollHeight;
+        scroller.scrollTop = previousScrollTop + Math.max(0, delta);
+      }
+
+      function mergeBoardEntries(existingEntries, incomingEntries) {
+        const merged = new Map();
+        for (const entry of existingEntries || []) {
+          if (entry.id) {
+            merged.set(entry.id, entry);
+          }
+        }
+        for (const entry of incomingEntries || []) {
+          if (entry.id) {
+            merged.set(entry.id, entry);
+          }
+        }
+        return Array.from(merged.values()).sort((left, right) => {
+          const leftKey = String(left.created_at || left.updated_at || "");
+          const rightKey = String(right.created_at || right.updated_at || "");
+          return leftKey.localeCompare(rightKey)
+            || String(left.id || "").localeCompare(String(right.id || ""));
+        });
+      }
+
       function handleBoardHookEvent(event) {
         const hookEvent = event.event;
         if (!hookEvent || hookEvent.kind !== "coordination_event") {
@@ -2975,14 +3350,23 @@
         if (!status || !timeline || !composer) {
           return;
         }
+        if (pendingBoardEntryFocusId && !state.focusEntryId) {
+          state.focusEntryId = pendingBoardEntryFocusId;
+          state.pendingFocusScroll = true;
+        }
 
+        const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
           ? state.error
           : state.loading
             ? state.submitting
               ? "Saving entry..."
               : "Loading coordination..."
-            : `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
+            : state.loadingOlder
+              ? `Loading earlier entries... - ${entryCountLabel}`
+              : state.newEntriesAvailable
+                ? `${entryCountLabel} - New updates`
+                : entryCountLabel;
         status.className = "board-status";
         if (state.error) {
           status.classList.add("error");
@@ -2997,20 +3381,49 @@
         const scroller = timeline.parentElement;
         const stickyBottomThreshold = 64;
         const previousScrollTop = scroller ? scroller.scrollTop : 0;
+        const previousScrollHeight = scroller ? scroller.scrollHeight : 0;
         const previousScrollMax = scroller
           ? scroller.scrollHeight - scroller.clientHeight
           : 0;
-        const wasNearBottom =
+        const shouldFollowBoardBottom =
           !scroller ||
           previousScrollMax <= 0 ||
           previousScrollMax - previousScrollTop <= stickyBottomThreshold;
+        state.shouldFollowBoardBottom = shouldFollowBoardBottom;
+        if (scroller && scroller.dataset.boardScrollBound !== "true") {
+          scroller.dataset.boardScrollBound = "true";
+          scroller.addEventListener("scroll", () => {
+            const scrollMax = scroller.scrollHeight - scroller.clientHeight;
+            const isNearBottom =
+              scrollMax <= 0 || scrollMax - scroller.scrollTop <= stickyBottomThreshold;
+            state.shouldFollowBoardBottom = isNearBottom;
+            if (isNearBottom) {
+              state.newEntriesAvailable = false;
+            }
+            if (scroller.scrollTop <= 48) {
+              requestOlderBoardEntries(windowId);
+            }
+          });
+        }
 
         timeline.innerHTML = "";
+        if (state.hasMoreBefore) {
+          const loadOlder = createNode(
+            "button",
+            "board-load-older",
+            state.loadingOlder ? "Loading earlier entries..." : "Load earlier entries",
+          );
+          loadOlder.type = "button";
+          loadOlder.disabled = state.loadingOlder;
+          loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
+          timeline.appendChild(loadOlder);
+        }
         if (!state.loading && state.entries.length === 0) {
           timeline.appendChild(
             createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
           );
         }
+        let focusTarget = null;
         for (const entry of state.entries) {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
@@ -3023,6 +3436,14 @@
           }
           if (entry.agent_color) {
             card.dataset.agentColor = entry.agent_color;
+          }
+          if (entry.id) {
+            card.setAttribute("data-board-entry-id", entry.id);
+          }
+          if (state.focusEntryId && entry.id === state.focusEntryId) {
+            card.classList.add("focus-target");
+            card.tabIndex = -1;
+            focusTarget = card;
           }
 
           const meta = createNode("div", "board-message-meta");
@@ -3042,8 +3463,21 @@
         }
 
         if (scroller) {
-          if (wasNearBottom) {
-            scroller.scrollTop = scroller.scrollHeight;
+          if (focusTarget && state.pendingFocusScroll) {
+            focusTarget.scrollIntoView({ block: "center" });
+            focusTarget.focus({ preventScroll: true });
+            state.pendingFocusScroll = false;
+            pendingBoardEntryFocusId = null;
+          } else if (state.pendingSelfPostScroll) {
+            forceBoardScrollToBottom(scroller);
+            state.pendingSelfPostScroll = false;
+            state.newEntriesAvailable = false;
+          } else if (state.preserveBoardScrollPosition) {
+            preserveBoardScrollPosition(scroller, previousScrollTop, previousScrollHeight);
+            state.preserveBoardScrollPosition = false;
+          } else if (shouldFollowBoardBottom) {
+            forceBoardScrollToBottom(scroller);
+            state.newEntriesAvailable = false;
           } else {
             scroller.scrollTop = previousScrollTop;
           }
@@ -3276,10 +3710,13 @@
       function renderLaunchWizard() {
         if (!launchWizard) {
           wizardModal.classList.remove("open");
+          wizardModal.classList.remove("is-drawer");
+          wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
           wizardBody.innerHTML = "";
           wizardError.hidden = true;
           wizardError.textContent = "";
+          if (wizardTitle) wizardTitle.textContent = "Launch Agent";
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
           syncWizardDraftState();
@@ -3288,10 +3725,16 @@
 
         syncWizardDraftState();
         closeModal();
+        const isStartWorkMode = launchWizard.show_branch_controls === false;
+        wizardModal.classList.toggle("is-drawer", isStartWorkMode);
+        wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         wizardModal.classList.add("open");
-        wizardMeta.textContent = `Selected branch · ${
-          launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
-        }`;
+        if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
+        wizardMeta.textContent = launchWizard.show_branch_controls === false
+          ? "Workspace launch"
+          : `Selected branch · ${
+            launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
+          }`;
         wizardSubmitButton.textContent = launchWizard.is_hydrating
           ? "Loading..."
           : launchWizard.branch_mode === "create_new"
@@ -3425,7 +3868,7 @@
           panel.appendChild(section);
         }
 
-        {
+        if (launchWizard.show_branch_controls !== false) {
           const section = createLaunchSection(
             "Branch",
             "Choose the selected branch or create a new branch from it.",
@@ -5642,6 +6085,7 @@
       const boardSurface = Object.freeze({
         ensureBoardState,
         requestBoard,
+        requestOlderBoardEntries,
         renderBoard,
         submitBoardEntry,
         handleRuntimeHookEvent: handleBoardHookEvent,
@@ -5689,6 +6133,11 @@
           case "workspace_state":
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
+            break;
+          case "active_work_projection":
+            activeWorkProjection = event.projection || null;
+            renderActiveWorkOverview();
+            recomputeOperatorTelemetry();
             break;
           case "window_list":
             windowListEntries = event.windows || [];
@@ -5756,6 +6205,16 @@
             state.notice = "";
             syncBranchSelectionState(state);
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
+            // SPEC-2356 — feed git layer count into the Operator Status Strip.
+            try {
+              const branchesCount = Array.isArray(event.entries) ? event.entries.length : 0;
+              window.__operatorShell?.applyTelemetryCounts?.({
+                branches: branchesCount,
+                git: branchesCount,
+              });
+            } catch (e) {
+              console.warn("operator branch telemetry failed", e);
+            }
             break;
           }
           case "memo_notes": {
@@ -5797,16 +6256,29 @@
           case "board_entries": {
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
             const incomingEntries = event.entries || [];
-            const completedSubmit = Boolean(state.pendingSubmit)
+            const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
+            const incomingEntryIds = new Set(incomingEntries.map((entry) => entry.id));
+            const retainedHistory = state.entries.some(
+              (entry) => Boolean(entry.id) && !incomingEntryIds.has(entry.id),
+            );
+            const addedEntry = incomingEntries.some(
+              (entry) => Boolean(entry.id) && !existingEntryIds.has(entry.id),
+            );
+            const pendingSubmit = state.pendingSubmit;
+            const completedSubmit = Boolean(pendingSubmit)
               && incomingEntries.some((entry) => {
                 const parentId = entry.parent_id || null;
                 return Boolean(entry.id)
-                  && !state.pendingSubmit.existingEntryIds.has(entry.id)
-                  && parentId === state.pendingSubmit.parentId
+                  && !pendingSubmit.existingEntryIds.has(entry.id)
+                  && parentId === pendingSubmit.parentId
                   && String(entry.author_kind || "").toLowerCase() === "user"
-                  && String(entry.body || "").trim() === state.pendingSubmit.body;
+                  && String(entry.body || "").trim() === pendingSubmit.body;
               });
-            state.entries = incomingEntries;
+            state.entries = mergeBoardEntries(state.entries, incomingEntries);
+            state.hasMoreBefore = retainedHistory
+              ? state.hasMoreBefore
+              : Boolean(event.has_more_before);
+            state.oldestEntryId = state.entries[0]?.id || null;
             if (
               state.replyParentId &&
               !state.entries.some((entry) => entry.id === state.replyParentId)
@@ -5814,14 +6286,32 @@
               state.replyParentId = null;
             }
             if (completedSubmit) {
-              if (state.composerBody.trim() === state.pendingSubmit.body) {
+              if (state.composerBody.trim() === pendingSubmit.body) {
                 state.composerBody = "";
               }
               state.replyParentId = null;
               state.pendingSubmit = null;
               state.submitting = false;
+              state.pendingSelfPostScroll = true;
+            } else if (addedEntry && !state.shouldFollowBoardBottom) {
+              state.newEntriesAvailable = true;
             }
             state.loading = false;
+            state.error = "";
+            frontendUnits.boardSurface.renderBoard(event.id);
+            break;
+          }
+          case "board_history_page": {
+            const state = frontendUnits.boardSurface.ensureBoardState(event.id);
+            const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
+            const olderEntries = (event.entries || []).filter(
+              (entry) => !entry.id || !existingEntryIds.has(entry.id),
+            );
+            state.entries = olderEntries.concat(state.entries);
+            state.hasMoreBefore = Boolean(event.has_more_before);
+            state.oldestEntryId = state.entries[0]?.id || null;
+            state.loadingOlder = false;
+            state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
             break;
@@ -6014,6 +6504,7 @@
           case "board_error": {
             const state = frontendUnits.boardSurface.ensureBoardState(event.id);
             state.loading = false;
+            state.loadingOlder = false;
             state.submitting = false;
             state.pendingSubmit = null;
             state.error = event.message;
@@ -6511,5 +7002,80 @@
         });
       }
 
+      // SPEC-2356 — bridge Command Palette + hotkey commands into existing
+      // surface dispatch. Each command either focuses an existing window or
+      // creates a new one through the same socket transport the preset
+      // buttons use, so they share the legacy invariants.
+      function focusOrSpawnPreset(preset) {
+        const allWindows = activeWorkspace().windows || [];
+        const existing = allWindows.find(
+          (w) => w.preset === preset && !w.minimized,
+        );
+        if (existing) {
+          frontendUnits.socketTransport.send({
+            kind: "focus_window",
+            id: existing.id,
+          });
+          return;
+        }
+        frontendUnits.socketTransport.send({
+          kind: "create_window",
+          preset,
+          bounds: visibleBounds(),
+        });
+      }
+
+      document.addEventListener("op:command", (event) => {
+        const id = event.detail?.id;
+        if (!id) return;
+        switch (id) {
+          case "open-board":
+            focusOrSpawnPreset("board");
+            return;
+          case "open-git":
+            focusOrSpawnPreset("branches");
+            return;
+          case "open-logs":
+            focusOrSpawnPreset("logs");
+            return;
+          case "open-branches":
+            focusOrSpawnPreset("branches");
+            return;
+          case "open-files":
+            focusOrSpawnPreset("file_tree");
+            return;
+          case "spawn-shell":
+            focusOrSpawnPreset("shell");
+            return;
+          case "start-work":
+          case "spawn-agent":
+            frontendUnits.socketTransport.send({
+              kind: "open_start_work",
+            });
+            return;
+          case "theme-cycle": {
+            const tm = window.__operatorShell?.themeManager;
+            if (!tm) return;
+            const cycle = { auto: "dark", dark: "light", light: "auto" };
+            tm.setTheme(cycle[tm.getPreference()] ?? "auto");
+            return;
+          }
+          case "open-help": {
+            const overlay = document.getElementById("op-hotkey-overlay");
+            if (overlay) {
+              overlay.dataset.open = overlay.dataset.open === "true" ? "" : "true";
+              overlay.setAttribute(
+                "aria-hidden",
+                overlay.dataset.open === "true" ? "false" : "true",
+              );
+            }
+            return;
+          }
+          default:
+            console.debug("op:command unknown id", id);
+        }
+      });
+
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
+      renderActiveWorkOverview();
       frontendUnits.socketTransport.connect();

@@ -1,6 +1,103 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.16.0] - 2026-05-04
+
+### Bug Fixes
+
+- **ui:** SPEC-2356 — replace inline html/body/project-bar baseline with tokens
+- **ui:** SPEC-2356 — remove duplicate grid, theme hint and connection dot via tokens
+- **ui:** SPEC-2356 — workspace-window chrome / titlebar to tokens (preserves SPEC-2008 contract)
+- **ui:** SPEC-2356 — workspace primitives + branch filter to tokens
+- **ui:** SPEC-2356 — window list panel + arrange-button to tokens
+- **ui:** SPEC-2356 — arrange-button hover + add-button to tokens
+- **ui:** SPEC-2356 — terminal overlay + panel window-body to tokens
+- **ui:** SPEC-2356 — status-dot and icon-button to tokens
+- **ui:** SPEC-2356 — terminal surface body follows canvas token
+- **ui:** SPEC-2356 — knowledge / memo surfaces to tokens
+- **ui:** SPEC-2356 — memo input fields and profile pane to tokens
+- **ui:** SPEC-2356 — branch list / cleanup badges to tokens
+- **ui:** SPEC-2356 — Board surface (chat shell, messages, composer) to tokens
+- Clarify agent workspace guidance
+- **ui:** SPEC-2356 — Logs surface (entries, severity chips, detail) to tokens
+- **ui:** SPEC-2356 — project picker / onboarding cards to tokens
+- **ui:** SPEC-2356 — Knowledge bridge deeper surface to tokens
+- Preserve start work coordination state
+- **ui:** SPEC-2356 — Launch Wizard surface (header, summary, sections, fields, choices) to tokens
+- **start-work:** Preserve blocked coordination state
+- **ui:** SPEC-2356 — Profile surface deeper (rows, chips, sections, fields) to tokens
+- **start-work:** Recover blocked agent state
+- Preserve board recency checks
+- **start-work:** Keep next milestones blocked
+- **ui:** SPEC-2356 — File Tree row + Branch row + tree icon to tokens
+- **ui:** SPEC-2356 — Wizard button / error / picker overlay / update toast to tokens
+- Backfill board segment timestamps
+- **ui:** SPEC-2356 — project-tab + app-version + index-status to tokens
+- Avoid unlocked board manifest writes
+- **ui:** SPEC-2356 — Branch notice + Migration modal + Mock surface to tokens
+- **ui:** SPEC-2356 — final inline background sweep to tokens
+- **ui:** SPEC-2356 — final inline color sweep to tokens
+- **ui:** SPEC-2356 — resize-handle gradient to tokens (full literal sweep complete)
+- **board:** Recover truncated projections
+- **board:** Avoid repeated projection rebuilds
+- **ui:** SPEC-2356 — final font-size sweep to type tokens
+
+### Documentation
+
+- SPEC-2356 — README に Operator Design Language の節を追記
+- Update README product overview
+
+### Features
+
+- **ui:** SPEC-2356 Phase 0 setup — fonts, styles skeleton, Playwright, CI workflow
+- **ui:** SPEC-2356 Phase 1 foundation — tokens, theme manager, fonts wiring
+- **ui:** SPEC-2356 Phase 2 — Operator Chrome Shell scaffold
+- **ui:** SPEC-2356 Phase 2 wiring — xterm theme adapter + Living Telemetry
+- **ui:** SPEC-2356 Phase 2 — op:command bridge to legacy surface dispatch
+- **ui:** SPEC-2356 Phase 3 — per-surface adoption (legacy class theming bridge)
+- **ui:** SPEC-2356 — Drawer pattern bridge for branch-cleanup / migration
+- **gui:** Hide terminal direct presets
+- Add branchless start work flow
+- Scale board storage and history loading
+- **ui:** SPEC-2356 — wire branch count to Operator Status Strip
+- **ui:** SPEC-2356 — bracket ornament on key Operator surface titles
+- **ui:** SPEC-2356 — unified focus-visible ring on Operator interactive surfaces
+- **ui:** SPEC-2356 — idle agent windows retain dim agent color identification
+- **ui:** SPEC-2356 — Operator-themed scrollbars (token-driven, theme-aware)
+- **ui:** SPEC-2356 — Operator-tinted text selection (chrome/panel surfaces)
+- **ui:** SPEC-2356 — Mission Briefing intro stamp with current timestamp
+- **ui:** SPEC-2356 — Project Bar accent line under the chrome edge
+- **workspace:** Show multi-agent active work overview
+- **ui:** SPEC-2356 — Command Palette empty state when no commands match
+- **ui:** SPEC-2356 — Status Strip clock with mission-control blinking colons
+- **ui:** SPEC-2356 — workspace empty state with bracket ornament + center alignment
+- **workspace:** Harden active work command center
+- **ui:** SPEC-2356 — Mission Briefing intro progress bar (boot sweep)
+
+### Miscellaneous Tasks
+
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge develop into update-readme
+
+### Testing
+
+- **ui:** SPEC-2356 Phase 4 — chrome structure tests + Playwright spec stubs
+- **ui:** SPEC-2356 — update modal primitive contract test for token-driven theming
+- **ui:** SPEC-2356 — release asset contract permits Operator bundle extension
+
+### Ci
+
+- **coverage:** Harden local pre-push gate
+- **coverage:** Avoid rustup pre-push false failures
+
 ## [9.15.0] - 2026-05-04
 
 ### Bug Fixes

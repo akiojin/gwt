@@ -265,6 +265,26 @@ mod tests {
     }
 
     #[test]
+    fn plan_user_prompt_submit_includes_workspace_policy_guidance() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let text = additional_context(&plan.output);
+
+        assert!(text.contains("AGENTS.md is project-local"));
+        assert!(text.contains("Do NOT create, switch, or delete branches"));
+        assert!(text.contains("git worktree add"));
+        assert!(text.contains("Start Work"));
+    }
+
+    #[test]
     fn plan_user_prompt_submit_short_reminder_mentions_coordination() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
@@ -278,6 +298,8 @@ mod tests {
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("coordination"));
+        assert!(text.contains("AGENTS.md is project-local"));
+        assert!(text.contains("Do NOT create, switch, or delete branches"));
     }
 
     #[test]

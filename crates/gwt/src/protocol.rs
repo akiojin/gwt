@@ -107,6 +107,12 @@ pub enum FrontendEvent {
     LoadBoard {
         id: String,
     },
+    LoadBoardHistory {
+        id: String,
+        before_entry_id: Option<String>,
+        #[serde(default = "default_board_history_limit")]
+        limit: usize,
+    },
     LoadProfile {
         id: String,
     },
@@ -201,8 +207,13 @@ pub enum FrontendEvent {
         id: String,
         issue_number: u64,
     },
+    OpenStartWork,
     OpenLaunchWizard {
         id: String,
+        branch_name: String,
+        linked_issue_number: Option<u64>,
+    },
+    OpenActiveWorkLaunchWizard {
         branch_name: String,
         linked_issue_number: Option<u64>,
     },
@@ -263,6 +274,10 @@ pub enum FrontendEvent {
     },
 }
 
+fn default_board_history_limit() -> usize {
+    50
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
     pub viewport: CanvasViewport,
@@ -317,11 +332,47 @@ pub struct AppStateView {
     pub recent_projects: Vec<RecentProjectView>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkAgentView {
+    pub session_id: String,
+    pub window_id: Option<String>,
+    pub agent_id: String,
+    pub display_name: String,
+    pub status_category: String,
+    pub current_focus: Option<String>,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub last_board_entry_id: Option<String>,
+    pub last_board_entry_kind: Option<String>,
+    pub coordination_scope: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkProjectionView {
+    pub id: String,
+    pub title: String,
+    pub status_category: String,
+    pub status_text: String,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub active_agents: usize,
+    pub blocked_agents: usize,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub pr_number: Option<u64>,
+    pub board_refs: Vec<String>,
+    pub agents: Vec<ActiveWorkAgentView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
     WorkspaceState {
         workspace: AppStateView,
+    },
+    ActiveWorkProjection {
+        projection: ActiveWorkProjectionView,
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
@@ -361,6 +412,13 @@ pub enum BackendEvent {
     BoardEntries {
         id: String,
         entries: Vec<BoardEntry>,
+        #[serde(default)]
+        has_more_before: bool,
+    },
+    BoardHistoryPage {
+        id: String,
+        entries: Vec<BoardEntry>,
+        has_more_before: bool,
     },
     ProfileSnapshot {
         id: String,
@@ -549,7 +607,7 @@ mod tests {
     };
 
     use super::{
-        BackendEvent, BranchEntriesPhase, ProfileEntryView, ProfileEnvEntryView,
+        BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
         ProfileSnapshotView,
     };
 
@@ -637,6 +695,106 @@ mod tests {
     }
 
     #[test]
+    fn active_work_projection_uses_distinct_wire_event_from_canvas_workspace_state() {
+        let event = BackendEvent::ActiveWorkProjection {
+            projection: super::ActiveWorkProjectionView {
+                id: "work-1".to_string(),
+                title: "Implement Start Work".to_string(),
+                status_category: "active".to_string(),
+                status_text: "Launching from Project Bar".to_string(),
+                owner: Some("SPEC-2359".to_string()),
+                next_action: Some("Run launch tests".to_string()),
+                active_agents: 1,
+                blocked_agents: 0,
+                branch: Some("work/20260504-1200".to_string()),
+                worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                pr_number: None,
+                board_refs: vec!["board-1".to_string()],
+                agents: vec![super::ActiveWorkAgentView {
+                    session_id: "session-1".to_string(),
+                    window_id: Some("tab-1::agent-1".to_string()),
+                    agent_id: "codex".to_string(),
+                    display_name: "Codex".to_string(),
+                    status_category: "active".to_string(),
+                    current_focus: Some("Run launch tests".to_string()),
+                    branch: Some("work/20260504-1200".to_string()),
+                    worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    last_board_entry_id: Some("board-1".to_string()),
+                    last_board_entry_kind: Some("handoff".to_string()),
+                    coordination_scope: Some("SPEC-2359 / start-work".to_string()),
+                    updated_at: "2026-05-04T12:00:00Z".to_string(),
+                }],
+            },
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize active work projection");
+
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("active_work_projection".to_string())),
+            "active work projection must not reuse canvas workspace_state"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/display_name")
+                .and_then(Value::as_str),
+            Some("Codex"),
+            "active work projection must expose per-agent summaries for Workspace UI"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/last_board_entry_id")
+                .and_then(Value::as_str),
+            Some("board-1")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/last_board_entry_kind")
+                .and_then(Value::as_str),
+            Some("handoff")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/agents/0/coordination_scope")
+                .and_then(Value::as_str),
+            Some("SPEC-2359 / start-work")
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_global_open_start_work_command() {
+        let event: FrontendEvent =
+            serde_json::from_value(serde_json::json!({ "kind": "open_start_work" }))
+                .expect("deserialize open_start_work");
+
+        assert!(
+            matches!(event, FrontendEvent::OpenStartWork),
+            "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_workspace_add_agent_command() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "open_active_work_launch_wizard",
+            "branch_name": "work/20260504-1200",
+            "linked_issue_number": null
+        }))
+        .expect("deserialize workspace add-agent launch");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::OpenActiveWorkLaunchWizard {
+                    branch_name,
+                    linked_issue_number: None,
+                } if branch_name == "work/20260504-1200"
+            ),
+            "Workspace Add Agent must not depend on a Branches window id"
+        );
+    }
+
+    #[test]
     fn board_entries_serializes_snapshot_contract() {
         let event = BackendEvent::BoardEntries {
             id: "board-1".to_string(),
@@ -650,6 +808,7 @@ mod tests {
                 vec!["coordination".to_string()],
                 vec!["2018".to_string()],
             )],
+            has_more_before: false,
         };
 
         let value = serde_json::to_value(&event).expect("serialize board entries");
@@ -666,6 +825,50 @@ mod tests {
             value["entries"][0]["related_topics"][0],
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
+        );
+    }
+
+    #[test]
+    fn board_history_page_serializes_cursor_contract() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_board_history",
+            "id": "board-1",
+            "before_entry_id": "entry-3",
+            "limit": 50
+        }))
+        .expect("deserialize board history request");
+        assert!(matches!(
+            frontend,
+            FrontendEvent::LoadBoardHistory {
+                id,
+                before_entry_id: Some(before_entry_id),
+                limit
+            } if id == "board-1" && before_entry_id == "entry-3" && limit == 50
+        ));
+
+        let backend = BackendEvent::BoardHistoryPage {
+            id: "board-1".to_string(),
+            entries: vec![BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Older update",
+                None,
+                None,
+                vec![],
+                vec![],
+            )],
+            has_more_before: true,
+        };
+        let value = serde_json::to_value(&backend).expect("serialize board history page");
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("board_history_page".to_string()))
+        );
+        assert_eq!(value["has_more_before"], Value::Bool(true));
+        assert_eq!(
+            value["entries"][0]["body"],
+            Value::String("Older update".into())
         );
     }
 

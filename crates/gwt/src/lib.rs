@@ -24,6 +24,7 @@ pub mod preset;
 pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
+pub mod start_work;
 pub mod window_state;
 pub mod workspace;
 
@@ -58,10 +59,10 @@ pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,
     load_agent_options, AgentOption, DockerWizardContext, LaunchTargetKind, LaunchWizardAction,
     LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
-    LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardPreviousProfile,
-    LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
-    LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
-    ShellLaunchConfig,
+    LaunchWizardLiveSessionView, LaunchWizardMode, LaunchWizardOptionView,
+    LaunchWizardPreviousProfile, LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep,
+    LaunchWizardSummaryView, LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry,
+    QuickStartLaunchMode, ShellLaunchConfig,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]
@@ -86,8 +87,8 @@ pub use preset::{
     WindowPreset, WindowSurface,
 };
 pub use protocol::{
-    AppStateView, ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode,
-    FocusCycleDirection, FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
-    ProjectTabView, RecentProjectView, WorkspaceView,
+    ActiveWorkAgentView, ActiveWorkProjectionView, AppStateView, ArrangeMode, BackendEvent,
+    BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection, FrontendEvent, ProfileEntryView,
+    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

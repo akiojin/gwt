@@ -3,6 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::cli::gwtd_resolver::{
+    default_development_fallbacks, default_installed_candidates, resolve_gwtd_path_with,
+    GwtdResolutionInputs,
+};
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
 use gwt_skills::{
     distribute_to_worktree, generate_codex_hooks, generate_settings_local, update_git_exclude,
@@ -48,14 +52,39 @@ pub fn resolve_public_gwt_bin_with_lookup(
     current_exe: &Path,
     lookup: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> PathBuf {
+    if is_named_gwtd_binary(current_exe) {
+        return current_exe.to_path_buf();
+    }
+
     if should_prefer_path_gwt(current_exe) {
-        if let Some(candidate) = lookup(INTERNAL_DAEMON_BINARY_NAME).filter(|candidate| {
+        let path_candidate = lookup(INTERNAL_DAEMON_BINARY_NAME).filter(|candidate| {
             !same_path(candidate, current_exe) && !is_bunx_temp_executable(candidate)
-        }) {
-            return candidate;
-        }
-        if let Some(candidate) = sibling_daemon_binary(current_exe) {
-            return candidate;
+        });
+        let sibling_candidate = sibling_daemon_binary(current_exe);
+        let trusted_candidates = path_candidate
+            .clone()
+            .into_iter()
+            .chain(sibling_candidate.clone())
+            .collect::<Vec<_>>();
+        let resolved = resolve_gwtd_path_with(GwtdResolutionInputs {
+            explicit_bin_path: None,
+            path_lookup: Box::new(move |command| {
+                (command == INTERNAL_DAEMON_BINARY_NAME)
+                    .then(|| path_candidate.clone())
+                    .flatten()
+            }),
+            installed_candidates: sibling_candidate
+                .clone()
+                .into_iter()
+                .chain(default_installed_candidates(Some(current_exe)))
+                .collect(),
+            development_fallbacks: default_development_fallbacks(),
+            is_file: Box::new(move |path| {
+                path.is_file() || trusted_candidates.iter().any(|candidate| candidate == path)
+            }),
+        });
+        if let Some(resolved) = resolved {
+            return resolved;
         }
     }
     current_exe.to_path_buf()

@@ -138,6 +138,7 @@ pub type AgentLaunchCompletion = (
     PathBuf,
     gwt_agent::AgentId,
     Option<u64>,
+    Option<String>,
 );
 
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
@@ -408,6 +409,249 @@ pub fn build_frontend_sync_events(
     }
 
     events
+}
+
+fn workspace_status_category_wire(
+    category: gwt_core::workspace_projection::WorkspaceStatusCategory,
+) -> &'static str {
+    use gwt_core::workspace_projection::WorkspaceStatusCategory;
+
+    match category {
+        WorkspaceStatusCategory::Active => "active",
+        WorkspaceStatusCategory::Idle => "idle",
+        WorkspaceStatusCategory::Blocked => "blocked",
+        WorkspaceStatusCategory::Done => "done",
+        WorkspaceStatusCategory::Unknown => "unknown",
+    }
+}
+
+fn active_work_projection_from_saved(
+    projection: gwt_core::workspace_projection::WorkspaceProjection,
+) -> gwt::ActiveWorkProjectionView {
+    use gwt_core::workspace_projection::WorkspaceStatusCategory;
+
+    let active_agents = projection
+        .agents
+        .iter()
+        .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
+        .count();
+    let blocked_agents = projection
+        .agents
+        .iter()
+        .filter(|agent| agent.status_category == WorkspaceStatusCategory::Blocked)
+        .count();
+    let agent_branch = projection
+        .agents
+        .iter()
+        .find_map(|agent| agent.branch.clone());
+    let agent_worktree = projection.agents.iter().find_map(|agent| {
+        agent
+            .worktree_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+    });
+    let status_category =
+        workspace_status_category_wire(projection.effective_status_category()).to_string();
+    let git_details = projection.git_details;
+    let (branch, worktree_path, pr_number) = match git_details {
+        Some(details) => (
+            details.branch.or(agent_branch),
+            details
+                .worktree_path
+                .map(|path| path.display().to_string())
+                .or(agent_worktree),
+            details.pr_number,
+        ),
+        None => (agent_branch, agent_worktree, None),
+    };
+    let mut agents = projection
+        .agents
+        .iter()
+        .map(active_work_agent_view_from_summary)
+        .collect::<Vec<_>>();
+    agents.sort_by(|left, right| {
+        active_work_agent_priority_rank(left)
+            .cmp(&active_work_agent_priority_rank(right))
+            .then_with(|| left.display_name.cmp(&right.display_name))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+
+    gwt::ActiveWorkProjectionView {
+        id: projection.id,
+        title: projection.title,
+        status_category,
+        status_text: projection.status_text,
+        owner: projection.owner,
+        next_action: projection.next_action,
+        active_agents,
+        blocked_agents,
+        branch,
+        worktree_path,
+        pr_number,
+        board_refs: projection.board_refs,
+        agents,
+    }
+}
+
+fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
+    match agent.status_category.as_str() {
+        "blocked" => 0,
+        "active" => match agent.last_board_entry_kind.as_deref() {
+            Some("handoff") => 1,
+            Some("next") => 2,
+            Some("claim") => 3,
+            Some("decision") => 4,
+            Some("status") => 5,
+            _ => 6,
+        },
+        "idle" => 7,
+        "done" => 8,
+        _ => 9,
+    }
+}
+
+fn active_work_agent_view_from_summary(
+    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+) -> gwt::ActiveWorkAgentView {
+    gwt::ActiveWorkAgentView {
+        session_id: agent.session_id.clone(),
+        window_id: agent.window_id.clone(),
+        agent_id: agent.agent_id.clone(),
+        display_name: agent.display_name.clone(),
+        status_category: workspace_status_category_wire(agent.status_category).to_string(),
+        current_focus: agent.current_focus.clone(),
+        branch: agent.branch.clone(),
+        worktree_path: agent
+            .worktree_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        last_board_entry_id: agent.last_board_entry_id.clone(),
+        last_board_entry_kind: agent
+            .last_board_entry_kind
+            .as_ref()
+            .map(|kind| kind.as_str().to_string()),
+        coordination_scope: agent.coordination_scope.clone(),
+        updated_at: agent.updated_at.to_rfc3339(),
+    }
+}
+
+fn active_agent_summary_from_session(
+    session: &ActiveAgentSession,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
+    gwt_core::workspace_projection::WorkspaceAgentSummary {
+        session_id: session.session_id.clone(),
+        window_id: Some(session.window_id.clone()),
+        agent_id: session.agent_id.clone(),
+        display_name: session.display_name.clone(),
+        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+        current_focus: None,
+        worktree_path: Some(session.worktree_path.clone()),
+        branch: Some(session.branch_name.clone()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        updated_at,
+    }
+}
+
+fn upsert_workspace_agent(
+    agents: &mut Vec<gwt_core::workspace_projection::WorkspaceAgentSummary>,
+    summary: gwt_core::workspace_projection::WorkspaceAgentSummary,
+) {
+    use gwt_core::workspace_projection::WorkspaceStatusCategory;
+
+    if let Some(existing) = agents
+        .iter_mut()
+        .find(|agent| agent.session_id == summary.session_id)
+    {
+        existing.agent_id = summary.agent_id;
+        existing.window_id = summary.window_id;
+        existing.display_name = summary.display_name;
+        existing.worktree_path = summary.worktree_path;
+        existing.branch = summary.branch;
+        if existing.status_category != WorkspaceStatusCategory::Blocked {
+            existing.status_category = summary.status_category;
+        }
+        if summary.current_focus.is_some() {
+            existing.current_focus = summary.current_focus;
+        }
+        if summary.last_board_entry_id.is_some() {
+            existing.last_board_entry_id = summary.last_board_entry_id;
+        }
+        if summary.last_board_entry_kind.is_some() {
+            existing.last_board_entry_kind = summary.last_board_entry_kind;
+        }
+        if summary.coordination_scope.is_some() {
+            existing.coordination_scope = summary.coordination_scope;
+        }
+        if summary.updated_at > existing.updated_at {
+            existing.updated_at = summary.updated_at;
+        }
+    } else {
+        agents.push(summary);
+    }
+}
+
+fn merge_active_sessions_into_projection<'a>(
+    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
+    sessions: impl IntoIterator<Item = &'a ActiveAgentSession>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) {
+    for session in sessions {
+        upsert_workspace_agent(
+            &mut projection.agents,
+            active_agent_summary_from_session(session, updated_at),
+        );
+    }
+}
+
+fn save_start_work_workspace_projection(
+    project_root: &Path,
+    session: &ActiveAgentSession,
+    base_branch: &str,
+    linked_issue_number: Option<u64>,
+) -> Result<(), String> {
+    use gwt_core::workspace_projection::{GitDetails, WorkspaceStatusCategory};
+
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
+            .map_err(|error| error.to_string())?;
+    projection.project_root = project_root.to_path_buf();
+    projection.title = "Start Work".to_string();
+    projection.status_category = WorkspaceStatusCategory::Active;
+    projection.next_action = Some("Check Board for latest updates".to_string());
+    if let Some(issue_number) = linked_issue_number {
+        projection.owner = Some(format!("Issue #{issue_number}"));
+    }
+    upsert_workspace_agent(
+        &mut projection.agents,
+        active_agent_summary_from_session(session, now),
+    );
+    let active_agents = projection
+        .agents
+        .iter()
+        .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
+        .count();
+    projection.status_text = if active_agents == 1 {
+        format!("{} is running", session.display_name)
+    } else {
+        format!("{active_agents} active agents")
+    };
+    projection.git_details = Some(GitDetails {
+        branch: Some(session.branch_name.clone()),
+        worktree_path: Some(session.worktree_path.clone()),
+        base_branch: Some(base_branch.to_string()),
+        pr_number: None,
+        pr_state: None,
+        created_by_start_work: true,
+        created_at: now,
+    });
+    projection.updated_at = now;
+
+    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -701,6 +945,11 @@ impl AppRuntime {
             }
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
             FrontendEvent::LoadBoard { id } => self.load_board_events(&client_id, &id),
+            FrontendEvent::LoadBoardHistory {
+                id,
+                before_entry_id,
+                limit,
+            } => self.load_board_history_events(&client_id, &id, before_entry_id.as_deref(), limit),
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
             FrontendEvent::LoadMemo { id } => self.load_memo_events(&client_id, &id),
             FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
@@ -831,11 +1080,16 @@ impl AppRuntime {
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
+            FrontendEvent::OpenStartWork => self.open_start_work(),
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
                 linked_issue_number,
             } => self.open_launch_wizard(&id, &branch_name, linked_issue_number),
+            FrontendEvent::OpenActiveWorkLaunchWizard {
+                branch_name,
+                linked_issue_number,
+            } => self.open_active_work_launch_wizard(&branch_name, linked_issue_number),
             FrontendEvent::LaunchWizardAction { action, bounds } => {
                 self.handle_launch_wizard_action(action, bounds)
             }
@@ -945,11 +1199,82 @@ impl AppRuntime {
                 .map(|wizard| wizard.wizard.view()),
             self.pending_update.clone(),
         );
+        if let Some(event) = self.active_work_projection_reply(client_id) {
+            events.insert(1, event);
+        }
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
         events.extend(self.migration_detected_replies(client_id));
         events
+    }
+
+    fn active_work_projection_reply(&self, client_id: &str) -> Option<OutboundEvent> {
+        let tab_id = self.active_tab_id.as_ref()?;
+        let tab = self.tab(tab_id)?;
+        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
+        Some(OutboundEvent::reply(
+            client_id,
+            BackendEvent::ActiveWorkProjection { projection },
+        ))
+    }
+
+    fn active_work_projection_for_tab(
+        &self,
+        tab_id: &str,
+        tab: &ProjectTabRuntime,
+    ) -> Option<gwt::ActiveWorkProjectionView> {
+        let sessions = self
+            .active_agent_sessions
+            .values()
+            .filter(|session| session.tab_id == tab_id)
+            .collect::<Vec<_>>();
+        if let Ok(Some(projection)) =
+            gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
+        {
+            let mut projection = projection;
+            merge_active_sessions_into_projection(
+                &mut projection,
+                sessions.iter().copied(),
+                chrono::Utc::now(),
+            );
+            return Some(active_work_projection_from_saved(projection));
+        }
+
+        let first = sessions.first()?;
+        let active_agents = sessions.len();
+        let now = chrono::Utc::now();
+        let mut agents = sessions
+            .iter()
+            .map(|session| {
+                let summary = active_agent_summary_from_session(session, now);
+                active_work_agent_view_from_summary(&summary)
+            })
+            .collect::<Vec<_>>();
+        agents.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Some(gwt::ActiveWorkProjectionView {
+            id: tab_id.to_string(),
+            title: format!("{} workspace", tab.title),
+            status_category: "active".to_string(),
+            status_text: if active_agents == 1 {
+                "1 active agent".to_string()
+            } else {
+                format!("{active_agents} active agents")
+            },
+            owner: None,
+            next_action: Some("Check Board for latest updates".to_string()),
+            active_agents,
+            blocked_agents: 0,
+            branch: Some(first.branch_name.clone()),
+            worktree_path: Some(first.worktree_path.display().to_string()),
+            pr_number: None,
+            board_refs: Vec::new(),
+            agents,
+        })
     }
 
     pub(crate) fn open_project_dialog_events(&mut self) -> Vec<OutboundEvent> {
@@ -1325,6 +1650,71 @@ impl AppRuntime {
                 BackendEvent::BoardEntries {
                     id: id.to_string(),
                     entries: snapshot.board.entries,
+                    has_more_before: snapshot.board.has_more_before,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: error.to_string(),
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn load_board_history_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        before_entry_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        if window.preset != WindowPreset::Board {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardError {
+                    id: id.to_string(),
+                    message: "Window is not a Board surface".to_string(),
+                },
+            )];
+        }
+
+        match gwt_core::coordination::load_entries_before(&tab.project_root, before_entry_id, limit)
+        {
+            Ok(page) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BoardHistoryPage {
+                    id: id.to_string(),
+                    entries: page.entries,
+                    has_more_before: page.has_more_before,
                 },
             )],
             Err(error) => vec![OutboundEvent::reply(
@@ -1402,6 +1792,7 @@ impl AppRuntime {
         };
 
         let mut events = Vec::new();
+        let latest_entry = snapshot.board.entries.last().cloned();
         for tab in &self.tabs {
             if !same_worktree_path(&tab.project_root, project_root) {
                 continue;
@@ -1413,7 +1804,20 @@ impl AppRuntime {
                 events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
                     id: combined_window_id(&tab.id, &window.id),
                     entries: snapshot.board.entries.clone(),
+                    has_more_before: snapshot.board.has_more_before,
                 }));
+            }
+        }
+        if let Some(entry) = latest_entry.as_ref() {
+            if let Some(tab) = self.tabs.iter().find(|tab| {
+                same_worktree_path(&tab.project_root, project_root)
+                    && self.active_tab_id.as_deref() == Some(tab.id.as_str())
+            }) {
+                if let Some(event) =
+                    self.record_workspace_board_milestone_event(&tab.id, &tab.project_root, entry)
+                {
+                    events.push(event);
+                }
             }
         }
         events
@@ -2029,6 +2433,7 @@ impl AppRuntime {
                 worktree_path,
                 agent_id,
                 linked_issue_number,
+                base_branch,
             )) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     return self.launch_error_events(window_id, "Window not found".to_string());
@@ -2040,6 +2445,8 @@ impl AppRuntime {
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
                     return self.launch_error_events(window_id, "Window not found".to_string());
                 };
+                let tab_id = address.tab_id.clone();
+                let project_root = tab.project_root.clone();
                 let geometry = window.geometry.clone();
 
                 self.active_agent_sessions.insert(
@@ -2051,7 +2458,7 @@ impl AppRuntime {
                         branch_name,
                         display_name,
                         worktree_path: worktree_path.clone(),
-                        tab_id: address.tab_id,
+                        tab_id: tab_id.clone(),
                     },
                 );
                 self.refresh_launch_wizard_session_cache(&window_id);
@@ -2080,8 +2487,45 @@ impl AppRuntime {
                                 "issue branch linkage update skipped after agent launch"
                             );
                         }
+                        let mut start_work_projection_updated = false;
+                        if let Some(base_branch) = base_branch.as_deref() {
+                            let active_session = &self.active_agent_sessions[&window_id];
+                            if active_session.branch_name.starts_with("work/") {
+                                match save_start_work_workspace_projection(
+                                    &project_root,
+                                    active_session,
+                                    base_branch,
+                                    linked_issue_number,
+                                ) {
+                                    Ok(()) => {
+                                        start_work_projection_updated = true;
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            project_root = %project_root.display(),
+                                            branch = %active_session.branch_name,
+                                            error = %error,
+                                            "workspace projection update skipped after Start Work launch"
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         let _ = self.persist();
                         let mut events = vec![self.workspace_state_broadcast()];
+                        if start_work_projection_updated
+                            && self.active_tab_id.as_deref() == Some(tab_id.as_str())
+                        {
+                            if let Some(tab) = self.tab(&tab_id) {
+                                if let Some(projection) =
+                                    self.active_work_projection_for_tab(&tab_id, tab)
+                                {
+                                    events.push(OutboundEvent::broadcast(
+                                        BackendEvent::ActiveWorkProjection { projection },
+                                    ));
+                                }
+                            }
+                        }
                         events.extend(Self::status_events(
                             window_id,
                             WindowProcessStatus::Running,
@@ -2430,6 +2874,7 @@ impl AppRuntime {
                 worktree_path,
                 agent_id,
                 config.linked_issue_number,
+                config.base_branch.clone(),
             ))
         })();
 
@@ -2442,6 +2887,7 @@ impl AppRuntime {
                 worktree_path,
                 agent_id,
                 linked_issue_number,
+                base_branch,
             )) => {
                 dispatch_agent_launch_success(
                     proxy,
@@ -2454,6 +2900,7 @@ impl AppRuntime {
                         worktree_path,
                         agent_id,
                         linked_issue_number,
+                        base_branch,
                     ),
                     |proxy, project_index_root| {
                         crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
@@ -3262,8 +3709,9 @@ mod tests {
     use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     use super::{
-        dispatch_agent_launch_success, ActiveAgentSession, AgentLaunchCompletion, AppEventProxy,
-        AppRuntime, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
+        active_work_projection_from_saved, dispatch_agent_launch_success,
+        save_start_work_workspace_projection, ActiveAgentSession, AgentLaunchCompletion,
+        AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
         KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardMemoryCache, LaunchWizardSession,
         OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
@@ -3830,6 +4278,7 @@ exit 0
             temp.path().to_path_buf(),
             gwt_agent::AgentId::Codex,
             None,
+            None,
         );
 
         dispatch_agent_launch_success(
@@ -4067,6 +4516,64 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_workspace() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.active_agent_sessions.insert(
+            "tab-1::agent-1".to_string(),
+            ActiveAgentSession {
+                window_id: "tab-1::agent-1".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.join("../repo-work-20260504-1234"),
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::WorkspaceState { .. })
+        ));
+        let projection = events.iter().find_map(|event| match &event.event {
+            BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+            _ => None,
+        });
+        let projection = projection.expect("active work projection event");
+        assert_eq!(projection.status_category, "active");
+        assert_eq!(projection.active_agents, 1);
+        assert_eq!(projection.branch.as_deref(), Some("work/20260504-1234"));
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.agents[0].session_id, "session-1");
+        assert_eq!(projection.agents[0].display_name, "Codex");
+        assert_eq!(projection.agents[0].status_category, "active");
+        assert_eq!(
+            projection.agents[0].branch.as_deref(),
+            Some("work/20260504-1234")
+        );
+        assert!(
+            events.iter().all(|event| matches!(
+                &event.target,
+                DispatchTarget::Client(client_id) if client_id == "client-1"
+            )),
+            "frontend-ready projection replay must remain client-scoped"
+        );
+    }
+
+    #[test]
     fn app_runtime_select_project_tab_broadcasts_workspace_before_clearing_wizard() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -4254,6 +4761,143 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.active_agent_sessions.insert(
+            "tab-1::agent-1".to_string(),
+            ActiveAgentSession {
+                window_id: "tab-1::agent-1".to_string(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.join("../repo-work-20260504-1234"),
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::OpenActiveWorkLaunchWizard {
+                branch_name: "work/20260504-1234".to_string(),
+                linked_issue_number: None,
+            },
+        );
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
+        ));
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("active work launch wizard")
+            .wizard
+            .view();
+        assert_eq!(view.mode, gwt::LaunchWizardMode::Branch);
+        assert_eq!(view.branch_name, "work/20260504-1234");
+        assert!(view.show_branch_controls);
+        assert_eq!(view.live_sessions.len(), 1);
+        assert_eq!(view.live_sessions[0].name, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_open_start_work_uses_active_project_without_creating_git_environment() {
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        fs::write(repo.join("README.md"), "repo\n").expect("readme");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+        run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+
+        assert!(matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
+        ));
+        let view = runtime
+            .launch_wizard
+            .as_ref()
+            .expect("start work wizard")
+            .wizard
+            .view();
+        assert_eq!(view.mode, gwt::LaunchWizardMode::StartWork);
+        assert_eq!(view.title, "Start Work");
+        assert!(!view.show_branch_controls);
+        assert_eq!(view.selected_branch_name, "origin/main");
+        assert!(view.branch_name.starts_with("work/"));
+
+        let refs = gwt_core::process::hidden_command("git")
+            .args([
+                "for-each-ref",
+                "refs/heads/work",
+                "refs/remotes/origin/work",
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("list work refs");
+        assert!(refs.status.success(), "git for-each-ref failed");
+        assert!(
+            refs.stdout.is_empty(),
+            "opening Start Work must not create branch refs"
+        );
+
+        let cancel_events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LaunchWizardAction {
+                action: LaunchWizardAction::Cancel,
+                bounds: None,
+            },
+        );
+        assert!(matches!(
+            cancel_events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardState { wizard: None })
+        ));
+        let refs_after_cancel = gwt_core::process::hidden_command("git")
+            .args([
+                "for-each-ref",
+                "refs/heads/work",
+                "refs/remotes/origin/work",
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("list work refs after cancel");
+        assert!(refs_after_cancel.status.success());
+        assert!(
+            refs_after_cancel.stdout.is_empty(),
+            "cancelling Start Work must not create branch refs"
+        );
+    }
+
+    #[test]
     fn app_runtime_custom_agent_cache_refresh_rebroadcasts_open_wizard_state() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -4427,6 +5071,186 @@ exit 0
             event.fields.get("error").map(String::as_str),
             Some("launch failed before process spawn")
         );
+    }
+
+    #[test]
+    fn app_runtime_start_work_launch_completion_records_workspace_git_details() {
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("repo-work-20260504-1234");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+
+        let _events = runtime.handle_launch_complete(
+            window_id,
+            Ok((
+                ProcessLaunch {
+                    command,
+                    args,
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: Some(worktree.clone()),
+                },
+                "session-1".to_string(),
+                "work/20260504-1234".to_string(),
+                "Codex".to_string(),
+                worktree.clone(),
+                gwt_agent::AgentId::Codex,
+                None,
+                Some("origin/main".to_string()),
+            )),
+        );
+
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let details = projection.git_details.expect("git details");
+        assert_eq!(
+            projection.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+        );
+        assert_eq!(details.branch.as_deref(), Some("work/20260504-1234"));
+        assert_eq!(details.base_branch.as_deref(), Some("origin/main"));
+        assert_eq!(details.worktree_path.as_deref(), Some(worktree.as_path()));
+        assert!(details.created_by_start_work);
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.agents[0].session_id, "session-1");
+    }
+
+    #[test]
+    fn app_runtime_start_work_launch_completion_merges_agents_and_broadcasts_projection() {
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        let worktree_one = temp.path().join("repo-work-20260504-1234");
+        let worktree_two = temp.path().join("repo-work-20260504-1235");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&worktree_one).expect("create worktree one");
+        fs::create_dir_all(&worktree_two).expect("create worktree two");
+        let mut persisted = empty_workspace_state();
+        persisted.windows.push(sample_window(
+            "agent-1",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ));
+        persisted.windows.push(sample_window(
+            "agent-2",
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ));
+        persisted.next_z_index = 3;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let launch = |cwd: PathBuf| {
+            let (command, args) = if cfg!(windows) {
+                (
+                    "cmd".to_string(),
+                    vec![
+                        "/d".to_string(),
+                        "/s".to_string(),
+                        "/c".to_string(),
+                        "exit /b 0".to_string(),
+                    ],
+                )
+            } else {
+                (
+                    "/bin/sh".to_string(),
+                    vec!["-lc".to_string(), "exit 0".to_string()],
+                )
+            };
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(cwd),
+            }
+        };
+
+        let _first_events = runtime.handle_launch_complete(
+            combined_window_id("tab-1", "agent-1"),
+            Ok((
+                launch(worktree_one.clone()),
+                "session-1".to_string(),
+                "work/20260504-1234".to_string(),
+                "Codex 1".to_string(),
+                worktree_one,
+                gwt_agent::AgentId::Codex,
+                None,
+                Some("origin/main".to_string()),
+            )),
+        );
+        let second_events = runtime.handle_launch_complete(
+            combined_window_id("tab-1", "agent-2"),
+            Ok((
+                launch(worktree_two.clone()),
+                "session-2".to_string(),
+                "work/20260504-1235".to_string(),
+                "Codex 2".to_string(),
+                worktree_two,
+                gwt_agent::AgentId::Codex,
+                None,
+                Some("origin/main".to_string()),
+            )),
+        );
+
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let session_ids = projection
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(projection.agents.len(), 2);
+        assert!(session_ids.contains("session-1"));
+        assert!(session_ids.contains("session-2"));
+        assert!(second_events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.active_agents == 2
+                && projection.branch.as_deref() == Some("work/20260504-1235")
+        )));
     }
 
     #[test]
@@ -4799,11 +5623,72 @@ exit 0
             &events[..],
             [OutboundEvent {
                 target: DispatchTarget::Client(client_id),
-                event: BackendEvent::BoardEntries { id, entries },
+                event: BackendEvent::BoardEntries { id, entries, .. },
             }] if client_id == "client-1"
                 && id == &window_id
                 && entries.len() == 1
                 && entries[0].body == "Need review"
+        ));
+    }
+
+    #[test]
+    fn app_runtime_load_board_history_replies_with_older_page() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        for idx in 0..4 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at = chrono::Utc::now() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            post_entry(&repo, entry).expect("seed board entry");
+        }
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo,
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::LoadBoardHistory {
+                id: window_id.clone(),
+                before_entry_id: Some("entry-3".to_string()),
+                limit: 2,
+            },
+        );
+
+        assert!(matches!(
+            &events[..],
+            [OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardHistoryPage {
+                    id,
+                    entries,
+                    has_more_before,
+                },
+            }] if client_id == "client-1"
+                && id == &window_id
+                && entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>() == vec!["entry-1", "entry-2"]
+                && *has_more_before
         ));
     }
 
@@ -5791,12 +6676,12 @@ exit 0
             },
         );
 
-        assert!(matches!(
-            &events[..],
-            [OutboundEvent {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
                 target: DispatchTarget::Client(client_id),
-                event: BackendEvent::BoardEntries { id, entries },
-            }] if client_id == "client-1"
+                event: BackendEvent::BoardEntries { id, entries, .. },
+            } if client_id == "client-1"
                 && id == &window_id
                 && entries.iter().any(|entry|
                     entry.body == "I will take the next slice"
@@ -5804,7 +6689,7 @@ exit 0
                     && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
                     && entry.related_owners == vec!["2018".to_string()]
                 )
-        ));
+        )));
 
         let snapshot = load_snapshot(&repo).expect("load board snapshot");
         assert!(snapshot.board.entries.iter().any(|entry| entry.body
@@ -5815,8 +6700,414 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only() {
+    fn app_runtime_post_board_entry_accepts_reply_to_history_parent() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let parent_id = "history-parent".to_string();
+        for idx in 0..505 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                format!("history entry {idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            if idx == 0 {
+                entry.id = parent_id.clone();
+            }
+            post_entry(&repo, entry).expect("seed board entry");
+        }
+        let snapshot = load_snapshot(&repo).expect("load board snapshot");
+        assert!(!snapshot
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == parent_id));
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo.clone(),
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::PostBoardEntry {
+                id: window_id.clone(),
+                entry_kind: BoardEntryKind::Next,
+                body: "Reply to older context".to_string(),
+                parent_id: Some(parent_id.clone()),
+                topics: vec![],
+                owners: vec![],
+                targets: Vec::new(),
+            },
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::BoardEntries { id, entries, .. },
+            } if client_id == "client-1"
+                && id == &window_id
+                && entries.iter().any(|entry|
+                    entry.body == "Reply to older context"
+                    && entry.parent_id.as_deref() == Some(parent_id.as_str())
+                )
+        )));
+    }
+
+    #[test]
+    fn app_runtime_post_board_entry_updates_workspace_projection_current_state() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "board-1",
+            repo.clone(),
+            WindowPreset::Board,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "board-1");
+
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::PostBoardEntry {
+                id: window_id,
+                entry_kind: BoardEntryKind::Next,
+                body: "Run final verification".to_string(),
+                parent_id: None,
+                topics: vec!["start-work".to_string()],
+                owners: vec!["SPEC-2359".to_string()],
+                targets: Vec::new(),
+            },
+        );
+
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let board_entry_id = projection
+            .board_refs
+            .first()
+            .expect("workspace board ref")
+            .clone();
+
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Run final verification")
+        );
+        assert_eq!(projection.owner.as_deref(), Some("SPEC-2359"));
+        assert_eq!(projection.board_refs.len(), 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.next_action.as_deref() == Some("Run final verification")
+                && projection.board_refs == vec![board_entry_id.clone()]
+        )));
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("repo-work-20260504-1234");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let session = ActiveAgentSession {
+            window_id: "tab-1::agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260504-1234".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: worktree.clone(),
+            tab_id: "tab-1".to_string(),
+        };
+        runtime
+            .active_agent_sessions
+            .insert(session.window_id.clone(), session.clone());
+        save_start_work_workspace_projection(&repo, &session, "develop", None)
+            .expect("save initial projection");
+        let blocked = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Blocked,
+            "Waiting for API credentials",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1")
+        .with_origin_agent_id("codex")
+        .with_origin_branch("work/20260504-1234");
+
+        let event = runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
+            .expect("active projection broadcast");
+
+        assert!(matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.status_category == "blocked"
+                && projection.blocked_agents == 1
+                && projection.agents.iter().any(|agent|
+                    agent.session_id == "session-1"
+                        && agent.status_category == "blocked"
+                        && agent.last_board_entry_id.as_deref() == Some(blocked.id.as_str())
+                )
+                && projection.board_refs == vec![blocked.id.clone()]
+                && projection.next_action.as_deref() == Some("Resolve blocker")
+        ));
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_prioritizes_handoff_agents() {
+        use gwt_core::workspace_projection::{
+            WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
+        };
+
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let now = chrono::Utc::now();
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-active".to_string(),
+            window_id: Some("tab-1::agent-active".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Alpha".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Implementing tests".to_string()),
+            worktree_path: None,
+            branch: Some("work/20260504-1234".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: now,
+        });
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-handoff".to_string(),
+            window_id: Some("tab-1::agent-handoff".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Zulu".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Review visual state coverage".to_string()),
+            worktree_path: None,
+            branch: Some("work/20260504-1234".to_string()),
+            last_board_entry_id: Some("board-handoff".to_string()),
+            last_board_entry_kind: Some(BoardEntryKind::Handoff),
+            coordination_scope: Some("SPEC-2359 / workspace-ux".to_string()),
+            updated_at: now,
+        });
+
+        let view = active_work_projection_from_saved(projection);
+
+        assert_eq!(view.agents[0].session_id, "session-handoff");
+        assert_eq!(
+            view.agents[0].last_board_entry_kind.as_deref(),
+            Some("handoff")
+        );
+        assert_eq!(
+            view.agents[0].coordination_scope.as_deref(),
+            Some("SPEC-2359 / workspace-ux")
+        );
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milestone() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("repo-work-20260504-1234");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let session = ActiveAgentSession {
+            window_id: "tab-1::agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260504-1234".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: worktree.clone(),
+            tab_id: "tab-1".to_string(),
+        };
+        runtime
+            .active_agent_sessions
+            .insert(session.window_id.clone(), session.clone());
+        save_start_work_workspace_projection(&repo, &session, "develop", None)
+            .expect("save initial projection");
+        let blocked = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Blocked,
+            "Waiting for API credentials",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1");
+        runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
+            .expect("blocked projection broadcast");
+        let status = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "API credentials configured",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1");
+
+        let event = runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &status)
+            .expect("active projection broadcast");
+
+        assert!(matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.status_category == "active"
+                && projection.active_agents == 1
+                && projection.blocked_agents == 0
+                && projection.branch.as_deref() == Some("work/20260504-1234")
+        ));
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("repo-work-20260504-1234");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let session = ActiveAgentSession {
+            window_id: "tab-1::agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260504-1234".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: worktree.clone(),
+            tab_id: "tab-1".to_string(),
+        };
+        runtime
+            .active_agent_sessions
+            .insert(session.window_id.clone(), session.clone());
+        save_start_work_workspace_projection(&repo, &session, "develop", None)
+            .expect("save initial projection");
+        let blocked = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Blocked,
+            "Waiting for API credentials",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1");
+        runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
+            .expect("blocked projection broadcast");
+        let next = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Next,
+            "Try alternate credential source",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1");
+
+        let event = runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &next)
+            .expect("blocked projection broadcast");
+
+        assert!(matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.status_category == "blocked"
+                && projection.active_agents == 0
+                && projection.blocked_agents == 1
+                && projection.status_text == "Waiting for API credentials"
+                && projection.next_action.as_deref() == Some("Try alternate credential source")
+                && projection.branch.as_deref() == Some("work/20260504-1234")
+        ));
+    }
+
+    #[test]
+    fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         let other_repo = temp.path().join("other-repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -5886,7 +7177,7 @@ exit 0
 
         let events = runtime.handle_board_projection_changed_events(&repo);
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         for expected_id in [
             combined_window_id("tab-1", "board-1"),
             combined_window_id("tab-1", "board-2"),
@@ -5895,7 +7186,7 @@ exit 0
                 event,
                 OutboundEvent {
                     target: DispatchTarget::Broadcast,
-                    event: BackendEvent::BoardEntries { id, entries },
+                    event: BackendEvent::BoardEntries { id, entries, .. },
                 } if *id == expected_id
                     && entries.len() == 1
                     && entries[0].body == "External update"

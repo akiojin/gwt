@@ -2,8 +2,35 @@
 
 [日本語](README.ja.md)
 
-gwt is a desktop GUI for managing Git worktrees and launching coding agents
-such as `Claude Code`, `Codex`, `Gemini`, and `OpenCode`.
+gwt is a desktop control plane for agent-driven development. It brings coding
+agents, project context, shared coordination, GitHub Issue-backed specs,
+semantic search, and managed workflow automation into one native GUI and
+browser-accessible workspace.
+
+Git worktrees are the isolation substrate behind gwt. They let gwt materialize
+safe per-task workspaces for agents, but the product flow starts from work,
+Issues, SPECs, search, and Board context rather than from branch management.
+
+## Why gwt
+
+- **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
+  `Gemini`, `OpenCode`, `Copilot`, and custom agents from a shared canvas.
+- **Shared Board** — keep user and agent communication in one repo-scoped
+  timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
+  and `question` posts.
+- **Agent-to-agent coordination** — managed hooks remind agents to post
+  reasoning milestones and inject recent Board context so parallel agents can
+  see decisions, handoffs, blockers, and targeted requests.
+- **Semantic Knowledge Bridge** — search Issues, SPECs, project source files,
+  and docs through a ChromaDB / multilingual-e5 index instead of relying only
+  on substring matches.
+- **GitHub Issue-backed SPECs** — treat `gwt-spec` Issues as the source of
+  truth while reading and editing sections through the local cache-backed CLI.
+- **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
+  issue routing, planning, TDD implementation, PR work, architecture review,
+  project search, and agent-pane management.
+- **Operator canvas** — arrange Agent, Board, Issue, SPEC, Logs, Memo, Profile,
+  File Tree, Branches, and PR surfaces in one mission-control style workspace.
 
 ## Install
 
@@ -99,45 +126,84 @@ therefore unavailable on Windows pending follow-up work; `gwtd
 daemon status` still works there but always reports `stopped` until
 the named-pipe path lands.
 
-## Main Workflow
+## Agent Workflow
 
-1. Open a repository directory or restore the previous project.
-2. Use the canvas to arrange floating windows.
-3. Open `Branches`, select a branch, and double-click to open Launch Agent.
-4. Start `Shell` or `Agent` windows on the selected branch/worktree.
-5. Inspect the repository with the read-only `File Tree` window.
+1. Open a project directory or restore the previous project.
+2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
+   the current work, related owners, and prior decisions.
+3. Choose `Start Work` from the Project Bar or Command Palette when the task is
+   still work-shaped rather than branch-shaped.
+4. Launch an `Agent` from Start Work, or launch directly from an Issue/SPEC
+   detail when the owner is already known.
+5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
+   only when launch is confirmed.
+6. Use the shared Board for status, claims, next steps, blockers, handoffs,
+   and decisions while agents run.
+7. Open `Branches` only when you need Git inspection, filtering, cleanup, or
+   lower-level branch/worktree details.
 
-Available windows include:
+Common windows include:
 
-- `Shell`
-- `Agent`
-- `Branches`
-- `File Tree`
-- `Settings`
-- `Memo`
-- `Profile`
-- `Logs`
-- `Issue`
-- `SPEC`
-- `Board`
-- `PR`
+- `Agent` — live coding-agent process windows created through Start Work or
+  Launch Agent
+- `Board` — shared user/agent timeline for reasoning and coordination
+- `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
+  search, detail panes, and Launch Agent handoff
+- `Logs` — project diagnostics and live log surface
+- `Memo` and `Profile` — repo-scoped notes and environment/profile management
+- `File Tree` — live read-only repository tree
+- `Branches` — branch inspection, filtering, cleanup, and Git details
+- `Settings` — application and agent configuration
+- `PR` — pull-request workflow surface; detailed list support depends on the
+  cache-backed PR source as it lands
 
-`Shell` and `Agent` are live process windows. `File Tree` is a live read-only
-tree view. The remaining windows are currently mock surfaces where production
-behavior has not been wired yet.
+`Agent` is the live process window for coding-agent sessions. `Board` is the
+coordination surface agents use to expose status, decisions, handoffs, and
+requests. `Issue` and `SPEC` use the local cache and semantic index rather than
+rendering direct GitHub API responses in the frontend.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
-PowerShell, or PowerShell 7. The selected shell applies to both `Shell` and
-`Agent` windows; Docker launches continue to use the container shell.
+PowerShell, or PowerShell 7. Docker launches continue to use the container
+shell.
 
 In terminal windows, drag to select text and release the mouse button to copy.
 On Windows and Linux, `Ctrl+Shift+C` also copies the current terminal
 selection. `Ctrl+C` stays mapped to the running terminal process.
 
-## Workspace Layout
+## Knowledge, Search, and Managed Skills
 
-gwt manages each project as a **Nested Bare + Worktree** layout under your
-workspace directory:
+gwt keeps project knowledge close to the agent workspace:
+
+- `gwtd issue spec <n>` reads GitHub Issue-backed SPECs from the local cache.
+- `gwtd issue view <n>` and `gwtd issue comments <n>` provide cache-backed Issue
+  access through the gwt CLI surface.
+- `gwt-search` searches SPECs, Issues, source files, and docs through the shared
+  ChromaDB runtime. Missing indexes are built on demand, and the desktop app can
+  repair the managed Python search runtime when needed.
+- The Issue/SPEC Knowledge Bridge windows combine cache-backed list/detail views
+  with semantic ranking, exact-match priority, and match percentages.
+
+Bundled workflow skills are materialized into `.claude/skills`,
+`.claude/commands`, and `.codex/skills` for the active worktree. The public
+entrypoints are:
+
+- `gwt-discussion` — investigation-first discussion and design clarification
+- `gwt-register-issue` / `gwt-fix-issue` — issue intake and issue-driven fixes
+- `gwt-plan-spec` — implementation planning for an approved SPEC
+- `gwt-build-spec` — TDD-oriented implementation from an approved task
+- `gwt-manage-pr` — PR create/check/fix lifecycle
+- `gwt-arch-review` — architecture review and improvement routing
+- `gwt-search` — unified semantic search
+- `gwt-agent` — running agent-pane inspection and control
+
+Managed hooks preserve user hooks while adding gwt runtime behavior for agent
+state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
+and coordination-event summaries.
+
+## Workspace Foundation
+
+For isolation and repeatable agent sessions, gwt can manage each project as a
+**Nested Bare + Worktree** layout under your workspace directory:
 
 ```
 <workspace>/<project>/
@@ -176,13 +242,52 @@ confirmation modal with three actions:
 - Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
   focused window is recentered
 
-## Managed Hooks and SPEC Cache
+## Operator Design Language (SPEC-2356)
 
-- gwt regenerates `.claude/settings.local.json` and merges `.codex/hooks.json`
-  for managed hooks
-- SPECs are stored as GitHub Issues labeled `gwt-spec`
+Starting with the Operator Design System update, gwt is themed as a single
+mission-control surface with editorial-industrial typography (`Mona Sans` for
+body, `Hubot Sans` condensed for display, `JetBrains Mono` for terminal /
+counters). Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
+Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
+single token system that ships in two flagship themes:
+
+- **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
+  for long sessions
+- **Light Operator** (Drafting Table / bone + ink) — for bright environments
+
+The active theme follows your OS `prefers-color-scheme`, but the **Theme**
+toggle in the Project Bar lets you cycle `auto → dark → light → auto`. The
+choice is persisted in browser storage and survives restarts. xterm terminal
+panes follow the overall theme automatically. `prefers-reduced-motion: reduce`
+disables the Living Telemetry pulse rim, status strip ticking, and Mission
+Briefing intro reveal so the UI stays usable in motion-sensitive environments.
+`forced-colors: active` (Windows High Contrast / macOS Increase Contrast)
+falls back to system colors so accessibility is preserved.
+
+### Hotkeys
+
+| Combo | Action |
+| --- | --- |
+| `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
+| `⌘B` | Focus the Board surface |
+| `⌘G` | Focus the Git (Branches) surface |
+| `⌘L` | Focus the Logs surface |
+| `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
+| `Esc` | Close any open palette / overlay / drawer |
+
+## SPEC and Runtime Quick Reference
+
+- SPEC source of truth: GitHub Issues labeled `gwt-spec`
 - Local cache path:
   `~/.gwt/cache/issues/<repo-hash>/`
+- Managed agent integration files:
+  `.claude/settings.local.json` and `.codex/hooks.json`
+- List available SPECs:
+
+```bash
+gwtd issue spec list
+```
+
 - Read a SPEC:
 
 ```bash
