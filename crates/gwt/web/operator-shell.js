@@ -240,13 +240,22 @@ function wireCommandPalette({ doc, hotkey }) {
     const query = input.value.trim().toLowerCase();
     visible = actions.filter(query);
     if (selectedIndex >= visible.length) selectedIndex = Math.max(0, visible.length - 1);
+    while (list.firstChild) list.removeChild(list.firstChild);
+    if (visible.length === 0) {
+      const empty = doc.createElement("li");
+      empty.className = "op-palette__empty";
+      empty.textContent = query
+        ? `No commands match "` + query + `"`
+        : "No commands registered yet.";
+      list.appendChild(empty);
+      return;
+    }
     const groups = new Map();
     for (const a of visible) {
       const key = a.group ?? "Commands";
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(a);
     }
-    list.innerHTML = "";
     let idx = 0;
     for (const [group, items] of groups) {
       const head = doc.createElement("li");
