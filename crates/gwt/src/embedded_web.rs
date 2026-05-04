@@ -1721,6 +1721,9 @@ mod tests {
     fn embedded_web_modal_frame_primitives_define_shared_contracts() {
         let html = index_html();
 
+        // SPEC-2356 FR-001: modal frame primitives must reference design
+        // tokens from `tokens.css` instead of raw colour literals so the
+        // Operator dark/light dual flagship can theme them via CSS variables.
         let primitives: [(&str, &[&str]); 5] = [
             (
                 ".modal-backdrop {",
@@ -1729,7 +1732,7 @@ mod tests {
                     "inset: 0",
                     "align-items: center",
                     "justify-content: center",
-                    "background: rgba(15, 23, 42",
+                    "background: var(--color-overlay)",
                 ],
             ),
             (
@@ -1737,8 +1740,8 @@ mod tests {
                 &[
                     "max-height: calc(100vh - 48px)",
                     "overflow: auto",
-                    "border-radius: 6px",
-                    "background: #ffffff",
+                    "border-radius: var(--radius-lg)",
+                    "background: var(--color-surface-elevated)",
                     "border: 1px solid",
                 ],
             ),
