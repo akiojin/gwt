@@ -144,12 +144,13 @@ impl WorkspaceProjection {
                     BoardEntryKind::Status
                     | BoardEntryKind::Claim
                     | BoardEntryKind::Handoff
-                    | BoardEntryKind::Decision
-                    | BoardEntryKind::Next => {
+                    | BoardEntryKind::Decision => {
                         agent.status_category = WorkspaceStatusCategory::Active;
                     }
-                    BoardEntryKind::Request | BoardEntryKind::Impact | BoardEntryKind::Question => {
-                    }
+                    BoardEntryKind::Next
+                    | BoardEntryKind::Request
+                    | BoardEntryKind::Impact
+                    | BoardEntryKind::Question => {}
                 }
             }
         }
@@ -402,6 +403,63 @@ mod tests {
         assert_eq!(
             projection.effective_status_category(),
             WorkspaceStatusCategory::Active
+        );
+    }
+
+    #[test]
+    fn board_milestone_next_keeps_blocked_agent_blocked() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "sess-1".to_string(),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            updated_at: Utc::now(),
+        });
+        let mut blocked = BoardEntry::new(
+            crate::coordination::AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Blocked,
+            "Waiting for credentials",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_origin_session_id("sess-1");
+        blocked.id = "blocked-1".to_string();
+        projection.record_board_milestone(&blocked);
+
+        let mut next = BoardEntry::new(
+            crate::coordination::AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Next,
+            "Try a different credential source",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_origin_session_id("sess-1");
+        next.id = "next-1".to_string();
+        projection.record_board_milestone(&next);
+
+        assert_eq!(
+            projection.agents[0].status_category,
+            WorkspaceStatusCategory::Blocked
+        );
+        assert_eq!(
+            projection.effective_status_category(),
+            WorkspaceStatusCategory::Blocked
+        );
+        assert_eq!(projection.status_text, "Waiting for credentials");
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Try a different credential source")
         );
     }
 }

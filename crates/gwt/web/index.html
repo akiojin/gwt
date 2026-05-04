@@ -1775,32 +1775,34 @@
         gap: 8px;
         min-height: 30px;
         padding: 0 12px;
-        font-size: 13px;
-        color: #0f172a;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text);
         cursor: pointer;
       }
 
       .file-tree-row:hover {
-        background: rgba(59, 130, 246, 0.08);
+        background: color-mix(in oklab, var(--color-state-active) 10%, transparent);
       }
 
       .file-tree-row.selected {
-        background: rgba(59, 130, 246, 0.12);
+        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
       }
 
       .tree-caret {
         width: 12px;
-        color: #64748b;
+        color: var(--color-text-muted);
         text-align: center;
       }
 
       .tree-icon {
         width: 16px;
-        color: #2563eb;
+        color: var(--agent-codex);
       }
 
       .tree-icon.file {
-        color: #64748b;
+        color: var(--color-text-muted);
       }
 
       .tree-name {
@@ -1812,9 +1814,11 @@
 
       .file-tree-footer {
         padding: 10px 12px;
-        border-top: 1px solid rgba(148, 163, 184, 0.25);
-        font-size: 12px;
-        color: #475569;
+        border-top: 1px solid var(--color-border);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .branch-row {
@@ -1822,20 +1826,20 @@
         grid-template-columns: auto minmax(0, 1fr) auto;
         gap: 10px;
         padding: 10px 12px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        border-bottom: 1px solid var(--color-border);
         cursor: pointer;
       }
 
       .branch-row:hover {
-        background: rgba(59, 130, 246, 0.06);
+        background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
       }
 
       .branch-row.selected {
-        background: rgba(59, 130, 246, 0.12);
+        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
       }
 
       .branch-row.cleanup-selected {
-        box-shadow: inset 2px 0 0 #0f172a;
+        box-shadow: inset 2px 0 0 var(--color-focus-ring);
       }
 
       .branch-row:last-child {
@@ -2575,11 +2579,13 @@
       .wizard-error {
         margin-bottom: 12px;
         padding: 10px 12px;
-        border-radius: 6px;
-        background: rgba(239, 68, 68, 0.08);
-        border: 1px solid rgba(239, 68, 68, 0.18);
-        font-size: 12px;
-        color: #b91c1c;
+        border-radius: var(--radius-md);
+        background: color-mix(in oklab, var(--color-state-blocked) 12%, transparent);
+        border: 1px solid color-mix(in oklab, var(--color-state-blocked) 32%, transparent);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-state-blocked);
       }
 
       .wizard-footer {
@@ -2600,19 +2606,22 @@
       .wizard-button {
         height: 36px;
         padding: 0 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #f8fafc;
-        color: #0f172a;
-        font-size: 12px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-strong);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         font-weight: 600;
+        text-transform: uppercase;
         cursor: pointer;
       }
 
       .wizard-button.primary {
-        background: #0f172a;
-        color: #ffffff;
-        border-color: #0f172a;
+        background: var(--color-state-active);
+        color: var(--color-canvas);
+        border-color: var(--color-state-active);
       }
 
       @media (max-width: 720px) {
@@ -2649,7 +2658,8 @@
         align-items: center;
         justify-content: center;
         padding: 24px;
-        background: rgba(237, 241, 246, 0.72);
+        background: var(--color-overlay);
+        backdrop-filter: blur(2px);
         z-index: 1200;
       }
 
@@ -2756,20 +2766,22 @@
         bottom: 20px;
         right: 20px;
         padding: 10px 16px;
-        background: rgba(255, 255, 255, 0.96);
-        border: 1px solid rgba(59, 130, 246, 0.4);
-        border-radius: 8px;
-        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+        background: var(--color-surface-elevated);
+        border: 1px solid var(--color-focus-ring);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-2);
         backdrop-filter: blur(8px);
-        font-size: 13px;
-        color: #1e40af;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-state-active);
         cursor: pointer;
         z-index: 9999;
         transition: opacity 0.3s;
       }
 
       .update-toast:hover {
-        background: rgba(239, 246, 255, 0.98);
+        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
       }
     </style>
   </head>
