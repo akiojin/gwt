@@ -1519,4 +1519,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn agents_documents_project_local_scope_and_start_work_branch_policy() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+
+        for needle in [
+            "この AGENTS.md は gwt リポジトリ専用",
+            "任意プロジェクト向けの汎用 Agent 指示ではない",
+            "Start Work / Launch materialization",
+            "git checkout -b",
+            "git worktree add",
+        ] {
+            assert!(
+                agents.contains(needle),
+                "expected AGENTS.md to document workspace policy phrase: {needle}"
+            );
+        }
+
+        assert!(
+            !agents.contains("新規 SPEC を作成した場合、現在のブランチでは実装に入らず"),
+            "AGENTS.md must not require agents to create a separate worktree after new SPEC creation"
+        );
+    }
 }

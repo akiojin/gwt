@@ -2,6 +2,12 @@
 
 このファイルは、このリポジトリでコードを扱う際のガイダンスを提供します。
 
+## 適用範囲
+
+- **この AGENTS.md は gwt リポジトリ専用**のローカル運用ルールであり、gwt が開く任意プロジェクト向けの汎用 Agent 指示ではない。
+- gwt を使って他プロジェクトを開発する場合、そのプロジェクト自身の `AGENTS.md` / `CLAUDE.md` / README 等を優先する。
+- gwt 共通の Agent 運用（Board/Workspace 更新、Start Work / Launch materialization、branch/worktree 操作の禁止）は、managed hooks / generated guidance / launch context で注入する。
+
 ## エージェント運用原則
 
 - **Plan Mode Default:** 非自明な作業、3ステップ以上のタスク、設計判断を含む変更では、実装前に Plan を作成する。途中で前提が崩れた場合は、作業を止めて Plan を更新してから再開する。
@@ -97,8 +103,8 @@
   - 機能要件（FR-\*）
   - 成功基準
 - `gwt-plan-spec` で `plan.md`、`tasks.md` も策定してから実装に入る
-- 新規 SPEC を作成した場合、現在のブランチでは実装に入らず、SPEC に基づく別ブランチ（Worktree）で実装する
-- 現在のコンバセーションでは SPEC 登録までで完了とする
+- 新規 SPEC を作成した場合でも、エージェントは自分で新規ブランチや Worktree を作成しない。実装に進む場合は、承認済み SPEC と `gwt-plan-spec` の成果物に基づき、現在起動されている branch/worktree で作業する。
+- Git 環境の作成が必要な場合は、ユーザー操作に基づく gwt の Start Work / Launch materialization が担当する。
 
 ##### 共通ルール
 
@@ -151,7 +157,7 @@
 - 作業（タスク）は、最大限の並列化をして進める
 - `git rebase -i origin/main` はLLMでの失敗率が高いため禁止（必要な場合は人間が手動で整形すること）
 - 作業（タスク）は、忖度なしで進める
-- **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除を行ってはならない。Worktreeは起動ブランチで作業を完結する設計。**
+- **エージェントはユーザーからの明示的な指示なく新規ブランチの作成・削除・切り替えを行ってはならない。`git checkout -b`、`git switch -c`、`git branch -D`、`git worktree add/remove` は禁止。Worktree は起動ブランチで作業を完結する設計であり、必要な Git 環境作成は gwt の Start Work / Launch materialization が行う。**
 - 「進めて」等の承認指示は、承認済みタスクを自律的に完了まで進める指示である。不要な中間確認を挟まず、完了まで一気に進める
 - **変更規模の大小に関わらず `feat` / `fix` / `refactor` は仕様策定（ローカル SPEC）・TDD を省略しない。** 「軽微だから省略」は禁止。適用除外は `docs:` / `chore:` / typo修正 / CLAUDE.md更新のみ
 
