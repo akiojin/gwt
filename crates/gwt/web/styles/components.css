@@ -1613,3 +1613,30 @@ kbd.op-kbd {
     transition: none;
   }
 }
+
+/* SPEC-2356 — micro motion on hover for the few row-style buttons that
+   take a click action. Smooth enough not to be distracting but clearly
+   responsive. reduced-motion env keeps the original snap. */
+:root[data-theme] .recent-project-row,
+:root[data-theme] .preset-button,
+:root[data-theme] .live-session-button,
+:root[data-theme] .launch-choice-button,
+:root[data-theme] .arrange-button,
+:root[data-theme] .add-button,
+:root[data-theme] .wizard-button {
+  transition: background var(--motion-fast) var(--motion-curve),
+              border-color var(--motion-fast) var(--motion-curve),
+              color var(--motion-fast) var(--motion-curve);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] .recent-project-row,
+  :root[data-theme] .preset-button,
+  :root[data-theme] .live-session-button,
+  :root[data-theme] .launch-choice-button,
+  :root[data-theme] .arrange-button,
+  :root[data-theme] .add-button,
+  :root[data-theme] .wizard-button {
+    transition: none;
+  }
+}
