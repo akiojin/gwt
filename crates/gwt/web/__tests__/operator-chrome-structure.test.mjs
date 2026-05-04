@@ -9,6 +9,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const indexPath = resolve(here, "../index.html");
 const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
+const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
+const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 
 test("index.html declares Operator chrome scaffold", () => {
   for (const sel of [
@@ -35,6 +37,46 @@ test("project bar exposes a Layers column with three layers", () => {
   assert.equal(layers.length, 3, "expected three sidebar layers");
   const labels = Array.from(layers).map((el) => el.dataset.layer);
   assert.deepEqual(labels.sort(), ["agents", "git", "hooks"]);
+});
+
+test("project bar and command palette expose Start Work outside the Branches surface", () => {
+  const projectBarAction = document.querySelector('.op-sidebar .op-layer[data-cmd="start-work"]');
+  assert.ok(projectBarAction, "expected Project Bar to expose a Start Work action");
+  assert.match(projectBarAction.textContent, /Start Work/);
+  assert.match(
+    operatorShellSource,
+    /id:\s*"start-work"[\s\S]+label:\s*"Start Work"/,
+    "expected Command Palette registry to include Start Work",
+  );
+  assert.match(
+    appSource,
+    /case\s+"start-work":[\s\S]+kind:\s*"open_start_work"/,
+    "expected Start Work command to send the global open_start_work event",
+  );
+});
+
+test("frontend handles active work projection as status-strip telemetry", () => {
+  assert.match(
+    appSource,
+    /case\s+"active_work_projection":[\s\S]+activeWorkProjection\s*=\s*event\.projection/,
+    "expected frontend to store active_work_projection separately from canvas workspace_state",
+  );
+  assert.match(
+    appSource,
+    /activeWorkProjection[\s\S]+applyTelemetryCounts/,
+    "expected active work projection to feed Operator telemetry",
+  );
+});
+
+test("Branches remains a branch browser, not a planning workspace", () => {
+  const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
+  assert.ok(branchPreset, "expected Branches preset to remain available");
+  assert.match(branchPreset.textContent, /Browse repository branches and launch agents/);
+  assert.doesNotMatch(
+    `${html}\n${appSource}`,
+    /Planning Session|Workspace card/i,
+    "Branches should not render Planning Session or Workspace-card concepts",
+  );
 });
 
 test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc", () => {

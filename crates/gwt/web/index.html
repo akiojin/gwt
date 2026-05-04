@@ -2645,6 +2645,11 @@
             <h3 class="op-sidebar__heading">
               <span>Quick</span>
             </h3>
+            <button class="op-layer" type="button" data-cmd="start-work">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Start Work</span>
+              <span class="op-layer__count">GO</span>
+            </button>
             <button class="op-layer" type="button" data-cmd="open-board">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Board</span>
@@ -2888,7 +2893,7 @@
         <div class="modal-shell is-wizard">
           <div class="modal-header wizard-header">
             <div>
-              <h2 class="wizard-title">Launch Agent</h2>
+              <h2 class="wizard-title" id="wizard-title">Launch Agent</h2>
               <div class="wizard-meta" id="wizard-meta"></div>
             </div>
             <button class="wizard-button" id="wizard-close-button">Close</button>

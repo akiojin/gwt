@@ -25,6 +25,7 @@ mod build;
 pub mod daemon;
 mod discuss;
 mod env;
+pub mod gwtd_resolver;
 pub mod hook;
 mod index;
 mod issue;

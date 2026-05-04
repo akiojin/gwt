@@ -18,6 +18,7 @@ use std::{
     thread,
 };
 
+use chrono::Utc;
 use gwt::{
     KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration,
     LaunchWizardLaunchRequest, LaunchWizardState, LaunchWizardView, LinkedIssueKind,
@@ -155,6 +156,74 @@ impl AppRuntime {
                     linked_issue_number,
                     linked_issue_kind,
                 },
+                agent_options,
+                quick_start_entries,
+                previous_profile,
+            ),
+        });
+
+        Ok(())
+    }
+
+    pub(crate) fn open_start_work(&mut self) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: "Open a project before starting work".to_string(),
+            })];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: "Project tab not found".to_string(),
+            })];
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: "Start Work requires a Git project".to_string(),
+            })];
+        }
+
+        let project_root = tab.project_root.clone();
+        match self.open_start_work_for_project(&tab_id, &project_root) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: error,
+            })],
+        }
+    }
+
+    pub(crate) fn open_start_work_for_project(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        let base_branch = gwt::start_work::resolve_start_work_base_branch(project_root)
+            .map_err(|error| error.to_string())?;
+        let work_branch = gwt::start_work::reserve_start_work_branch_name(project_root, Utc::now());
+        let quick_start_root = project_root.to_path_buf();
+        let quick_start_entries = self
+            .launch_wizard_cache
+            .quick_start_entries(&quick_start_root, &work_branch);
+        let previous_profile = self.launch_wizard_cache.previous_profile(&quick_start_root);
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let (docker_context, docker_service_status) =
+            detect_wizard_docker_context_and_status(&quick_start_root);
+        let wizard_id = Uuid::new_v4().to_string();
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id,
+            wizard: LaunchWizardState::open_start_work_with_previous_profile(
+                LaunchWizardContext {
+                    selected_branch: synthetic_branch_entry(&base_branch),
+                    normalized_branch_name: work_branch,
+                    worktree_path: None,
+                    quick_start_root,
+                    live_sessions: Vec::new(),
+                    docker_context,
+                    docker_service_status,
+                    linked_issue_number: None,
+                    linked_issue_kind: None,
+                },
+                base_branch,
                 agent_options,
                 quick_start_entries,
                 previous_profile,

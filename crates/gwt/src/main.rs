@@ -1828,6 +1828,7 @@ mod tests {
                 repo,
                 AgentId::Codex,
                 None,
+                None,
             )),
         );
         assert!(matches!(
@@ -2642,6 +2643,7 @@ mod tests {
                 repo.clone(),
                 AgentId::Codex,
                 None,
+                None,
             )),
         );
         assert!(matches!(
@@ -2678,6 +2680,7 @@ mod tests {
                 "Codex".to_string(),
                 repo,
                 AgentId::Codex,
+                None,
                 None,
             )),
         );
