@@ -379,23 +379,25 @@
       }
 
       .arrange-button:hover {
-        background: #f8fafc;
+        background: var(--color-button-bg-hover);
       }
 
       .add-button {
         width: 46px;
         height: 46px;
         border: none;
-        border-radius: 6px;
-        background: #0f172a;
-        color: white;
+        border-radius: var(--radius-md);
+        background: var(--color-button-bg);
+        color: var(--color-button-fg);
+        font-family: var(--font-display);
         font-size: 26px;
+        font-weight: 700;
         cursor: pointer;
-        box-shadow: 0 14px 28px rgba(15, 23, 42, 0.25);
+        box-shadow: var(--shadow-2);
       }
 
       .add-button:hover {
-        background: #111f37;
+        background: var(--color-button-bg-hover);
       }
 
       /* SPEC-2356 — workspace window chrome.
