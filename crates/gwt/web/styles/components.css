@@ -1152,3 +1152,42 @@ kbd.op-kbd {
   color: var(--color-text-muted);
   margin-bottom: var(--space-4);
 }
+
+/* ============================================================
+   Project Bar accent — subtle gradient strip under the bar.
+
+   The accent line sits at the bottom edge of the Project Bar and
+   flows along the agent state token's chroma so that the chrome
+   reads as part of the Mission Control system. The line is
+   render-cheap (1px linear-gradient) and silent under
+   `forced-colors: active`.
+   ============================================================ */
+
+:root[data-theme] .project-bar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in oklab, var(--color-state-active) 56%, transparent) 18%,
+    color-mix(in oklab, var(--agent-codex) 36%, transparent) 50%,
+    color-mix(in oklab, var(--color-state-active) 56%, transparent) 82%,
+    transparent 100%
+  );
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .project-bar::after {
+    background: none;
+  }
+}
+
+.project-bar {
+  position: relative; /* anchor the ::after accent line */
+}
