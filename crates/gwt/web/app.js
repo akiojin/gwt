@@ -50,6 +50,9 @@
       const stackButton = document.getElementById("stack-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
+      const activeWorkCount = document.getElementById("op-active-work-count");
+      const activeWorkSummary = document.getElementById("op-active-work-summary");
+      const activeWorkAgents = document.getElementById("op-active-work-agents");
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -980,6 +983,141 @@
           window.__operatorShell.applyTelemetryCounts(counts);
         } catch (e) {
           console.warn("operator telemetry update failed", e);
+        }
+      }
+
+      function activeWorkAgentCount(projection) {
+        const agents = Array.isArray(projection?.agents) ? projection.agents : [];
+        if (agents.length > 0) return agents.length;
+        return Number(projection?.active_agents || 0) + Number(projection?.blocked_agents || 0);
+      }
+
+      function projectionIssueNumber(projection) {
+        const owner = String(projection?.owner || "");
+        const match = owner.match(/^Issue\s+#(\d+)$/i);
+        return match ? Number(match[1]) : null;
+      }
+
+      function compactPathLabel(value) {
+        if (!value) return "";
+        const parts = String(value).split(/[\\/]+/).filter(Boolean);
+        if (parts.length <= 2) return String(value);
+        return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+      }
+
+      function appendMeta(container, value) {
+        if (!value) return;
+        container.appendChild(createNode("span", "", value));
+      }
+
+      function renderActiveWorkOverview() {
+        if (!activeWorkSummary || !activeWorkAgents) return;
+        activeWorkSummary.innerHTML = "";
+        activeWorkAgents.innerHTML = "";
+
+        if (!activeWorkProjection) {
+          if (activeWorkCount) activeWorkCount.textContent = "0";
+          activeWorkSummary.appendChild(createNode("div", "op-work-empty", "No active work"));
+          return;
+        }
+
+        const agents = Array.isArray(activeWorkProjection.agents)
+          ? activeWorkProjection.agents
+          : [];
+        const agentCount = activeWorkAgentCount(activeWorkProjection);
+        if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
+
+        activeWorkSummary.appendChild(
+          createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
+        );
+        const meta = createNode("div", "op-work-meta");
+        appendMeta(meta, activeWorkProjection.owner);
+        appendMeta(meta, activeWorkProjection.branch);
+        appendMeta(meta, activeWorkProjection.pr_number ? `PR #${activeWorkProjection.pr_number}` : "");
+        activeWorkSummary.appendChild(meta);
+        activeWorkSummary.appendChild(
+          createNode(
+            "div",
+            "op-work-status",
+            activeWorkProjection.next_action ||
+              activeWorkProjection.status_text ||
+              "Work is active",
+          ),
+        );
+
+        const actions = createNode("div", "op-work-actions");
+        if (activeWorkProjection.branch) {
+          const addAgent = createNode("button", "op-work-action", "Add Agent");
+          addAgent.type = "button";
+          addAgent.addEventListener("click", () => {
+            send({
+              kind: "open_active_work_launch_wizard",
+              branch_name: activeWorkProjection.branch,
+              linked_issue_number: projectionIssueNumber(activeWorkProjection),
+            });
+          });
+          actions.appendChild(addAgent);
+        }
+        if ((activeWorkProjection.board_refs || []).length > 0) {
+          const openBoard = createNode("button", "op-work-action", "Open Board");
+          openBoard.type = "button";
+          openBoard.addEventListener("click", () => focusOrSpawnPreset("board"));
+          actions.appendChild(openBoard);
+        }
+        if (actions.childNodes.length > 0) {
+          activeWorkSummary.appendChild(actions);
+        }
+
+        if (agents.length === 0) {
+          activeWorkAgents.appendChild(
+            createNode("div", "op-work-empty", "Agent details unavailable"),
+          );
+          return;
+        }
+
+        for (const agent of agents) {
+          const state = agent.status_category || "unknown";
+          const card = createNode("article", "op-agent-card");
+          card.dataset.state = state;
+          if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
+
+          const head = createNode("div", "op-agent-head");
+          head.appendChild(
+            createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
+          );
+          head.appendChild(createNode("div", "op-agent-state", state));
+          card.appendChild(head);
+
+          const agentMeta = createNode("div", "op-agent-meta");
+          appendMeta(agentMeta, agent.branch);
+          appendMeta(agentMeta, compactPathLabel(agent.worktree_path));
+          appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
+          card.appendChild(agentMeta);
+
+          if (agent.current_focus) {
+            card.appendChild(createNode("div", "op-agent-focus", agent.current_focus));
+          }
+
+          const agentActions = createNode("div", "op-agent-actions");
+          if (agent.window_id) {
+            const focusButton = createNode("button", "op-agent-action", "Focus");
+            focusButton.type = "button";
+            focusButton.addEventListener("click", () => {
+              focusWindowRemotely(agent.window_id, { center: true });
+            });
+            agentActions.appendChild(focusButton);
+          }
+          if (agent.last_board_entry_id) {
+            const boardButton = createNode("button", "op-agent-action", "Board");
+            boardButton.type = "button";
+            boardButton.addEventListener("click", () => focusOrSpawnPreset("board"));
+            agentActions.appendChild(boardButton);
+          }
+          if (agentActions.childNodes.length > 0) {
+            card.appendChild(agentActions);
+          }
+
+          activeWorkAgents.appendChild(card);
         }
       }
 
@@ -5821,6 +5959,7 @@
             break;
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
+            renderActiveWorkOverview();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -6719,4 +6858,5 @@
       });
 
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
+      renderActiveWorkOverview();
       frontendUnits.socketTransport.connect();

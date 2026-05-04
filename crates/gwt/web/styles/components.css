@@ -239,6 +239,156 @@ body::after {
   color: var(--color-text-muted);
 }
 
+.op-active-work {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.op-work-summary,
+.op-agent-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+}
+
+.op-work-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.op-work-empty {
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+}
+
+.op-work-title {
+  color: var(--color-text-strong);
+  font-family: var(--font-display);
+  font-size: var(--type-sm);
+  font-stretch: 80%;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.op-work-meta,
+.op-agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.op-work-status {
+  color: var(--color-text);
+  font-size: var(--type-sm);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.op-work-actions,
+.op-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.op-work-action,
+.op-agent-action {
+  appearance: none;
+  border: 1px solid var(--color-button-border);
+  border-radius: var(--radius-md);
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  min-height: 28px;
+  padding: 0 var(--space-2);
+}
+
+.op-work-action:hover,
+.op-work-action:focus-visible,
+.op-agent-action:hover,
+.op-agent-action:focus-visible {
+  outline: none;
+  border-color: var(--color-focus-ring);
+  background: var(--color-button-bg-hover);
+}
+
+.op-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.op-agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.op-agent-card[data-state="blocked"] {
+  border-color: var(--color-state-blocked);
+}
+
+.op-agent-card[data-state="active"] {
+  border-color: var(--color-state-active);
+}
+
+.op-agent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.op-agent-name {
+  min-width: 0;
+  color: var(--color-text-strong);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.op-agent-state {
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  padding: 0 var(--space-2);
+  text-transform: uppercase;
+}
+
+.op-agent-card[data-state="blocked"] .op-agent-state {
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.op-agent-card[data-state="active"] .op-agent-state {
+  border-color: var(--color-state-active);
+  color: var(--color-state-active);
+}
+
+.op-agent-focus {
+  color: var(--color-text);
+  font-size: var(--type-sm);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 /* ============================================================
    Status Strip — bottom chrome
    ============================================================ */

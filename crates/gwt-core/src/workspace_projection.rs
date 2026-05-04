@@ -38,6 +38,8 @@ pub struct GitDetails {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,
+    #[serde(default)]
+    pub window_id: Option<String>,
     pub agent_id: String,
     pub display_name: String,
     pub status_category: WorkspaceStatusCategory,
@@ -237,6 +239,7 @@ mod tests {
         projection.status_text = "Still describing the current task".to_string();
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
+            window_id: None,
             agent_id: "codex".to_string(),
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Blocked,
@@ -258,11 +261,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_summary_deserializes_legacy_payload_without_window_id() {
+        let summary: WorkspaceAgentSummary = serde_json::from_value(serde_json::json!({
+            "session_id": "sess-1",
+            "agent_id": "codex",
+            "display_name": "Codex",
+            "status_category": "active",
+            "current_focus": null,
+            "worktree_path": null,
+            "branch": "work/20260504-1200",
+            "last_board_entry_id": null,
+            "updated_at": "2026-05-04T12:00:00Z"
+        }))
+        .expect("legacy summary");
+
+        assert_eq!(summary.window_id, None);
+    }
+
+    #[test]
     fn effective_status_uses_active_agent_before_idle_projection() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Idle;
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
+            window_id: None,
             agent_id: "codex".to_string(),
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
@@ -355,6 +377,7 @@ mod tests {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
+            window_id: None,
             agent_id: "codex".to_string(),
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
@@ -411,6 +434,7 @@ mod tests {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
+            window_id: None,
             agent_id: "codex".to_string(),
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,

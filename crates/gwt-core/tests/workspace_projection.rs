@@ -22,6 +22,7 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
         next_action: Some("Run focused tests".to_string()),
         agents: vec![WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
+            window_id: Some("tab-1::agent-1".to_string()),
             agent_id: "codex".to_string(),
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
