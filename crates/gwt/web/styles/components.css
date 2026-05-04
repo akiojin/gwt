@@ -1531,3 +1531,28 @@ kbd.op-kbd {
     outline: 2px solid Highlight;
   }
 }
+
+/* SPEC-2356 — when blocked count > 0 the BLOCKED cell pulses subtly so
+   the user notices something needs attention. The animation is keyframed
+   on opacity (no shadow / repaint cost) and disabled by reduced-motion
+   and forced-colors. */
+@keyframes op-status-strip-blocked-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+:root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+  animation: op-status-strip-blocked-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+    animation: none;
+  }
+}
