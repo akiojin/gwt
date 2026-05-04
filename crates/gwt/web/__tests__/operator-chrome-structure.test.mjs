@@ -239,3 +239,38 @@ test("Mission Briefing splash has dismissible affordance (pointer-events + curso
   assert.match(briefing[0], /pointer-events:\s*auto/);
   assert.match(briefing[0], /cursor:\s*pointer/);
 });
+
+test("operator-shell wires theme toggle aria-label updates on every render", () => {
+  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
+  // wireThemeToggle.renderLabel must update aria-label every render so
+  // screen readers know the live preference + effective theme.
+  assert.match(
+    operatorShell,
+    /btn\.setAttribute\(\s*"aria-label"/,
+    "expected wireThemeToggle to update aria-label on every render",
+  );
+  assert.match(
+    operatorShell,
+    /Theme: \$\{pref === "auto" \? `auto/,
+    "expected aria-label format to disclose preference + effective theme",
+  );
+});
+
+test("operator-shell wires sidebar collapse hotkey and Mission Briefing early dismiss", () => {
+  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
+  // The source contains `cmd+\\\\` (escaped backslash in JS source).
+  assert.ok(
+    operatorShell.includes('hotkey.register("cmd+\\\\"'),
+    "expected Cmd+backslash hotkey registration for sidebar collapse",
+  );
+  assert.match(
+    operatorShell,
+    /opSidebar\s*===\s*"collapsed"/,
+    "expected collapsed state toggle on documentElement.dataset.opSidebar",
+  );
+  assert.match(
+    operatorShell,
+    /earlyDismiss/,
+    "expected Mission Briefing earlyDismiss helper",
+  );
+});
