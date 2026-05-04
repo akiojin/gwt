@@ -1,7 +1,7 @@
 //! Repo-local coordination storage for a shared board chat timeline.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -297,9 +297,16 @@ pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
 
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
-    Ok(CoordinationSnapshot {
-        board: load_json_or_default(&coordination_board_projection_path(worktree_root))?,
-    })
+    let coordination_root = coordination_dir(worktree_root);
+    let projection: BoardProjection =
+        load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    if legacy_event_log_needs_import(&coordination_root)?
+        || projection_needs_rebuild(&projection, &manifest)
+    {
+        return with_coordination_lock(worktree_root, || repair_snapshot_locked(worktree_root));
+    }
+    Ok(CoordinationSnapshot { board: projection })
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
@@ -311,6 +318,13 @@ pub fn append_event(
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
+    with_coordination_lock(worktree_root, || append_event_locked(worktree_root, event))
+}
+
+fn with_coordination_lock<T>(
+    worktree_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let lock = OpenOptions::new()
         .create(true)
         .read(true)
@@ -319,10 +333,10 @@ pub fn append_event(
         .open(coordination_lock_path(worktree_root))?;
     lock.lock_exclusive()?;
 
-    let result = append_event_locked(worktree_root, event);
+    let result = operation();
     let unlock_result = lock.unlock();
     match (result, unlock_result) {
-        (Ok(snapshot), Ok(())) => Ok(snapshot),
+        (Ok(value), Ok(())) => Ok(value),
         (Err(err), _) => Err(err),
         (Ok(_), Err(err)) => Err(err.into()),
     }
@@ -332,7 +346,10 @@ fn append_event_locked(
     worktree_root: &Path,
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
-    let manifest = append_event_to_segments(worktree_root, event, EVENT_SEGMENT_MAX_BYTES)?;
+    let coordination_root = coordination_dir(worktree_root);
+    let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
+    let manifest =
+        append_event_to_segments_root(&coordination_root, event, EVENT_SEGMENT_MAX_BYTES)?;
     let mut projection: BoardProjection =
         load_json_or_default(&coordination_board_projection_path(worktree_root))?;
     match event {
@@ -350,7 +367,22 @@ fn append_event_locked(
             projection.updated_at = Utc::now();
         }
     }
-    let snapshot = CoordinationSnapshot { board: projection };
+    let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
+        rebuild_snapshot_from_segments_root(&coordination_root)?
+    } else {
+        CoordinationSnapshot { board: projection }
+    };
+    write_atomic_json(
+        &coordination_board_projection_path(worktree_root),
+        &snapshot.board,
+    )?;
+    Ok(snapshot)
+}
+
+fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> {
+    let coordination_root = coordination_dir(worktree_root);
+    import_late_legacy_event_log_locked(&coordination_root)?;
+    let snapshot = rebuild_snapshot_from_segments_root(&coordination_root)?;
     write_atomic_json(
         &coordination_board_projection_path(worktree_root),
         &snapshot.board,
@@ -362,33 +394,13 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
     if !event_path.exists() {
         File::create(event_path)?;
     }
-    let file = OpenOptions::new().read(true).open(event_path)?;
-    let reader = BufReader::new(file);
-
-    let mut board_entries = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // Parse as a generic Value first so legacy event types (e.g. the
-        // retired `agent_card_upsert` from the pre-shared-chat era) can be
-        // skipped without failing the whole rebuild.
-        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(json_error)?;
-        let event_type = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        match event_type {
-            "message_appended" | "board_post" => {
-                let event: CoordinationEvent = serde_json::from_value(value).map_err(json_error)?;
-                let CoordinationEvent::MessageAppended { entry } = event;
-                board_entries.push(entry);
-            }
-            _ => continue,
-        }
-    }
+    let mut board_entries = load_legacy_board_events_from_path(event_path)?
+        .into_iter()
+        .map(|event| {
+            let CoordinationEvent::MessageAppended { entry } = event;
+            entry
+        })
+        .collect::<Vec<_>>();
 
     board_entries.sort_by_key(|entry| entry.created_at);
 
@@ -647,7 +659,7 @@ fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf])
     std::fs::create_dir_all(project_dir)?;
     let event_path = project_dir.join(EVENTS_FILE_NAME);
     let mut events = if event_path.exists() {
-        load_events_from_path(&event_path)?
+        load_legacy_board_events_from_path(&event_path)?
     } else {
         Vec::new()
     };
@@ -661,7 +673,7 @@ fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf])
         if !legacy_event_path.exists() {
             continue;
         }
-        events.extend(load_events_from_path(&legacy_event_path)?);
+        events.extend(load_legacy_board_events_from_path(&legacy_event_path)?);
         consumed_dirs.push(legacy_dir.clone());
     }
 
@@ -690,7 +702,7 @@ fn migrate_legacy_event_log_to_segments(coordination_root: &Path) -> Result<()> 
     std::fs::create_dir_all(coordination_root)?;
     let legacy_events_path = coordination_legacy_events_path_from_root(coordination_root);
     let mut events = if legacy_events_path.exists() {
-        load_events_from_path(&legacy_events_path)?
+        load_legacy_board_events_from_path(&legacy_events_path)?
     } else {
         Vec::new()
     };
@@ -728,6 +740,7 @@ fn write_events_to_segments(
     Ok(manifest)
 }
 
+#[cfg(test)]
 fn append_event_to_segments(
     worktree_root: &Path,
     event: &CoordinationEvent,
@@ -845,6 +858,72 @@ fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegment
     }
 }
 
+fn legacy_event_log_needs_import(coordination_root: &Path) -> Result<bool> {
+    let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
+    if !legacy_path.exists() {
+        return Ok(false);
+    }
+    Ok(legacy_path.metadata()?.len() > 0)
+}
+
+fn import_late_legacy_event_log_locked(coordination_root: &Path) -> Result<bool> {
+    let legacy_path = coordination_legacy_events_path_from_root(coordination_root);
+    if !legacy_path.exists() {
+        return Ok(false);
+    }
+
+    let mut legacy_events = load_legacy_board_events_from_path(&legacy_path)?;
+    legacy_events.sort_by_key(coordination_event_timestamp);
+
+    let mut seen_entry_ids = load_board_entries_from_segments_root(coordination_root)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<HashSet<_>>();
+    let mut imported = false;
+    for event in legacy_events {
+        let entry_id = coordination_event_entry_id(&event).to_string();
+        if !seen_entry_ids.insert(entry_id) {
+            continue;
+        }
+        append_event_to_segments_root(coordination_root, &event, EVENT_SEGMENT_MAX_BYTES)?;
+        imported = true;
+    }
+    std::fs::remove_file(legacy_path)?;
+    Ok(imported)
+}
+
+fn projection_needs_rebuild(projection: &BoardProjection, manifest: &EventSegmentManifest) -> bool {
+    let total_entries = manifest.total_entries();
+    let expected_entries = total_entries.min(HOT_PROJECTION_ENTRY_LIMIT);
+    if projection.total_entries != total_entries {
+        return true;
+    }
+    if projection.entries.len() != expected_entries {
+        return true;
+    }
+    if projection.has_more_before != (total_entries > projection.entries.len()) {
+        return true;
+    }
+    if projection.oldest_entry_id != projection.entries.first().map(|entry| entry.id.clone()) {
+        return true;
+    }
+    if projection.newest_entry_id != projection.entries.last().map(|entry| entry.id.clone()) {
+        return true;
+    }
+    if let Some(expected_newest_entry_id) = manifest
+        .segments
+        .iter()
+        .rev()
+        .find(|segment| segment.entries > 0)
+        .and_then(|segment| segment.last_entry_id.as_deref())
+    {
+        if projection.newest_entry_id.as_deref() != Some(expected_newest_entry_id) {
+            return true;
+        }
+    }
+    false
+}
+
 fn write_event_manifest(coordination_root: &Path, manifest: &EventSegmentManifest) -> Result<()> {
     write_atomic_json(
         &coordination_events_manifest_path_from_root(coordination_root),
@@ -888,6 +967,34 @@ fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
     Ok(events)
 }
 
+fn load_legacy_board_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = OpenOptions::new().read(true).open(path)?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(json_error)?;
+        let event_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match event_type {
+            "message_appended" | "board_post" => {
+                events.push(serde_json::from_value(value).map_err(json_error)?);
+            }
+            _ => continue,
+        }
+    }
+    Ok(events)
+}
+
 fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()> {
     let parent = path
         .parent()
@@ -915,6 +1022,12 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
 fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
     match event {
         CoordinationEvent::MessageAppended { entry } => entry.created_at,
+    }
+}
+
+fn coordination_event_entry_id(event: &CoordinationEvent) -> &str {
+    match event {
+        CoordinationEvent::MessageAppended { entry } => &entry.id,
     }
 }
 
@@ -1495,6 +1608,196 @@ mod tests {
                 .map(|entry| entry.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["entry-0", "entry-1", "entry-2", "entry-3", "entry-4", "entry-5"]
+        );
+    }
+
+    #[test]
+    fn post_entry_repairs_truncated_hot_projection_from_segments() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for idx in 0..3 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                format!("entry-{idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{idx}");
+            entry.created_at =
+                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.updated_at = entry.created_at;
+            post_entry(dir.path(), entry).unwrap();
+        }
+
+        let mut truncated = load_snapshot(dir.path()).unwrap().board;
+        truncated.entries = truncated.entries.split_off(2);
+        truncated.oldest_entry_id = truncated.entries.first().map(|entry| entry.id.clone());
+        truncated.newest_entry_id = truncated.entries.last().map(|entry| entry.id.clone());
+        truncated.has_more_before = true;
+        write_atomic_json(&coordination_board_projection_path(dir.path()), &truncated).unwrap();
+
+        let mut appended = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "entry-3",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        appended.id = "entry-3".to_string();
+        appended.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 3).unwrap();
+        appended.updated_at = appended.created_at;
+
+        let snapshot = post_entry(dir.path(), appended).unwrap();
+
+        assert_eq!(snapshot.board.total_entries, 4);
+        assert!(!snapshot.board.has_more_before);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-0", "entry-1", "entry-2", "entry-3"]
+        );
+    }
+
+    #[test]
+    fn post_entry_imports_late_legacy_events_jsonl_and_repairs_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut first = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        first.id = "entry-segmented".to_string();
+        first.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        first.updated_at = first.created_at;
+        post_entry(dir.path(), first).unwrap();
+
+        let mut late_legacy = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Decision,
+            "late legacy entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        late_legacy.id = "entry-late-legacy".to_string();
+        late_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        late_legacy.updated_at = late_legacy.created_at;
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: late_legacy.clone(),
+            }],
+        );
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &build_hot_projection(vec![late_legacy], Utc::now()),
+        )
+        .unwrap();
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "new segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.id = "entry-new".to_string();
+        new_entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 2, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+
+        let snapshot = post_entry(dir.path(), new_entry).unwrap();
+
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 3);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-segmented", "entry-late-legacy", "entry-new"]
+        );
+    }
+
+    #[test]
+    fn load_snapshot_imports_late_legacy_events_jsonl_and_repairs_projection() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut segmented = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "segmented entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        segmented.id = "entry-segmented".to_string();
+        segmented.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        segmented.updated_at = segmented.created_at;
+        post_entry(dir.path(), segmented).unwrap();
+
+        let mut late_legacy = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Decision,
+            "late legacy entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        late_legacy.id = "entry-late-legacy".to_string();
+        late_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        late_legacy.updated_at = late_legacy.created_at;
+        write_events(
+            &coordination_events_path(dir.path()),
+            &[CoordinationEvent::MessageAppended {
+                entry: late_legacy.clone(),
+            }],
+        );
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &build_hot_projection(vec![late_legacy], Utc::now()),
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+
+        assert!(!coordination_events_path(dir.path()).exists());
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 2);
+        assert_eq!(
+            snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["entry-segmented", "entry-late-legacy"]
         );
     }
 
