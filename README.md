@@ -273,6 +273,7 @@ falls back to system colors so accessibility is preserved.
 | `⌘G` | Focus the Git (Branches) surface |
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
+| `⌘\` | Collapse / expand the Sidebar Layers |
 | `Esc` | Close any open palette / overlay / drawer |
 
 ## SPEC and Runtime Quick Reference
