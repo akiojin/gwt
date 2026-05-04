@@ -1599,3 +1599,17 @@ kbd.op-kbd {
 :root[data-theme][data-op-sidebar="collapsed"] .op-sidebar {
   display: none;
 }
+
+/* SPEC-2356 — smooth Sidebar collapse transition.
+   When user toggles ⌘\, the grid template columns animate from
+   240px ↔ 0 instead of snapping. reduced-motion env keeps the
+   instant snap behaviour. */
+:root[data-theme] #app {
+  transition: grid-template-columns var(--motion-medium) var(--motion-curve);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] #app {
+    transition: none;
+  }
+}
