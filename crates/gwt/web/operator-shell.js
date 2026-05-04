@@ -43,6 +43,11 @@ function wireThemeToggle({ doc, themeManager }) {
     value.textContent = pref === "auto"
       ? `AUTO ${eff === "dark" ? "▮" : "▯"}`
       : pref.toUpperCase();
+    // SPEC-2356 — expose the live preference to assistive tech.
+    btn.setAttribute(
+      "aria-label",
+      `Theme: ${pref === "auto" ? `auto (currently ${eff})` : pref}. Click to cycle.`,
+    );
   };
 
   renderLabel();
