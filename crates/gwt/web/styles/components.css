@@ -943,6 +943,9 @@ kbd.op-kbd {
   font-size: var(--type-md);
   text-transform: uppercase;
   opacity: 0;
+  /* SPEC-2356 — soft cyan glow on the OPERATOR ONLINE marker so it reads
+     as the boot complete signal. */
+  text-shadow: 0 0 12px color-mix(in oklab, var(--color-state-active) 60%, transparent);
   animation: op-briefing-online-in var(--motion-slow) ease-out forwards;
   animation-delay: calc(var(--motion-slow) * 4);
 }
