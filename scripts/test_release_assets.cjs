@@ -89,10 +89,24 @@ run("package scripts keep the GUI front door and release contract explicit", () 
   assert.equal(pkg.bin.gwt, "bin/gwt.cjs");
   assert.equal(pkg.bin.gwtd, "bin/gwtd.cjs");
   assert.equal(pkg.scripts["test:release-assets"], "node scripts/test_release_assets.cjs");
-  assert.equal(
-    pkg.scripts["test:frontend-bundle"],
-    "node --check crates/gwt/web/app.js && node --check crates/gwt/web/branch-cleanup-modal.js && node --check crates/gwt/web/migration-modal.js"
-  );
+  // SPEC-2356 — the frontend bundle now also covers Operator Design System
+  // ESM modules (theme-manager / hotkey / operator-shell). The contract is
+  // expressed as required substrings so future modules can extend the chain
+  // without rewriting the test, while still keeping the legacy SPEC-2008
+  // surfaces (app, branch-cleanup-modal, migration-modal) wired up.
+  for (const required of [
+    "node --check crates/gwt/web/app.js",
+    "node --check crates/gwt/web/branch-cleanup-modal.js",
+    "node --check crates/gwt/web/migration-modal.js",
+    "node --check crates/gwt/web/theme-manager.js",
+    "node --check crates/gwt/web/hotkey.js",
+    "node --check crates/gwt/web/operator-shell.js",
+  ]) {
+    assert.ok(
+      pkg.scripts["test:frontend-bundle"].includes(required),
+      `test:frontend-bundle must include "${required}", got: ${pkg.scripts["test:frontend-bundle"]}`
+    );
+  }
   assert.equal(pkg.scripts["test:release-flow"], "bash scripts/check-release-flow.sh");
   assert.equal(pkg.scripts.dev, "cargo run -p gwt --bin gwt");
   assert.equal(pkg.scripts.build, "cargo build --release -p gwt --bin gwt --bin gwtd");
