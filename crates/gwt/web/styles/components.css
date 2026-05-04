@@ -1640,3 +1640,31 @@ kbd.op-kbd {
     transition: none;
   }
 }
+
+/* SPEC-2356 — soften theme-switch by transitioning core surface tokens.
+   When the user flips dark↔light through the toggle or ⌘ command, the
+   chrome doesn't snap; surface backgrounds + text colours fade through
+   the change in 200ms. reduced-motion / forced-colors keep the snap. */
+:root[data-theme] body,
+:root[data-theme] .op-sidebar,
+:root[data-theme] .op-status-strip,
+:root[data-theme] .project-bar,
+:root[data-theme] .modal-shell,
+:root[data-theme] .workspace-window,
+:root[data-theme] .titlebar {
+  transition: background var(--motion-medium) var(--motion-curve),
+              color var(--motion-medium) var(--motion-curve),
+              border-color var(--motion-medium) var(--motion-curve);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] body,
+  :root[data-theme] .op-sidebar,
+  :root[data-theme] .op-status-strip,
+  :root[data-theme] .project-bar,
+  :root[data-theme] .modal-shell,
+  :root[data-theme] .workspace-window,
+  :root[data-theme] .titlebar {
+    transition: none;
+  }
+}
