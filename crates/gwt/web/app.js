@@ -6616,5 +6616,76 @@
         });
       }
 
+      // SPEC-2356 — bridge Command Palette + hotkey commands into existing
+      // surface dispatch. Each command either focuses an existing window or
+      // creates a new one through the same socket transport the preset
+      // buttons use, so they share the legacy invariants.
+      function focusOrSpawnPreset(preset) {
+        const allWindows = activeWorkspace().windows || [];
+        const existing = allWindows.find(
+          (w) => w.preset === preset && !w.minimized,
+        );
+        if (existing) {
+          frontendUnits.socketTransport.send({
+            kind: "focus_window",
+            id: existing.id,
+          });
+          return;
+        }
+        frontendUnits.socketTransport.send({
+          kind: "create_window",
+          preset,
+          bounds: visibleBounds(),
+        });
+      }
+
+      document.addEventListener("op:command", (event) => {
+        const id = event.detail?.id;
+        if (!id) return;
+        switch (id) {
+          case "open-board":
+            focusOrSpawnPreset("board");
+            return;
+          case "open-git":
+            focusOrSpawnPreset("branches");
+            return;
+          case "open-logs":
+            focusOrSpawnPreset("logs");
+            return;
+          case "open-branches":
+            focusOrSpawnPreset("branches");
+            return;
+          case "open-files":
+            focusOrSpawnPreset("file_tree");
+            return;
+          case "spawn-shell":
+            focusOrSpawnPreset("shell");
+            return;
+          case "spawn-agent":
+            focusOrSpawnPreset("claude");
+            return;
+          case "theme-cycle": {
+            const tm = window.__operatorShell?.themeManager;
+            if (!tm) return;
+            const cycle = { auto: "dark", dark: "light", light: "auto" };
+            tm.setTheme(cycle[tm.getPreference()] ?? "auto");
+            return;
+          }
+          case "open-help": {
+            const overlay = document.getElementById("op-hotkey-overlay");
+            if (overlay) {
+              overlay.dataset.open = overlay.dataset.open === "true" ? "" : "true";
+              overlay.setAttribute(
+                "aria-hidden",
+                overlay.dataset.open === "true" ? "false" : "true",
+              );
+            }
+            return;
+          }
+          default:
+            console.debug("op:command unknown id", id);
+        }
+      });
+
       frontendUnits.projectWorkspaceShell.renderAppState(appState);
       frontendUnits.socketTransport.connect();
