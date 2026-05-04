@@ -1420,8 +1420,8 @@
         display: flex;
         flex-direction: column;
         background:
-          radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 34%),
-          linear-gradient(180deg, #f8fafc 0%, #ffffff 42%);
+          radial-gradient(circle at top left, color-mix(in oklab, var(--color-state-active) 14%, transparent), transparent 34%),
+          var(--color-surface);
       }
 
       .board-timeline-scroll {
@@ -1438,23 +1438,25 @@
       }
 
       .board-composer-bar {
-        border-top: 1px solid rgba(148, 163, 184, 0.22);
-        background: rgba(255, 255, 255, 0.94);
+        border-top: 1px solid var(--color-border);
+        background: color-mix(in oklab, var(--color-surface) 94%, transparent);
         padding: 12px;
-        box-shadow: 0 -18px 40px rgba(15, 23, 42, 0.08);
+        box-shadow: 0 -18px 40px color-mix(in oklab, var(--color-canvas) 8%, transparent);
       }
 
       .board-status {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .board-status.info {
-        color: #1d4ed8;
+        color: var(--color-state-active);
       }
 
       .board-status.error {
-        color: #b91c1c;
+        color: var(--color-state-blocked);
       }
 
       .board-message {
@@ -1462,16 +1464,16 @@
         gap: 7px;
         width: min(78%, 560px);
         padding: 12px 14px;
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 16px;
-        background: rgba(255, 255, 255, 0.94);
-        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-surface-elevated);
+        box-shadow: var(--shadow-1);
       }
 
       .board-message.user {
         align-self: flex-end;
         border-bottom-right-radius: 5px;
-        background: #eff6ff;
+        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
       }
 
       .board-message.agent {
@@ -1483,21 +1485,24 @@
         align-self: center;
         width: min(86%, 620px);
         text-align: center;
-        background: #f8fafc;
+        background: var(--color-surface);
       }
 
       .board-message-meta {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .board-message-body {
-        font-size: 13px;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
         line-height: 1.5;
-        color: #0f172a;
+        color: var(--color-text);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
@@ -1507,11 +1512,19 @@
         width: 100%;
         resize: none;
         padding: 11px 12px;
-        border-radius: 12px;
-        border: 1px solid rgba(148, 163, 184, 0.38);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-strong);
         font: inherit;
-        color: #0f172a;
-        background: #ffffff;
+        font-family: var(--font-body);
+        color: var(--color-text);
+        background: var(--color-surface);
+      }
+      .board-textarea:focus {
+        outline: none;
+        border-color: var(--color-focus-ring);
+      }
+      .board-textarea::placeholder {
+        color: var(--color-text-muted);
       }
 
       .board-composer-actions {
@@ -1528,7 +1541,7 @@
         gap: 10px;
         flex-wrap: wrap;
         padding: 10px 12px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .logs-filter-field {
