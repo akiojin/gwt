@@ -245,3 +245,21 @@
     --shadow-glow-active: 0 0 0 2px Highlight;
   }
 }
+
+/* SPEC-2356 — prefers-contrast: more
+   bump border / muted text contrast in both themes for users who request
+   higher visual separation. Token-only adjustment so dark/light flagships
+   share the same approach. */
+@media (prefers-contrast: more) {
+  :root[data-theme="dark"] {
+    --color-border: rgba(232, 234, 237, 0.30);
+    --color-border-strong: rgba(232, 234, 237, 0.55);
+    --color-text-muted: #d4dce4;
+  }
+
+  :root[data-theme="light"] {
+    --color-border: rgba(26, 29, 36, 0.30);
+    --color-border-strong: rgba(26, 29, 36, 0.55);
+    --color-text-muted: #2a2f37;
+  }
+}
