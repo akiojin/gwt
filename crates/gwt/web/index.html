@@ -608,7 +608,7 @@
       .surface-mock .window-body,
       .surface-memo .window-body,
       .surface-profile .window-body {
-        background: #ffffff;
+        background: var(--color-surface);
       }
 
       .terminal-root {
@@ -623,11 +623,13 @@
         right: 12px;
         bottom: 12px;
         padding: 10px 12px;
-        border-radius: 6px;
-        background: rgba(15, 23, 42, 0.82);
-        color: #dbeafe;
-        font-size: 12px;
-        border: 1px solid rgba(59, 130, 246, 0.18);
+        border-radius: var(--radius-md);
+        background: color-mix(in oklab, var(--color-canvas) 82%, transparent);
+        color: var(--color-text);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        border: 1px solid var(--color-border-strong);
         pointer-events: none;
         user-select: none;
         display: none;
@@ -639,7 +641,7 @@
         align-items: center;
         justify-content: center;
         gap: 12px;
-        background: rgba(15, 23, 42, 0.95);
+        background: color-mix(in oklab, var(--color-canvas) 95%, transparent);
         pointer-events: auto;
         user-select: text;
       }
@@ -648,12 +650,14 @@
         font-size: 24px;
         line-height: 1;
         display: inline-block;
+        color: var(--color-state-active);
         animation: spin-text 0.8s steps(8) infinite;
       }
 
       .overlay-message {
-        font-size: 13px;
-        color: #bfdbfe;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
+        color: var(--color-text);
         max-width: 100%;
         overflow-wrap: anywhere;
         white-space: pre-wrap;
@@ -664,18 +668,20 @@
         align-self: flex-end;
         min-width: 56px;
         height: 26px;
-        border: 1px solid rgba(147, 197, 253, 0.32);
-        border-radius: 4px;
-        background: rgba(59, 130, 246, 0.18);
-        color: #dbeafe;
+        border: 1px solid var(--color-border-strong);
+        border-radius: var(--radius-sm);
+        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+        color: var(--color-text-strong);
         cursor: pointer;
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
         font-weight: 700;
+        letter-spacing: var(--tracking-mono);
         user-select: none;
       }
 
       .overlay-copy-button:hover:not(:disabled) {
-        background: rgba(59, 130, 246, 0.28);
+        background: color-mix(in oklab, var(--color-state-active) 28%, transparent);
       }
 
       .overlay-copy-button:disabled {
