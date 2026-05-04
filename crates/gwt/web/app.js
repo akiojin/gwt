@@ -2,6 +2,30 @@
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
+      import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
+
+      // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
+      // module loads so the theme toggle, command palette, hotkey overlay,
+      // status strip clock, and Mission Briefing intro are wired before the
+      // rest of app.js continues bootstrapping the legacy surfaces.
+      const __op = initOperatorShell();
+      const xtermThemeAdapters = new Set();
+      __op.themeManager.subscribe((effective) => {
+        for (const adapter of xtermThemeAdapters) {
+          try { adapter(effective); } catch (e) { console.error("xterm theme adapter threw", e); }
+        }
+      });
+      window.__operatorShell = {
+        themeManager: __op.themeManager,
+        hotkey: __op.hotkey,
+        palette: __op.palette,
+        registerXtermThemeAdapter: (fn) => {
+          xtermThemeAdapters.add(fn);
+          try { fn(__op.themeManager.getEffective()); } catch (_e) { /* ignore */ }
+          return () => xtermThemeAdapters.delete(fn);
+        },
+        applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
+      };
 
       const canvas = document.getElementById("canvas");
       const stage = document.getElementById("canvas-stage");

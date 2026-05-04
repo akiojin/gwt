@@ -141,6 +141,10 @@ impl EmbeddedServer {
             )
             .route("/hotkey.js", get(embedded_web::hotkey_js_handler))
             .route(
+                "/operator-shell.js",
+                get(embedded_web::operator_shell_js_handler),
+            )
+            .route(
                 "/styles/tokens.css",
                 get(embedded_web::styles_tokens_css_handler),
             )

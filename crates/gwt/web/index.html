@@ -2596,8 +2596,61 @@
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
             </button>
+            <button
+              class="op-theme-toggle"
+              id="op-theme-toggle"
+              type="button"
+              aria-label="Toggle theme"
+              data-theme-state="auto"
+            >
+              <span class="op-theme-toggle__label">Theme</span>
+              <span id="op-theme-toggle-value">AUTO</span>
+            </button>
           </div>
         </div>
+        <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar layers">
+          <div class="op-sidebar__section">
+            <h3 class="op-sidebar__heading">
+              <span>Layers</span>
+              <span class="op-sidebar__count" id="op-sidebar-count">0</span>
+            </h3>
+            <button class="op-layer" type="button" data-layer="agents" aria-pressed="true">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Agents</span>
+              <span class="op-layer__count" id="op-layer-count-agents">0</span>
+            </button>
+            <button class="op-layer" type="button" data-layer="git" aria-pressed="true">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Git</span>
+              <span class="op-layer__count" id="op-layer-count-git">0</span>
+            </button>
+            <button class="op-layer" type="button" data-layer="hooks" aria-pressed="true">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Hooks</span>
+              <span class="op-layer__count" id="op-layer-count-hooks">0</span>
+            </button>
+          </div>
+          <div class="op-sidebar__section">
+            <h3 class="op-sidebar__heading">
+              <span>Quick</span>
+            </h3>
+            <button class="op-layer" type="button" data-cmd="open-board">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Board</span>
+              <span class="op-layer__count">⌘B</span>
+            </button>
+            <button class="op-layer" type="button" data-cmd="open-git">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Git</span>
+              <span class="op-layer__count">⌘G</span>
+            </button>
+            <button class="op-layer" type="button" data-cmd="open-logs">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Logs</span>
+              <span class="op-layer__count">⌘L</span>
+            </button>
+          </div>
+        </aside>
         <div class="canvas-area">
           <div class="hint">
             <span class="connection-dot" id="connection-dot"></span>
@@ -2633,6 +2686,14 @@
             </div>
           </div>
           <div class="floating-actions">
+            <button
+              class="arrange-button"
+              id="op-palette-button"
+              aria-label="Command palette"
+              title="Command palette (⌘K / ⌘P)"
+            >
+              ⌘K
+            </button>
             <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
             <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
             <div class="window-list-shell">
@@ -2650,6 +2711,112 @@
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
             <button class="add-button" id="add-button" aria-label="Add window">+</button>
+          </div>
+        </div>
+        <footer class="op-status-strip" id="op-status-strip" aria-label="Operator status strip">
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__live-dot" aria-hidden="true"></span>
+            <span class="op-status-strip__label">LIVE</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">ACTIVE</span>
+            <span class="op-status-strip__value" id="op-strip-active">0</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">IDLE</span>
+            <span class="op-status-strip__value" id="op-strip-idle">0</span>
+          </div>
+          <div class="op-status-strip__cell op-status-strip__cell--blocked">
+            <span class="op-status-strip__label">BLOCKED</span>
+            <span class="op-status-strip__value" id="op-strip-blocked">0</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">BR</span>
+            <span class="op-status-strip__value" id="op-strip-branches">—</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">T</span>
+            <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
+          </div>
+        </footer>
+      </div>
+      <div class="op-briefing" id="op-briefing" aria-hidden="true">
+        <h1 class="op-briefing__title">gwt://operator</h1>
+        <div class="op-briefing__lines" id="op-briefing-lines">
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 60ms">
+            ▪ resolving environment
+          </div>
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 220ms">
+            ▪ connecting daemon
+          </div>
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 380ms">
+            ▪ loading workspace
+          </div>
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 540ms">
+            ▪ board sync
+          </div>
+        </div>
+        <div class="op-briefing__online">— OPERATOR ONLINE —</div>
+      </div>
+      <div class="op-palette-backdrop" id="op-palette-backdrop" aria-hidden="true">
+        <div
+          class="op-palette"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Command palette"
+        >
+          <input
+            type="text"
+            class="op-palette__input"
+            id="op-palette-input"
+            placeholder="Run a command…"
+            autocomplete="off"
+            data-hotkey-override="true"
+          />
+          <ul class="op-palette__list" id="op-palette-list" role="listbox"></ul>
+        </div>
+      </div>
+      <div class="op-hotkey-overlay" id="op-hotkey-overlay" aria-hidden="true">
+        <div
+          class="op-hotkey-card"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Hotkey reference"
+        >
+          <h2 class="op-hotkey-card__title">Operator Hotkeys</h2>
+          <div class="op-hotkey-card__group">
+            <h3 class="op-hotkey-card__group-title">Navigation</h3>
+            <div class="op-hotkey-card__row">
+              <span>Command palette</span>
+              <kbd class="op-kbd">⌘ K</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Project switcher</span>
+              <kbd class="op-kbd">⌘ P</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Board surface</span>
+              <kbd class="op-kbd">⌘ B</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Git surface</span>
+              <kbd class="op-kbd">⌘ G</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Logs surface</span>
+              <kbd class="op-kbd">⌘ L</kbd>
+            </div>
+          </div>
+          <div class="op-hotkey-card__group">
+            <h3 class="op-hotkey-card__group-title">Help</h3>
+            <div class="op-hotkey-card__row">
+              <span>This card</span>
+              <kbd class="op-kbd">⌘ ?</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Close overlay</span>
+              <kbd class="op-kbd">Esc</kbd>
+            </div>
           </div>
         </div>
       </div>
