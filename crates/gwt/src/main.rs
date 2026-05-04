@@ -18,8 +18,7 @@ use gwt::{
     load_session_state, migrate_legacy_workspace_state, refresh_managed_gwt_assets_for_worktree,
     resolve_launch_spec, save_session_state, save_workspace_state, workspace_state_path,
     BackendEvent, BranchEntriesPhase, BranchListEntry, DockerWizardContext, FrontendEvent,
-    HookForwardTarget, KnowledgeKind, LaunchWizardCompletion, LaunchWizardContext,
-    LaunchWizardLaunchRequest, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
+    HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
     WindowGeometry, WindowPreset, WindowProcessStatus, WorkspaceState, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
@@ -37,6 +36,7 @@ mod docker_launch;
 mod embedded_server;
 mod embedded_web;
 mod launch_runtime;
+mod project_index_bootstrap;
 mod repo_browser;
 mod runtime_support;
 mod update_front_door;
@@ -84,9 +84,9 @@ pub(crate) use runtime_support::{
     close_window_from_workspace, combined_window_id, current_git_branch, dedupe_recent_projects,
     fallback_project_target, first_available_worktree_path, front_door_route, geometry_to_pty_size,
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
-    origin_remote_ref, resolve_launch_spec_with_fallback, resolve_project_target, run_cli,
-    same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
-    synthetic_branch_entry, workspace_view_for_tab,
+    origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
+    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
+    should_auto_start_restored_window, synthetic_branch_entry, workspace_view_for_tab,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -127,6 +127,10 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
 
 fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
     let project_root = std::env::current_dir().ok();
+    let project_root_label = project_root
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
     drop(runtime.spawn(async move {
         let status = match project_root {
             Some(path) => tokio::task::spawn_blocking(move || {
@@ -134,15 +138,18 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
             })
             .await
             .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
-                state: "error".to_string(),
+                state: gwt::ProjectIndexStatusState::Error,
                 detail: format!("Project index status task failed: {err}"),
             }),
             None => gwt::ProjectIndexStatusView {
-                state: "skipped".to_string(),
+                state: gwt::ProjectIndexStatusState::Skipped,
                 detail: "No current directory".to_string(),
             },
         };
-        let _ = proxy.send_event(UserEvent::ProjectIndexStatus { status });
+        let _ = proxy.send_event(UserEvent::ProjectIndexStatus {
+            project_root: project_root_label,
+            status,
+        });
     }));
 }
 
@@ -236,7 +243,9 @@ fn spawn_board_projection_watcher(
         let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
             return;
         };
-        let Some(projection_file_name) = projection_path.file_name().map(|name| name.to_owned())
+        let Some(projection_file_name) = projection_path
+            .file_name()
+            .map(std::borrow::ToOwned::to_owned)
         else {
             return;
         };
@@ -304,6 +313,116 @@ fn spawn_board_projection_watcher(
     })
 }
 
+/// Daemon broadcast subscriber registry — one [`DaemonSubscriber`]
+/// per active project. Mirrors [`BoardProjectionWatcherRegistry`] but
+/// listens for `DaemonFrame::Event { channel: "board" }` from a running
+/// `gwtd` daemon instead of file system events. SPEC-2077 Phase H1
+/// GREEN subscribe path: pushes `UserEvent::BoardProjectionChanged`
+/// when another gwt instance posts a Board entry through the same
+/// daemon scope.
+///
+/// When the daemon is not running, [`spawn_board_daemon_subscriber`]
+/// returns `None` and the entry stays unfilled. The next time
+/// [`Self::sync`] runs (after a project tab change) we retry the
+/// resolve, so a daemon that comes up later is picked up automatically.
+#[cfg(unix)]
+#[derive(Default)]
+struct BoardDaemonSubscriberRegistry {
+    subscribers: HashMap<PathBuf, gwt::daemon_subscriber::DaemonSubscriber>,
+}
+
+#[cfg(unix)]
+impl BoardDaemonSubscriberRegistry {
+    fn sync(&mut self, app: &AppRuntime, proxy: EventLoopProxy<UserEvent>) {
+        let mut active_roots = HashSet::new();
+        for tab in &app.tabs {
+            let project_root = tab.project_root.clone();
+            let key = board_projection_watch_key(&project_root);
+            active_roots.insert(key.clone());
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.subscribers.entry(key) {
+                if let Some(subscriber) = spawn_board_daemon_subscriber(project_root, proxy.clone())
+                {
+                    entry.insert(subscriber);
+                }
+            }
+        }
+        self.subscribers
+            .retain(|project_root, _| active_roots.contains(project_root));
+    }
+
+    fn shutdown(&mut self) {
+        self.subscribers.clear();
+    }
+}
+
+#[cfg(unix)]
+fn spawn_board_daemon_subscriber(
+    project_root: PathBuf,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Option<gwt::daemon_subscriber::DaemonSubscriber> {
+    use gwt_core::daemon::{
+        resolve_bootstrap_action, DaemonBootstrapAction, RuntimeScope, RuntimeTarget,
+        DAEMON_PROTOCOL_VERSION,
+    };
+
+    // Validate that we *can* construct a `RuntimeScope` for this
+    // project before spawning the thread. Failures here are
+    // permanent (invalid path, etc) so there's no point retrying on
+    // every reconnect attempt.
+    if let Err(err) = RuntimeScope::from_project_root(&project_root, RuntimeTarget::Host) {
+        tracing::debug!(
+            project_root = %project_root.display(),
+            error = %err,
+            "daemon subscriber: scope resolution failed (subscriber not spawned)"
+        );
+        return None;
+    }
+
+    // Re-resolve the daemon endpoint on every connect attempt. This
+    // is essential because (a) a daemon that wasn't running when the
+    // tab opened may come up later, and (b) `gwtd daemon start` mints
+    // a fresh `auth_token` on every restart — caching the original
+    // endpoint would loop forever on handshake rejection.
+    let resolver_project_root = project_root.clone();
+    let resolver = move || -> Result<gwt_core::daemon::DaemonEndpoint, String> {
+        let scope = RuntimeScope::from_project_root(&resolver_project_root, RuntimeTarget::Host)
+            .map_err(|err| format!("scope: {err}"))?;
+        let gwt_home = gwt_core::paths::gwt_home();
+        let action = resolve_bootstrap_action(
+            &gwt_home,
+            &scope,
+            DAEMON_PROTOCOL_VERSION,
+            is_subscriber_pid_alive,
+        )
+        .map_err(|err| format!("bootstrap: {err}"))?;
+        match action {
+            DaemonBootstrapAction::Reuse(ep) => Ok(ep),
+            DaemonBootstrapAction::Spawn { .. } => Err("daemon not running".to_string()),
+        }
+    };
+
+    let proxy_for_callback = proxy;
+    let project_root_for_callback = project_root;
+    Some(
+        gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+            resolver,
+            vec!["board".to_string()],
+            move |channel, _payload| {
+                if channel == "board" {
+                    let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
+                        project_root: project_root_for_callback.clone(),
+                    });
+                }
+            },
+        ),
+    )
+}
+
+// Liveness probe shared with `cli::daemon` and `daemon_publisher`;
+// see `gwt::process::is_process_alive`.
+#[cfg(unix)]
+use gwt::process::is_process_alive as is_subscriber_pid_alive;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DockerBundleMounts {
     host_gwt: PathBuf,
@@ -349,6 +468,7 @@ enum UserEvent {
         message: String,
     },
     ProjectIndexStatus {
+        project_root: String,
         status: gwt::ProjectIndexStatusView,
     },
     LaunchComplete {
@@ -685,7 +805,7 @@ mod tests {
         .concat();
 
         let main_source = include_str!("main.rs");
-        let runtime_source = include_str!("app_runtime.rs");
+        let runtime_source = include_str!("app_runtime/mod.rs");
 
         assert!(
             !main_source.contains(&forbidden_init),
@@ -992,6 +1112,7 @@ mod tests {
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 Vec::new(),
             ),
@@ -1097,6 +1218,7 @@ mod tests {
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
@@ -1389,9 +1511,7 @@ mod tests {
             1
         );
         assert_eq!(
-            runtime
-                .maximize_window_events(&file_tree_id, bounds.clone())
-                .len(),
+            runtime.maximize_window_events(&file_tree_id, bounds).len(),
             1
         );
         assert!(
@@ -1705,7 +1825,7 @@ mod tests {
                 "session-3".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo.clone(),
+                repo,
                 AgentId::Codex,
                 None,
             )),
@@ -1890,7 +2010,7 @@ mod tests {
             vec![sample_project_tab(
                 "tab-1",
                 "Repo",
-                repo.clone(),
+                repo,
                 ProjectKind::Git,
                 &[
                     WindowPreset::Branches,
@@ -2004,7 +2124,7 @@ mod tests {
                     "client-1".to_string(),
                     gwt::FrontendEvent::MaximizeWindow {
                         id: file_tree_id.clone(),
-                        bounds: bounds.clone(),
+                        bounds,
                     },
                 )
                 .len(),
@@ -2080,7 +2200,7 @@ mod tests {
                 .handle_frontend_event(
                     "client-1".to_string(),
                     gwt::FrontendEvent::LoadFileTree {
-                        id: file_tree_id.clone(),
+                        id: file_tree_id,
                         path: Some("src".to_string()),
                     },
                 )
@@ -2299,14 +2419,32 @@ mod tests {
             prepared_ok[0].event,
             BackendEvent::LaunchWizardState { wizard: Some(_) }
         ));
-        assert!(
-            !runtime
-                .launch_wizard
-                .as_ref()
-                .expect("launch wizard")
-                .wizard
-                .is_hydrating
+        let issue_session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        assert!(!issue_session.wizard.is_hydrating);
+        assert_eq!(
+            issue_session.wizard.context.linked_issue_kind,
+            Some(gwt::LinkedIssueKind::Issue)
         );
+        assert_eq!(issue_session.wizard.context.linked_issue_number, Some(7));
+
+        runtime.launch_wizard = None;
+        let prepared_spec =
+            runtime.handle_issue_launch_wizard_prepared(super::IssueLaunchWizardPrepared {
+                client_id: "client-1".to_string(),
+                id: "spec-1".to_string(),
+                knowledge_kind: KnowledgeKind::Spec,
+                tab_id: "tab-1".to_string(),
+                project_root: repo.clone(),
+                issue_number: 2014,
+                result: Ok("feature/demo".to_string()),
+            });
+        assert_eq!(prepared_spec.len(), 1);
+        let spec_session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        assert_eq!(
+            spec_session.wizard.context.linked_issue_kind,
+            Some(gwt::LinkedIssueKind::Spec)
+        );
+        assert_eq!(spec_session.wizard.context.linked_issue_number, Some(2014));
 
         runtime.launch_wizard = None;
         assert!(runtime
@@ -2391,11 +2529,12 @@ mod tests {
                     selected_branch: sample_branch_entry("feature/demo"),
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: Some(repo.clone()),
-                    quick_start_root: repo.clone(),
+                    quick_start_root: repo,
                     live_sessions: Vec::new(),
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 sample_wizard_stale_agent_options(),
                 Vec::new(),
@@ -2537,7 +2676,7 @@ mod tests {
                 "session-2".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo.clone(),
+                repo,
                 AgentId::Codex,
                 None,
             )),
@@ -3264,8 +3403,8 @@ mod tests {
         )]);
         assert!(matches!(
             client_one.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-                | Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected
+                | tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
         assert!(client_two
             .try_recv()
@@ -3367,7 +3506,7 @@ mod tests {
         let files = gwt_docker::DockerFiles {
             dockerfile: None,
             compose_file: Some(compose_file.clone()),
-            devcontainer_dir: Some(devcontainer_dir.clone()),
+            devcontainer_dir: Some(devcontainer_dir),
         };
 
         let defaults =
@@ -3377,13 +3516,6 @@ mod tests {
             defaults.workspace_folder.as_deref(),
             Some("/workspaces/repo")
         );
-        assert!(super::same_worktree_path(
-            defaults
-                .compose_file
-                .as_deref()
-                .expect("compose file from defaults"),
-            &compose_file,
-        ));
         assert_eq!(defaults.compose_files.len(), 1);
         assert!(super::same_worktree_path(
             &defaults.compose_files[0],
@@ -4062,7 +4194,7 @@ mod tests {
             Some("main")
         );
         assert_eq!(
-            super::preferred_issue_launch_branch(&[head.clone()]).as_deref(),
+            super::preferred_issue_launch_branch(&[head]).as_deref(),
             Some("feature/current")
         );
         assert!(super::preferred_issue_launch_branch(&[]).is_none());
@@ -4322,7 +4454,7 @@ fn main() -> wry::Result<()> {
         })
         .ok();
 
-    if let Err(error) = gwt::cli::prepare_daemon_front_door_for_path(&startup_dir) {
+    if let Err(error) = gwt::cli::hook::prepare_daemon_front_door_for_path(&startup_dir) {
         eprintln!("gwt daemon bootstrap: {error}");
     }
 
@@ -4349,6 +4481,10 @@ fn main() -> wry::Result<()> {
     app.bootstrap();
     let mut board_projection_watchers = BoardProjectionWatcherRegistry::default();
     board_projection_watchers.sync(&app, proxy.clone());
+    #[cfg(unix)]
+    let mut board_daemon_subscribers = BoardDaemonSubscriberRegistry::default();
+    #[cfg(unix)]
+    board_daemon_subscribers.sync(&app, proxy.clone());
     if let Some(log_handles) = log_handles.as_mut() {
         if let Some(mut ui_rx) = log_handles.take_ui_rx() {
             let log_proxy = proxy.clone();
@@ -4364,7 +4500,7 @@ fn main() -> wry::Result<()> {
         &runtime,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
-        pty_writers.clone(),
+        pty_writers,
     )
     .expect("embedded server");
     app.set_hook_forward_target(server.hook_forward_target());
@@ -4425,6 +4561,8 @@ fn main() -> wry::Result<()> {
                 // child process outlives the window.
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                #[cfg(unix)]
+                board_daemon_subscribers.shutdown();
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
@@ -4434,6 +4572,8 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_frontend_event(client_id, event);
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
+                    #[cfg(unix)]
+                    board_daemon_subscribers.sync(&app, proxy.clone());
                 }
                 clients.dispatch(events);
                 if refresh_index_status {
@@ -4467,9 +4607,15 @@ fn main() -> wry::Result<()> {
                     },
                 )]);
             }
-            Event::UserEvent(UserEvent::ProjectIndexStatus { status }) => {
+            Event::UserEvent(UserEvent::ProjectIndexStatus {
+                project_root,
+                status,
+            }) => {
                 clients.dispatch(vec![OutboundEvent::broadcast(
-                    BackendEvent::ProjectIndexStatus { status },
+                    BackendEvent::ProjectIndexStatus {
+                        project_root,
+                        status,
+                    },
                 )]);
             }
             Event::UserEvent(UserEvent::LaunchComplete { window_id, result }) => {
@@ -4509,6 +4655,8 @@ fn main() -> wry::Result<()> {
             }) => {
                 let events = app.handle_migration_done(&tab_id, &branch_worktree_path);
                 board_projection_watchers.sync(&app, proxy.clone());
+                #[cfg(unix)]
+                board_daemon_subscribers.sync(&app, proxy.clone());
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::MigrationError {
@@ -4528,6 +4676,8 @@ fn main() -> wry::Result<()> {
                         NativeMenuCommand::OpenProject => {
                             let events = app.open_project_dialog_events();
                             board_projection_watchers.sync(&app, proxy.clone());
+                            #[cfg(unix)]
+                            board_daemon_subscribers.sync(&app, proxy.clone());
                             clients.dispatch(events);
                         }
                         NativeMenuCommand::ReloadWebView => {
@@ -4543,6 +4693,8 @@ fn main() -> wry::Result<()> {
                 // path other than CloseRequested, still release PTY children.
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
+                #[cfg(unix)]
+                board_daemon_subscribers.shutdown();
                 server.shutdown();
             }
             _ => {}

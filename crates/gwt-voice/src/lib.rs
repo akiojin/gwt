@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn silence_detected_error_carries_duration() {
         let err = VoiceError::SilenceDetected(3);
-        assert!(err.to_string().contains("3"));
+        assert!(err.to_string().contains('3'));
         assert!(matches!(err, VoiceError::SilenceDetected(3)));
     }
 

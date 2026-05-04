@@ -96,7 +96,7 @@ impl ScrollbackStorage {
 
     /// Clear all stored lines.
     pub fn clear(&mut self) {
-        for slot in self.lines.iter_mut() {
+        for slot in &mut self.lines {
             *slot = None;
         }
         self.head = 0;

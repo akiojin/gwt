@@ -191,13 +191,13 @@ impl ProfilesConfig {
             return Err("default profile cannot be renamed".to_string());
         }
         if current_name != new_name && self.profiles.iter().any(|p| p.name == new_name) {
-            return Err(format!("profile '{}' already exists", new_name));
+            return Err(format!("profile '{new_name}' already exists"));
         }
 
         let active_matches = self.active.as_deref() == Some(current_name);
         let profile = self
             .profile_mut(current_name)
-            .ok_or_else(|| format!("profile '{}' not found", current_name))?;
+            .ok_or_else(|| format!("profile '{current_name}' not found"))?;
         profile.name = new_name.to_string();
         profile.description = new_description.to_string();
         if active_matches {
@@ -222,7 +222,7 @@ impl ProfilesConfig {
     /// Switch the active profile. Returns an error string if the profile is not found.
     pub fn switch(&mut self, name: &str) -> Result<(), String> {
         if !self.profiles.iter().any(|p| p.name == name) {
-            return Err(format!("profile '{}' not found", name));
+            return Err(format!("profile '{name}' not found"));
         }
         self.active = Some(name.to_string());
         Ok(())
@@ -238,7 +238,7 @@ impl ProfilesConfig {
             .profiles
             .iter()
             .position(|profile| profile.name == name)
-            .ok_or_else(|| format!("profile '{}' not found", name))?;
+            .ok_or_else(|| format!("profile '{name}' not found"))?;
         let active_switched_to_default = self.active.as_deref() == Some(name);
         self.profiles.remove(idx);
         self.ensure_default_profile();
@@ -263,7 +263,7 @@ impl ProfilesConfig {
         }
         let profile = self
             .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{}' not found", profile_name))?;
+            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
         profile.env_vars.insert(key.to_string(), value.to_string());
         Ok(())
     }
@@ -282,9 +282,9 @@ impl ProfilesConfig {
         }
         let profile = self
             .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{}' not found", profile_name))?;
+            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
         if current_key != new_key && profile.env_vars.contains_key(new_key) {
-            return Err(format!("environment variable '{}' already exists", new_key));
+            return Err(format!("environment variable '{new_key}' already exists"));
         }
         if current_key != new_key {
             profile.env_vars.remove(current_key);
@@ -299,7 +299,7 @@ impl ProfilesConfig {
     pub fn remove_env_var(&mut self, profile_name: &str, key: &str) -> Result<(), String> {
         let profile = self
             .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{}' not found", profile_name))?;
+            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
         profile.env_vars.remove(key);
         Ok(())
     }
@@ -312,7 +312,7 @@ impl ProfilesConfig {
         }
         let profile = self
             .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{}' not found", profile_name))?;
+            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
         if !profile.disabled_env.iter().any(|item| item == key) {
             profile.disabled_env.push(key.to_string());
             profile.disabled_env.sort();
@@ -333,11 +333,10 @@ impl ProfilesConfig {
         }
         let profile = self
             .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{}' not found", profile_name))?;
+            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
         if current_key != new_key && profile.disabled_env.iter().any(|item| item == new_key) {
             return Err(format!(
-                "disabled environment variable '{}' already exists",
-                new_key
+                "disabled environment variable '{new_key}' already exists"
             ));
         }
         if let Some(item) = profile
@@ -357,7 +356,7 @@ impl ProfilesConfig {
     pub fn remove_disabled_env(&mut self, profile_name: &str, key: &str) -> Result<(), String> {
         let profile = self
             .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{}' not found", profile_name))?;
+            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
         profile.disabled_env.retain(|item| item != key);
         Ok(())
     }

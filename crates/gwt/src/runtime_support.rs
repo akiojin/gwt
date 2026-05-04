@@ -1,10 +1,10 @@
 use super::*;
 
-pub(crate) fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
+pub fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
 }
 
-pub(crate) fn should_auto_close_agent_window(
+pub fn should_auto_close_agent_window(
     active_agent_sessions: &HashMap<String, ActiveAgentSession>,
     window_id: &str,
     status: &WindowProcessStatus,
@@ -12,7 +12,7 @@ pub(crate) fn should_auto_close_agent_window(
     matches!(status, WindowProcessStatus::Stopped) && active_agent_sessions.contains_key(window_id)
 }
 
-pub(crate) fn close_window_from_workspace(
+pub fn close_window_from_workspace(
     tabs: &mut [ProjectTabRuntime],
     window_lookup: &mut HashMap<String, WindowAddress>,
     window_details: &mut HashMap<String, String>,
@@ -32,15 +32,15 @@ pub(crate) fn close_window_from_workspace(
     true
 }
 
-pub(crate) fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
+pub fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> bool {
     window.preset.requires_process() && window.status == WindowProcessStatus::Running
 }
 
-pub(crate) fn current_app_version() -> &'static str {
+pub fn current_app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-pub(crate) fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
+pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
     gwt::WorkspaceView {
         viewport: tab.workspace.persisted().viewport.clone(),
         windows: tab
@@ -57,7 +57,7 @@ pub(crate) fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceV
     }
 }
 
-pub(crate) fn app_state_view_from_parts(
+pub fn app_state_view_from_parts(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<&str>,
     recent_projects: &[gwt::RecentProjectEntry],
@@ -86,7 +86,7 @@ pub(crate) fn app_state_view_from_parts(
     }
 }
 
-pub(crate) fn normalize_active_tab_id(
+pub fn normalize_active_tab_id(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<String>,
 ) -> Option<String> {
@@ -100,7 +100,7 @@ pub(crate) fn normalize_active_tab_id(
     }
 }
 
-pub(crate) fn dedupe_recent_projects(
+pub fn dedupe_recent_projects(
     entries: Vec<gwt::RecentProjectEntry>,
 ) -> Vec<gwt::RecentProjectEntry> {
     let mut deduped: Vec<gwt::RecentProjectEntry> = Vec::new();
@@ -116,7 +116,27 @@ pub(crate) fn dedupe_recent_projects(
     deduped
 }
 
-pub(crate) fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
+/// Issue #1678: drop recent project entries whose paths no longer exist on
+/// disk. Called once at load time so subsequent `persist()` writes a clean
+/// list back. A separate function (rather than baked into `dedupe_*`) so
+/// tests and callers can exercise the path predicate without filesystem.
+pub fn prune_missing_recent_projects(
+    entries: Vec<gwt::RecentProjectEntry>,
+) -> Vec<gwt::RecentProjectEntry> {
+    prune_missing_recent_projects_with(entries, std::path::Path::exists)
+}
+
+pub fn prune_missing_recent_projects_with(
+    entries: Vec<gwt::RecentProjectEntry>,
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<gwt::RecentProjectEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| exists(&entry.path))
+        .collect()
+}
+
+pub fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
     ProjectOpenTarget {
         title: gwt::project_title_from_path(&path),
         project_root: path,
@@ -125,7 +145,7 @@ pub(crate) fn fallback_project_target(path: PathBuf) -> ProjectOpenTarget {
     }
 }
 
-pub(crate) fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
+pub fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> {
     let canonical = dunce::canonicalize(path)
         .map_err(|error| format!("failed to open project {}: {error}", path.display()))?;
     if !canonical.is_dir() {
@@ -166,7 +186,7 @@ pub(crate) fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, S
     })
 }
 
-pub(crate) fn normalize_branch_name(branch_name: &str) -> String {
+pub fn normalize_branch_name(branch_name: &str) -> String {
     if let Some(name) = branch_name.strip_prefix("refs/remotes/") {
         return name.strip_prefix("origin/").unwrap_or(name).to_string();
     }
@@ -176,7 +196,7 @@ pub(crate) fn normalize_branch_name(branch_name: &str) -> String {
     branch_name.to_string()
 }
 
-pub(crate) fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
+pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
     BranchListEntry {
         name: branch_name.to_string(),
         scope: gwt::BranchScope::Local,
@@ -190,7 +210,7 @@ pub(crate) fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
     }
 }
 
-pub(crate) fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
+pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
         WindowPreset::Issue => Some(KnowledgeKind::Issue),
         WindowPreset::Spec => Some(KnowledgeKind::Spec),
@@ -199,7 +219,7 @@ pub(crate) fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<Knowledg
     }
 }
 
-pub(crate) fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
+pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathBuf> {
     if current_git_branch(repo_path)
         .as_ref()
         .is_ok_and(|current| current == branch_name)
@@ -217,7 +237,7 @@ pub(crate) fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Optio
         .map(|worktree| worktree.path)
 }
 
-pub(crate) fn first_available_worktree_path(
+pub fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],
 ) -> Option<PathBuf> {
@@ -235,20 +255,20 @@ pub(crate) fn first_available_worktree_path(
     None
 }
 
-pub(crate) fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
+pub fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_str()?;
     let mut candidate = path.to_path_buf();
     candidate.set_file_name(format!("{file_name}-{suffix}"));
     Some(candidate)
 }
 
-pub(crate) fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
+pub fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
     worktrees
         .iter()
         .any(|worktree| same_worktree_path(&worktree.path, path))
 }
 
-pub(crate) fn same_worktree_path(left: &Path, right: &Path) -> bool {
+pub fn same_worktree_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
@@ -259,7 +279,7 @@ pub(crate) fn same_worktree_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-pub(crate) fn origin_remote_ref(branch_name: &str) -> String {
+pub fn origin_remote_ref(branch_name: &str) -> String {
     if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
         ref_name.to_string()
     } else if branch_name.starts_with("origin/") {
@@ -269,7 +289,7 @@ pub(crate) fn origin_remote_ref(branch_name: &str) -> String {
     }
 }
 
-pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
+pub fn current_git_branch(repo_path: &Path) -> Result<String, String> {
     let output = gwt_core::process::hidden_command("git")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
@@ -290,7 +310,7 @@ pub(crate) fn current_git_branch(repo_path: &Path) -> Result<String, String> {
     }
 }
 
-pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
+pub fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
     let output = gwt_core::process::hidden_command("git")
         .args([
             "show-ref",
@@ -313,7 +333,7 @@ pub(crate) fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result
     }
 }
 
-pub(crate) fn resolve_launch_spec_with_fallback(
+pub fn resolve_launch_spec_with_fallback(
     preset: WindowPreset,
     shell: &gwt::ShellProgram,
 ) -> Result<gwt::LaunchSpec, gwt::PresetResolveError> {
@@ -322,27 +342,27 @@ pub(crate) fn resolve_launch_spec_with_fallback(
 }
 
 #[cfg(test)]
-pub(crate) fn spawn_env() -> HashMap<String, String> {
+pub fn spawn_env() -> HashMap<String, String> {
     let (env, _) =
         gwt_agent::LaunchEnvironment::from_base_env(gwt_agent::environment::host_process_env())
             .into_parts();
     env
 }
 
-pub(crate) fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
+pub fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
     let cols = ((geometry.width.max(420.0) - 26.0) / 8.4).floor() as u16;
     let rows = ((geometry.height.max(260.0) - 58.0) / 18.0).floor() as u16;
     (cols.max(20), rows.max(6))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FrontDoorRoute {
+pub enum FrontDoorRoute {
     Gui,
     RepoBackedCli,
     DetachedCli,
 }
 
-pub(crate) fn front_door_route(argv: &[String]) -> FrontDoorRoute {
+pub fn front_door_route(argv: &[String]) -> FrontDoorRoute {
     match argv.get(1).map(String::as_str) {
         Some("issue" | "pr" | "actions") => FrontDoorRoute::RepoBackedCli,
         Some(top_verb) if gwt::cli::should_dispatch_cli(argv) => {
@@ -362,9 +382,9 @@ pub(crate) fn attach_parent_console_for_cli() {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn attach_parent_console_for_cli() {}
+pub fn attach_parent_console_for_cli() {}
 
-pub(crate) fn run_cli(argv: &[String]) -> io::Result<()> {
+pub fn run_cli(argv: &[String]) -> io::Result<()> {
     match front_door_route(argv) {
         FrontDoorRoute::RepoBackedCli => {
             let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -463,19 +483,113 @@ mod windows_console {
     }
 }
 
-pub(crate) fn resolve_repo_coordinates() -> Option<(String, String)> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    parse_github_remote_url(&url)
+pub fn resolve_repo_coordinates() -> Option<(String, String)> {
+    // Issue #2054: support multi-remote git repos where `origin` points at a
+    // local mirror and the GitHub URL lives under a different remote name.
+    // Resolution order:
+    //   1. `GWT_GITHUB_REPO=owner/name` direct override
+    //   2. `GWT_REMOTE=<name>` selects the remote to read
+    //   3. `origin` remote URL (legacy default)
+    //   4. Scan all remotes and pick the first GitHub URL we find
+    select_repo_coordinates(&load_remote_urls(), &repo_env_overrides())
 }
 
-pub(crate) fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
+/// Pure resolver kept independent of git invocation so it can be unit-tested
+/// against synthetic remote fixtures.
+pub fn select_repo_coordinates(
+    remotes: &[(String, String)],
+    overrides: &RepoEnvOverrides,
+) -> Option<(String, String)> {
+    if let Some(direct) = overrides
+        .github_repo
+        .as_deref()
+        .and_then(parse_owner_repo_pair)
+    {
+        return Some(direct);
+    }
+
+    if let Some(name) = overrides.remote.as_deref() {
+        if let Some((_, url)) = remotes
+            .iter()
+            .find(|(remote_name, _)| remote_name.as_str() == name)
+        {
+            if let Some(parsed) = parse_github_remote_url(url) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    if let Some((_, url)) = remotes.iter().find(|(name, _)| name.as_str() == "origin") {
+        if let Some(parsed) = parse_github_remote_url(url) {
+            return Some(parsed);
+        }
+    }
+
+    remotes
+        .iter()
+        .find_map(|(_, url)| parse_github_remote_url(url))
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RepoEnvOverrides {
+    pub github_repo: Option<String>,
+    pub remote: Option<String>,
+}
+
+fn repo_env_overrides() -> RepoEnvOverrides {
+    RepoEnvOverrides {
+        github_repo: std::env::var("GWT_GITHUB_REPO")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        remote: std::env::var("GWT_REMOTE").ok().filter(|v| !v.is_empty()),
+    }
+}
+
+fn load_remote_urls() -> Vec<(String, String)> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["remote", "-v"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_git_remote_v(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn parse_git_remote_v(text: &str) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else { continue };
+        let Some(url) = parts.next() else { continue };
+        // The third token is "(fetch)" / "(push)". `git remote -v` lists each
+        // remote twice; dedupe so callers see a single entry per name.
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        out.push((name.to_string(), url.to_string()));
+    }
+    out
+}
+
+fn parse_owner_repo_pair(value: &str) -> Option<(String, String)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.splitn(2, '/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim().trim_end_matches(".git");
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+pub fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
     if let Some(rest) = url.strip_prefix("git@github.com:") {
         let trimmed = rest.trim_end_matches(".git");
         let mut parts = trimmed.splitn(2, '/');
@@ -503,10 +617,12 @@ pub(crate) fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{front_door_route, FrontDoorRoute};
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|part| part.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]
@@ -597,6 +713,154 @@ mod tests {
         assert!(
             !target.needs_migration,
             "Bare layout must not request migration"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #2054: gwt pr remote resolution must tolerate non-GitHub
+    // `origin` and explicit env overrides.
+    // -------------------------------------------------------------------
+
+    fn s(value: &str) -> String {
+        value.to_string()
+    }
+
+    fn remotes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(name, url)| (s(name), s(url))).collect()
+    }
+
+    #[test]
+    fn select_repo_coordinates_prefers_origin_when_it_is_github() {
+        let coords = super::select_repo_coordinates(
+            &remotes(&[
+                ("origin", "https://github.com/akiojin/gwt"),
+                ("upstream", "https://github.com/anthropics/example"),
+            ]),
+            &super::RepoEnvOverrides::default(),
+        );
+        assert_eq!(coords, Some((s("akiojin"), s("gwt"))));
+    }
+
+    #[test]
+    fn select_repo_coordinates_falls_back_to_other_remote_when_origin_is_local_mirror() {
+        // The exact scenario from issue #2054: origin points at a local bare
+        // mirror, and the actual GitHub URL is registered under a different
+        // remote name (here `github`).
+        let coords = super::select_repo_coordinates(
+            &remotes(&[
+                ("origin", "E:/llmlb/llmlb.git"),
+                ("github", "https://github.com/akiojin/llmlb"),
+            ]),
+            &super::RepoEnvOverrides::default(),
+        );
+        assert_eq!(coords, Some((s("akiojin"), s("llmlb"))));
+    }
+
+    #[test]
+    fn select_repo_coordinates_honours_remote_env_override() {
+        // GWT_REMOTE=upstream should redirect resolution even if origin is a
+        // perfectly valid GitHub URL.
+        let coords = super::select_repo_coordinates(
+            &remotes(&[
+                ("origin", "https://github.com/akiojin/gwt"),
+                ("upstream", "git@github.com:anthropics/example.git"),
+            ]),
+            &super::RepoEnvOverrides {
+                github_repo: None,
+                remote: Some(s("upstream")),
+            },
+        );
+        assert_eq!(coords, Some((s("anthropics"), s("example"))));
+    }
+
+    #[test]
+    fn select_repo_coordinates_honours_github_repo_env_override() {
+        // GWT_GITHUB_REPO trumps every remote; useful when no GitHub remote
+        // is registered locally but the user knows the slug.
+        let coords = super::select_repo_coordinates(
+            &remotes(&[("origin", "E:/llmlb/llmlb.git")]),
+            &super::RepoEnvOverrides {
+                github_repo: Some(s("akiojin/llmlb")),
+                remote: None,
+            },
+        );
+        assert_eq!(coords, Some((s("akiojin"), s("llmlb"))));
+    }
+
+    #[test]
+    fn select_repo_coordinates_returns_none_when_no_github_remote_or_override() {
+        let coords = super::select_repo_coordinates(
+            &remotes(&[
+                ("origin", "E:/llmlb/llmlb.git"),
+                ("backup", "/srv/git/llmlb.git"),
+            ]),
+            &super::RepoEnvOverrides::default(),
+        );
+        assert_eq!(coords, None);
+    }
+
+    #[test]
+    fn prune_missing_recent_projects_drops_entries_whose_paths_are_gone() {
+        // Issue #1678: stale entries must be removed before the next persist
+        // round-trip so disk state stops referring to deleted projects.
+        let exists_paths: std::collections::HashSet<String> = ["/tmp/exists-a", "/tmp/exists-b"]
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect();
+        let entries = vec![
+            gwt::RecentProjectEntry {
+                path: PathBuf::from("/tmp/exists-a"),
+                title: "alive a".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: PathBuf::from("/tmp/missing-x"),
+                title: "deleted x".to_string(),
+                kind: gwt::ProjectKind::Git,
+            },
+            gwt::RecentProjectEntry {
+                path: PathBuf::from("/tmp/exists-b"),
+                title: "alive b".to_string(),
+                kind: gwt::ProjectKind::Bare,
+            },
+        ];
+
+        let pruned = super::prune_missing_recent_projects_with(entries, |path| {
+            exists_paths.contains(&path.to_string_lossy().to_string())
+        });
+
+        assert_eq!(pruned.len(), 2);
+        assert_eq!(pruned[0].title, "alive a");
+        assert_eq!(pruned[1].title, "alive b");
+    }
+
+    #[test]
+    fn prune_missing_recent_projects_returns_input_when_all_paths_exist() {
+        let entries = vec![gwt::RecentProjectEntry {
+            path: PathBuf::from("/tmp/here"),
+            title: "alive".to_string(),
+            kind: gwt::ProjectKind::Git,
+        }];
+        let pruned = super::prune_missing_recent_projects_with(entries.clone(), |_| true);
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].path, entries[0].path);
+    }
+
+    #[test]
+    fn parse_git_remote_v_dedupes_fetch_and_push_lines() {
+        let stdout = "\
+origin\thttps://github.com/akiojin/gwt (fetch)
+origin\thttps://github.com/akiojin/gwt (push)
+upstream\tgit@github.com:anthropics/example.git (fetch)
+upstream\tgit@github.com:anthropics/example.git (push)
+";
+        let parsed = super::parse_git_remote_v(stdout);
+        assert_eq!(
+            parsed,
+            vec![
+                (s("origin"), s("https://github.com/akiojin/gwt")),
+                (s("upstream"), s("git@github.com:anthropics/example.git")),
+            ]
         );
     }
 }

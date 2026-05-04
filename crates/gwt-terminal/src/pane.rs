@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Status of a pane's child process.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneStatus {
     Running,
     Completed(i32),

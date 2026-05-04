@@ -376,7 +376,9 @@ mod tests {
 
     #[test]
     fn load_snapshot_returns_empty_when_notes_file_is_missing() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -390,7 +392,9 @@ mod tests {
 
     #[test]
     fn load_snapshot_treats_zero_byte_file_as_empty() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -406,7 +410,9 @@ mod tests {
 
     #[test]
     fn load_snapshot_supports_legacy_top_level_array_schema() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -432,7 +438,9 @@ mod tests {
 
     #[test]
     fn load_snapshot_errors_on_invalid_json() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -448,7 +456,9 @@ mod tests {
 
     #[test]
     fn create_update_delete_note_round_trips_through_repo_scoped_store() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -482,7 +492,9 @@ mod tests {
 
     #[test]
     fn load_snapshot_orders_pinned_first_then_updated_at_desc_then_id() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -492,7 +504,7 @@ mod tests {
                 MemoNote {
                     id: "z-note".to_string(),
                     title: "Older pinned".to_string(),
-                    body: "".to_string(),
+                    body: String::new(),
                     pinned: true,
                     created_at: Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap(),
                     updated_at: Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap(),
@@ -500,7 +512,7 @@ mod tests {
                 MemoNote {
                     id: "a-note".to_string(),
                     title: "Newest unpinned".to_string(),
-                    body: "".to_string(),
+                    body: String::new(),
                     pinned: false,
                     created_at: Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).unwrap(),
                     updated_at: Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).unwrap(),
@@ -508,7 +520,7 @@ mod tests {
                 MemoNote {
                     id: "b-note".to_string(),
                     title: "Newest pinned".to_string(),
-                    body: "".to_string(),
+                    body: String::new(),
                     pinned: true,
                     created_at: Utc.with_ymd_and_hms(2026, 4, 22, 0, 0, 0).unwrap(),
                     updated_at: Utc.with_ymd_and_hms(2026, 4, 22, 0, 0, 0).unwrap(),
@@ -516,7 +528,7 @@ mod tests {
                 MemoNote {
                     id: "c-note".to_string(),
                     title: "Tie breaker".to_string(),
-                    body: "".to_string(),
+                    body: String::new(),
                     pinned: false,
                     created_at: Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).unwrap(),
                     updated_at: Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).unwrap(),
@@ -541,7 +553,9 @@ mod tests {
 
     #[test]
     fn repo_scoped_notes_path_reuses_repo_identity_for_linked_worktrees() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -575,7 +589,9 @@ mod tests {
 
     #[test]
     fn create_note_waits_for_repo_scoped_lock_release() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());

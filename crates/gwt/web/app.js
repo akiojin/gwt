@@ -235,11 +235,17 @@
         recovery: "",
       };
       let versionState = { current: "", latest: "" };
-      let indexStatusState = { state: "", detail: "" };
+      const indexStatusByProjectRoot = new Map();
       let projectError = "";
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
       function renderIndexStatus() {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const indexStatusState =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || {
+            state: "",
+            detail: "",
+          };
         const state = indexStatusState.state || "";
         indexStatusLabel.hidden = !state || state === "skipped";
         indexStatusLabel.className = `index-status ${state}`;
@@ -255,11 +261,14 @@
         indexStatusLabel.title = indexStatusState.detail || label;
       }
 
-      function setIndexStatus(status) {
-        indexStatusState = {
+      function setIndexStatus(projectRoot, status) {
+        if (!projectRoot) {
+          return;
+        }
+        indexStatusByProjectRoot.set(projectRoot, {
           state: status?.state || "",
           detail: status?.detail || "",
-        };
+        });
         renderIndexStatus();
       }
 
@@ -710,6 +719,7 @@
         setVersionState(appState.app_version, versionState.latest);
         renderProjectTabs();
         renderProjectPicker();
+        renderIndexStatus();
         updateActionAvailability();
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
@@ -2980,6 +2990,21 @@
           status.classList.add("info");
         }
 
+        // The actual scroll viewport is `.board-timeline-scroll`, the
+        // parent wrapper that has `overflow: auto`. Reading scrollTop /
+        // scrollHeight off `.board-timeline` returns 0/wrong values
+        // because `.board-timeline` itself is sized to its content.
+        const scroller = timeline.parentElement;
+        const stickyBottomThreshold = 64;
+        const previousScrollTop = scroller ? scroller.scrollTop : 0;
+        const previousScrollMax = scroller
+          ? scroller.scrollHeight - scroller.clientHeight
+          : 0;
+        const wasNearBottom =
+          !scroller ||
+          previousScrollMax <= 0 ||
+          previousScrollMax - previousScrollTop <= stickyBottomThreshold;
+
         timeline.innerHTML = "";
         if (!state.loading && state.entries.length === 0) {
           timeline.appendChild(
@@ -3014,6 +3039,14 @@
           card.appendChild(meta);
           card.appendChild(createNode("div", "board-message-body", entry.body));
           timeline.appendChild(card);
+        }
+
+        if (scroller) {
+          if (wasNearBottom) {
+            scroller.scrollTop = scroller.scrollHeight;
+          } else {
+            scroller.scrollTop = previousScrollTop;
+          }
         }
 
         composer.innerHTML = "";
@@ -5689,7 +5722,7 @@
             break;
           }
           case "project_index_status":
-            setIndexStatus(event.status);
+            setIndexStatus(event.project_root, event.status);
             break;
           case "file_tree_entries": {
             const state = frontendUnits.branchesFileTreeSurface.ensureFileTreeState(

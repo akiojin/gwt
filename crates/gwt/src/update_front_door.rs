@@ -1,15 +1,13 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StartupUpdateAction {
+pub enum StartupUpdateAction {
     Publish,
     Stop,
     Retry,
 }
 
-pub(crate) fn classify_startup_update_state(
-    state: &gwt_core::update::UpdateState,
-) -> StartupUpdateAction {
+pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> StartupUpdateAction {
     match state {
         gwt_core::update::UpdateState::Available {
             asset_url: Some(_), ..
@@ -22,7 +20,7 @@ pub(crate) fn classify_startup_update_state(
     }
 }
 
-pub(crate) fn spawn_startup_update_check(
+pub fn spawn_startup_update_check(
     runtime: &Runtime,
     clients: ClientHub,
     update_proxy: EventLoopProxy<UserEvent>,
@@ -66,7 +64,7 @@ pub(crate) fn spawn_startup_update_check(
 /// Called from a background thread so the GUI remains responsive during download.
 /// On success, this function calls `std::process::exit(0)` and never returns.
 /// On any failure, it returns silently.
-pub(crate) fn apply_update_and_exit() {
+pub fn apply_update_and_exit() {
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,

@@ -53,7 +53,7 @@ fn compute_worktree_hash_for_dir(dir: &Path) -> Option<String> {
 pub struct ResolvedRunner {
     /// Executable to invoke (e.g., "claude", "bunx", "npx").
     pub executable: String,
-    /// Base args inserted before agent-specific args (e.g., ["@anthropic-ai/claude-code@1.2.3"]).
+    /// Base args inserted before agent-specific args (e.g., `["@anthropic-ai/claude-code@1.2.3"]`).
     pub base_args: Vec<String>,
 }
 
@@ -141,9 +141,9 @@ pub fn resolve_runner(agent_id: &AgentId, version: &str) -> ResolvedRunner {
     };
 
     let version_spec = if version == "latest" {
-        format!("{}@latest", package)
+        format!("{package}@latest")
     } else {
-        format!("{}@{}", package, version)
+        format!("{package}@{version}")
     };
 
     let (executable, needs_yes) = find_bunx_or_npx();
@@ -291,9 +291,9 @@ pub struct AgentLaunchBuilder {
     env_overrides: HashMap<String, String>,
     /// Env table from a `CustomCodingAgent`. Merged into the spawn env AFTER
     /// the SPEC-1921 Common family (TERM / GWT_*) and agent-specific env
-    /// (Claude / Codex / …), and BEFORE [`env_overrides`], so preset-seeded
-    /// custom entries win over built-in defaults but never clobber explicit
-    /// caller-provided overrides.
+    /// (Claude / Codex / …), and BEFORE the explicit `env_overrides` field
+    /// above, so preset-seeded custom entries win over built-in defaults
+    /// but never clobber explicit caller-provided overrides.
     custom_agent_env: HashMap<String, String>,
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
@@ -393,9 +393,9 @@ impl AgentLaunchBuilder {
 
     /// Supply a `CustomCodingAgent.env` table that should flow into the
     /// spawn env. Intended for SPEC-1921 FR-063: preset-seeded env tables
-    /// merge AFTER Common and agent-specific env, BEFORE [`env_overrides`],
-    /// so preset entries win over built-in defaults but never clobber
-    /// explicit caller overrides.
+    /// merge AFTER Common and agent-specific env, BEFORE the explicit
+    /// `env_overrides` field, so preset entries win over built-in
+    /// defaults but never clobber explicit caller overrides.
     pub fn custom_agent_env(mut self, env: HashMap<String, String>) -> Self {
         self.custom_agent_env = env;
         self
@@ -640,13 +640,13 @@ impl AgentLaunchBuilder {
         }
 
         if let Some(ref model) = self.model {
-            args.push(format!("--model={}", model));
+            args.push(format!("--model={model}"));
         }
 
         // Reasoning level (Codex-specific)
         if let Some(ref level) = self.reasoning_level {
             args.push("-c".to_string());
-            args.push(format!("model_reasoning_effort={}", level));
+            args.push(format!("model_reasoning_effort={level}"));
             args.push("-c".to_string());
             args.push("model_reasoning_summaries=detailed".to_string());
         }
@@ -705,7 +705,7 @@ impl AgentLaunchBuilder {
             .get(GWT_SESSION_RUNTIME_PATH_ENV)
             .or_else(|| env_vars.get(GWT_SESSION_RUNTIME_PATH_ENV))
             .map(PathBuf::from)
-            .and_then(|runtime_path| runtime_path.parent().map(|dir| dir.to_path_buf()))
+            .and_then(|runtime_path| runtime_path.parent().map(std::path::Path::to_path_buf))
             .map(|dir| dir.to_string_lossy().into_owned())
     }
 

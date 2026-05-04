@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use gwt_core::daemon::{
-    persist_endpoint, resolve_bootstrap_action, validate_handshake, DaemonBootstrapAction,
-    DaemonEndpoint, HookEnvelope, IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope,
-    RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    persist_endpoint, resolve_bootstrap_action, validate_handshake, ClientFrame,
+    DaemonBootstrapAction, DaemonEndpoint, DaemonFrame, DaemonStatus, HookEnvelope,
+    IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, RuntimeTarget,
+    DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -33,6 +34,49 @@ fn daemon_endpoint_path_is_scoped_by_repo_and_worktree() {
     assert_eq!(
         endpoint_path.file_name().unwrap(),
         "worktree-scope-5678.json"
+    );
+}
+
+#[test]
+fn bootstrap_rejects_pre_v2_endpoint_files() {
+    // Locks in the v1 -> v2 protocol bump (PR #2299): an endpoint
+    // file persisted by a daemon speaking the older untyped frame
+    // schema (`protocol_version: 1`) must be rejected by the
+    // current bootstrap path so we force a respawn instead of
+    // inheriting an incompatible daemon. Without this regression
+    // guard a future revert of the bump would be silent.
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let gwt_home = tempdir().unwrap();
+
+    let mut legacy = DaemonEndpoint::new(
+        scope.clone(),
+        4242,
+        "http://127.0.0.1:7777".into(),
+        "secret-token".into(),
+        "0.1.0".into(),
+    );
+    legacy.protocol_version = 1;
+    persist_endpoint(&scope.endpoint_path(gwt_home.path()), &legacy).unwrap();
+
+    let action =
+        resolve_bootstrap_action(gwt_home.path(), &scope, DAEMON_PROTOCOL_VERSION, |pid| {
+            pid == 4242
+        })
+        .unwrap();
+    assert!(
+        matches!(action, DaemonBootstrapAction::Spawn { .. }),
+        "expected Spawn for v1 endpoint, got: {action:?}"
+    );
+    assert!(
+        !scope.endpoint_path(gwt_home.path()).exists(),
+        "stale v1 endpoint file should be removed"
     );
 }
 
@@ -111,7 +155,7 @@ fn authenticated_handshake_accepts_matching_contract_and_rejects_mismatch() {
     let request = IpcHandshakeRequest {
         protocol_version: DAEMON_PROTOCOL_VERSION,
         auth_token: "secret-token".into(),
-        scope: scope.clone(),
+        scope,
     };
     let response = IpcHandshakeResponse {
         protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -245,7 +289,7 @@ fn daemon_endpoint_is_usable_returns_false_for_empty_auth_token() {
         scope.clone(),
         4242,
         "http://127.0.0.1:7777".into(),
-        "".into(),
+        String::new(),
         "0.1.0".into(),
     );
     assert!(!endpoint.is_usable(&scope, DAEMON_PROTOCOL_VERSION, |_| true));
@@ -290,7 +334,7 @@ fn validate_handshake_rejects_scope_mismatch() {
     )
     .unwrap();
     let endpoint = DaemonEndpoint::new(
-        scope_a.clone(),
+        scope_a,
         4242,
         "http://127.0.0.1:7777".into(),
         "secret-token".into(),
@@ -333,7 +377,7 @@ fn validate_handshake_rejects_with_reason() {
     let request = IpcHandshakeRequest {
         protocol_version: DAEMON_PROTOCOL_VERSION,
         auth_token: "secret-token".into(),
-        scope: scope.clone(),
+        scope,
     };
     let response = IpcHandshakeResponse {
         protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -368,7 +412,7 @@ fn validate_handshake_rejects_without_reason() {
     let request = IpcHandshakeRequest {
         protocol_version: DAEMON_PROTOCOL_VERSION,
         auth_token: "secret-token".into(),
-        scope: scope.clone(),
+        scope,
     };
     let response = IpcHandshakeResponse {
         protocol_version: DAEMON_PROTOCOL_VERSION,
@@ -447,6 +491,151 @@ fn persist_endpoint_round_trips_through_file_system() {
     assert_eq!(loaded.pid, 4242);
     assert_eq!(loaded.bind, "http://127.0.0.1:7777");
     assert_eq!(loaded.auth_token, "secret-token");
+}
+
+#[test]
+fn client_frame_hook_round_trips_through_json() {
+    let project_root = tempdir().unwrap();
+    let scope = RuntimeScope::new(
+        "repo-scope-1234",
+        "worktree-scope-5678",
+        project_root.path().to_path_buf(),
+        RuntimeTarget::Host,
+    )
+    .unwrap();
+    let envelope = HookEnvelope {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        scope,
+        hook_name: "pre-command".into(),
+        session_id: Some("sess-1".into()),
+        cwd: PathBuf::from(project_root.path()),
+        payload: json!({"command": "codex"}),
+    };
+
+    let frame = ClientFrame::Hook(envelope);
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "hook");
+    assert_eq!(json_value["hook_name"], "pre-command");
+    assert_eq!(json_value["payload"]["command"], "codex");
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn client_frame_subscribe_serializes_channel_list() {
+    let frame = ClientFrame::Subscribe {
+        channels: vec!["board".to_string(), "runtime-status".to_string()],
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "subscribe");
+    assert_eq!(json_value["channels"][0], "board");
+    assert_eq!(json_value["channels"][1], "runtime-status");
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn client_frame_publish_round_trips_payload() {
+    let frame = ClientFrame::Publish {
+        channel: "board".to_string(),
+        payload: json!({"entries": 7, "last_seq": 42}),
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "publish");
+    assert_eq!(json_value["channel"], "board");
+    assert_eq!(json_value["payload"]["entries"], 7);
+    assert_eq!(json_value["payload"]["last_seq"], 42);
+
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_ack_serializes_to_canonical_shape() {
+    let frame = DaemonFrame::Ack;
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "ack");
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_event_carries_channel_and_payload() {
+    let frame = DaemonFrame::Event {
+        channel: "board".to_string(),
+        payload: json!({"entries": 3}),
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "event");
+    assert_eq!(json_value["channel"], "board");
+    assert_eq!(json_value["payload"]["entries"], 3);
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_error_serializes_message() {
+    let frame = DaemonFrame::Error {
+        message: "unknown frame type".to_string(),
+    };
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "error");
+    assert_eq!(json_value["message"], "unknown frame type");
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn client_frame_status_serializes_to_canonical_shape() {
+    let frame = ClientFrame::Status;
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "status");
+    let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_frame_status_carries_uptime_and_channel_count() {
+    let frame = DaemonFrame::Status(DaemonStatus {
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        daemon_version: "9.14.0".to_string(),
+        uptime_seconds: 42,
+        broadcast_channels: 3,
+        connections: 2,
+    });
+    let json_value = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json_value["type"], "status");
+    assert_eq!(json_value["protocol_version"], DAEMON_PROTOCOL_VERSION);
+    assert_eq!(json_value["daemon_version"], "9.14.0");
+    assert_eq!(json_value["uptime_seconds"], 42);
+    assert_eq!(json_value["broadcast_channels"], 3);
+    assert_eq!(json_value["connections"], 2);
+    let round_trip: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    assert_eq!(round_trip, frame);
+}
+
+#[test]
+fn daemon_status_connections_field_defaults_to_zero_when_missing() {
+    // Older daemons may not include `connections` in their wire form;
+    // serde must treat the missing field as 0 to keep forward-compat
+    // working for clients reading from a daemon that predates the
+    // counter.
+    let json_value = json!({
+        "type": "status",
+        "protocol_version": DAEMON_PROTOCOL_VERSION,
+        "daemon_version": "old",
+        "uptime_seconds": 1,
+        "broadcast_channels": 0,
+    });
+    let frame: DaemonFrame = serde_json::from_value(json_value).unwrap();
+    match frame {
+        DaemonFrame::Status(status) => {
+            assert_eq!(status.connections, 0);
+        }
+        other => panic!("expected Status frame, got: {other:?}"),
+    }
 }
 
 #[test]

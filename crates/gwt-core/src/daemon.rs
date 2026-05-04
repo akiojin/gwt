@@ -15,7 +15,20 @@ use crate::{
 };
 
 /// Protocol version spoken by `gwt` and `gwtd`.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
+///
+/// Daemon endpoint reuse is keyed by this version, so a bump forces
+/// the bootstrap path to discard endpoints persisted by older daemons
+/// instead of accepting a connection that would later fail at the
+/// frame layer.
+///
+/// History:
+/// - `1`: initial untyped post-handshake frames (`{"ack":true}` etc).
+/// - `2`: typed `ClientFrame` / `DaemonFrame` post-handshake schema
+///   plus per-channel broadcast fan-out (SPEC-2077 Phase H1
+///   primitives + GREEN integration). Older clients/daemons will
+///   reject the handshake and force a respawn instead of attempting
+///   to exchange frames they cannot parse.
+pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
 
 /// Runtime backend target for daemon-managed execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +181,64 @@ pub struct IpcHandshakeResponse {
     pub rejection_reason: Option<String>,
 }
 
+/// Tagged frame envelope sent by `gwt` over the post-handshake IPC stream.
+///
+/// Wire format is newline-delimited JSON. The `type` discriminator selects
+/// the variant. Phase H1+ extends the variants for additional hot paths
+/// (subscriptions, runtime status pushes, etc.); the existing variants are
+/// stable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientFrame {
+    /// Forward a managed-hook event to the daemon for routing.
+    Hook(HookEnvelope),
+    /// Subscribe to one or more daemon broadcast channels.
+    Subscribe { channels: Vec<String> },
+    /// Publish a payload to a daemon broadcast channel. Subscribers of
+    /// `channel` receive a [`DaemonFrame::Event`] with the same payload.
+    /// This is the gwt → gwtd companion to `Subscribe`; it is what
+    /// Phase H1 GREEN domain handlers use to fan a state change out
+    /// across all gwt instances on the same project scope.
+    Publish { channel: String, payload: Value },
+    /// Request a snapshot of the daemon's current runtime stats.
+    Status,
+}
+
+/// Tagged frame envelope returned by `gwtd`.
+///
+/// Wire format is newline-delimited JSON. `Ack` is the canonical reply for
+/// a successfully processed [`ClientFrame`]; `Event` carries a daemon
+/// broadcast payload (Phase H1 ships board projection events; H2-H4
+/// will add runtime status / hook events / launch lifecycle on the
+/// same variant); `Error` represents a frame that the daemon rejected;
+/// `Status` returns the snapshot requested via [`ClientFrame::Status`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonFrame {
+    /// Acknowledgment for the previous client frame.
+    Ack,
+    /// Broadcast event delivered to subscribed clients.
+    Event { channel: String, payload: Value },
+    /// The daemon rejected the frame. `message` is human-readable.
+    Error { message: String },
+    /// Snapshot of daemon runtime stats, returned in response to a
+    /// [`ClientFrame::Status`] request.
+    Status(DaemonStatus),
+}
+
+/// Runtime stats snapshot returned by a [`DaemonFrame::Status`] frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub protocol_version: u32,
+    pub daemon_version: String,
+    pub uptime_seconds: u64,
+    pub broadcast_channels: usize,
+    /// Number of currently-connected IPC clients, including the one
+    /// asking for the status snapshot.
+    #[serde(default)]
+    pub connections: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonBootstrapAction {
     Reuse(DaemonEndpoint),
@@ -207,8 +278,7 @@ pub fn validate_handshake(
             .as_deref()
             .unwrap_or("unknown rejection");
         return Err(GwtError::Agent(format!(
-            "daemon handshake rejected: {}",
-            reason
+            "daemon handshake rejected: {reason}"
         )));
     }
 
@@ -224,7 +294,7 @@ pub fn persist_endpoint(path: &Path, endpoint: &DaemonEndpoint) -> Result<()> {
     })?;
     ensure_dir(parent)?;
     let payload = serde_json::to_vec_pretty(endpoint)
-        .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {}", e)))?;
+        .map_err(|e| GwtError::Other(format!("serialize daemon endpoint failed: {e}")))?;
     fs::write(path, payload)?;
     Ok(())
 }
@@ -257,7 +327,7 @@ where
 fn load_endpoint(path: &Path) -> Result<DaemonEndpoint> {
     let payload = fs::read(path)?;
     serde_json::from_slice(&payload)
-        .map_err(|e| GwtError::Other(format!("parse daemon endpoint failed: {}", e)))
+        .map_err(|e| GwtError::Other(format!("parse daemon endpoint failed: {e}")))
 }
 
 fn remove_endpoint_file(path: &Path) -> Result<()> {

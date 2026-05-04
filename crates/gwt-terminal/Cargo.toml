@@ -9,20 +9,17 @@ description = "PTY management, vt100 terminal emulation, and scrollback for gwt"
 publish = false
 
 [dependencies]
-gwt-core.workspace = true
 portable-pty.workspace = true
-tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 vt100 = "0.16"
 
 [target.'cfg(unix)'.dependencies]
-libc.workspace = true
 nix = { version = "0.31", features = ["signal"] }
 
 [target.'cfg(windows)'.dependencies]
 serde_json.workspace = true
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_JobObjects",
@@ -32,3 +29,6 @@ windows = { version = "0.61", features = [
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

@@ -1,5 +1,297 @@
 # Lessons Learned
 
+## 2026-05-04 — multi-round correction loops on the same docs are a smell, not a feature
+
+### 事象
+
+architecture.md / README の daemon 説明を refresh しようとして、 同一の
+docs を 3 ラウンド連続 codex P2 で訂正することになった
+(PR #2335 → #2336 → #2337):
+
+1. **PR #2335**: `gwtd daemon` が GUI 起動時に "auto-bootstrap" すると
+   記載 → 実装は endpoint メタデータを書くだけで daemon サーバーを
+   起動しないため事実誤認。 加えて endpoint ファイル名を
+   `endpoint.json` と書いたが、 実際は
+   `RuntimeScope::endpoint_path` で `<worktree-hash>.json`。
+2. **PR #2336**: 上記 2 件を訂正したが、 「最初の `gwt` GUI 起動時に
+   endpoint メタデータが記録され、 後続プロセスが live な daemon を
+   見つけられる」と書き直した → これも誤り。 `is_alive` predicate が
+   `|pid| pid == self.pid` という狭い条件のため、 `gwtd daemon
+   start` の endpoint を「dead」扱いで削除し sentinel で上書きする。
+   GUI 起動が live daemon の endpoint を **clobber する** という
+   逆方向の事実だった。
+3. **PR #2337**: 残りの誤った claim をすべて削り、 verifiable な記述
+   だけに切り戻した。 副産物として、 codex の指摘から実装の
+   front-door clobber bug が浮上したため Issue #2338 として登録。
+
+### 原因
+
+各ラウンドで「修正したつもり」でも、 自分が新しく書いた wording が
+別の事実誤認を含むまま push し、 codex が次の round で別の角度から
+反証してきた。 共通する根本原因は **ストーリー先行で書いた wording
+を、 実際の code path で逐語検証していなかった** こと。 PR #2313 で
+書いた `tasks/lessons.md` rule 4 そのものに自分自身が複数回失敗した
+形になる。
+
+具体的に逃した検証ステップ:
+
+- "auto-bootstrap" と書く前に `serve_blocking` の caller を grep
+  すれば、 GUI front door からは呼ばれていないことがすぐ判った
+- "endpoint.json" と書く前に `endpoint_path` の実装を読めば、
+  filename が `<worktree-hash>.json` であることが判った
+- "subsequent processes can find a live daemon" と書く前に
+  `prepare_daemon_front_door_for_path` の `is_alive` closure
+  を読めば、 自分の PID 以外を全部 dead 扱いする狭さに気づけた
+
+### 再発防止策
+
+1. **同一 PR が 2 ラウンド以上 codex P2 を受けたら、 反射的に追加
+   修正で押し返さず、 一度全文を verifiable claim だけに削ぎ落とす**。
+   "自分の story を docs で再構築する" モードに入っている合図。
+2. **daemon / IPC / runtime のような並行系挙動を docs で説明する
+   ときは、 各文を書く前に「この文を反証できる code path はないか」
+   を 1 文ごとに 30 秒だけ自問する**。 grep 1 回で済む確認が
+   review round 1 周分のコストを節約する。
+3. **副産物として bug を発見したら、 docs PR の場で fix まで踏み込
+   まず Issue 化する**。 PR #2337 → Issue #2338 が良い分離例。
+   front-door clobber は SPEC-2077 owner の design 判断が要るため
+   autonomous fix の対象ではない。
+4. **lessons.md の rule 4 自体を、 失敗するたびに具体例として
+   追記する**。 抽象ルールだけだと自分の脳内で「適用済」と錯覚
+   しやすい。 具体 instance が増えるほど、 同じ罠の sniff test が
+   早く効くようになる。
+
+PR #2305 / #2310 / #2311 / #2315 (codex P2 round 1) と本ラウンド
+(round 2) の両方が「verify-before-write」の同じ rule を破った
+事例なので、 Phase H2-H4 docs を書くときは特に注意する。
+
+## 2026-05-04 — review feedback: claims must be verified against the actual code path
+
+### 事象
+
+このセッションで codex review が同じパターンの P2 finding を 3 回連続で
+出した。 PR #2305 (regression test の `tokio::time::sleep(300ms)` で
+stale-token attempt が起きる前に rotation が走る race)、 PR #2310
+(README が daemon auto-bootstrap を全プラットフォーム共通として記述)、
+PR #2311 (Windows note が `gwtd daemon status` も unavailable と記述)。
+すべて「自分が書いた claim が actual code path で本当に成立するか」
+を verify せずに ship したのが共通原因。
+
+### 原因
+
+3 件の root cause:
+
+1. **PR #2305 (test race)**: subscriber thread が CI 上で遅れて起動した
+   場合、 sleep 後の resolver flip より前に thread が動かないので、
+   `stale token → rejected → reconnect with live token` の regression
+   path が exercise されない。 「sleep 300ms すれば必ず stale 試行が
+   先に走る」という暗黙の前提が壊れる。
+2. **PR #2310 (README scope)**: daemon の auto-bootstrap / fan-out は
+   `#[cfg(unix)]` only。 Windows では `gwtd daemon start` は "not
+   yet implemented" を返すだけ。 README で無条件に "auto-bootstraps
+   a per-project runtime daemon" と書くと Windows ユーザーが期待
+   外動作に当たる。
+3. **PR #2311 (Windows note overscope)**: `gwtd daemon status` 自体は
+   全プラットフォームでコンパイルされる (`crates/gwt/src/cli/daemon/mod.rs::run`
+   の Status arm に cfg gate が無い)。 Windows でも実行できて
+   `stopped scope=...` を返すが、 README で "unavailable" と書くと
+   ユーザーが diagnostic command を skip してしまう。
+
+3 件とも「claim を書く時に grep / read で対応箇所を確認」していれば
+review 前に気づけた:
+
+- (1) 「sleep が必ず先に観測される」は TIMING の claim → resolver の
+  call counter で観測可能な signal にできる
+- (2) 「全プラットフォームで auto-bootstraps」は PLATFORM の claim →
+  `#[cfg(unix)]` を grep すれば限定範囲が分かる
+- (3) 「Windows で daemon status は unavailable」は AVAILABILITY の
+  claim → `report_status` の cfg を確認すれば全プラットフォーム可と
+  分かる
+
+### 再発防止策
+
+test や docs を書く前に「自分の claim を 1 つに絞り、 actual code
+path で verify する」step を必須にする:
+
+1. **Test の wait condition は wall-clock sleep ではなく observable
+   signal**: 「N ms 待てば X が起きているはず」は CI の負荷で容易に
+   崩れる。 代わりに `AtomicUsize` の counter / `Notify` /
+   `RwLock<Vec<Event>>` などで「観測したい遷移そのもの」を polling
+   する loop を書く。 wait の上限は CI slow path 用に generous に。
+2. **Platform / cfg の claim は cfg を grep して verify**: docs や
+   user-facing comment に「X is available on Y」と書く前に、
+   `grep -n "cfg.*<platform>" path/to/source.rs` で対応する `#[cfg(...)]`
+   を確認する。 unsupported / partially-supported を分けて書く。
+3. **"Available" vs "Useful" を区別**: コマンドが compile されるか
+   と、 そのコマンドが意味のある結果を返すかは別。 Windows daemon
+   status は compile される (available) が、 daemon が動かないので
+   結果は常に `stopped` (limited usefulness)。 docs では両方を分けて
+   表現する。
+4. **Review 前 self-check**: 自分が書いた claim を 1 つずつ抜き出し、
+   「これを否定する code path はないか」を確認する。 sleep が race
+   を隠していないか、 cfg gate が範囲を狭めていないか、 「unavailable」
+   claim が実は compile される command を含めていないか。
+
+これらは Phase H2-H4 や future README 更新でも同じ落とし穴が再現する
+ため、 docs を書く前 / regression test を書く前にチェックリスト化
+する。
+
+## 2026-05-04 — fix(daemon): broadcast forwarder treated RecvError::Lagged as fatal
+
+### 事象
+
+SPEC-2077 Phase H1 の per-channel broadcast forwarder
+(`crates/gwt/src/cli/daemon/server.rs`) が `broadcast::Receiver::recv()`
+の `Err(_)` をすべて fatal 扱いして loop break していたため、 slow
+subscriber が DEFAULT_CHANNEL_CAPACITY (64) を超えて lag した瞬間に
+購読が無音で終了する。 client 側は出口 EOF だけを観測し、 reconnect
+からのフル resubscribe が必要だった。
+
+### 原因
+
+`tokio::sync::broadcast::error::RecvError` には 2 variant あり、
+意味が完全に異なる:
+
+- `Lagged(u64)`: 「N frames を捨てたよ」という回復可能な warning
+  signal。 channel そのものは健全で、 次の `recv()` は新しい frame
+  を返す。
+- `Closed`: 全 Sender が drop された terminal 状態。 これ以降 frame
+  は来ない。
+
+両者を `Err(_)` でまとめて break すると、 lag burst で副次的に
+subscription 全体が落ちる。 capacity 64 は通常運用では十分だが、
+forwarder task が runtime 上の他タスクで一瞬 starve した間に publish
+バーストが来ると現実的に発生する。
+
+同じ落とし穴は他の async primitive にも潜む:
+
+- `mpsc::error::TryRecvError::Empty` (一時的に空) vs `Disconnected`
+  (terminal) を `Err(_)` でまとめると spurious wakeup を terminate
+  扱いしてしまう
+- `std::io::ErrorKind::WouldBlock` / `Interrupted` を `Err(_)` で
+  まとめると nonblocking IO で正常な再試行を諦める
+- `tokio::time::error::Elapsed` (timeout、 retry 可能) と underlying
+  IO error (terminal) を区別せず break する
+
+### 再発防止策
+
+並列 / 非同期 primitive の `Result::Err` を match するときは、
+**variant ごとに recoverable / terminal を明示分類する**:
+
+1. `RecvError`, `TryRecvError`, `io::ErrorKind`, `Elapsed` などの
+   error 型を `Err(_)` でまとめて catch しない。 必ず variant を
+   pattern match して各 variant の意味を確認する。
+2. recoverable variant (Lagged / WouldBlock / Interrupted /
+   Empty / Elapsed) は **continue + 観測のための warn log**、
+   terminal variant (Closed / Disconnected / 真の IO error) は
+   **break / 上位エラー化** に分岐する。
+3. forwarder のような producer-consumer pattern では、
+   recoverable error 経路を必ず unit test で pin する。 underlying
+   primitive (broadcast::Receiver, mpsc::Receiver) に対してオーバー
+   フロー / drain 試験を書き、 「subscription は alive のまま、
+   次の recv() で newer frame が返る」契約を assertion で固定する。
+4. defensive code は code comment で **どの variant が来うるか** /
+   **どう振り分けたか** を明記する。 単に `match err` だけだと
+   reviewer は「全 Err が同じ意味」と読みがち。
+
+これは Phase H2-H4 で `handle_runtime_output` / `handle_runtime_hook_event`
+を daemon 経由化するときも同じパターンが再出現する。 broadcast
+channel に乗せる別 channel を増やすたびに、 forwarder の error
+handling を見直すこと。
+
+## 2026-05-03 — fix(daemon): SPEC-2077 Phase H1 GREEN review-driven hardening
+
+### 事象
+
+SPEC-2077 Phase H1 の daemon IPC 経路 (PR #2278〜#2300) を ship した
+ところ、 codex / coderabbit reviewer から P1 / P2 合計 12 件の race /
+leak / blocking 指摘を受け、 #2295〜#2300 の 6 PR で逐次修正することに
+なった。 主要なものは:
+
+- Subscribe ack 前の Event を `_ack` で吸収して取りこぼす race
+- Publish Ack と broadcast Event の send 順序が forwarder task の
+  spawn 順に依存して非決定的 (FSM 崩壊)
+- 接続終了時に forwarder task が `out_tx` clone を握り続けて writer
+  /connection task / ConnectionGuard が leak、 connections counter が
+  inflate
+- `BroadcastHub::publish` が channels mutex を hold しながら
+  `Sender::send` (内部で payload clone) を呼び、 cross-channel HOL
+  block
+- 非-Unix の `is_process_alive_pid` が常に true で stale endpoint が
+  永続的に「running」報告
+- protocol version 据え置きで旧 daemon と新 client が handshake 後に
+  schema mismatch
+- CLI 短命プロセスで detached publish thread が process exit と共に
+  kill され broadcast 喪失
+- daemon 起動時 readiness lines が `&mut String` buffer 経由で
+  shutdown 後にしか visible でない
+
+### 原因
+
+**根本原因の共通テーマは「async / 並列 primitive の lifetime と
+synchronization の組合せを設計時に詰めていない」ことだった。**
+
+具体的に言語化すると:
+
+1. **`Notify::notify_waiters` は fire-and-forget**: 待機者がいない
+   タイミングで notify すると永久に消える。 これに気づかず stop
+   signal として単独で使うと race window が残る。
+2. **broadcast `Sender::send` は payload clone**: ロックを跨いだ
+   呼び出しは fan-out 規模に応じて lock hold 時間が線形に伸びる。
+3. **mpsc の Sender clone は senders count を増やす**: 全 clone が
+   drop されないと receiver は close されない。 spawned task に
+   clone を渡す場合、 task 終了経路を必ず設計する。
+4. **Spawn 時 capture の値は immutable な snapshot**: daemon
+   restart のような外部状態変化を待ちたい場合、 closure が新値を
+   resolve できる resolver pattern にする。
+5. **detached thread は process lifetime に縛られる**: 短命 CLI
+   process では sync で完結させ、 長命 GUI process でのみ thread
+   spawn に逃がす。
+6. **wire schema 変更 は protocol version bump とセット**: handshake
+   は通って後段で frame parse 失敗、 という「中間状態互換」の罠。
+
+### 再発防止策
+
+新しい daemon 機能 / 並列 primitive を追加するときは、 review に
+出す前に以下を順に確認する:
+
+1. **Async cancellation pattern**: `tokio::sync::Notify` を stop
+   signal に使うときは必ず `Arc<AtomicBool>` と pair にし、 select
+   loop の先頭で flag を再 load する。 race window を closure 化
+   しない。
+2. **mpsc Sender lifetime**: spawned task に `out_tx.clone()` を
+   渡したら、 reader 終了時に「全 forwarder を起こす経路」
+   (select! の cancel arm + flag) を必ず実装する。 drop だけでは
+   broadcast 受信中の forwarder は永久に park する。
+3. **Mutex hold range**: 共有 mutex 配下で重い操作 (clone, send,
+   network I/O) を呼ばない。 必要なものを Arc clone で snapshot
+   して guard を drop してから動かす。
+4. **CLI / GUI thread spawn の分離**: 短命 CLI command path では
+   detached thread を使わず sync 完結。 Long-running GUI / daemon
+   path でのみ thread spawn を許す。 各 caller のプロセス
+   lifetime を意識する。
+5. **External state を closure で再 resolve**: long-lived consumer
+   (subscriber 等) が外部 endpoint / config に依存する場合、
+   constructor で endpoint を受け取るのではなく `Fn() -> Result<T>`
+   resolver を受け取り、 必要な瞬間に都度 resolve する。
+6. **Wire schema 変更 = protocol version bump**: post-handshake の
+   frame schema を typed enum に変える、 新 variant を追加する、
+   serde tag を変えるなどはすべて protocol version bump とセット。
+   bump で endpoint reuse を拒否させ、 強制 respawn で互換性を切る。
+7. **CLI buffered output**: long-running command (`gwtd daemon
+   start` のような) では readiness 出力を `&mut String` に貯めない。
+   `&mut dyn io::Write` を受け取って即時 flush することで supervising
+   script から observable にする。
+8. **Subscribe / RPC ack は frame 型を validate**: ack 待ちで最初の
+   1 フレームを `_ack: T` で discard すると、 race で先に来た
+   broadcast event を吸収する。 `read_frame::<DaemonFrame>()` を
+   loop して `match` で `Ack` を観測するまで他 frame は callback /
+   stdout に流す。
+
+これらは Phase H2-H4 (handle_runtime_output / hook_event /
+launch_complete) の daemon 移行でも同じ pattern が再出現するため、
+最初からテンプレに組み込んでから書く。
+
 ## 2026-04-30 — fix(skills): managed skills must not assume gwtd is on PATH
 
 ### 事象

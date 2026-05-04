@@ -7,9 +7,9 @@ use gwt_core::{
 };
 use gwt_github::SpecOpsError;
 
-use crate::cli::{CliCommand, CliEnv, CliParseError};
+use crate::cli::{BoardCommand, CliEnv, CliParseError};
 
-pub(crate) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
+pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
         Some("show") => {
@@ -20,7 +20,7 @@ pub(crate) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
                     other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
                 }
             }
-            Ok(CliCommand::BoardShow { json })
+            Ok(BoardCommand::Show { json })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -30,11 +30,11 @@ pub(crate) fn parse(args: &[String]) -> Result<CliCommand, CliParseError> {
 
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
-    cmd: CliCommand,
+    cmd: BoardCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
-        CliCommand::BoardShow { json } => {
+        BoardCommand::Show { json } => {
             let snapshot = load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?;
             if json {
                 let rendered = serde_json::to_string_pretty(&snapshot)
@@ -46,7 +46,7 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        CliCommand::BoardPost {
+        BoardCommand::Post {
             kind,
             body,
             file,
@@ -81,18 +81,55 @@ pub(super) fn run<E: CliEnv>(
             }
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
+            publish_board_change(env.repo_path(), snapshot.board.entries.len());
             out.push_str(&format!(
                 "board entries: {}\n",
                 snapshot.board.entries.len()
             ));
             0
         }
-        _ => unreachable!("board::run called with non-board command"),
     };
     Ok(code)
 }
 
-fn parse_post_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
+/// Best-effort daemon broadcast after a CLI `gwtd board post` succeeds
+/// (SPEC-2077 Phase H1 GREEN). Mirrors the GUI handler in
+/// `app_runtime/board.rs`: notify subscribers via the daemon so other
+/// gwt instances on the same project see the new entry without
+/// waiting for their file watcher to fire. Errors are logged at debug
+/// level and ignored — local file is the source of truth.
+#[cfg(unix)]
+fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
+    // CLI path runs in a short-lived process: `gwtd board post`
+    // returns to the shell immediately, so a detached publish thread
+    // would be killed before it finishes the connect/publish/ack
+    // round-trip (the daemon would then never see the broadcast).
+    // The publish is bounded by `daemon_publisher::publish_event`'s
+    // per-stage timeout (~200 ms each across connect / send / ack,
+    // ~600 ms worst case), which is an acceptable amount of
+    // synchronous wall time for a CLI command.
+    let result = crate::daemon_publisher::publish_event(
+        project_root,
+        "board",
+        serde_json::json!({"entries_count": entries_count}),
+    );
+    if let Err(err) = result {
+        tracing::debug!(
+            error = %err,
+            project_root = %project_root.display(),
+            entries_count,
+            "gwtd board post: daemon publish failed (non-fatal)"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) {
+    // Daemon publishing is gated on Unix; CLI continues to drive the
+    // local file path on other platforms.
+}
+
+fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut kind: Option<String> = None;
     let mut body: Option<String> = None;
     let mut file: Option<String> = None;
@@ -158,7 +195,7 @@ fn parse_post_args(args: &[&String]) -> Result<CliCommand, CliParseError> {
         i += 1;
     }
 
-    Ok(CliCommand::BoardPost {
+    Ok(BoardCommand::Post {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
@@ -247,7 +284,7 @@ mod tests {
     #[test]
     fn board_family_parse_show_json() {
         let cmd = parse(&[s("show"), s("--json")]).unwrap();
-        assert_eq!(cmd, CliCommand::BoardShow { json: true });
+        assert_eq!(cmd, BoardCommand::Show { json: true });
     }
 
     #[test]
@@ -264,7 +301,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cmd,
-            CliCommand::BoardPost {
+            BoardCommand::Post {
                 kind: "request".into(),
                 body: Some("hello".into()),
                 file: None,
@@ -292,7 +329,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             cmd,
-            CliCommand::BoardPost {
+            BoardCommand::Post {
                 kind: "claim".into(),
                 body: Some("I claim feature/foo".into()),
                 file: None,
@@ -312,7 +349,7 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            CliCommand::BoardPost {
+            BoardCommand::Post {
                 kind: "claim".into(),
                 body: Some("taking the migration".into()),
                 file: None,
@@ -348,7 +385,7 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            CliCommand::BoardPost {
+            BoardCommand::Post {
                 kind: "request".into(),
                 body: Some("Need a board".into()),
                 file: None,
@@ -390,7 +427,7 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, CliCommand::BoardShow { json: false }, &mut out).unwrap();
+        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
 
         assert_eq!(code, 0);
         assert!(
@@ -419,7 +456,7 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, CliCommand::BoardShow { json: false }, &mut out).unwrap();
+        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
 
         assert_eq!(code, 0);
         assert!(out.contains("user: legacy entry"));
@@ -447,7 +484,7 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, CliCommand::BoardShow { json: false }, &mut out).unwrap();
+        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
 
         assert_eq!(code, 0);
         assert!(out.contains("== Chat =="));

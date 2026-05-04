@@ -77,10 +77,27 @@ gwtd issue spec 1784 --section plan
 gwtd pr current
 gwtd board show
 gwtd hook workflow-policy
+gwtd daemon status            # プロジェクトごとの runtime daemon を確認
 ```
 
-managed hook と runtime 委譲は `gwtd` を使います。利用者が別の daemon
-プロセスを手動起動する必要はありません。
+managed hook と runtime 委譲は `gwtd` を使います。macOS と Linux では、
+ユーザーが `gwtd daemon start` を実行することでプロジェクトごとの
+runtime daemon（Unix ドメインソケット IPC）が起動します。daemon
+が live な間、同じリポジトリに繋がっている全 `gwt` インスタンスへ
+イベントが fan-out されます（例: 片方のウィンドウで Board に投稿
+した内容が、別インスタンスにも遅延なく届く）。Ctrl-C / SIGTERM で
+daemon を停止するまでバックグラウンドで動き続けます。診断用に
+`gwtd daemon status` で現在の endpoint を確認できます。`gwtd
+daemon start` を実行していない場合は multi-instance fan-out は
+無効ですが、ローカルのファイルベース state とファイル watcher は
+従来どおり動作します。
+
+Windows では現状 long-running daemon は提供されておらず、
+`gwtd daemon start` は "not yet implemented" で終了します。managed
+hook は同期的な `gwt hook ...` dispatch にフォールバックし、複数
+インスタンス間のイベント fan-out は Windows 対応 (named-pipe 経路)
+が完了するまで利用できません。`gwtd daemon status` 自体は Windows
+でも実行可能ですが、daemon が動かないため常に `stopped` を表示します。
 
 ## 基本フロー
 

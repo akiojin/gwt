@@ -12,6 +12,25 @@ pub use quick_start::load_quick_start_entries;
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "release/"];
 
+/// Distinguishes the source bridge so branch names seed as `issue-{n}` vs
+/// `spec-{n}` (kept independent of `linked_issue_number` because Branches-window
+/// callers can know the number from a linkage store but not the source kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedIssueKind {
+    Issue,
+    Spec,
+}
+
+impl LinkedIssueKind {
+    fn branch_kind_segment(self) -> &'static str {
+        match self {
+            LinkedIssueKind::Issue => "issue",
+            LinkedIssueKind::Spec => "spec",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchWizardStep {
@@ -349,6 +368,21 @@ pub struct LaunchWizardContext {
     pub docker_context: Option<DockerWizardContext>,
     pub docker_service_status: gwt_docker::ComposeServiceStatus,
     pub linked_issue_number: Option<u64>,
+    /// Source kind of the SPEC/Issue knowledge bridge that opened this wizard.
+    /// `None` for Branches-window callers, preserving non-breaking behavior.
+    pub linked_issue_kind: Option<LinkedIssueKind>,
+}
+
+impl LaunchWizardContext {
+    /// Returns the auto-seeded suffix `"{kind}-{number}"` (e.g. `"issue-42"`,
+    /// `"spec-2014"`) when both `linked_issue_kind` and `linked_issue_number`
+    /// are present. Used during `BranchAction::CreateNew` and `BranchTypeSelect`
+    /// to pre-fill `branch_name` per SPEC-2014 FR-025.
+    pub fn linked_issue_branch_suffix(&self) -> Option<String> {
+        let number = self.linked_issue_number?;
+        let kind = self.linked_issue_kind?;
+        Some(format!("{}-{}", kind.branch_kind_segment(), number))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -833,8 +867,8 @@ impl LaunchWizardState {
             .ok_or_else(|| "Agent option is unavailable".to_string())?;
 
         let agent_id = agent_id_from_key(&selected_agent.id);
-        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
-        if let Some(custom_agent) = selected_agent.custom_agent.clone() {
+        let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+        if let Some(custom_agent) = selected_agent.custom_agent {
             builder = builder.custom_agent(custom_agent);
         }
 
@@ -912,10 +946,10 @@ impl LaunchWizardState {
             return Err("Launch options are still loading".to_string());
         }
 
-        let working_dir = if !self.is_new_branch {
-            self.context.worktree_path.clone()
-        } else {
+        let working_dir = if self.is_new_branch {
             None
+        } else {
+            self.context.worktree_path.clone()
         };
         let branch = (!self.branch_name.is_empty()).then(|| self.branch_name.clone());
         let base_branch = self.is_new_branch.then(|| {
@@ -930,7 +964,7 @@ impl LaunchWizardState {
 
         Ok(ShellLaunchConfig {
             working_dir,
-            branch: branch.clone(),
+            branch,
             base_branch,
             display_name: "Shell".to_string(),
             runtime_target: self.runtime_target,
@@ -1005,12 +1039,7 @@ impl LaunchWizardState {
             }
             LaunchWizardStep::BranchTypeSelect => {
                 if let Some(prefix) = BRANCH_TYPE_PREFIXES.get(self.selected) {
-                    let seed = if self.branch_name.is_empty() {
-                        (*prefix).to_string()
-                    } else {
-                        self.branch_name.clone()
-                    };
-                    self.branch_name = apply_branch_prefix(&seed, prefix);
+                    self.seed_branch_name_for_prefix(prefix);
                 }
             }
             LaunchWizardStep::LaunchTarget => {
@@ -1254,7 +1283,8 @@ impl LaunchWizardState {
             if self.branch_name.is_empty()
                 || self.branch_name == self.context.normalized_branch_name
             {
-                self.branch_name = BRANCH_TYPE_PREFIXES[0].to_string();
+                self.branch_name.clear();
+                self.seed_branch_name_for_prefix(BRANCH_TYPE_PREFIXES[0]);
             }
         } else {
             self.base_branch_name = None;
@@ -1270,12 +1300,28 @@ impl LaunchWizardState {
             self.error = Some("Branch type is unavailable".to_string());
             return;
         }
-        let seed = if self.branch_name.is_empty() {
-            prefix.to_string()
+        self.seed_branch_name_for_prefix(prefix);
+    }
+
+    /// Apply `prefix` to `branch_name`. When the current name has no
+    /// user-entered suffix (empty or just a known prefix), pre-fill from
+    /// `LinkedIssueKind` + `linked_issue_number` per SPEC-2014 FR-024/025.
+    /// User-entered suffixes are preserved (NFR-008).
+    fn seed_branch_name_for_prefix(&mut self, prefix: &str) {
+        let trimmed = self.branch_name.trim();
+        let user_suffix = BRANCH_TYPE_PREFIXES
+            .iter()
+            .find_map(|known| trimmed.strip_prefix(known))
+            .unwrap_or(trimmed)
+            .trim_matches('/');
+        if user_suffix.is_empty() {
+            self.branch_name = match self.context.linked_issue_branch_suffix() {
+                Some(seed) => format!("{prefix}{seed}"),
+                None => prefix.to_string(),
+            };
         } else {
-            self.branch_name.clone()
-        };
-        self.branch_name = apply_branch_prefix(&seed, prefix);
+            self.branch_name = format!("{prefix}{user_suffix}");
+        }
     }
 
     fn set_launch_target(&mut self, target: LaunchTargetKind) {
@@ -2897,20 +2943,6 @@ fn docker_lifecycle_value(intent: gwt_agent::DockerLifecycleIntent) -> &'static 
     }
 }
 
-fn apply_branch_prefix(seed: &str, prefix: &str) -> String {
-    let trimmed = seed.trim();
-    let suffix = BRANCH_TYPE_PREFIXES
-        .iter()
-        .find_map(|known| trimmed.strip_prefix(known))
-        .unwrap_or(trimmed)
-        .trim_matches('/');
-    if suffix.is_empty() {
-        prefix.to_string()
-    } else {
-        format!("{prefix}{suffix}")
-    }
-}
-
 fn is_explicit_model_selection(model: &str) -> bool {
     !model.is_empty() && !model.starts_with("Default")
 }
@@ -3001,7 +3033,7 @@ pub fn build_builtin_agent_options(
                 installed_version: detected.and_then(|detected| detected.version.clone()),
                 versions: cache
                     .get(&agent_id)
-                    .map(|versions| versions.to_vec())
+                    .map(<[std::string::String]>::to_vec)
                     .unwrap_or_default(),
                 custom_agent: None,
             }
@@ -3160,7 +3192,20 @@ mod tests {
             docker_context: None,
             docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
             linked_issue_number: None,
+            linked_issue_kind: None,
         }
+    }
+
+    fn context_with_linked_issue(
+        branch: BranchListEntry,
+        normalized: &str,
+        kind: LinkedIssueKind,
+        number: u64,
+    ) -> LaunchWizardContext {
+        let mut ctx = context(branch, normalized);
+        ctx.linked_issue_kind = Some(kind);
+        ctx.linked_issue_number = Some(number);
+        ctx
     }
 
     fn sample_session(
@@ -3609,6 +3654,95 @@ mod tests {
         assert_eq!(state.step, LaunchWizardStep::BranchTypeSelect);
         assert!(state.is_new_branch);
         assert_eq!(state.base_branch_name.as_deref(), Some("feature/gui"));
+    }
+
+    fn create_new_with_prefix(state: &mut LaunchWizardState, prefix: &str) {
+        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
+        state.apply(LaunchWizardAction::SetBranchType {
+            prefix: prefix.to_string(),
+        });
+    }
+
+    #[test]
+    fn branch_seed_uses_issue_kind_when_create_new_then_feature_prefix() {
+        let mut state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Issue, 42),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        create_new_with_prefix(&mut state, "feature/");
+        assert_eq!(state.branch_name, "feature/issue-42");
+    }
+
+    #[test]
+    fn branch_seed_uses_spec_kind_when_create_new_then_feature_prefix() {
+        let mut state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Spec, 2014),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        create_new_with_prefix(&mut state, "feature/");
+        assert_eq!(state.branch_name, "feature/spec-2014");
+    }
+
+    #[test]
+    fn branch_seed_uses_issue_kind_when_alternative_prefix_selected() {
+        let mut state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Issue, 10),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        create_new_with_prefix(&mut state, "bugfix/");
+        assert_eq!(state.branch_name, "bugfix/issue-10");
+    }
+
+    #[test]
+    fn branch_seed_omits_when_no_linked_issue_kind() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        create_new_with_prefix(&mut state, "feature/");
+        assert_eq!(state.branch_name, "feature/");
+    }
+
+    #[test]
+    fn branch_seed_respects_user_edit_when_prefix_changes() {
+        let mut state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Issue, 42),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        create_new_with_prefix(&mut state, "feature/");
+        state.apply(LaunchWizardAction::SetBranchName {
+            value: "feature/custom-name".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetBranchType {
+            prefix: "bugfix/".to_string(),
+        });
+        assert_eq!(state.branch_name, "bugfix/custom-name");
+    }
+
+    #[test]
+    fn branch_seed_omits_title_slug_for_spec_proposal_a() {
+        let ctx =
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Spec, 2014);
+        let suffix = ctx
+            .linked_issue_branch_suffix()
+            .expect("linked issue branch suffix");
+        assert_eq!(suffix, "spec-2014");
+    }
+
+    #[test]
+    fn branch_seed_create_new_then_default_prefix_seeds_branch_name() {
+        let mut state = LaunchWizardState::open_with(
+            context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Issue, 7),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
+        assert_eq!(state.branch_name, "feature/issue-7");
     }
 
     #[test]
@@ -4093,7 +4227,7 @@ mod tests {
 
         state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
         state.apply(LaunchWizardAction::SetBranchName {
-            value: "".to_string(),
+            value: String::new(),
         });
         state.apply(LaunchWizardAction::Submit);
 
@@ -4737,11 +4871,6 @@ mod tests {
             docker_lifecycle_value(gwt_agent::DockerLifecycleIntent::CreateAndStart),
             "create_and_start"
         );
-        assert_eq!(
-            apply_branch_prefix("feature/coverage", "fix/"),
-            "fix/coverage"
-        );
-        assert_eq!(apply_branch_prefix("  ", "chore/"), "chore/");
         assert!(is_explicit_model_selection("gpt-5.5"));
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
@@ -5070,7 +5199,7 @@ mod tests {
         let mut resumable = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
-            state.quick_start_entries.clone(),
+            state.quick_start_entries,
         );
         resumable.apply(LaunchWizardAction::ApplyQuickStart {
             index: 0,

@@ -104,7 +104,7 @@ impl FakeTransport {
     pub fn enqueue(&self, response: HttpResponse) {
         self.state
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .canned
             .push_back(response);
     }
@@ -113,7 +113,7 @@ impl FakeTransport {
     pub fn recorded(&self) -> Vec<HttpRequest> {
         self.state
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .recorded
             .clone()
     }
@@ -127,7 +127,10 @@ impl Default for FakeTransport {
 
 impl HttpTransport for FakeTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.recorded.push(request);
         state
             .canned
@@ -361,7 +364,7 @@ fn parse_issue_state(s: &str) -> IssueState {
 fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
     let number = issue
         .get("number")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| ApiError::Unexpected("issue.number missing".into()))?;
     let title = issue
         .get("title")
@@ -400,7 +403,7 @@ fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| {
-                    let id = v.get("databaseId").and_then(|i| i.as_u64())?;
+                    let id = v.get("databaseId").and_then(serde_json::Value::as_u64)?;
                     let body = v
                         .get("body")
                         .and_then(|b| b.as_str())
@@ -434,7 +437,7 @@ fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
 fn parse_rest_issue(json: &Value) -> Result<IssueSnapshot, ApiError> {
     let number = json
         .get("number")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| ApiError::Unexpected("issue.number missing".into()))?;
     let title = json
         .get("title")
@@ -479,7 +482,7 @@ fn parse_rest_issue(json: &Value) -> Result<IssueSnapshot, ApiError> {
 fn parse_rest_comment(json: &Value) -> Result<CommentSnapshot, ApiError> {
     let id = json
         .get("id")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| ApiError::Unexpected("comment.id missing".into()))?;
     let body = json
         .get("body")
@@ -663,7 +666,7 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let mut out: Vec<SpecSummary> = nodes
             .into_iter()
             .filter_map(|v| {
-                let number = v.get("number").and_then(|n| n.as_u64())?;
+                let number = v.get("number").and_then(serde_json::Value::as_u64)?;
                 let title = v
                     .get("title")
                     .and_then(|t| t.as_str())

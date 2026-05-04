@@ -65,9 +65,8 @@ fn tracked_skill_markdowns(
 }
 
 fn scanned_skill_markdowns(skills_dir: &std::path::Path) -> Vec<PathBuf> {
-    let entries = match fs::read_dir(skills_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+    let Ok(entries) = fs::read_dir(skills_dir) else {
+        return Vec::new();
     };
 
     entries

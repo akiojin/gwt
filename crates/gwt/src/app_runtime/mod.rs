@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone)]
-pub(crate) enum AppEventProxy {
+pub enum AppEventProxy {
     Real(EventLoopProxy<UserEvent>),
     #[cfg(test)]
     Stub(Arc<Mutex<Vec<UserEvent>>>),
@@ -34,7 +34,7 @@ impl AppEventProxy {
 }
 
 #[derive(Clone)]
-pub(crate) enum BlockingTaskSpawner {
+pub enum BlockingTaskSpawner {
     Tokio(tokio::runtime::Handle),
     #[cfg(test)]
     Thread,
@@ -69,7 +69,7 @@ impl BlockingTaskSpawner {
     }
 }
 
-pub(crate) struct KnowledgeSearchRequest<'a> {
+pub struct KnowledgeSearchRequest<'a> {
     pub(crate) id: &'a str,
     pub(crate) kind: KnowledgeKind,
     pub(crate) query: &'a str,
@@ -78,7 +78,7 @@ pub(crate) struct KnowledgeSearchRequest<'a> {
     pub(crate) list_scope: gwt::KnowledgeListScope,
 }
 
-pub(crate) struct KnowledgeLoadRequest<'a> {
+pub struct KnowledgeLoadRequest<'a> {
     pub(crate) id: &'a str,
     pub(crate) kind: KnowledgeKind,
     pub(crate) request_id: Option<u64>,
@@ -109,7 +109,7 @@ struct KnowledgeSearchTask {
     list_scope: gwt::KnowledgeListScope,
 }
 
-pub(crate) struct WindowRuntime {
+pub struct WindowRuntime {
     pane: Arc<Mutex<Pane>>,
     /// Handle to the background reader thread that forwards PTY output.
     /// Taken and joined during `stop_window_runtime` so the reader releases
@@ -122,7 +122,7 @@ pub(crate) struct WindowRuntime {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProcessLaunch {
+pub struct ProcessLaunch {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
     pub(crate) env: HashMap<String, String>,
@@ -130,7 +130,7 @@ pub(crate) struct ProcessLaunch {
     pub(crate) cwd: Option<PathBuf>,
 }
 
-pub(crate) type AgentLaunchCompletion = (
+pub type AgentLaunchCompletion = (
     ProcessLaunch,
     String,
     String,
@@ -140,21 +140,35 @@ pub(crate) type AgentLaunchCompletion = (
     Option<u64>,
 );
 
-pub(crate) type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
+pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
-#[derive(Debug, Clone)]
-pub(crate) struct BoardPostRequest {
-    pub(crate) id: String,
-    pub(crate) entry_kind: gwt_core::coordination::BoardEntryKind,
-    pub(crate) body: String,
-    pub(crate) parent_id: Option<String>,
-    pub(crate) topics: Vec<String>,
-    pub(crate) owners: Vec<String>,
-    pub(crate) targets: Vec<String>,
+mod board;
+mod memory;
+mod migration;
+mod profile;
+mod window;
+mod wizard;
+pub use board::BoardPostRequest;
+use profile::ProfileSaveRequest;
+
+fn dispatch_agent_launch_success<F>(
+    proxy: AppEventProxy,
+    window_id: String,
+    completion: AgentLaunchCompletion,
+    spawn_project_index_bootstrap: F,
+) where
+    F: FnOnce(AppEventProxy, PathBuf),
+{
+    let project_index_root = completion.4.clone();
+    proxy.send(UserEvent::LaunchComplete {
+        window_id,
+        result: Ok(completion),
+    });
+    spawn_project_index_bootstrap(proxy, project_index_root);
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveAgentSession {
+pub struct ActiveAgentSession {
     pub(crate) window_id: String,
     pub(crate) session_id: String,
     pub(crate) agent_id: String,
@@ -165,7 +179,7 @@ pub(crate) struct ActiveAgentSession {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LaunchWizardMemoryCache {
+pub struct LaunchWizardMemoryCache {
     sessions: Vec<gwt_agent::Session>,
     agent_options: Vec<gwt::AgentOption>,
 }
@@ -263,13 +277,13 @@ struct IssueBranchLinkStore {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum DispatchTarget {
+pub enum DispatchTarget {
     Broadcast,
     Client(ClientId),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct OutboundEvent {
+pub struct OutboundEvent {
     pub(crate) target: DispatchTarget,
     pub(crate) event: BackendEvent,
 }
@@ -343,15 +357,7 @@ fn knowledge_view_events(
     ]
 }
 
-struct ProfileSaveRequest {
-    current_name: String,
-    name: String,
-    description: String,
-    env_vars: Vec<gwt::ProfileEnvEntryView>,
-    disabled_env: Vec<String>,
-}
-
-pub(crate) fn build_frontend_sync_events(
+pub fn build_frontend_sync_events(
     client_id: &str,
     workspace: gwt::AppStateView,
     terminal_statuses: Vec<(String, WindowProcessStatus, String)>,
@@ -405,7 +411,7 @@ pub(crate) fn build_frontend_sync_events(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectTabRuntime {
+pub struct ProjectTabRuntime {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) project_root: PathBuf,
@@ -478,20 +484,20 @@ fn detect_locked_worktrees(project_root: &Path) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WindowAddress {
+pub struct WindowAddress {
     pub(crate) tab_id: String,
     pub(crate) raw_id: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LaunchWizardSession {
+pub struct LaunchWizardSession {
     pub(crate) tab_id: String,
     pub(crate) wizard_id: String,
     pub(crate) wizard: LaunchWizardState,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct IssueLaunchWizardPrepared {
+pub struct IssueLaunchWizardPrepared {
     pub(crate) client_id: ClientId,
     pub(crate) id: String,
     pub(crate) knowledge_kind: KnowledgeKind,
@@ -502,7 +508,7 @@ pub(crate) struct IssueLaunchWizardPrepared {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ProjectOpenTarget {
+pub struct ProjectOpenTarget {
     pub(crate) project_root: PathBuf,
     pub(crate) title: String,
     pub(crate) kind: gwt::ProjectKind,
@@ -511,7 +517,7 @@ pub(crate) struct ProjectOpenTarget {
     pub(crate) needs_migration: bool,
 }
 
-pub(crate) struct AppRuntime {
+pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
     pub(crate) recent_projects: Vec<gwt::RecentProjectEntry>,
@@ -590,7 +596,9 @@ impl AppRuntime {
         let mut app = Self {
             tabs,
             active_tab_id,
-            recent_projects: dedupe_recent_projects(persisted.recent_projects),
+            recent_projects: prune_missing_recent_projects(dedupe_recent_projects(
+                persisted.recent_projects,
+            )),
             profile_selections: HashMap::new(),
             profile_config_path: None,
             runtimes: HashMap::new(),
@@ -1037,124 +1045,6 @@ impl AppRuntime {
     }
 
     /// SPEC-1934 FR-019: user accepted the migration confirmation modal.
-    /// Spawns `gwt::migration::execute_migration` on a background thread and
-    /// streams progress / completion / error back through `UserEvent::Migration*`.
-    pub(crate) fn start_migration_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
-            return Vec::new();
-        };
-        let project_root = tab.project_root.clone();
-        let proxy = self.proxy.clone();
-        let tab_id_owned = tab_id.to_string();
-
-        std::thread::spawn(move || {
-            let progress_tab = tab_id_owned.clone();
-            let progress_proxy = proxy.clone();
-            let outcome = gwt::migration::execute_migration(
-                &project_root,
-                gwt_core::migration::MigrationOptions::default(),
-                move |phase, percent| {
-                    progress_proxy.send(UserEvent::MigrationProgress {
-                        tab_id: progress_tab.clone(),
-                        phase,
-                        percent,
-                    });
-                },
-            );
-            match outcome {
-                Ok(result) => proxy.send(UserEvent::MigrationDone {
-                    tab_id: tab_id_owned,
-                    branch_worktree_path: result.branch_worktree_path,
-                }),
-                Err(error) => proxy.send(UserEvent::MigrationError {
-                    tab_id: tab_id_owned,
-                    phase: error.phase,
-                    message: error.message,
-                    recovery: error.recovery,
-                }),
-            }
-        });
-
-        Vec::new()
-    }
-
-    /// SPEC-1934 US-6.7: user dismissed the modal. Drop the in-memory flag so
-    /// the rest of the GUI proceeds without further detection events.
-    pub(crate) fn skip_migration_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.migration_pending = false;
-        }
-        Vec::new()
-    }
-
-    /// SPEC-1934 US-6.9: migration finished successfully. Re-point the project
-    /// tab at the new branch worktree, reload its persisted workspace, and
-    /// surface a [`BackendEvent::MigrationDone`] alongside a refreshed
-    /// workspace_state broadcast.
-    pub(crate) fn handle_migration_done(
-        &mut self,
-        tab_id: &str,
-        branch_worktree_path: &Path,
-    ) -> Vec<OutboundEvent> {
-        let canonical = dunce::canonicalize(branch_worktree_path)
-            .unwrap_or_else(|_| branch_worktree_path.to_path_buf());
-
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.project_root = canonical.clone();
-            tab.kind = gwt::ProjectKind::Git;
-            tab.migration_pending = false;
-            match load_restored_workspace_state(&canonical) {
-                Ok(persisted) => tab.workspace = WorkspaceState::from_persisted(persisted),
-                Err(error) => {
-                    tracing::warn!(
-                        target: "gwt::migration",
-                        ?canonical,
-                        %error,
-                        "post-migration workspace reload failed; keeping current workspace state"
-                    );
-                }
-            }
-        }
-        let _ = self.persist();
-
-        vec![
-            self.workspace_state_broadcast(),
-            OutboundEvent::broadcast(BackendEvent::MigrationDone {
-                tab_id: tab_id.to_string(),
-                branch_worktree_path: canonical.display().to_string(),
-            }),
-        ]
-    }
-
-    /// SPEC-1934 US-6.6: migration failed. Drop the pending flag (the
-    /// frontend offers Retry / Restore / Quit) and broadcast the failure.
-    pub(crate) fn handle_migration_error(
-        &mut self,
-        tab_id: &str,
-        phase: gwt_core::migration::MigrationPhase,
-        message: String,
-        recovery: gwt_core::migration::RecoveryState,
-    ) -> Vec<OutboundEvent> {
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            tab.migration_pending = false;
-        }
-        vec![OutboundEvent::broadcast(BackendEvent::MigrationError {
-            tab_id: tab_id.to_string(),
-            phase: phase.as_str().to_string(),
-            message,
-            recovery: recovery_state_label(recovery).to_string(),
-        })]
-    }
-
-    /// SPEC-1934 US-6.8: user chose Quit. Phase 10.4 will translate this into
-    /// a `UserEvent::QuitApp` once the runtime helper lands (T-097); the
-    /// frontend already closes the modal optimistically.
-    pub(crate) fn quit_migration_events(&mut self, _tab_id: &str) -> Vec<OutboundEvent> {
-        // TODO(T-097): proxy.send(UserEvent::QuitApp) once the dispatch
-        // helper lands.
-        Vec::new()
-    }
-
     pub(crate) fn remember_recent_project(&mut self, target: &ProjectOpenTarget) {
         self.recent_projects
             .retain(|entry| !same_worktree_path(&entry.path, &target.project_root));
@@ -1230,215 +1120,6 @@ impl AppRuntime {
             events.push(self.launch_wizard_state_broadcast(None));
         }
         events
-    }
-
-    pub(crate) fn create_window_events(
-        &mut self,
-        preset: WindowPreset,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return Vec::new();
-        };
-        let window = {
-            let Some(tab) = self.tab_mut(&tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.add_window(preset, bounds)
-        };
-        self.register_window(&tab_id, &window.id);
-        let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
-        let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast()];
-        events.extend(runtime_events);
-        events
-    }
-
-    pub(crate) fn focus_window_events(
-        &mut self,
-        id: &str,
-        bounds: Option<WindowGeometry>,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let Some(tab) = self.tab_mut(&address.tab_id) else {
-            return Vec::new();
-        };
-        if !tab.workspace.focus_window(&address.raw_id, bounds) {
-            return Vec::new();
-        }
-        self.active_tab_id = Some(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn cycle_focus_events(
-        &mut self,
-        direction: gwt::FocusCycleDirection,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(tab) = self.active_tab_mut() else {
-            return Vec::new();
-        };
-        if tab.workspace.cycle_focus(direction, bounds).is_none() {
-            return Vec::new();
-        }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn update_viewport_events(
-        &mut self,
-        viewport: gwt::CanvasViewport,
-    ) -> Vec<OutboundEvent> {
-        let Some(tab) = self.active_tab_mut() else {
-            return Vec::new();
-        };
-        tab.workspace.update_viewport(viewport);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn arrange_windows_events(
-        &mut self,
-        mode: gwt::ArrangeMode,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return Vec::new();
-        };
-        let arranged = {
-            let Some(tab) = self.tab_mut(&tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.arrange_windows(mode, bounds)
-        };
-        if !arranged {
-            return Vec::new();
-        }
-        if let Some(tab) = self.tab(&tab_id) {
-            for window in tab.workspace.persisted().windows.iter() {
-                self.resize_runtime_to_window(&combined_window_id(&tab_id, &window.id));
-            }
-        }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn maximize_window_events(
-        &mut self,
-        id: &str,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.maximize_window(&address.raw_id, bounds)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn minimize_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.minimize_window(&address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn restore_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.restore_window(&address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn update_window_geometry_events(
-        &mut self,
-        id: &str,
-        geometry: WindowGeometry,
-        cols: u16,
-        rows: u16,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.update_geometry(&address.raw_id, geometry)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        if let Some(runtime) = self.runtimes.get(id) {
-            if let Ok(mut pane) = runtime.pane.lock() {
-                let _ = pane.resize(cols.max(20), rows.max(6));
-            }
-        }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        self.stop_window_runtime(id);
-        self.remove_window_state_tracking(id);
-        self.profile_selections.remove(id);
-        if !close_window_from_workspace(
-            &mut self.tabs,
-            &mut self.window_lookup,
-            &mut self.window_details,
-            id,
-        ) {
-            return Vec::new();
-        }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn list_windows_event(&self) -> BackendEvent {
-        let windows = self
-            .active_tab_id
-            .as_ref()
-            .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| workspace_view_for_tab(tab).windows)
-            .unwrap_or_default();
-        BackendEvent::WindowList { windows }
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
@@ -1656,86 +1337,6 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn load_profile_events(&mut self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
-        if let Err(message) = self.resolve_profile_window_context(id) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message,
-                },
-            )];
-        }
-
-        let selected_profile = self.profile_selections.get(id).cloned();
-        let config_path = match self.profile_config_path() {
-            Ok(path) => path,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-        match gwt::profile_dispatch::load_snapshot_at(&config_path, selected_profile.as_deref()) {
-            Ok(snapshot) => {
-                self.profile_selections
-                    .insert(id.to_string(), snapshot.selected_profile.clone());
-                vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileSnapshot {
-                        id: id.to_string(),
-                        snapshot,
-                    },
-                )]
-            }
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )],
-        }
-    }
-
-    pub(crate) fn load_memo_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
-        let project_root = match self.resolve_memo_window_context(id) {
-            Ok(context) => context,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        }
-        .1;
-
-        match gwt_core::notes::load_snapshot(&project_root) {
-            Ok(snapshot) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::MemoNotes {
-                    id: id.to_string(),
-                    notes: snapshot.notes,
-                    selected_note_id: None,
-                },
-            )],
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::MemoError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )],
-        }
-    }
-
     pub(crate) fn load_logs_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
@@ -1787,643 +1388,6 @@ impl AppRuntime {
                 BackendEvent::LogError {
                     id: id.to_string(),
                     message: error,
-                },
-            )],
-        }
-    }
-
-    pub(crate) fn select_profile_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        profile_name: &str,
-    ) -> Vec<OutboundEvent> {
-        if let Err(message) = self.resolve_profile_window_context(id) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message,
-                },
-            )];
-        }
-
-        self.profile_selections
-            .insert(id.to_string(), profile_name.to_string());
-        self.load_profile_events(client_id, id)
-    }
-
-    pub(crate) fn create_profile_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        name: &str,
-    ) -> Vec<OutboundEvent> {
-        let tab_id = match self.resolve_profile_window_context(id) {
-            Ok(tab_id) => tab_id,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        let selected_profile = name.trim().to_string();
-        let config_path = match self.profile_config_path() {
-            Ok(path) => path,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-        if let Err(error) =
-            gwt::profile_dispatch::create_profile_at(&config_path, &selected_profile)
-        {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )];
-        }
-
-        self.profile_selections
-            .insert(id.to_string(), selected_profile);
-        self.profile_snapshot_events(&tab_id, id, client_id)
-    }
-
-    pub(crate) fn set_active_profile_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        profile_name: &str,
-    ) -> Vec<OutboundEvent> {
-        let tab_id = match self.resolve_profile_window_context(id) {
-            Ok(tab_id) => tab_id,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        let config_path = match self.profile_config_path() {
-            Ok(path) => path,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-        if let Err(error) =
-            gwt::profile_dispatch::switch_active_profile_at(&config_path, profile_name)
-        {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )];
-        }
-
-        self.profile_selections
-            .insert(id.to_string(), profile_name.to_string());
-        self.profile_snapshot_events(&tab_id, id, client_id)
-    }
-
-    fn save_profile_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        request: ProfileSaveRequest,
-    ) -> Vec<OutboundEvent> {
-        let tab_id = match self.resolve_profile_window_context(id) {
-            Ok(tab_id) => tab_id,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        let config_path = match self.profile_config_path() {
-            Ok(path) => path,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-        if let Err(error) = gwt::profile_dispatch::save_profile_at(
-            &config_path,
-            &request.current_name,
-            &request.name,
-            &request.description,
-            &request.env_vars,
-            &request.disabled_env,
-        ) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )];
-        }
-
-        self.profile_selections
-            .insert(id.to_string(), request.name.trim().to_string());
-        self.profile_snapshot_events(&tab_id, id, client_id)
-    }
-
-    pub(crate) fn delete_profile_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        profile_name: &str,
-    ) -> Vec<OutboundEvent> {
-        let tab_id = match self.resolve_profile_window_context(id) {
-            Ok(tab_id) => tab_id,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        let config_path = match self.profile_config_path() {
-            Ok(path) => path,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::ProfileError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-        if let Err(error) = gwt::profile_dispatch::delete_profile_at(&config_path, profile_name) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::ProfileError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )];
-        }
-
-        self.profile_snapshot_events(&tab_id, id, client_id)
-    }
-
-    fn resolve_profile_window_context(&self, id: &str) -> std::result::Result<String, String> {
-        let Some(address) = self.window_lookup.get(id) else {
-            return Err("Window not found".to_string());
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return Err("Project tab not found".to_string());
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return Err("Window not found".to_string());
-        };
-        if window.preset != WindowPreset::Profile {
-            return Err("Window is not a Profile surface".to_string());
-        }
-
-        Ok(address.tab_id.clone())
-    }
-
-    fn profile_window_ids_for_tab(&self, tab_id: &str) -> Vec<String> {
-        let Some(tab) = self.tab(tab_id) else {
-            return Vec::new();
-        };
-        tab.workspace
-            .persisted()
-            .windows
-            .iter()
-            .filter(|window| window.preset == WindowPreset::Profile)
-            .map(|window| combined_window_id(tab_id, &window.id))
-            .collect()
-    }
-
-    fn profile_config_path(&self) -> std::result::Result<PathBuf, String> {
-        if let Some(path) = &self.profile_config_path {
-            return Ok(path.clone());
-        }
-        gwt::profile_dispatch::config_path().map_err(|error| error.to_string())
-    }
-
-    fn active_profile_spawn_env(&self) -> Result<gwt_agent::LaunchEnvironment, String> {
-        let config_path = self.profile_config_path()?;
-        gwt_agent::LaunchEnvironment::from_active_profile(
-            &config_path,
-            gwt_agent::LaunchRuntimeTarget::Host,
-        )
-    }
-
-    fn profile_snapshot_events(
-        &mut self,
-        tab_id: &str,
-        selected_window_id: &str,
-        client_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let window_ids = self.profile_window_ids_for_tab(tab_id);
-        let mut events = Vec::new();
-
-        for window_id in window_ids {
-            let selected_profile = self.profile_selections.get(&window_id).cloned();
-            let config_path = match self.profile_config_path() {
-                Ok(path) => path,
-                Err(message) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::ProfileError {
-                            id: selected_window_id.to_string(),
-                            message,
-                        },
-                    )];
-                }
-            };
-            match gwt::profile_dispatch::load_snapshot_at(&config_path, selected_profile.as_deref())
-            {
-                Ok(snapshot) => {
-                    self.profile_selections
-                        .insert(window_id.clone(), snapshot.selected_profile.clone());
-                    events.push(OutboundEvent::broadcast(BackendEvent::ProfileSnapshot {
-                        id: window_id,
-                        snapshot,
-                    }));
-                }
-                Err(error) => {
-                    return vec![OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::ProfileError {
-                            id: selected_window_id.to_string(),
-                            message: error.to_string(),
-                        },
-                    )];
-                }
-            }
-        }
-
-        events
-    }
-
-    pub(crate) fn create_memo_note_events(
-        &self,
-        client_id: &str,
-        id: &str,
-        title: String,
-        body: String,
-        pinned: bool,
-    ) -> Vec<OutboundEvent> {
-        let (tab_id, project_root) = match self.resolve_memo_window_context(id) {
-            Ok(context) => context,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        let created = match gwt_core::notes::create_note(
-            &project_root,
-            gwt_core::notes::MemoNoteDraft::new(title, body, pinned),
-        ) {
-            Ok(note) => note,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-
-        self.memo_snapshot_events(&tab_id, id, Some(created.id), &project_root, client_id)
-    }
-
-    pub(crate) fn update_memo_note_events(
-        &self,
-        client_id: &str,
-        id: &str,
-        note_id: &str,
-        title: String,
-        body: String,
-        pinned: bool,
-    ) -> Vec<OutboundEvent> {
-        let (tab_id, project_root) = match self.resolve_memo_window_context(id) {
-            Ok(context) => context,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        let updated = match gwt_core::notes::update_note(
-            &project_root,
-            note_id,
-            gwt_core::notes::MemoNoteDraft::new(title, body, pinned),
-        ) {
-            Ok(note) => note,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-
-        self.memo_snapshot_events(&tab_id, id, Some(updated.id), &project_root, client_id)
-    }
-
-    pub(crate) fn delete_memo_note_events(
-        &self,
-        client_id: &str,
-        id: &str,
-        note_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let (tab_id, project_root) = match self.resolve_memo_window_context(id) {
-            Ok(context) => context,
-            Err(message) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message,
-                    },
-                )];
-            }
-        };
-
-        if let Err(error) = gwt_core::notes::delete_note(&project_root, note_id) {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::MemoError {
-                    id: id.to_string(),
-                    message: error.to_string(),
-                },
-            )];
-        }
-
-        let selected_note_id = match gwt_core::notes::load_snapshot(&project_root) {
-            Ok(snapshot) => snapshot.notes.first().map(|note| note.id.clone()),
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: id.to_string(),
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-
-        self.memo_snapshot_events(&tab_id, id, selected_note_id, &project_root, client_id)
-    }
-
-    fn resolve_memo_window_context(
-        &self,
-        id: &str,
-    ) -> std::result::Result<(String, PathBuf), String> {
-        let Some(address) = self.window_lookup.get(id) else {
-            return Err("Window not found".to_string());
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return Err("Project tab not found".to_string());
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return Err("Window not found".to_string());
-        };
-        if window.preset != WindowPreset::Memo {
-            return Err("Window is not a Memo surface".to_string());
-        }
-
-        Ok((address.tab_id.clone(), tab.project_root.clone()))
-    }
-
-    fn memo_window_ids_for_tab(&self, tab_id: &str) -> Vec<String> {
-        let Some(tab) = self.tab(tab_id) else {
-            return Vec::new();
-        };
-        tab.workspace
-            .persisted()
-            .windows
-            .iter()
-            .filter(|window| window.preset == WindowPreset::Memo)
-            .map(|window| combined_window_id(tab_id, &window.id))
-            .collect()
-    }
-
-    fn memo_snapshot_events(
-        &self,
-        tab_id: &str,
-        selected_window_id: &str,
-        selected_note_id: Option<String>,
-        project_root: &Path,
-        client_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let snapshot = match gwt_core::notes::load_snapshot(project_root) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::MemoError {
-                        id: selected_window_id.to_string(),
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-
-        self.memo_window_ids_for_tab(tab_id)
-            .into_iter()
-            .map(|window_id| {
-                OutboundEvent::broadcast(BackendEvent::MemoNotes {
-                    id: window_id.clone(),
-                    notes: snapshot.notes.clone(),
-                    selected_note_id: if window_id == selected_window_id {
-                        selected_note_id.clone()
-                    } else {
-                        None
-                    },
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn post_board_entry_events(
-        &self,
-        client_id: &str,
-        request: BoardPostRequest,
-    ) -> Vec<OutboundEvent> {
-        let BoardPostRequest {
-            id,
-            entry_kind,
-            body,
-            parent_id,
-            topics,
-            owners,
-            targets,
-        } = request;
-
-        let Some(address) = self.window_lookup.get(&id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Window not found".to_string(),
-                },
-            )];
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Project tab not found".to_string(),
-                },
-            )];
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Window not found".to_string(),
-                },
-            )];
-        };
-        if window.preset != WindowPreset::Board {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Window is not a Board surface".to_string(),
-                },
-            )];
-        }
-
-        let trimmed_body = body.trim();
-        if trimmed_body.is_empty() {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: "Board entry body is required".to_string(),
-                },
-            )];
-        }
-
-        let parent_id = parent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let topics = sanitize_board_list(&topics);
-        let owners = sanitize_board_list(&owners);
-        let targets = sanitize_board_list(&targets);
-
-        let snapshot = match gwt_core::coordination::load_snapshot(&tab.project_root) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardError {
-                        id,
-                        message: error.to_string(),
-                    },
-                )];
-            }
-        };
-        if let Some(parent_id) = parent_id.as_deref() {
-            if !snapshot
-                .board
-                .entries
-                .iter()
-                .any(|entry| entry.id == parent_id)
-            {
-                return vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::BoardError {
-                        id,
-                        message: "Reply target was not found".to_string(),
-                    },
-                )];
-            }
-        }
-
-        let mut entry = gwt_core::coordination::BoardEntry::new(
-            gwt_core::coordination::AuthorKind::User,
-            "You",
-            entry_kind,
-            trimmed_body,
-            None,
-            parent_id,
-            topics,
-            owners,
-        );
-        if !targets.is_empty() {
-            entry = entry.with_target_owners(targets);
-        }
-        match gwt_core::coordination::post_entry(&tab.project_root, entry) {
-            Ok(snapshot) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardEntries {
-                    id,
-                    entries: snapshot.board.entries,
-                },
-            )],
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::BoardError {
-                    id,
-                    message: error.to_string(),
                 },
             )],
         }
@@ -2803,18 +1767,6 @@ impl AppRuntime {
     }
 }
 
-fn sanitize_board_list(values: &[String]) -> Vec<String> {
-    let mut sanitized = Vec::new();
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || sanitized.iter().any(|item| item == trimmed) {
-            continue;
-        }
-        sanitized.push(trimmed.to_string());
-    }
-    sanitized
-}
-
 fn load_log_entries_from_dir(log_dir: &Path) -> Result<Vec<gwt_core::logging::LogEvent>, String> {
     let path = gwt_core::logging::current_log_file(log_dir);
     let file = match std::fs::File::open(&path) {
@@ -2916,395 +1868,6 @@ fn spawn_branch_cleanup_async(
 }
 
 impl AppRuntime {
-    pub(crate) fn open_launch_wizard(
-        &mut self,
-        id: &str,
-        branch_name: &str,
-        linked_issue_number: Option<u64>,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            })];
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Project tab not found".to_string(),
-            })];
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window not found".to_string(),
-            })];
-        };
-
-        if window.preset != WindowPreset::Branches {
-            return vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: "Window is not a branches list".to_string(),
-            })];
-        }
-
-        let project_root = tab.project_root.clone();
-        let tab_id = address.tab_id.clone();
-        match self.open_launch_wizard_for_branch(
-            &tab_id,
-            &project_root,
-            branch_name,
-            linked_issue_number,
-        ) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => vec![OutboundEvent::broadcast(BackendEvent::BranchError {
-                id: id.to_string(),
-                message: error,
-            })],
-        }
-    }
-
-    pub(crate) fn open_launch_wizard_for_branch(
-        &mut self,
-        tab_id: &str,
-        project_root: &Path,
-        branch_name: &str,
-        linked_issue_number: Option<u64>,
-    ) -> Result<(), String> {
-        let normalized_branch_name = normalize_branch_name(branch_name);
-        let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
-        let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
-        let quick_start_root = worktree_path
-            .clone()
-            .unwrap_or_else(|| project_root.to_path_buf());
-        let quick_start_entries = self
-            .launch_wizard_cache
-            .quick_start_entries(&quick_start_root, &normalized_branch_name);
-        let previous_profile = self.launch_wizard_cache.previous_profile(&quick_start_root);
-        let agent_options = self.launch_wizard_cache.agent_options();
-        let (docker_context, docker_service_status) =
-            detect_wizard_docker_context_and_status(&quick_start_root);
-        let wizard_id = Uuid::new_v4().to_string();
-        self.launch_wizard = Some(LaunchWizardSession {
-            tab_id: tab_id.to_string(),
-            wizard_id,
-            wizard: LaunchWizardState::open_with_previous_profile(
-                LaunchWizardContext {
-                    selected_branch: synthetic_branch_entry(branch_name),
-                    normalized_branch_name,
-                    worktree_path,
-                    quick_start_root,
-                    live_sessions,
-                    docker_context,
-                    docker_service_status,
-                    linked_issue_number,
-                },
-                agent_options,
-                quick_start_entries,
-                previous_profile,
-            ),
-        });
-
-        Ok(())
-    }
-
-    fn refresh_open_launch_wizard_from_cache(&mut self) {
-        let Some(session) = self.launch_wizard.as_mut() else {
-            return;
-        };
-        let context = session.wizard.context.clone();
-        let agent_options = self.launch_wizard_cache.agent_options();
-        let quick_start_entries = self
-            .launch_wizard_cache
-            .quick_start_entries(&context.quick_start_root, &context.normalized_branch_name);
-        session.wizard.apply_hydration(gwt::LaunchWizardHydration {
-            selected_branch: Some(context.selected_branch),
-            normalized_branch_name: context.normalized_branch_name,
-            worktree_path: context.worktree_path,
-            quick_start_root: context.quick_start_root,
-            docker_context: context.docker_context,
-            docker_service_status: context.docker_service_status,
-            agent_options,
-            quick_start_entries,
-            previous_profile: None,
-        });
-    }
-
-    pub(crate) fn open_issue_launch_wizard_events(
-        &mut self,
-        client_id: &str,
-        id: &str,
-        issue_number: u64,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                knowledge_error_event(
-                    id,
-                    KnowledgeKind::Issue,
-                    "Window not found",
-                    None,
-                    None,
-                    None,
-                ),
-            )];
-        };
-        let Some(tab) = self.tab(&address.tab_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                knowledge_error_event(
-                    id,
-                    KnowledgeKind::Issue,
-                    "Project tab not found",
-                    None,
-                    None,
-                    None,
-                ),
-            )];
-        };
-        let Some(window) = tab.workspace.window(&address.raw_id) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                knowledge_error_event(
-                    id,
-                    KnowledgeKind::Issue,
-                    "Window not found",
-                    None,
-                    None,
-                    None,
-                ),
-            )];
-        };
-        let Some(kind) = knowledge_kind_for_preset(window.preset) else {
-            return vec![OutboundEvent::reply(
-                client_id,
-                knowledge_error_event(
-                    id,
-                    KnowledgeKind::Issue,
-                    "Window is not a knowledge bridge",
-                    None,
-                    None,
-                    None,
-                ),
-            )];
-        };
-
-        let project_root = tab.project_root.clone();
-        let tab_id = address.tab_id.clone();
-        let proxy = self.proxy.clone();
-        let client_id = client_id.to_string();
-        let id = id.to_string();
-        let active_session_branches = self.active_session_branches_for_tab(&address.tab_id);
-        thread::spawn(move || {
-            let result =
-                list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
-                    .map_err(|error| error.to_string())
-                    .and_then(|entries| {
-                        preferred_issue_launch_branch(&entries)
-                            .ok_or_else(|| "No local branch is available for launch".to_string())
-                    });
-            proxy.send(UserEvent::IssueLaunchWizardPrepared(
-                IssueLaunchWizardPrepared {
-                    client_id,
-                    id,
-                    knowledge_kind: kind,
-                    tab_id,
-                    project_root,
-                    issue_number,
-                    result,
-                },
-            ));
-        });
-        Vec::new()
-    }
-
-    pub(crate) fn handle_issue_launch_wizard_prepared(
-        &mut self,
-        prepared: IssueLaunchWizardPrepared,
-    ) -> Vec<OutboundEvent> {
-        let IssueLaunchWizardPrepared {
-            client_id,
-            id,
-            knowledge_kind,
-            tab_id,
-            project_root,
-            issue_number,
-            result,
-        } = prepared;
-        if self.tab(&tab_id).is_none() {
-            return vec![OutboundEvent::reply(
-                &client_id,
-                knowledge_error_event(
-                    id,
-                    knowledge_kind,
-                    "Project tab not found",
-                    None,
-                    None,
-                    None,
-                ),
-            )];
-        }
-
-        match result {
-            Ok(branch_name) => match self.open_launch_wizard_for_branch(
-                &tab_id,
-                &project_root,
-                &branch_name,
-                Some(issue_number),
-            ) {
-                Ok(()) => vec![self.launch_wizard_state_outbound()],
-                Err(error) => vec![OutboundEvent::reply(
-                    &client_id,
-                    knowledge_error_event(id, knowledge_kind, error, None, None, None),
-                )],
-            },
-            Err(error) => vec![OutboundEvent::reply(
-                &client_id,
-                knowledge_error_event(id, knowledge_kind, error, None, None, None),
-            )],
-        }
-    }
-
-    pub(crate) fn handle_launch_wizard_action(
-        &mut self,
-        action: gwt::LaunchWizardAction,
-        bounds: Option<WindowGeometry>,
-    ) -> Vec<OutboundEvent> {
-        let Some(mut session) = self.launch_wizard.take() else {
-            return Vec::new();
-        };
-        let action_stage = Self::launch_wizard_action_error_stage(&action);
-        let action_label = Self::launch_wizard_action_label(&action);
-        let requested_agent_id = match &action {
-            gwt::LaunchWizardAction::SetAgent { agent_id } => Some(agent_id.clone()),
-            _ => None,
-        };
-        session.wizard.apply(action);
-        if let Some(error) = session.wizard.error.as_deref() {
-            Self::log_launch_wizard_error(
-                &session,
-                action_stage,
-                action_label,
-                requested_agent_id.as_deref(),
-                error,
-            );
-        }
-
-        match session.wizard.completion.take() {
-            Some(LaunchWizardCompletion::Cancelled) => {
-                vec![self.launch_wizard_state_broadcast(None)]
-            }
-            Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
-                let Some(address) = self.window_lookup.get(&window_id).cloned() else {
-                    let error = "The selected session window is no longer available".to_string();
-                    Self::log_launch_wizard_error(
-                        &session,
-                        "focus_window",
-                        action_label,
-                        requested_agent_id.as_deref(),
-                        &error,
-                    );
-                    session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
-                };
-                let Some(tab) = self.tab_mut(&address.tab_id) else {
-                    let error = "Project tab not found".to_string();
-                    Self::log_launch_wizard_error(
-                        &session,
-                        "focus_window",
-                        action_label,
-                        requested_agent_id.as_deref(),
-                        &error,
-                    );
-                    session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
-                };
-                if !tab.workspace.focus_window(&address.raw_id, None) {
-                    let error = "The selected session window is no longer available".to_string();
-                    Self::log_launch_wizard_error(
-                        &session,
-                        "focus_window",
-                        action_label,
-                        requested_agent_id.as_deref(),
-                        &error,
-                    );
-                    session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
-                }
-                self.active_tab_id = Some(address.tab_id);
-                let _ = self.persist();
-                vec![
-                    self.workspace_state_broadcast(),
-                    self.launch_wizard_state_broadcast(None),
-                ]
-            }
-            Some(LaunchWizardCompletion::Launch(config)) => {
-                let Some(bounds) = bounds else {
-                    let error = "Viewport bounds are required to launch a window".to_string();
-                    Self::log_launch_wizard_error(
-                        &session,
-                        "launch_bounds",
-                        action_label,
-                        requested_agent_id.as_deref(),
-                        &error,
-                    );
-                    session.wizard.error = Some(error);
-                    self.launch_wizard = Some(session);
-                    return vec![self.launch_wizard_state_outbound()];
-                };
-                match *config {
-                    LaunchWizardLaunchRequest::Agent(config) => {
-                        match self.spawn_agent_window(&session.tab_id, *config, bounds) {
-                            Ok(mut events) => {
-                                events.push(self.launch_wizard_state_broadcast(None));
-                                events
-                            }
-                            Err(error) => {
-                                Self::log_launch_wizard_error(
-                                    &session,
-                                    "spawn_agent_window",
-                                    action_label,
-                                    requested_agent_id.as_deref(),
-                                    &error,
-                                );
-                                session.wizard.error = Some(error);
-                                self.launch_wizard = Some(session);
-                                vec![self.launch_wizard_state_outbound()]
-                            }
-                        }
-                    }
-                    LaunchWizardLaunchRequest::Shell(config) => {
-                        match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
-                            Ok(mut events) => {
-                                events.push(self.launch_wizard_state_broadcast(None));
-                                events
-                            }
-                            Err(error) => {
-                                Self::log_launch_wizard_error(
-                                    &session,
-                                    "spawn_shell_window",
-                                    action_label,
-                                    requested_agent_id.as_deref(),
-                                    &error,
-                                );
-                                session.wizard.error = Some(error);
-                                self.launch_wizard = Some(session);
-                                vec![self.launch_wizard_state_outbound()]
-                            }
-                        }
-                    }
-                }
-            }
-            None => {
-                self.launch_wizard = Some(session);
-                vec![self.launch_wizard_state_outbound()]
-            }
-        }
-    }
-
     pub(crate) fn live_sessions_for_branch(
         &self,
         tab_id: &str,
@@ -3708,9 +2271,9 @@ impl AppRuntime {
             config.display_name,
             config.branch.as_ref().unwrap_or(&"workspace".to_string())
         );
-        let window =
-            tab.workspace
-                .add_window_with_title(WindowPreset::Agent, title.clone(), false, bounds);
+        let window = tab
+            .workspace
+            .add_window_with_title(WindowPreset::Agent, title, false, bounds);
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
@@ -3739,54 +2302,7 @@ impl AppRuntime {
                 config,
                 profile_config_path,
                 hook_forward_target,
-            )
-        });
-
-        Ok(events)
-    }
-
-    pub(crate) fn spawn_wizard_shell_window(
-        &mut self,
-        tab_id: &str,
-        config: ShellLaunchConfig,
-        bounds: WindowGeometry,
-    ) -> Result<Vec<OutboundEvent>, String> {
-        let tab = self
-            .tab_mut(tab_id)
-            .ok_or_else(|| "Project tab not found".to_string())?;
-        let project_root = tab.project_root.display().to_string();
-        let title = format!(
-            "{} · {}",
-            config.display_name,
-            config.branch.as_ref().unwrap_or(&"workspace".to_string())
-        );
-        let window = tab
-            .workspace
-            .add_window_with_title(WindowPreset::Shell, title, false, bounds);
-        self.register_window(tab_id, &window.id);
-        let window_id = combined_window_id(tab_id, &window.id);
-
-        self.window_pty_statuses
-            .insert(window_id.clone(), WindowProcessStatus::Running);
-        self.window_hook_states.remove(&window_id);
-
-        let mut events = vec![self.workspace_state_broadcast()];
-        events.extend(Self::status_events(
-            window_id.clone(),
-            WindowProcessStatus::Running,
-            Some("Launching...".to_string()),
-        ));
-
-        let proxy = self.proxy.clone();
-        let profile_config_path = self.profile_config_path()?;
-        thread::spawn(move || {
-            Self::spawn_wizard_shell_window_async(
-                proxy,
-                project_root,
-                window_id,
-                config,
-                profile_config_path,
-            )
+            );
         });
 
         Ok(events)
@@ -3830,14 +2346,6 @@ impl AppRuntime {
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
             refresh_managed_gwt_assets_for_worktree(&worktree_path)
                 .map_err(|error| error.to_string())?;
-            if let Err(error) = gwt::index_worker::bootstrap_project_index_for_path(&worktree_path)
-            {
-                tracing::warn!(
-                    worktree = %worktree_path.display(),
-                    error = %error,
-                    "project index bootstrap skipped during worktree prepare"
-                );
-            }
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
                 && apply_host_package_runner_fallback(&mut config)
@@ -3935,9 +2443,10 @@ impl AppRuntime {
                 agent_id,
                 linked_issue_number,
             )) => {
-                proxy.send(UserEvent::LaunchComplete {
+                dispatch_agent_launch_success(
+                    proxy,
                     window_id,
-                    result: Ok((
+                    (
                         process_launch,
                         session_id,
                         branch_name,
@@ -3945,8 +2454,12 @@ impl AppRuntime {
                         worktree_path,
                         agent_id,
                         linked_issue_number,
-                    )),
-                });
+                    ),
+                    |proxy, project_index_root| {
+                        crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
+                            .spawn(proxy, project_index_root);
+                    },
+                );
             }
             Err(error) => {
                 proxy.send(UserEvent::LaunchComplete {
@@ -3955,43 +2468,6 @@ impl AppRuntime {
                 });
             }
         }
-    }
-
-    pub(crate) fn spawn_wizard_shell_window_async(
-        proxy: AppEventProxy,
-        project_root: String,
-        window_id: String,
-        mut config: ShellLaunchConfig,
-        profile_config_path: PathBuf,
-    ) {
-        let result = (|| {
-            proxy.send(UserEvent::LaunchProgress {
-                window_id: window_id.clone(),
-                message: "Preparing worktree...".to_string(),
-            });
-            resolve_shell_launch_worktree(Path::new(&project_root), &mut config)?;
-            let worktree_path = config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(&project_root));
-            gwt_agent::LaunchEnvironment::from_active_profile(
-                &profile_config_path,
-                config.runtime_target,
-            )?
-            .with_project_root(&worktree_path)
-            .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
-
-            if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-                proxy.send(UserEvent::LaunchProgress {
-                    window_id: window_id.clone(),
-                    message: "Starting Docker service...".to_string(),
-                });
-            }
-
-            build_shell_process_launch(Path::new(&project_root), &mut config)
-        })();
-
-        proxy.send(UserEvent::ShellLaunchComplete { window_id, result });
     }
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {
@@ -4273,24 +2749,6 @@ impl AppRuntime {
         })
     }
 
-    pub(crate) fn launch_wizard_state_outbound(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: self
-                .launch_wizard
-                .as_ref()
-                .map(|wizard| Box::new(wizard.wizard.view())),
-        })
-    }
-
-    pub(crate) fn launch_wizard_state_broadcast(
-        &self,
-        wizard: Option<gwt::LaunchWizardView>,
-    ) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
-            wizard: wizard.map(Box::new),
-        })
-    }
-
     pub(crate) fn window_status(&self, window_id: &str) -> Option<WindowProcessStatus> {
         let pty_state = self
             .window_pty_statuses
@@ -4382,10 +2840,6 @@ impl AppRuntime {
             self.launch_wizard = None;
         }
         wizard_closed
-    }
-
-    pub(crate) fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
-        self.launch_wizard.take()
     }
 
     pub(crate) fn rebuild_window_lookup(&mut self) {
@@ -4776,7 +3230,7 @@ mod tests {
         ffi::OsString,
         fs,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex, RwLock},
+        sync::{mpsc, Arc, Mutex, RwLock},
         thread,
         time::{Duration, Instant},
     };
@@ -4808,10 +3262,10 @@ mod tests {
     use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
     use super::{
-        ActiveAgentSession, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProjectTabRuntime, UserEvent,
-        WindowRuntime,
+        dispatch_agent_launch_success, ActiveAgentSession, AgentLaunchCompletion, AppEventProxy,
+        AppRuntime, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
+        KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardMemoryCache, LaunchWizardSession,
+        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
     };
     use crate::{combined_window_id, same_worktree_path, PtyWriterRegistry};
 
@@ -5297,6 +3751,120 @@ exit 0
         panic!("timed out waiting for {label}: {}", path.display());
     }
 
+    #[test]
+    fn project_index_bootstrap_runs_in_background_without_blocking_launch() {
+        let temp = tempdir().expect("tempdir");
+        let (proxy, events) = AppEventProxy::stub();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let spawn_started = Instant::now();
+        let service = crate::project_index_bootstrap::ProjectIndexBootstrapService::new_for_test();
+
+        let spawned = service.spawn_with(
+            proxy,
+            temp.path().to_path_buf(),
+            move |_project_root| {
+                started_tx.send(()).expect("signal bootstrap start");
+                release_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release bootstrap");
+                Ok(())
+            },
+            |_project_root| gwt::ProjectIndexStatusView {
+                state: gwt::ProjectIndexStatusState::Ready,
+                detail: "test bootstrap complete".to_string(),
+            },
+        );
+        let spawn_elapsed = spawn_started.elapsed();
+
+        assert_eq!(
+            spawned,
+            crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
+        );
+        assert!(
+            spawn_elapsed < Duration::from_millis(250),
+            "spawning bootstrap must return before the slow bootstrap body completes"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("background bootstrap should start promptly");
+        assert!(
+            events.lock().expect("event log").is_empty(),
+            "no status should be emitted before the slow bootstrap completes"
+        );
+
+        release_tx.send(()).expect("release bootstrap");
+        wait_for_recorded_event("project index status", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::ProjectIndexStatus {
+                        project_root,
+                        status,
+                    } if project_root == &dunce::canonicalize(temp.path())
+                            .unwrap_or_else(|_| temp.path().to_path_buf())
+                            .display()
+                            .to_string()
+                        && status.state == gwt::ProjectIndexStatusState::Ready
+                        && status.detail == "test bootstrap complete"
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn agent_launch_success_dispatches_launch_complete_before_project_index_status() {
+        let temp = tempdir().expect("tempdir");
+        let (proxy, events) = AppEventProxy::stub();
+        let completion: AgentLaunchCompletion = (
+            ProcessLaunch {
+                command: "agent".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(temp.path().to_path_buf()),
+            },
+            "session-1".to_string(),
+            "feature/test".to_string(),
+            "Codex".to_string(),
+            temp.path().to_path_buf(),
+            gwt_agent::AgentId::Codex,
+            None,
+        );
+
+        dispatch_agent_launch_success(
+            proxy,
+            "tab-1::agent-1".to_string(),
+            completion,
+            |proxy, project_root| {
+                proxy.send(UserEvent::ProjectIndexStatus {
+                    project_root: project_root.display().to_string(),
+                    status: gwt::ProjectIndexStatusView {
+                        state: gwt::ProjectIndexStatusState::Ready,
+                        detail: "ready".to_string(),
+                    },
+                });
+            },
+        );
+
+        let recorded = events.lock().expect("events");
+        assert!(
+            matches!(recorded.first(), Some(UserEvent::LaunchComplete { .. })),
+            "LaunchComplete must be emitted first"
+        );
+        assert!(
+            matches!(
+                recorded.get(1),
+                Some(UserEvent::ProjectIndexStatus {
+                    project_root,
+                    status,
+                }) if project_root == &temp.path().display().to_string()
+                    && status.state == gwt::ProjectIndexStatusState::Ready
+            ),
+            "ProjectIndexStatus must follow LaunchComplete and carry project root"
+        );
+    }
+
     fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
         LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -5321,6 +3889,7 @@ exit 0
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 Vec::new(),
             ),
@@ -5374,6 +3943,7 @@ exit 0
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
                     linked_issue_number: Some(42),
+                    linked_issue_kind: None,
                 },
                 Vec::new(),
                 Vec::new(),
@@ -5604,7 +4174,7 @@ exit 0
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
-            .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None)
+            .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
             .expect("open launch wizard");
 
         let view = runtime
@@ -5664,7 +4234,7 @@ exit 0
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
         runtime
-            .open_launch_wizard_for_branch("tab-1", &repo, "feature/docker", None)
+            .open_launch_wizard_for_branch("tab-1", &repo, "feature/docker", None, None)
             .expect("open launch wizard");
 
         let wizard = &runtime.launch_wizard.as_ref().expect("wizard").wizard;
@@ -6111,7 +4681,19 @@ exit 0
 
     #[test]
     fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
+        // Persistence flows through `workspace_state_path()` which is
+        // HOME-based, so we must serialize against other HOME-touching
+        // tests and pin HOME to this test's tempdir for the duration.
+        // Without this guard, parallel tests that mutate HOME race
+        // with our persist + load pair and the workspace file ends up
+        // missing (or pointing at another test's already-cleaned
+        // tempdir).
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab_with_window_at(
@@ -6176,7 +4758,7 @@ exit 0
     fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -6229,7 +4811,7 @@ exit 0
     fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_views() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -6414,7 +4996,7 @@ exit 0
     fn app_runtime_knowledge_search_replies_through_async_dispatch() {
         let _lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -6497,10 +5079,10 @@ exit 0
     fn app_runtime_manual_knowledge_refresh_replies_through_async_dispatch() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _gh_lock = fake_gh_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -6586,10 +5168,10 @@ exit 0
     fn app_runtime_manual_knowledge_refresh_error_preserves_request_context() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _gh_lock = fake_gh_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -6659,10 +5241,10 @@ exit 0
     fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _gh_lock = fake_gh_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -6689,7 +5271,7 @@ exit 0
         runtime.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
             client_id: "client-1".to_string(),
             id: window_id.clone(),
-            project_root: repo.clone(),
+            project_root: repo,
             kind: gwt::KnowledgeKind::Issue,
             request_id: Some(33),
             selected_number: None,
@@ -6830,7 +5412,7 @@ exit 0
     fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -7028,7 +5610,7 @@ exit 0
     fn app_runtime_create_memo_note_broadcasts_repo_scoped_snapshot_to_memo_windows() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -7062,8 +5644,8 @@ exit 0
             "client-1".to_string(),
             FrontendEvent::CreateMemoNote {
                 id: current_window_id.clone(),
-                title: "".to_string(),
-                body: "".to_string(),
+                title: String::new(),
+                body: String::new(),
                 pinned: false,
             },
         );
@@ -7102,7 +5684,7 @@ exit 0
     fn app_runtime_update_memo_note_persists_repo_scoped_edits() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -7161,7 +5743,7 @@ exit 0
     fn app_runtime_post_board_entry_persists_reply_topics_and_owners() {
         let _env_lock = env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -7347,8 +5929,8 @@ exit 0
         fs::create_dir_all(&repo_a).expect("repo-a");
         fs::create_dir_all(&repo_b).expect("repo-b");
 
-        let pending = migration_pending_tab("tab-1", repo_a.clone());
-        let mut clean = sample_project_tab("tab-2", "Other", repo_b.clone(), ProjectKind::Git, &[]);
+        let pending = migration_pending_tab("tab-1", repo_a);
+        let mut clean = sample_project_tab("tab-2", "Other", repo_b, ProjectKind::Git, &[]);
         clean.migration_pending = false;
         let runtime = sample_runtime(temp.path(), vec![pending, clean], Some("tab-1"));
 
@@ -7371,7 +5953,7 @@ exit 0
         let new_worktree = project.join("develop");
         fs::create_dir_all(&new_worktree).expect("new worktree");
 
-        let tab = migration_pending_tab("tab-1", project.clone());
+        let tab = migration_pending_tab("tab-1", project);
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
         let events = runtime.handle_migration_done("tab-1", &new_worktree);

@@ -38,12 +38,38 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let codex_hooks =
         std::fs::read_to_string(dir.path().join(".codex/hooks.json")).expect("read codex");
     let cli_bin_text = cli_bin.display().to_string();
-    assert!(json_commands(&claude_settings)
-        .iter()
-        .any(|command| command.contains(&cli_bin_text)));
-    assert!(json_commands(&codex_hooks)
-        .iter()
-        .any(|command| command.contains(&cli_bin_text)));
+    // Diagnostic-rich asserts: if the test ever flakes on CI again,
+    // the failure message includes the resolved cli_bin path, the
+    // observed GWT_HOOK_BIN env value, and a redacted view of the
+    // generated commands so we can see WHICH command shape mismatched
+    // instead of just `assertion failed`.
+    let observed_env = std::env::var("GWT_HOOK_BIN").unwrap_or_else(|_| "<unset>".to_string());
+    let claude_commands = json_commands(&claude_settings);
+    assert!(
+        claude_commands
+            .iter()
+            .any(|command| command.contains(&cli_bin_text)),
+        "claude settings missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  GWT_HOOK_BIN env: {observed_env}\n  generated commands ({} entries):\n{}",
+        claude_commands.len(),
+        claude_commands
+            .iter()
+            .map(|c| format!("    - {c}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let codex_commands = json_commands(&codex_hooks);
+    assert!(
+        codex_commands
+            .iter()
+            .any(|command| command.contains(&cli_bin_text)),
+        "codex hooks missing cli_bin path\n  cli_bin_text: {cli_bin_text}\n  GWT_HOOK_BIN env: {observed_env}\n  generated commands ({} entries):\n{}",
+        codex_commands.len(),
+        codex_commands
+            .iter()
+            .map(|c| format!("    - {c}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
 
     let exclude_path = dir.path().join(".git/info/exclude");
     let exclude = std::fs::read_to_string(&exclude_path).expect("read exclude");
@@ -154,7 +180,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|p| p.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 struct ScopedEnvVar {

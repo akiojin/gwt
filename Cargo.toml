@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "9.14.0"
+version = "9.15.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/akiojin/gwt"
@@ -69,7 +69,6 @@ serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "chrono"] }
 tracing-appender = "0.2"
-tracing-chrome = "0.7"
 
 # File locking
 fs2 = "0.4"
@@ -79,16 +78,11 @@ portable-pty = "0.9"
 
 # Testing
 tempfile = "3"
-insta = { version = "1", features = ["yaml"] }
-
-# Benchmarks
-criterion = { version = "0.8", features = ["html_reports"] }
 
 # Embedded assets
 include_dir = "0.7"
 
 # Utilities
-directories = "6"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
@@ -102,8 +96,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Windows executable resources
 winresource = "0.1.31"
 
-# WebSocket
-tokio-tungstenite = "0.28"
+# WebSocket-related
 futures-util = "0.3"
 
 # Base64 encoding
@@ -123,7 +116,6 @@ dunce = "1"
 
 # System information
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
-nvml-wrapper = "0.12"
 
 # File system watcher (gwt-spec issue)
 notify = "8"

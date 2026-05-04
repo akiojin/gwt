@@ -248,7 +248,10 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
                 _ => PrState::Open,
             };
             PrStatus {
-                number: v.get("number").and_then(|n| n.as_u64()).unwrap_or(0),
+                number: v
+                    .get("number")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
                 title: v
                     .get("title")
                     .and_then(|t| t.as_str())
@@ -397,10 +400,7 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
         .and_then(|v| v.as_str())
         .unwrap_or("(untitled)");
 
-    let summary = format!(
-        "PR: {} | CI: {:?} | Merge: {:?} | Review: {:?}",
-        title, ci, merge, review
-    );
+    let summary = format!("PR: {title} | CI: {ci:?} | Merge: {merge:?} | Review: {review:?}");
 
     Ok(PrCheckReport {
         ci,

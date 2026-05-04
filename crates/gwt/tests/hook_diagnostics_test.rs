@@ -4,7 +4,7 @@ use gwt::cli::{dispatch, TestEnv};
 use serde_json::Value;
 
 fn argv(strs: &[&str]) -> Vec<String> {
-    strs.iter().map(|s| s.to_string()).collect()
+    strs.iter().map(std::string::ToString::to_string).collect()
 }
 
 fn env_test_lock() -> &'static std::sync::Mutex<()> {
@@ -39,7 +39,7 @@ impl Drop for ScopedEnvVar {
 fn hook_event_writes_opt_in_handler_timing_without_stdout_noise() {
     let _env_lock = env_test_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     let profile_path = tmp.path().join("hook-profile.jsonl");
     let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);

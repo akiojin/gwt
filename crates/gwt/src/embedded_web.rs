@@ -3,74 +3,74 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
-pub(crate) fn index_html() -> &'static str {
+pub fn index_html() -> &'static str {
     include_str!("../web/index.html")
 }
 
-pub(crate) fn app_js() -> &'static str {
+pub fn app_js() -> &'static str {
     include_str!("../web/app.js")
 }
 
-pub(crate) fn branch_cleanup_modal_js() -> &'static str {
+pub fn branch_cleanup_modal_js() -> &'static str {
     include_str!("../web/branch-cleanup-modal.js")
 }
 
-pub(crate) fn migration_modal_js() -> &'static str {
+pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
 
-pub(crate) fn xterm_js() -> &'static str {
+pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
 
-pub(crate) fn xterm_fit_js() -> &'static str {
+pub fn xterm_fit_js() -> &'static str {
     include_str!("../web/vendor/xterm/addon-fit.mjs")
 }
 
-pub(crate) fn xterm_css() -> &'static str {
+pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
 }
 
-pub(crate) async fn index_handler() -> Html<&'static str> {
+pub async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
 
-pub(crate) async fn app_js_handler() -> impl IntoResponse {
+pub async fn app_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         app_js(),
     )
 }
 
-pub(crate) async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
+pub async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         branch_cleanup_modal_js(),
     )
 }
 
-pub(crate) async fn migration_modal_js_handler() -> impl IntoResponse {
+pub async fn migration_modal_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         migration_modal_js(),
     )
 }
 
-pub(crate) async fn xterm_js_handler() -> impl IntoResponse {
+pub async fn xterm_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         xterm_js(),
     )
 }
 
-pub(crate) async fn xterm_fit_js_handler() -> impl IntoResponse {
+pub async fn xterm_fit_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         xterm_fit_js(),
     )
 }
 
-pub(crate) async fn xterm_css_handler() -> impl IntoResponse {
+pub async fn xterm_css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
@@ -79,7 +79,11 @@ pub(crate) async fn xterm_css_handler() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_js, index_html};
+    use super::{app_js, branch_cleanup_modal_js, index_html, xterm_css, xterm_fit_js, xterm_js};
+    use super::{
+        app_js_handler, branch_cleanup_modal_js_handler, xterm_css_handler, xterm_fit_js_handler,
+        xterm_js_handler,
+    };
 
     fn frontend_bundle_source() -> &'static str {
         concat!(
@@ -293,6 +297,66 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_secondary_assets_are_embedded() {
+        assert!(!branch_cleanup_modal_js().is_empty());
+        assert!(!xterm_js().is_empty());
+        assert!(!xterm_fit_js().is_empty());
+        assert!(xterm_css().contains(".xterm"));
+    }
+
+    #[tokio::test]
+    async fn embedded_web_asset_handlers_set_content_types() {
+        use axum::{http::header, response::IntoResponse};
+
+        let js = "text/javascript; charset=utf-8";
+        assert_eq!(
+            app_js_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap(),
+            js,
+        );
+        assert_eq!(
+            branch_cleanup_modal_js_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap(),
+            js,
+        );
+        assert_eq!(
+            xterm_js_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap(),
+            js,
+        );
+        assert_eq!(
+            xterm_fit_js_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap(),
+            js,
+        );
+        assert_eq!(
+            xterm_css_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap(),
+            "text/css; charset=utf-8",
+        );
+    }
+
+    #[test]
     fn embedded_web_canvas_wheel_routing_is_installed_through_named_handler() {
         let html = frontend_bundle_source();
 
@@ -375,7 +439,7 @@ mod tests {
             "expected embedded css to define index health states",
         );
         assert!(
-            js.contains("function setIndexStatus(status)")
+            js.contains("function setIndexStatus(projectRoot, status)")
                 && js.contains("case \"project_index_status\""),
             "expected frontend to consume project_index_status events",
         );

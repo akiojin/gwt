@@ -486,7 +486,7 @@ mod tests {
             height: 920.0,
         };
 
-        let window = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        let window = workspace.add_window(WindowPreset::Shell, bounds);
 
         // Shell preset is 720x420 so the geometry must center inside bounds.
         assert_eq!(window.geometry.x, 360.0);
@@ -505,7 +505,7 @@ mod tests {
 
         let first = workspace.add_window(WindowPreset::Shell, bounds.clone());
         let second = workspace.add_window(WindowPreset::Shell, bounds.clone());
-        let third = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        let third = workspace.add_window(WindowPreset::Shell, bounds);
 
         assert_eq!((first.geometry.x, first.geometry.y), (360.0, 250.0));
         assert_eq!((second.geometry.x, second.geometry.y), (388.0, 274.0));
@@ -557,7 +557,7 @@ mod tests {
 
         // A minimized window must not block the cascade slot it was created in,
         // so the next launch lands back at the viewport center.
-        let next = workspace.add_window(WindowPreset::Shell, bounds.clone());
+        let next = workspace.add_window(WindowPreset::Shell, bounds);
         assert_eq!((next.geometry.x, next.geometry.y), (360.0, 250.0));
     }
 

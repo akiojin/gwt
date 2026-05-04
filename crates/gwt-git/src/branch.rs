@@ -481,7 +481,7 @@ fn parse_branch_line(line: &str) -> Option<Branch> {
     let upstream = parts
         .get(2)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
     let track = parts.get(3).unwrap_or(&"");
     let (ahead, behind) = parse_ahead_behind(track);
     let last_commit_date = parts

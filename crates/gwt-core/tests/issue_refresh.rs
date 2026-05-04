@@ -6,7 +6,9 @@ use std::{
 };
 
 use gwt_core::{
-    index::runtime::{refresh_issues_if_stale, RefreshIssuesOptions, RunnerSpawner},
+    index::runtime::{
+        refresh_issues_if_stale, PythonRunnerSpawner, RefreshIssuesOptions, RunnerSpawner,
+    },
     repo_hash::compute_repo_hash,
 };
 
@@ -25,7 +27,7 @@ impl RunnerSpawner for RecordingSpawner {
     ) -> std::io::Result<()> {
         self.calls
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(format!(
                 "{}|{}|{}",
                 repo_hash,
@@ -64,7 +66,10 @@ async fn refresh_kicks_runner_when_ttl_expired() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = spawner
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(calls.len(), 1, "expected one runner spawn call");
 }
 
@@ -84,7 +89,10 @@ async fn refresh_skipped_within_ttl() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = spawner
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(calls.len(), 0, "must not spawn runner within TTL window");
 }
 
@@ -102,7 +110,10 @@ async fn refresh_kicks_runner_when_meta_missing() {
     };
     refresh_issues_if_stale(&opts, &spawner).await.unwrap();
 
-    let calls = spawner.calls.lock().unwrap_or_else(|p| p.into_inner());
+    let calls = spawner
+        .calls
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(calls.len(), 1, "missing meta means stale");
 }
 
@@ -140,4 +151,18 @@ async fn refresh_returns_quickly_even_when_runner_runs_long() {
         start.elapsed() < Duration::from_millis(200),
         "refresh must not block on runner work"
     );
+}
+
+#[test]
+fn python_runner_spawner_builds_issue_index_command_and_surfaces_spawn_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spawner = PythonRunnerSpawner {
+        python_executable: tmp.path().join("missing-python.exe"),
+        runner_script: tmp.path().join("runner.py"),
+    };
+
+    let error = spawner
+        .spawn_index_issues("repo-hash", tmp.path(), true)
+        .expect_err("missing executable should surface the spawn error");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }

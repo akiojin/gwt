@@ -5,6 +5,18 @@ on:
     branches: [develop, main]
 
 jobs:
+  audit:
+    name: Cargo Deny (advisories + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.4
+      - name: Run cargo deny (advisories + sources)
+        run: cargo deny check advisories sources
   lint:
     name: Clippy & Rustfmt
     runs-on: ubuntu-latest
@@ -34,6 +46,14 @@ jobs:
         run: cargo clippy -p gwt-core -p gwt --all-targets --all-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check rustdoc warnings
+        # The codebase is at 0 rustdoc warnings post-PR #2331; this
+        # gate keeps it that way by failing CI if a future PR
+        # reintroduces a broken intra-doc link, an unclosed HTML tag,
+        # or a public-doc link to a private item.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps --document-private-items
       - name: Check frontend bundle syntax
         run: npm run --silent test:frontend-bundle
       - name: Check release flow contract

@@ -23,7 +23,7 @@ fn current_session_id() -> String {
     std::env::var(GWT_SESSION_ID_ENV).unwrap_or_default()
 }
 
-pub(crate) fn run<E: CliEnv>(
+pub fn run<E: CliEnv>(
     env: &mut E,
     action: SkillStateAction,
     skill_name: &str,

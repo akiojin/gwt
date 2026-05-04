@@ -91,7 +91,7 @@ impl SpecBody {
             .map(|s| (s.name, s.content))
             .collect();
 
-        for (name, location) in sections_index.0.iter() {
+        for (name, location) in &sections_index.0 {
             match location {
                 SectionLocation::Body => {
                     if let Some(content) = body_section_map.get(name) {

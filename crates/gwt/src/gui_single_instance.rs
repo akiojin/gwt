@@ -38,7 +38,7 @@ impl Drop for GuiInstanceLock {
         let _ = self.file.unlock();
         let mut registry = process_lock_registry()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         registry.remove(&self.path);
     }
 }
@@ -82,7 +82,7 @@ pub fn acquire_gui_instance_lock(
     {
         let mut registry = process_lock_registry()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if registry.contains(&lock_path) {
             return Err(GuiInstanceLockError::AlreadyRunning {
                 project_root: project_root.to_path_buf(),
@@ -127,7 +127,7 @@ pub fn acquire_gui_instance_lock(
 fn unregister_process_lock(path: &Path) {
     let mut registry = process_lock_registry()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     registry.remove(path);
 }
 

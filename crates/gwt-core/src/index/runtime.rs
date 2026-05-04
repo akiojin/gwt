@@ -286,7 +286,7 @@ mod tests {
         ) -> std::io::Result<()> {
             self.calls
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(format!(
                     "{}|{}|{}",
                     repo_hash,
@@ -313,7 +313,7 @@ mod tests {
             spawner
                 .calls
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .len(),
             1
         );
@@ -331,7 +331,7 @@ mod tests {
         std::fs::create_dir_all(&orphan).unwrap();
 
         let opts = ReconcileOptions {
-            index_root: idx.clone(),
+            index_root: idx,
             repo_hash: repo,
             active_worktree_paths: Vec::new(),
             legacy_worktree_dirs: Vec::new(),

@@ -33,7 +33,7 @@ Do not use this for new work intake. Use `gwt-register-issue` instead.
 ## Workflow
 
 1. Verify that `gwtd issue view` and `gwtd issue comments` can access the target issue.
-2. Gather facts with `gwtd issue view`, `gwtd issue comments`, linked PR inspection, and `python3 ".claude/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number or URL>"`.
+2. Gather facts with `gwtd issue view <number>`, `gwtd issue comments <number>`, `gwtd issue linked-prs <number>`, and `python3 ".codex/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number or URL>"`.
 3. Decide direct-fix vs spec-needed. Prefer direct fix for clear corrective work; prefer `gwt-discussion` when behavior design or broader scope definition is required.
 4. If the change is a clear direct fix, continue through `gwt-build-spec` and finish verification.
 5. Post progress and closure comments through `gwtd issue comment`.

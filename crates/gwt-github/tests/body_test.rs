@@ -81,15 +81,24 @@ fn red_12_assemble_body_and_comments() {
     let comments = [mk_comment(42, "plan", "plan content\nline 2")];
     let spec_body = SpecBody::parse(&body, &comments).unwrap();
     assert_eq!(
-        spec_body.sections.get(&n("spec")).map(|s| s.as_str()),
+        spec_body
+            .sections
+            .get(&n("spec"))
+            .map(std::string::String::as_str),
         Some("spec content")
     );
     assert_eq!(
-        spec_body.sections.get(&n("tasks")).map(|s| s.as_str()),
+        spec_body
+            .sections
+            .get(&n("tasks"))
+            .map(std::string::String::as_str),
         Some("tasks content")
     );
     assert_eq!(
-        spec_body.sections.get(&n("plan")).map(|s| s.as_str()),
+        spec_body
+            .sections
+            .get(&n("plan"))
+            .map(std::string::String::as_str),
         Some("plan content\nline 2")
     );
 }
@@ -127,7 +136,10 @@ s\n\
     ];
     let spec_body = SpecBody::parse(&body, &comments).unwrap();
     assert_eq!(
-        spec_body.sections.get(&n("plan")).map(|s| s.as_str()),
+        spec_body
+            .sections
+            .get(&n("plan"))
+            .map(std::string::String::as_str),
         Some("alpha\nbeta")
     );
 }
@@ -172,7 +184,10 @@ fn red_17_splice_preserves_other_sections() {
     spec_body.splice(n("tasks"), "tasks REPLACED".to_string());
 
     assert_eq!(
-        spec_body.sections.get(&n("tasks")).map(|s| s.as_str()),
+        spec_body
+            .sections
+            .get(&n("tasks"))
+            .map(std::string::String::as_str),
         Some("tasks REPLACED")
     );
     assert_eq!(spec_body.sections.get(&n("spec")).cloned(), before_spec);
@@ -188,7 +203,10 @@ fn red_18_splice_adds_new_section() {
     assert!(!spec_body.sections.contains_key(&n("research")));
     spec_body.splice(n("research"), "research body".to_string());
     assert_eq!(
-        spec_body.sections.get(&n("research")).map(|s| s.as_str()),
+        spec_body
+            .sections
+            .get(&n("research"))
+            .map(std::string::String::as_str),
         Some("research body")
     );
 }

@@ -203,7 +203,7 @@ fn red_58_load_entry_reconstructs_spec_body() {
     cache.write_snapshot(&mk_snapshot(11, body)).unwrap();
 
     let entry: CacheEntry = cache.load_entry(IssueNumber(11)).unwrap();
-    let spec_body: SpecBody = entry.spec_body.clone();
+    let spec_body: SpecBody = entry.spec_body;
     assert_eq!(
         spec_body.meta,
         SpecMeta {

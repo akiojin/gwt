@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn resolve_launch_worktree_request(
+pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
     base_branch: Option<&str>,
@@ -121,7 +121,7 @@ pub(crate) fn resolve_launch_worktree_request(
     Ok(())
 }
 
-pub(crate) fn resolve_launch_worktree(
+pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
@@ -134,7 +134,7 @@ pub(crate) fn resolve_launch_worktree(
     )
 }
 
-pub(crate) fn resolve_shell_launch_worktree(
+pub fn resolve_shell_launch_worktree(
     repo_path: &Path,
     config: &mut ShellLaunchConfig,
 ) -> Result<(), String> {
@@ -147,7 +147,7 @@ pub(crate) fn resolve_shell_launch_worktree(
     )
 }
 
-pub(crate) fn build_shell_process_launch(
+pub fn build_shell_process_launch(
     repo_path: &Path,
     config: &mut ShellLaunchConfig,
 ) -> Result<ProcessLaunch, String> {
@@ -223,9 +223,9 @@ pub(crate) fn build_shell_process_launch(
     })
 }
 
-pub(crate) const WINDOWS_HOST_SHELL_EXPRESSION_ENV: &str = "GWT_WINDOWS_HOST_SHELL_EXPRESSION";
+pub const WINDOWS_HOST_SHELL_EXPRESSION_ENV: &str = "GWT_WINDOWS_HOST_SHELL_EXPRESSION";
 
-pub(crate) fn windows_shell_process_command(shell: gwt_agent::WindowsShellKind) -> &'static str {
+pub fn windows_shell_process_command(shell: gwt_agent::WindowsShellKind) -> &'static str {
     match shell {
         gwt_agent::WindowsShellKind::CommandPrompt => "cmd.exe",
         gwt_agent::WindowsShellKind::WindowsPowerShell => "powershell",
@@ -241,7 +241,7 @@ fn interactive_windows_shell_args(shell: gwt_agent::WindowsShellKind) -> Vec<Str
     }
 }
 
-pub(crate) fn apply_windows_host_shell_wrapper(
+pub fn apply_windows_host_shell_wrapper(
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
@@ -330,7 +330,7 @@ fn build_powershell_command_script(command: &str, args: &[String]) -> String {
     )
 }
 
-pub(crate) fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
+pub fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchConfig) -> bool {
     apply_host_package_runner_fallback_with_probe(
         config,
         "npx".to_string(),
@@ -338,7 +338,7 @@ pub(crate) fn apply_host_package_runner_fallback(config: &mut gwt_agent::LaunchC
     )
 }
 
-pub(crate) fn apply_host_package_runner_fallback_with_probe<F>(
+pub fn apply_host_package_runner_fallback_with_probe<F>(
     config: &mut gwt_agent::LaunchConfig,
     fallback_executable: String,
     mut probe: F,
@@ -401,7 +401,7 @@ fn infer_package_runner_version_spec(command: &str, args: &[String]) -> Option<S
     }
 
     let version_spec = match args.first().map(String::as_str) {
-        Some("--yes") | Some("-y") => args.get(1)?,
+        Some("--yes" | "-y") => args.get(1)?,
         _ => args.first()?,
     };
     if version_spec.is_empty() || version_spec.starts_with('-') {
@@ -428,7 +428,7 @@ fn probe_host_package_runner(
     )
 }
 
-pub(crate) fn probe_host_package_runner_with_timeout(
+pub fn probe_host_package_runner_with_timeout(
     command: &str,
     args: Vec<String>,
     env_vars: &HashMap<String, String>,
@@ -474,7 +474,7 @@ pub(crate) fn probe_host_package_runner_with_timeout(
     }
 }
 
-pub(crate) fn command_matches_runner(command: &str, runner: &str) -> bool {
+pub fn command_matches_runner(command: &str, runner: &str) -> bool {
     let path = Path::new(command);
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -482,7 +482,7 @@ pub(crate) fn command_matches_runner(command: &str, runner: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(runner))
 }
 
-pub(crate) fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     if !gwt_docker::docker_available() {
         return Err("Docker is not installed or not available on PATH".to_string());
     }
@@ -495,7 +495,7 @@ pub(crate) fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn install_launch_gwt_bin_env(
+pub fn install_launch_gwt_bin_env(
     env_vars: &mut HashMap<String, String>,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
 ) -> Result<(), String> {
@@ -505,7 +505,7 @@ pub(crate) fn install_launch_gwt_bin_env(
     })
 }
 
-pub(crate) fn install_launch_gwt_bin_env_with_lookup(
+pub fn install_launch_gwt_bin_env_with_lookup(
     env_vars: &mut HashMap<String, String>,
     runtime_target: gwt_agent::LaunchRuntimeTarget,
     current_exe: &Path,

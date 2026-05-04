@@ -77,7 +77,7 @@ fn split_unquoted_control_operators(command: &str) -> Vec<&str> {
                     start = i;
                     continue;
                 }
-                b'|' if matches!(bytes.get(i + 1), Some(b'|') | Some(b'&')) => {
+                b'|' if matches!(bytes.get(i + 1), Some(b'|' | b'&')) => {
                     segments.push(&command[start..i]);
                     i += 2;
                     start = i;

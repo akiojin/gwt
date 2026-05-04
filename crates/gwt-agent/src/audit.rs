@@ -28,7 +28,7 @@ const SECRET_SUFFIXES: &[&str] = &["_API_KEY", "_TOKEN", "_SECRET"];
 ///
 /// Matching is case-insensitive. The following keys are considered secret:
 ///
-/// - Exact match against [`EXACT_SECRET_NAMES`].
+/// - Exact match against the module-level `EXACT_SECRET_NAMES` list.
 /// - Any key that ends with `_API_KEY`, `_TOKEN`, or `_SECRET`.
 ///
 /// Non-secret keys such as `ANTHROPIC_BASE_URL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`,
@@ -59,7 +59,7 @@ pub fn redact_env_value_for_audit<'a>(key: &str, value: &'a str) -> std::borrow:
 /// Callers should clone the `CustomCodingAgent` first when the original must
 /// retain secrets for launch.
 pub fn redact_secrets_in_agent(agent: &mut crate::custom::CustomCodingAgent) {
-    for (key, value) in agent.env.iter_mut() {
+    for (key, value) in &mut agent.env {
         if is_secret_env_key(key) {
             *value = REDACTED_PLACEHOLDER.to_string();
         }

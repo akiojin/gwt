@@ -140,7 +140,7 @@ fn spawn_output_reader(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let reader = BufReader::new(reader);
-        for line in reader.lines().map_while(|line| line.ok()) {
+        for line in reader.lines().map_while(std::result::Result::ok) {
             if tx.send(CommandOutputLine { stream, line }).is_err() {
                 break;
             }
@@ -892,7 +892,7 @@ mod tests {
     fn with_fake_docker<R>(script_body: &str, f: impl FnOnce(&PathBuf) -> R) -> R {
         let _guard = TEST_LOCK
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_dir, script_path) = write_fake_docker(script_body);
         let prev = std::env::var_os("GWT_DOCKER_BIN");
         std::env::set_var("GWT_DOCKER_BIN", &script_path);
@@ -905,7 +905,40 @@ mod tests {
     }
 
     fn read_invocation(path: &PathBuf) -> String {
-        fs::read_to_string(path).expect("read invocation log")
+        // Issue #2349: `compose_restart_invokes_docker_with_expected_arguments`
+        // (and a few sibling compose_* tests using the same fake-docker
+        // pattern) flake intermittently. The leading hypothesis is FS
+        // flush latency between the fake docker shell script's `> file`
+        // close and the parent test's read — kernels generally make
+        // writes-via-closed-fd visible to a subsequent read on the same
+        // host, but slow CI runners or APFS / tmpfs eventual-consistency
+        // edge cases occasionally observe an empty file.
+        //
+        // Retry up to 50 times × 10 ms (= 500 ms total) before giving
+        // up. The healthy path returns on the first attempt; the retry
+        // tail is invisible during normal runs and only kicks in when
+        // the file genuinely needs the OS a moment longer to settle.
+        for attempt in 0..50 {
+            match fs::read_to_string(path) {
+                Ok(content) if !content.is_empty() => return content,
+                Ok(_) => {
+                    // File exists but empty — fake docker may not have
+                    // flushed yet. Wait and retry.
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // File doesn't exist yet — same FS flush window.
+                }
+                Err(err) => panic!(
+                    "read invocation log {} (attempt {attempt}): {err}",
+                    path.display()
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "read invocation log: file at {} still empty / missing after 500ms",
+            path.display()
+        );
     }
 
     #[test]

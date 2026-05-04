@@ -78,10 +78,26 @@ gwtd issue spec 1784 --section plan
 gwtd pr current
 gwtd board show
 gwtd hook workflow-policy
+gwtd daemon status            # inspect the per-project runtime daemon
 ```
 
-Managed hooks and runtime delegation use `gwtd`. There is no separate daemon
-process to start by hand.
+Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
+running `gwtd daemon start` brings up a per-project runtime daemon
+(Unix-domain socket IPC) that multi-instance event fan-out depends on
+— for example, with the daemon running, Board posts you make in one
+`gwt` window appear in another instance opened on the same repo
+without a polling delay. The daemon keeps running in the background
+until you stop it (Ctrl-C or SIGTERM). `gwtd daemon status` prints
+the live endpoint for diagnostics. Without `gwtd daemon start`,
+multi-instance fan-out is inactive but local file-based state and
+the file watcher continue to work as before.
+
+Windows currently has no long-running daemon: `gwtd daemon start`
+exits with "not yet implemented", and managed hooks fall back to
+synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
+therefore unavailable on Windows pending follow-up work; `gwtd
+daemon status` still works there but always reports `stopped` until
+the named-pipe path lands.
 
 ## Main Workflow
 

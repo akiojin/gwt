@@ -45,7 +45,7 @@ pub enum HookOutput {
     Silent,
     /// Stop-hook block envelope: `{"decision":"block","reason":"<reason>"}`.
     /// Claude Code / Codex interpret this as "do not stop; continue with
-    /// <reason> as the new instruction". exit code is 0.
+    /// `<reason>` as the new instruction". exit code is 0.
     StopBlock {
         reason: String,
     },

@@ -259,7 +259,7 @@ mod tests {
     fn same_path_and_env_var_guard_preserve_previous_values() {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().expect("tempdir");
         let nested = dir.path().join("nested");
         std::fs::create_dir_all(&nested).expect("create nested");

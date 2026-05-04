@@ -178,7 +178,7 @@ fn run_post_backup(
     }
 
     let cfg = BareProjectConfig {
-        bare_repo_name: bare_repo_name.clone(),
+        bare_repo_name,
         remote_url: origin_url,
         created_at: Utc::now().to_rfc3339(),
         migrated_from: Some("normal".to_string()),

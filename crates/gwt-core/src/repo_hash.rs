@@ -1,6 +1,7 @@
 //! Repository identification via normalized origin URL hashing.
 //!
-//! `RepoHash` is the SHA256[:16] of a canonicalized origin URL. The same
+//! `RepoHash` is the first 16 hex digits of the SHA256 of a canonicalized
+//! origin URL (i.e., `SHA256(...)[..16]` in slice notation). The same
 //! upstream repository (HTTPS clone, SSH clone, second worktree) always
 //! resolves to the same `RepoHash`.
 

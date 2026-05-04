@@ -12,7 +12,7 @@ pub fn lock_pty_test() -> MutexGuard<'static, ()> {
     PTY_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|p| p.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, Clone)]

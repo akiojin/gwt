@@ -22,7 +22,7 @@ use serde_json::Value;
 const DETACHED_REPO_CACHE_DIR: &str = "__detached__";
 const SPEC_LABEL: &str = "gwt-spec";
 const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
-pub(crate) const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IssueCacheRefreshMeta {
@@ -30,33 +30,33 @@ struct IssueCacheRefreshMeta {
     ttl_minutes: u64,
 }
 
-pub(crate) fn issue_cache_base_root() -> PathBuf {
+pub fn issue_cache_base_root() -> PathBuf {
     gwt_cache_dir().join("issues")
 }
 
-pub(crate) fn detached_issue_cache_root() -> PathBuf {
+pub fn detached_issue_cache_root() -> PathBuf {
     issue_cache_base_root().join(DETACHED_REPO_CACHE_DIR)
 }
 
-pub(crate) fn issue_cache_root_for_repo_hash(repo_hash: &RepoHash) -> PathBuf {
+pub fn issue_cache_root_for_repo_hash(repo_hash: &RepoHash) -> PathBuf {
     issue_cache_base_root().join(repo_hash.as_str())
 }
 
-pub(crate) fn issue_cache_root_for_repo_slug(owner: &str, repo: &str) -> PathBuf {
+pub fn issue_cache_root_for_repo_slug(owner: &str, repo: &str) -> PathBuf {
     let remote = format!("https://github.com/{owner}/{repo}.git");
     issue_cache_root_for_repo_hash(&compute_repo_hash(&remote))
 }
 
-pub(crate) fn issue_cache_root_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
+pub fn issue_cache_root_for_repo_path(repo_path: &Path) -> Option<PathBuf> {
     crate::index_worker::detect_repo_hash(repo_path)
         .map(|repo_hash| issue_cache_root_for_repo_hash(&repo_hash))
 }
 
-pub(crate) fn issue_cache_root_for_repo_path_or_detached(repo_path: &Path) -> PathBuf {
+pub fn issue_cache_root_for_repo_path_or_detached(repo_path: &Path) -> PathBuf {
     issue_cache_root_for_repo_path(repo_path).unwrap_or_else(detached_issue_cache_root)
 }
 
-pub(crate) fn sync_issue_cache_from_remote_if_missing(
+pub fn sync_issue_cache_from_remote_if_missing(
     repo_path: &Path,
     cache_root: &Path,
 ) -> Result<(), String> {
@@ -70,7 +70,7 @@ pub(crate) fn sync_issue_cache_from_remote_if_missing(
     sync_issue_cache_from_remote(repo_path, cache_root)
 }
 
-pub(crate) fn sync_issue_cache_from_remote_if_stale(
+pub fn sync_issue_cache_from_remote_if_stale(
     repo_path: &Path,
     cache_root: &Path,
     ttl: Duration,
@@ -85,10 +85,7 @@ pub(crate) fn sync_issue_cache_from_remote_if_stale(
     Ok(true)
 }
 
-pub(crate) fn sync_issue_cache_from_remote(
-    repo_path: &Path,
-    cache_root: &Path,
-) -> Result<(), String> {
+pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Result<(), String> {
     let snapshots = fetch_issue_list_snapshots(repo_path)?;
     if snapshots.is_empty() {
         fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
@@ -115,7 +112,7 @@ pub(crate) fn sync_issue_cache_from_remote(
     Ok(())
 }
 
-pub(crate) fn issue_cache_has_entries(cache_root: &Path) -> bool {
+pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(cache_root) else {
         return false;
     };
@@ -225,7 +222,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
 
 fn parse_issue_state(value: Option<&str>) -> IssueState {
     match value {
-        Some("CLOSED") | Some("closed") => IssueState::Closed,
+        Some("CLOSED" | "closed") => IssueState::Closed,
         _ => IssueState::Open,
     }
 }
@@ -249,10 +246,13 @@ fn parse_issue_labels(issue: &Value) -> Vec<String> {
 }
 
 fn parse_comment_id(comment: &Value) -> Option<u64> {
-    if let Some(id) = comment.get("databaseId").and_then(|value| value.as_u64()) {
+    if let Some(id) = comment
+        .get("databaseId")
+        .and_then(serde_json::Value::as_u64)
+    {
         return Some(id);
     }
-    if let Some(id) = comment.get("id").and_then(|value| value.as_u64()) {
+    if let Some(id) = comment.get("id").and_then(serde_json::Value::as_u64) {
         return Some(id);
     }
     let url = comment.get("url").and_then(|value| value.as_str())?;
@@ -264,7 +264,7 @@ fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot
     let issue: Value = serde_json::from_str(json).map_err(|err| err.to_string())?;
     let actual_number = issue
         .get("number")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| format!("issue #{number} missing number field", number = number.0))?;
     let title = issue
         .get("title")

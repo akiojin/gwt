@@ -197,7 +197,9 @@ mod tests {
 
     #[test]
     fn gwt_home_ends_with_dot_gwt() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = gwt_home();
         assert!(home.ends_with(".gwt"));
     }
@@ -251,7 +253,9 @@ mod tests {
 
     #[test]
     fn gwt_config_path_ends_with_config_toml() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_config_path();
         assert_eq!(p.file_name().unwrap(), "config.toml");
         assert!(p.ends_with(gwt_home_suffix(&["config.toml"])));
@@ -259,21 +263,27 @@ mod tests {
 
     #[test]
     fn gwt_sessions_dir_is_under_home() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_sessions_dir();
         assert!(p.ends_with(gwt_home_suffix(&["sessions"])));
     }
 
     #[test]
     fn gwt_cache_dir_is_under_home() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_cache_dir();
         assert!(p.ends_with(gwt_home_suffix(&["cache"])));
     }
 
     #[test]
     fn gwt_projects_dir_is_under_home() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_projects_dir();
         assert!(p.ends_with(gwt_home_suffix(&["projects"])));
     }
@@ -287,7 +297,9 @@ mod tests {
 
     #[test]
     fn gwt_session_state_path_is_under_home() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_session_state_path();
         assert!(p.ends_with(gwt_home_suffix(&["session.json"])));
     }
@@ -305,7 +317,9 @@ mod tests {
 
     #[test]
     fn gwt_logs_dir_is_under_home() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_logs_dir();
         assert!(p.ends_with(gwt_home_suffix(&["logs"])));
     }
@@ -353,21 +367,27 @@ mod tests {
 
     #[test]
     fn gwt_runtime_dir_is_under_home() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_runtime_dir();
         assert!(p.ends_with(gwt_home_suffix(&["runtime"])));
     }
 
     #[test]
     fn gwt_runtime_runner_path_is_under_runtime_dir() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_runtime_runner_path();
         assert!(p.ends_with(gwt_home_suffix(&["runtime", "chroma_index_runner.py"])));
     }
 
     #[test]
     fn gwt_project_index_venv_dir_is_under_runtime_dir() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = gwt_project_index_venv_dir();
         assert!(p.ends_with(gwt_home_suffix(&["runtime", "chroma-venv"])));
     }

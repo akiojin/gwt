@@ -33,7 +33,7 @@ type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 const CLIENT_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Default)]
-pub(super) struct ClientHub {
+pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>,
 }
 
@@ -42,7 +42,7 @@ impl ClientHub {
         let (tx, rx) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
         self.clients
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(client_id, tx);
         rx
     }
@@ -50,12 +50,15 @@ impl ClientHub {
     pub(super) fn unregister(&self, client_id: &str) {
         self.clients
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(client_id);
     }
 
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
-        let mut clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stale_clients = Vec::new();
         for outbound in events {
             let payload = serde_json::to_string(&outbound.event).expect("backend event json");
@@ -90,7 +93,7 @@ struct ServerState {
     pty_writers: PtyWriterRegistry,
 }
 
-pub(super) struct EmbeddedServer {
+pub struct EmbeddedServer {
     url: String,
     hook_forward_token: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -175,7 +178,7 @@ impl EmbeddedServer {
     }
 }
 
-pub(super) async fn health_handler() -> &'static str {
+pub async fn health_handler() -> &'static str {
     "ok"
 }
 
@@ -360,7 +363,7 @@ fn handle_frontend_message(
     );
 }
 
-pub(super) fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+pub fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -368,7 +371,7 @@ pub(super) fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str)
         .is_some_and(|token| token == expected_token)
 }
 
-pub(super) fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
+pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
         return true;
     };
@@ -387,7 +390,7 @@ pub(super) fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
 }
 
 #[cfg(test)]
-pub(super) fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
+pub fn broadcast_runtime_hook_event(clients: &ClientHub, event: RuntimeHookEvent) {
     clients.dispatch(vec![OutboundEvent::broadcast(
         gwt::BackendEvent::RuntimeHookEvent { event },
     )]);
@@ -440,7 +443,9 @@ mod tests {
             FrontendEvent::FrontendReady,
         );
 
-        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
             [UserEvent::Frontend { client_id, event: FrontendEvent::FrontendReady }]
@@ -463,7 +468,9 @@ mod tests {
             },
         );
 
-        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(matches!(
             recorded.as_slice(),
             [UserEvent::Frontend { client_id, event: FrontendEvent::TerminalInput { id, data } }]
@@ -486,7 +493,10 @@ mod tests {
             )]);
         }
 
-        let clients = hub.clients.lock().unwrap_or_else(|p| p.into_inner());
+        let clients = hub
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             !clients.contains_key("slow-client"),
             "lagging websocket client should be unregistered once its queue is full"
@@ -515,8 +525,8 @@ mod tests {
         let (proxy, events) = AppEventProxy::stub();
         let clients = ClientHub::default();
         let pty_writers = Arc::new(RwLock::new(HashMap::new()));
-        let mut server = EmbeddedServer::start(&runtime, proxy, clients.clone(), pty_writers)
-            .expect("embedded server");
+        let mut server =
+            EmbeddedServer::start(&runtime, proxy, clients, pty_writers).expect("embedded server");
         let hook = server.hook_forward_target();
         let client = reqwest::blocking::Client::new();
 
@@ -641,7 +651,9 @@ mod tests {
             .expect("authorized hook request");
         assert_eq!(accepted.status(), HttpStatusCode::NO_CONTENT);
 
-        let recorded = events.lock().unwrap_or_else(|p| p.into_inner());
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(recorded.iter().any(|user_event| {
             matches!(
                 user_event,

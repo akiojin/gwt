@@ -13,9 +13,9 @@
 //!   GraphQL query in the HTTPS backend.
 //!
 //! This module defines the trait, its input/output types, and an in-memory
-//! [`FakeIssueClient`] used by contract tests. A real HTTPS backend backed
-//! by `reqwest` is implemented in [`crate::client::http`] (coming in the next
-//! TDD cycle).
+//! [`fake::FakeIssueClient`] used by contract tests. A real HTTPS backend
+//! backed by `reqwest` is implemented in [`crate::client::http`] (coming in
+//! the next TDD cycle).
 
 pub mod fake;
 pub mod http;

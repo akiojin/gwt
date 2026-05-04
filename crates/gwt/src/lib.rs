@@ -3,7 +3,11 @@ pub mod branch_list;
 pub mod cli;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
+#[cfg(unix)]
+pub mod daemon_publisher;
 pub mod daemon_runtime;
+#[cfg(unix)]
+pub mod daemon_subscriber;
 mod discussion_resume;
 pub mod file_tree;
 pub mod gui_single_instance;
@@ -17,6 +21,7 @@ pub mod migration;
 pub mod native_app;
 pub mod persistence;
 pub mod preset;
+pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
 pub mod window_state;
@@ -43,7 +48,7 @@ pub use custom_agents_service::{
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
-pub use index_worker::ProjectIndexStatusView;
+pub use index_worker::{ProjectIndexStatusState, ProjectIndexStatusView};
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
     KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
@@ -55,7 +60,8 @@ pub use launch_wizard::{
     LaunchWizardCompletion, LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchRequest,
     LaunchWizardLiveSessionView, LaunchWizardOptionView, LaunchWizardPreviousProfile,
     LaunchWizardQuickStartView, LaunchWizardState, LaunchWizardStep, LaunchWizardSummaryView,
-    LaunchWizardView, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode, ShellLaunchConfig,
+    LaunchWizardView, LinkedIssueKind, LiveSessionEntry, QuickStartEntry, QuickStartLaunchMode,
+    ShellLaunchConfig,
 };
 pub use managed_assets::refresh_managed_gwt_assets_for_worktree;
 #[cfg(target_os = "macos")]

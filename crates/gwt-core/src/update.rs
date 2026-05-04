@@ -294,17 +294,14 @@ impl UpdateManager {
 
         match self.fetch_latest_release() {
             Ok(release) => {
-                let latest_ver = match parse_tag_version(&release.tag_name) {
-                    Some(v) => v,
-                    None => {
-                        return UpdateState::Failed {
-                            message: format!(
-                                "Failed to parse release tag as version: {}",
-                                release.tag_name
-                            ),
-                            failed_at: now,
-                        };
-                    }
+                let Some(latest_ver) = parse_tag_version(&release.tag_name) else {
+                    return UpdateState::Failed {
+                        message: format!(
+                            "Failed to parse release tag as version: {}",
+                            release.tag_name
+                        ),
+                        failed_at: now,
+                    };
                 };
 
                 let platform = Platform::detect();
@@ -331,8 +328,8 @@ impl UpdateManager {
                     checked_at: now,
                     latest_version: Some(latest_ver.to_string()),
                     release_url: Some(release.html_url.clone()),
-                    portable_asset_url: portable_asset_url.clone(),
-                    installer_asset_url: installer_asset_url.clone(),
+                    portable_asset_url,
+                    installer_asset_url,
                     asset_url: asset_url.clone(),
                 };
                 let _ = write_cache(&self.cache_path, &cache_file);
@@ -815,9 +812,9 @@ fn parse_tag_version(tag: &str) -> Option<Version> {
 fn asset_name_from_url(url: &str) -> Option<String> {
     url.split('/')
         .next_back()
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
@@ -1128,12 +1125,9 @@ fn find_extracted_binary(extract_dir: &Path, binary_name: &str) -> Result<Option
     // Fallback: deep search.
     let mut stack = vec![extract_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => {
-                // Ignore unreadable directories and continue searching other paths.
-                continue;
-            }
+        // Ignore unreadable directories and continue searching other paths.
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
         };
 
         for entry in entries.flatten() {
@@ -2138,7 +2132,7 @@ mod tests {
     fn choose_apply_plan_prefers_installer_for_windows_per_user_msi_install() {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let local_app_data = temp.path().join("AppData").join("Local");
         let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
@@ -2176,7 +2170,7 @@ mod tests {
     ) {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let local_app_data = temp.path().join("AppData").join("Local");
         let current_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
@@ -2258,7 +2252,7 @@ mod tests {
     fn resolve_windows_restart_executable_prefers_per_user_install_after_migration() {
         let _guard = ENV_MUTEX
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let local_app_data = temp.path().join("AppData").join("Local");
         let migrated_exe = local_app_data.join("Programs").join("GWT").join("gwt.exe");
@@ -2848,7 +2842,7 @@ mod tests {
         );
         assert_eq!(
             app_bundle_executable_path(&bundle, target),
-            Some(bundle_exe.clone())
+            Some(bundle_exe)
         );
         assert_eq!(
             find_matching_app_bundle(temp.path(), target),

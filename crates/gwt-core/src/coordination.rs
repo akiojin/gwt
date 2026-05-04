@@ -126,6 +126,11 @@ impl BoardEntry {
         self
     }
 
+    pub fn with_target_owner(mut self, value: impl Into<String>) -> Self {
+        self.target_owners.push(value.into());
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         author_kind: AuthorKind,
@@ -814,7 +819,9 @@ mod tests {
 
     #[test]
     fn git_repo_without_origin_uses_project_scoped_coordination_dir() {
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home_guard = ScopedEnvVar::set("HOME", home.path());
         let _userprofile_guard = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -864,7 +871,7 @@ mod tests {
 
         let mut names: Vec<String> = std::fs::read_dir(coordination_dir(dir.path()))
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
@@ -917,15 +924,11 @@ mod tests {
 
         write_events(
             legacy_one.join(EVENTS_FILE_NAME).as_path(),
-            &[CoordinationEvent::MessageAppended {
-                entry: second.clone(),
-            }],
+            &[CoordinationEvent::MessageAppended { entry: second }],
         );
         write_events(
             legacy_two.join(EVENTS_FILE_NAME).as_path(),
-            &[CoordinationEvent::MessageAppended {
-                entry: first.clone(),
-            }],
+            &[CoordinationEvent::MessageAppended { entry: first }],
         );
 
         migrate_legacy_coordination_dirs(&project_dir, &[legacy_one.clone(), legacy_two.clone()])
@@ -1143,6 +1146,28 @@ mod tests {
         );
 
         assert!(entry.target_owners.is_empty());
+    }
+
+    #[test]
+    fn board_entry_with_target_owner_pushes_single_value() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Claim,
+            "claim",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_target_owner("sess-a3f2");
+        assert_eq!(entry.target_owners, vec!["sess-a3f2".to_string()]);
+
+        let chained = entry.with_target_owner("feature/foo");
+        assert_eq!(
+            chained.target_owners,
+            vec!["sess-a3f2".to_string(), "feature/foo".to_string()]
+        );
     }
 
     #[test]

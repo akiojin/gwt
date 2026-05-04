@@ -362,7 +362,7 @@ pub fn sessions_dir_from_runtime_path(runtime_path: &Path) -> Option<PathBuf> {
         .parent()?
         .parent()?
         .parent()
-        .map(|path| path.to_path_buf())
+        .map(std::path::Path::to_path_buf)
 }
 
 /// Reset the runtime namespace for the current gwt process.
@@ -592,7 +592,7 @@ mod tests {
         );
         legacy.insert(
             "display_name".into(),
-            toml::Value::String(session.display_name.clone()),
+            toml::Value::String(session.display_name),
         );
 
         std::fs::write(&path, toml::to_string(&legacy).unwrap()).unwrap();
@@ -923,7 +923,7 @@ mod tests {
         );
         legacy.insert(
             "display_name".into(),
-            toml::Value::String(session.display_name.clone()),
+            toml::Value::String(session.display_name),
         );
 
         std::fs::write(path, toml::to_string(&legacy).unwrap()).unwrap();

@@ -72,7 +72,7 @@ pub struct PersistedWindowState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     /// Wire-only color hint sent to the WebView. 送信直前に backend が
-    /// [`agent_id`] (または `preset` のフォールバック) から計算する。
+    /// `agent_id` フィールド (または `preset` のフォールバック) から計算する。
     /// disk には書かない (`skip_deserializing` + skip_serializing_if で
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
@@ -102,7 +102,7 @@ pub struct RecentProjectEntry {
     pub kind: ProjectKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSessionTabState {
     pub id: String,
     pub title: String,
@@ -110,7 +110,7 @@ pub struct PersistedSessionTabState {
     pub kind: ProjectKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedSessionState {
     #[serde(default)]
     pub tabs: Vec<PersistedSessionTabState>,
@@ -416,7 +416,7 @@ mod tests {
                 PersistedSessionTabState {
                     id: "project-1".to_string(),
                     title: "demo".to_string(),
-                    project_root: project_root.clone(),
+                    project_root,
                     kind: ProjectKind::Git,
                 },
                 PersistedSessionTabState {
@@ -615,7 +615,7 @@ mod tests {
     fn workspace_state_path_uses_project_scoped_storage() {
         let _env_lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let path = workspace_state_path(dir.path());
         let hash = gwt_core::paths::project_scope_hash(dir.path());
@@ -626,7 +626,7 @@ mod tests {
     fn load_restored_workspace_state_pauses_process_windows() {
         let _env_lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project dir");
@@ -685,7 +685,7 @@ mod tests {
     fn migrate_legacy_app_state_splits_session_and_project_workspaces() {
         let _env_lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
@@ -755,7 +755,7 @@ mod tests {
     fn migrate_legacy_single_workspace_uses_fallback_project_target() {
         let _env_lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
@@ -793,7 +793,7 @@ mod tests {
     fn migrate_legacy_workspace_state_keeps_existing_new_workspace() {
         let _env_lock = crate::env_test_lock()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");

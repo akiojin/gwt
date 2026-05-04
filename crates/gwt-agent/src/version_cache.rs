@@ -162,7 +162,7 @@ impl VersionCache {
         });
 
         for version in versions {
-            if entry.versions.last().map(|v| v.as_str()) == Some(version.as_str()) {
+            if entry.versions.last().map(std::string::String::as_str) == Some(version.as_str()) {
                 continue;
             }
             entry.versions.push(version);
@@ -223,7 +223,7 @@ impl VersionCache {
             AgentId::Gemini => "gemini".to_string(),
             AgentId::OpenCode => "opencode".to_string(),
             AgentId::Copilot => "copilot".to_string(),
-            AgentId::Custom(name) => format!("custom-{}", name),
+            AgentId::Custom(name) => format!("custom-{name}"),
         }
     }
 

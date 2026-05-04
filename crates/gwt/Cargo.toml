@@ -51,8 +51,11 @@ reqwest.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-muda = "0.18"
+muda = "0.19"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 image.workspace = true
