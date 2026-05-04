@@ -710,7 +710,8 @@
         justify-content: space-between;
         gap: 12px;
         padding: 10px 12px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
       }
 
       .workspace-scroll {
@@ -727,8 +728,9 @@
 
       .workspace-empty-state {
         padding: 16px 12px;
-        font-size: 12px;
-        color: #64748b;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text-muted);
       }
 
       .branch-toolbar {
@@ -776,19 +778,21 @@
       .branch-filter-button {
         height: 28px;
         padding: 0 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #f8fafc;
-        color: #334155;
-        font-size: 12px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         font-weight: 600;
         cursor: pointer;
       }
 
       .branch-filter-button.active {
-        background: #0f172a;
-        border-color: #0f172a;
-        color: #ffffff;
+        background: var(--color-button-bg);
+        border-color: var(--color-button-bg);
+        color: var(--color-button-fg);
       }
 
       .workspace-toolbar.is-stacked .branch-filter-group {
@@ -806,9 +810,13 @@
       .knowledge-heading,
       .mock-heading {
         min-width: 0;
-        font-size: 12px;
-        font-weight: 600;
-        color: #334155;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        font-weight: 700;
+        color: var(--color-display-fg);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
