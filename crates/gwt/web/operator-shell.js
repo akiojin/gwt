@@ -94,10 +94,28 @@ function wireStatusStripClock({ doc }) {
   const clock = doc.getElementById("op-strip-clock");
   if (!clock) return;
 
+  // SPEC-2356 — render the clock with separately-styled colon glyphs so the
+  // mission-control "blink" effect can target only the separators while the
+  // numbers stay rock-steady. Clears + rebuilds via DOM nodes (no innerHTML
+  // because the security hook flags textContent-as-template-string).
   const reduced = matchReduced(doc);
+  const setClock = (h, m, s) => {
+    while (clock.firstChild) clock.removeChild(clock.firstChild);
+    const append = (text, isColon) => {
+      const span = doc.createElement("span");
+      if (isColon) span.className = "op-strip-clock__colon";
+      span.textContent = text;
+      clock.appendChild(span);
+    };
+    append(pad2(h), false);
+    append(":", true);
+    append(pad2(m), false);
+    append(":", true);
+    append(pad2(s), false);
+  };
   const tick = () => {
     const now = new Date();
-    clock.textContent = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+    setClock(now.getHours(), now.getMinutes(), now.getSeconds());
   };
   tick();
 

@@ -1351,3 +1351,28 @@ kbd.op-kbd {
   color: var(--color-text-muted);
   text-align: center;
 }
+
+/* Mission-control blinking colons in the live clock */
+@keyframes op-strip-clock-blink {
+  0%, 60% { opacity: 1; }
+  70%, 100% { opacity: 0.35; }
+}
+
+:root[data-theme] .op-strip-clock__colon {
+  display: inline-block;
+  animation: op-strip-clock-blink var(--motion-pulse) ease-in-out infinite;
+  margin: 0 0.05em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] .op-strip-clock__colon {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .op-strip-clock__colon {
+    animation: none;
+  }
+}
