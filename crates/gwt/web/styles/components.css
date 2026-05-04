@@ -892,7 +892,12 @@ kbd.op-kbd {
   font-family: var(--font-mono);
   color: var(--color-text-muted);
   font-size: var(--type-sm);
-  pointer-events: none;
+  /* SPEC-2356 — splash should accept click-to-dismiss (`pointer-events`
+     auto) but the cursor hints at the affordance. The hidden state still
+     uses `display: none` from the [hidden] attr, so events stop firing
+     once the splash is exited. */
+  pointer-events: auto;
+  cursor: pointer;
   opacity: 1;
   transition: opacity var(--motion-slow) var(--motion-curve);
 }
