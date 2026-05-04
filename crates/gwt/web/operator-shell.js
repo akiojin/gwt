@@ -175,14 +175,24 @@ function wireMissionBriefing({ doc, win }) {
     return;
   }
 
-  // SPEC-2356 — stamp the briefing with the current session timestamp so the
-  // splash reads like a mission-control boot log, not just a static splash.
+  // SPEC-2356 — stamp the briefing with the current session timestamp + a
+  // 6-char session-id-style hash so the splash reads like a mission-control
+  // boot log, not just a static splash. The hash is mathematically derived
+  // from the boot timestamp so two simultaneous sessions render distinct
+  // strings without spinning up any randomness source.
   const stamp = doc.getElementById("op-briefing-stamp");
   if (stamp) {
     const now = new Date();
     const datePart = `${now.getFullYear()}.${pad2(now.getMonth() + 1)}.${pad2(now.getDate())}`;
     const timePart = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
-    stamp.textContent = `T+0 · ${datePart} ${timePart}`;
+    let hashSrc = now.getTime();
+    let hash = "";
+    while (hash.length < 6) {
+      hashSrc = (hashSrc * 9301 + 49297) % 0xfffff;
+      hash += hashSrc.toString(16).padStart(5, "0").slice(-2);
+    }
+    const sessionId = hash.slice(0, 6).toUpperCase();
+    stamp.textContent = `T+0 · ${datePart} ${timePart} · SESSION ${sessionId}`;
   }
 
   const reduced = matchReduced(doc);
