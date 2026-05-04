@@ -392,16 +392,18 @@
         background: #111f37;
       }
 
+      /* SPEC-2356 — workspace window chrome.
+         Box-shadows are heuristic depth values that look right on either
+         theme; the surface backgrounds and titlebar fills come from tokens
+         so the dual-theme layer can re-skin them without further surgery. */
       .workspace-window {
         position: absolute;
         min-width: 420px;
         min-height: 260px;
-        border-radius: 6px;
+        border-radius: var(--radius-md);
         overflow: hidden;
-        border: 1px solid rgba(15, 23, 42, 0.24);
-        box-shadow:
-          0 18px 42px rgba(15, 23, 42, 0.2),
-          0 2px 6px rgba(15, 23, 42, 0.1);
+        border: 1px solid var(--color-border-strong);
+        box-shadow: var(--shadow-2);
       }
 
       .workspace-window[data-agent-color]::before {
@@ -410,7 +412,7 @@
         top: 0;
         bottom: 0;
         left: 0;
-        width: 4px;
+        width: 3px;
         background: var(--current-agent);
         z-index: 2;
         pointer-events: none;
@@ -418,8 +420,8 @@
 
       .workspace-window.focused {
         box-shadow:
-          0 22px 54px rgba(15, 23, 42, 0.28),
-          0 0 0 1px rgba(37, 99, 235, 0.24);
+          var(--shadow-2),
+          0 0 0 1px var(--color-focus-ring);
       }
 
       .workspace-window.minimized {
@@ -427,7 +429,9 @@
       }
 
       .workspace-window.surface-terminal {
-        background: #0b1220;
+        /* Terminal panes follow the canvas colour so the xterm theme
+           adapter renders flush against the chrome. */
+        background: var(--color-canvas);
       }
 
       .workspace-window.surface-file-tree,
@@ -438,7 +442,7 @@
       .workspace-window.surface-knowledge,
       .workspace-window.surface-memo,
       .workspace-window.surface-profile {
-        background: rgba(255, 255, 255, 0.98);
+        background: var(--color-surface);
       }
 
       .titlebar {
@@ -453,8 +457,9 @@
       }
 
       .surface-terminal .titlebar {
-        background: rgba(15, 23, 42, 0.98);
-        color: #e2e8f0;
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .surface-file-tree .titlebar,
@@ -465,8 +470,9 @@
       .surface-knowledge .titlebar,
       .surface-memo .titlebar,
       .surface-profile .titlebar {
-        background: rgba(248, 250, 252, 0.98);
-        color: #0f172a;
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .titlebar:active {
