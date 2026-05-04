@@ -1128,3 +1128,19 @@ kbd.op-kbd {
     scrollbar-color: auto;
   }
 }
+
+/* ============================================================
+   Text selection — Operator-tinted (token-driven).
+   ============================================================ */
+
+:root[data-theme] ::selection {
+  background: color-mix(in oklab, var(--color-state-active) 36%, transparent);
+  color: var(--color-text-strong);
+}
+
+/* Inside terminal panes xterm.js paints its own selection layer; this
+   default is for the chrome and panel surfaces only. */
+:root[data-theme] .terminal-root ::selection {
+  background: transparent;
+  color: inherit;
+}
