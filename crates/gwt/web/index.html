@@ -108,17 +108,17 @@
         max-width: 280px;
         height: 32px;
         padding: 0 8px 0 10px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        border-radius: 6px;
-        background: #f8fafc;
-        color: #334155;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
         cursor: pointer;
       }
 
       .project-tab.active {
-        border-color: rgba(37, 99, 235, 0.34);
-        background: rgba(59, 130, 246, 0.1);
-        color: #0f172a;
+        border-color: var(--color-focus-ring);
+        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
+        color: var(--color-text-strong);
       }
 
       .project-tab-label {
@@ -126,7 +126,8 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        font-size: 12px;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
         font-weight: 600;
       }
 
@@ -134,14 +135,14 @@
         width: 18px;
         height: 18px;
         border: none;
-        border-radius: 4px;
-        background: rgba(148, 163, 184, 0.18);
+        border-radius: var(--radius-sm);
+        background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
         color: inherit;
         cursor: pointer;
       }
 
       .project-tab-close:hover {
-        background: rgba(148, 163, 184, 0.28);
+        background: color-mix(in oklab, var(--color-text-muted) 28%, transparent);
       }
 
       .project-actions {
@@ -155,11 +156,13 @@
         align-items: center;
         height: 32px;
         padding: 0 10px;
-        border: 1px solid rgba(148, 163, 184, 0.3);
-        border-radius: 6px;
-        background: #f8fafc;
-        color: #475569;
-        font-size: 12px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+        color: var(--color-text-muted);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         font-weight: 600;
         white-space: nowrap;
       }
@@ -173,11 +176,13 @@
         align-items: center;
         height: 32px;
         padding: 0 10px;
-        border: 1px solid rgba(148, 163, 184, 0.3);
-        border-radius: 6px;
-        background: #f8fafc;
-        color: #475569;
-        font-size: 12px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+        color: var(--color-text-muted);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         font-weight: 700;
         white-space: nowrap;
       }
