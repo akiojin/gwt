@@ -15,7 +15,12 @@
 //! the same `BackendEvent::BoardEntries` / `BackendEvent::BoardError`
 //! responses.
 
-use gwt_core::coordination::{self, BoardEntryKind};
+use std::path::Path;
+
+use gwt_core::{
+    coordination::{self, BoardEntryKind},
+    workspace_projection,
+};
 
 use super::{AppRuntime, BackendEvent, OutboundEvent, WindowPreset};
 
@@ -148,13 +153,24 @@ impl AppRuntime {
         match coordination::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
-                vec![OutboundEvent::reply(
+                let latest_entry = snapshot.board.entries.last().cloned();
+                let mut events = vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::BoardEntries {
                         id,
                         entries: snapshot.board.entries,
                     },
-                )]
+                )];
+                if let Some(entry) = latest_entry.as_ref() {
+                    if let Some(event) = self.record_workspace_board_milestone_event(
+                        &tab.id,
+                        &tab.project_root,
+                        entry,
+                    ) {
+                        events.push(event);
+                    }
+                }
+                events
             }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
@@ -164,6 +180,46 @@ impl AppRuntime {
                 },
             )],
         }
+    }
+
+    pub(crate) fn record_workspace_board_milestone_event(
+        &self,
+        tab_id: &str,
+        project_root: &Path,
+        entry: &coordination::BoardEntry,
+    ) -> Option<OutboundEvent> {
+        let mut projection =
+            match workspace_projection::load_or_default_workspace_projection(project_root) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        project_root = %project_root.display(),
+                        "failed to load workspace projection for board milestone"
+                    );
+                    return None;
+                }
+            };
+        projection.record_board_milestone(entry);
+        if let Err(error) =
+            workspace_projection::save_workspace_projection(project_root, &projection)
+        {
+            tracing::warn!(
+                error = %error,
+                project_root = %project_root.display(),
+                "failed to save workspace projection for board milestone"
+            );
+            return None;
+        }
+
+        if self.active_tab_id.as_deref() != Some(tab_id) {
+            return None;
+        }
+        let tab = self.tab(tab_id)?;
+        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
+        Some(OutboundEvent::broadcast(
+            BackendEvent::ActiveWorkProjection { projection },
+        ))
     }
 }
 

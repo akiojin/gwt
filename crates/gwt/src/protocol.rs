@@ -201,6 +201,7 @@ pub enum FrontendEvent {
         id: String,
         issue_number: u64,
     },
+    OpenStartWork,
     OpenLaunchWizard {
         id: String,
         branch_name: String,
@@ -317,11 +318,30 @@ pub struct AppStateView {
     pub recent_projects: Vec<RecentProjectView>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkProjectionView {
+    pub id: String,
+    pub title: String,
+    pub status_category: String,
+    pub status_text: String,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub active_agents: usize,
+    pub blocked_agents: usize,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub pr_number: Option<u64>,
+    pub board_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
     WorkspaceState {
         workspace: AppStateView,
+    },
+    ActiveWorkProjection {
+        projection: ActiveWorkProjectionView,
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
@@ -549,7 +569,7 @@ mod tests {
     };
 
     use super::{
-        BackendEvent, BranchEntriesPhase, ProfileEntryView, ProfileEnvEntryView,
+        BackendEvent, BranchEntriesPhase, FrontendEvent, ProfileEntryView, ProfileEnvEntryView,
         ProfileSnapshotView,
     };
 
@@ -633,6 +653,46 @@ mod tests {
         assert_eq!(
             value.get("data_base64"),
             Some(&Value::String("aGVsbG8=".to_string()))
+        );
+    }
+
+    #[test]
+    fn active_work_projection_uses_distinct_wire_event_from_canvas_workspace_state() {
+        let event = BackendEvent::ActiveWorkProjection {
+            projection: super::ActiveWorkProjectionView {
+                id: "work-1".to_string(),
+                title: "Implement Start Work".to_string(),
+                status_category: "active".to_string(),
+                status_text: "Launching from Project Bar".to_string(),
+                owner: Some("SPEC-2359".to_string()),
+                next_action: Some("Run launch tests".to_string()),
+                active_agents: 1,
+                blocked_agents: 0,
+                branch: Some("work/20260504-1200".to_string()),
+                worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                pr_number: None,
+                board_refs: vec!["board-1".to_string()],
+            },
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize active work projection");
+
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("active_work_projection".to_string())),
+            "active work projection must not reuse canvas workspace_state"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_global_open_start_work_command() {
+        let event: FrontendEvent =
+            serde_json::from_value(serde_json::json!({ "kind": "open_start_work" }))
+                .expect("deserialize open_start_work");
+
+        assert!(
+            matches!(event, FrontendEvent::OpenStartWork),
+            "Start Work must be a global command, not a Branches window event"
         );
     }
 

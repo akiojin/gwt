@@ -46,6 +46,13 @@ Add `--target <session-id|branch|agent-id>` (repeatable) when the post is meant 
 Targeted posts are prefixed with a structured marker (currently the `>>` token) at the start of each entry \
 line in the recipient's reminder injection. Omit `--target` for broadcast.\n\
 \n\
+**Workspace / Git environment guidance**:\n\
+- AGENTS.md is project-local: follow the target repository's AGENTS.md when present, \
+but do not assume gwt's AGENTS.md applies to other projects.\n\
+- Do NOT create, switch, or delete branches/worktrees manually (`git checkout -b`, \
+`git switch -c`, `git branch -D`, `git worktree add/remove`). gwt Start Work / \
+Launch materialization owns Git environment creation.\n\
+\n\
 Do NOT post tool-level reports (e.g., \"running gcc\", \"opening file X\", \"ran test Y\"). \
 Anything already visible in the diff or log does not need a Board entry.\n\
 \n\
@@ -58,7 +65,10 @@ pub(super) const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
 (phase change, alternative chosen, concern raised) or a coordination boundary \
-(claim, next, handoff, blocked, decision) has emerged.\n";
+(claim, next, handoff, blocked, decision) has emerged.\n\
+\n\
+AGENTS.md is project-local. Do NOT create, switch, or delete branches/worktrees \
+manually; gwt Start Work / Launch materialization owns Git environment creation.\n";
 
 // Stop reminders are emitted as `systemMessage` (user-facing) because
 // Claude Code's Stop hook schema does not accept `hookSpecificOutput`.

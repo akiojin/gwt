@@ -103,14 +103,18 @@ the named-pipe path lands.
 
 1. Open a repository directory or restore the previous project.
 2. Use the canvas to arrange floating windows.
-3. Open `Branches`, select a branch, and double-click to open Launch Agent.
-4. Start `Agent` windows from Launch Agent on the selected branch/worktree.
-5. Use the add-window button for supporting workspace windows such as `File Tree`.
+3. Choose `Start Work` from the Project Bar or Command Palette to open the
+   launch settings without picking or naming a branch.
+4. Launch an `Agent`; gwt creates the backing `work/YYYYMMDD-HHMM[-n]`
+   branch/worktree when the launch is confirmed.
+5. Open `Branches` when you need branch inspection, filtering, cleanup, or Git
+   details.
+6. Use the add-window button for supporting workspace windows such as `File Tree`.
 
 Common windows include:
 
-- `Agent` (created through Launch Agent)
-- `Branches`
+- `Agent` (created through Start Work / Launch Agent)
+- `Branches` (branch inspection and cleanup)
 - `File Tree`
 - `Settings`
 - `Memo`

@@ -56,6 +56,8 @@
       const modal = document.getElementById("preset-modal");
       const closeModalButton = document.getElementById("close-modal");
       const wizardModal = document.getElementById("wizard-modal");
+      const wizardDialog = wizardModal.querySelector(".modal-shell");
+      const wizardTitle = document.getElementById("wizard-title");
       const wizardMeta = document.getElementById("wizard-meta");
       const wizardSummary = document.getElementById("wizard-summary");
       const wizardBody = document.getElementById("wizard-body");
@@ -227,6 +229,7 @@
       let viewport = { x: 0, y: 0, zoom: 1 };
       let viewportRasterTimer = null;
       let launchWizard = null;
+      let activeWorkProjection = null;
       let wizardWasOpen = false;
       let wizardAdvancedOpen = false;
       let wizardBranchDraft = "";
@@ -960,6 +963,18 @@
           if (!state) continue;
           if (state in counts) counts[state] += 1;
           counts.agents += 1;
+        }
+        if (activeWorkProjection) {
+          const category = activeWorkProjection.status_category || "unknown";
+          const activeAgents = Number(activeWorkProjection.active_agents || 0);
+          const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
+          if (category === "active") counts.active = Math.max(counts.active, activeAgents || 1);
+          if (category === "idle") counts.idle = Math.max(counts.idle, 1);
+          if (category === "blocked") counts.blocked = Math.max(counts.blocked, blockedAgents || 1);
+          if (category === "done") counts.done = Math.max(counts.done, 1);
+          counts.blocked = Math.max(counts.blocked, blockedAgents);
+          counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
+          counts.branches = activeWorkProjection.branch ? 1 : "—";
         }
         try {
           window.__operatorShell.applyTelemetryCounts(counts);
@@ -3381,10 +3396,13 @@
       function renderLaunchWizard() {
         if (!launchWizard) {
           wizardModal.classList.remove("open");
+          wizardModal.classList.remove("is-drawer");
+          wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
           wizardBody.innerHTML = "";
           wizardError.hidden = true;
           wizardError.textContent = "";
+          if (wizardTitle) wizardTitle.textContent = "Launch Agent";
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
           syncWizardDraftState();
@@ -3393,10 +3411,16 @@
 
         syncWizardDraftState();
         closeModal();
+        const isStartWorkMode = launchWizard.show_branch_controls === false;
+        wizardModal.classList.toggle("is-drawer", isStartWorkMode);
+        wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         wizardModal.classList.add("open");
-        wizardMeta.textContent = `Selected branch · ${
-          launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
-        }`;
+        if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
+        wizardMeta.textContent = launchWizard.show_branch_controls === false
+          ? "Workspace launch"
+          : `Selected branch · ${
+            launchWizard.selected_branch_name || launchWizard.branch_name || "Workspace"
+          }`;
         wizardSubmitButton.textContent = launchWizard.is_hydrating
           ? "Loading..."
           : launchWizard.branch_mode === "create_new"
@@ -3530,7 +3554,7 @@
           panel.appendChild(section);
         }
 
-        {
+        if (launchWizard.show_branch_controls !== false) {
           const section = createLaunchSection(
             "Branch",
             "Choose the selected branch or create a new branch from it.",
@@ -5795,6 +5819,10 @@
             projectError = "";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
             break;
+          case "active_work_projection":
+            activeWorkProjection = event.projection || null;
+            recomputeOperatorTelemetry();
+            break;
           case "window_list":
             windowListEntries = event.windows || [];
             frontendUnits.projectWorkspaceShell.renderWindowList();
@@ -6661,8 +6689,11 @@
           case "spawn-shell":
             focusOrSpawnPreset("shell");
             return;
+          case "start-work":
           case "spawn-agent":
-            focusOrSpawnPreset("claude");
+            frontendUnits.socketTransport.send({
+              kind: "open_start_work",
+            });
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;

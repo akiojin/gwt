@@ -33,6 +33,13 @@ impl LinkedIssueKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum LaunchWizardMode {
+    Branch,
+    StartWork,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LaunchWizardStep {
     QuickStart,
     FocusExistingSession,
@@ -106,6 +113,7 @@ pub struct LaunchWizardSummaryView {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardView {
     pub title: String,
+    pub mode: LaunchWizardMode,
     pub branch_name: String,
     pub selected_branch_name: String,
     pub linked_issue_number: Option<u64>,
@@ -147,6 +155,7 @@ pub struct LaunchWizardView {
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_codex_fast_mode: bool,
+    pub show_branch_controls: bool,
     pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     pub error: Option<String>,
@@ -484,6 +493,7 @@ pub enum LaunchWizardAction {
 #[derive(Debug, Clone)]
 pub struct LaunchWizardState {
     pub context: LaunchWizardContext,
+    pub wizard_mode: LaunchWizardMode,
     pub step: LaunchWizardStep,
     pub selected: usize,
     pub detected_agents: Vec<AgentOption>,
@@ -559,6 +569,7 @@ impl LaunchWizardState {
 
         let mut state = Self {
             context: context.clone(),
+            wizard_mode: LaunchWizardMode::Branch,
             step,
             selected: 0,
             detected_agents: agent_options,
@@ -620,6 +631,29 @@ impl LaunchWizardState {
         )
     }
 
+    pub fn open_start_work_with_previous_profile(
+        context: LaunchWizardContext,
+        base_branch_name: String,
+        agent_options: Vec<AgentOption>,
+        quick_start_entries: Vec<QuickStartEntry>,
+        previous_profile: Option<LaunchWizardPreviousProfile>,
+    ) -> Self {
+        let mut state = Self::new_with(
+            context,
+            agent_options,
+            quick_start_entries,
+            previous_profile,
+            false,
+        );
+        state.wizard_mode = LaunchWizardMode::StartWork;
+        state.step = LaunchWizardStep::LaunchTarget;
+        state.selected = step_default_selection(state.step, &state);
+        state.is_new_branch = true;
+        state.base_branch_name = Some(base_branch_name);
+        state.branch_name = state.context.normalized_branch_name.clone();
+        state
+    }
+
     pub fn open_loading(context: LaunchWizardContext, agent_options: Vec<AgentOption>) -> Self {
         Self::new_with(context, agent_options, Vec::new(), None, true)
     }
@@ -643,7 +677,12 @@ impl LaunchWizardState {
 
     pub fn view(&self) -> LaunchWizardView {
         LaunchWizardView {
-            title: "Launch Agent".to_string(),
+            title: if self.wizard_mode == LaunchWizardMode::StartWork {
+                "Start Work".to_string()
+            } else {
+                "Launch Agent".to_string()
+            },
+            mode: self.wizard_mode,
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
             linked_issue_number: self.linked_issue_number,
@@ -694,6 +733,7 @@ impl LaunchWizardState {
             show_execution_mode: self.launch_target_is_agent(),
             show_skip_permissions: self.launch_target_is_agent(),
             show_codex_fast_mode: self.launch_target_is_agent() && self.agent_is_codex(),
+            show_branch_controls: self.wizard_mode == LaunchWizardMode::Branch,
             codex_fast_mode: self.codex_fast_mode,
             launch_summary: self.launch_summary_view(),
             error: self.error.clone(),
@@ -1543,19 +1583,24 @@ impl LaunchWizardState {
     }
 
     fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
-        let mut summary = vec![
-            LaunchWizardSummaryView {
+        let mut summary = if self.wizard_mode == LaunchWizardMode::StartWork {
+            vec![LaunchWizardSummaryView {
+                label: "Workspace".to_string(),
+                value: "Current project".to_string(),
+            }]
+        } else {
+            vec![LaunchWizardSummaryView {
                 label: "Branch".to_string(),
                 value: self.branch_name.clone(),
+            }]
+        };
+        summary.push(LaunchWizardSummaryView {
+            label: "Target".to_string(),
+            value: match self.launch_target {
+                LaunchTargetKind::Agent => "Agent".to_string(),
+                LaunchTargetKind::Shell => "Shell".to_string(),
             },
-            LaunchWizardSummaryView {
-                label: "Target".to_string(),
-                value: match self.launch_target {
-                    LaunchTargetKind::Agent => "Agent".to_string(),
-                    LaunchTargetKind::Shell => "Shell".to_string(),
-                },
-            },
-        ];
+        });
 
         if self.launch_target_is_agent() {
             summary.push(LaunchWizardSummaryView {
@@ -4029,6 +4074,54 @@ mod tests {
         assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
         assert!(config.resume_session_id.is_none());
         assert_eq!(config.linked_issue_number, None);
+    }
+
+    #[test]
+    fn start_work_mode_skips_branch_steps_and_hides_branch_controls() {
+        let state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/main"), "work/20260504-1234"),
+            "origin/main".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            None,
+        );
+
+        let view = state.view();
+
+        assert_eq!(state.step, LaunchWizardStep::LaunchTarget);
+        assert_eq!(view.title, "Start Work");
+        assert_eq!(view.mode, LaunchWizardMode::StartWork);
+        assert!(!view.show_branch_controls);
+        assert_eq!(view.branch_name, "work/20260504-1234");
+        assert!(
+            !view
+                .launch_summary
+                .iter()
+                .any(|item| item.label == "Branch"),
+            "Start Work should not surface the generated work branch as primary UI"
+        );
+        assert!(state.is_new_branch);
+        assert_eq!(state.base_branch_name.as_deref(), Some("origin/main"));
+    }
+
+    #[test]
+    fn start_work_launch_config_materializes_reserved_work_branch() {
+        let state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260504-1234"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            None,
+        );
+
+        let config = state.build_launch_config().expect("launch config");
+
+        assert_eq!(config.branch.as_deref(), Some("work/20260504-1234"));
+        assert_eq!(config.base_branch.as_deref(), Some("origin/develop"));
+        assert!(
+            config.working_dir.is_none(),
+            "Start Work must defer worktree materialization until launch confirmation"
+        );
     }
 
     #[test]

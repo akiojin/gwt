@@ -891,6 +891,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_branches_surface_remains_branch_browser() {
+        let html = frontend_bundle_source();
+        let branches_block = html
+            .split("if (surface === \"branches\")")
+            .nth(1)
+            .and_then(|tail| tail.split("if (surface === \"memo\")").next())
+            .expect("branches render block");
+
+        assert!(
+            branches_block.contains("Repository branches")
+                && branches_block.contains("branch-list")
+                && branches_block.contains("open-branch-cleanup"),
+            "expected Branches surface to stay branch-list oriented",
+        );
+        assert!(
+            !branches_block.contains("Planning Session")
+                && !branches_block.contains("active_work_projection")
+                && !branches_block.contains("workspace-card"),
+            "expected Branches surface not to render Workspace or Planning Session cards",
+        );
+    }
+
+    #[test]
     fn embedded_web_serves_every_root_module_import() {
         let js = app_js();
         let embedded_web_source = include_str!("embedded_web.rs");
@@ -1182,6 +1205,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_surface_does_not_render_workspace_or_planning_cards() {
+        let html = frontend_bundle_source();
+        let board_block = html
+            .split("if (surface === \"board\")")
+            .nth(1)
+            .and_then(|tail| tail.split("if (surface === \"logs\")").next())
+            .expect("board render block");
+
+        assert!(
+            board_block.contains("board-chat-shell")
+                && board_block.contains("board-timeline")
+                && board_block.contains("board-composer"),
+            "expected Board surface to remain a chat/event log",
+        );
+        assert!(
+            !board_block.contains("Planning Session")
+                && !board_block.contains("workspace-card")
+                && !board_block.contains("active_work_projection"),
+            "expected Board surface not to render Workspace or Planning Session cards",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_messages_put_user_on_right_and_agent_on_left() {
         let html = frontend_bundle_source();
         fn css_block<'a>(html: &'a str, selector: &str) -> &'a str {
@@ -1398,6 +1444,31 @@ mod tests {
         assert!(
             wizard_state.is_match(html),
             "expected launch wizard state updates to hydrate the shared wizard renderer",
+        );
+    }
+
+    #[test]
+    fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains(r#"case "start-work":"#) && html.contains(r#"kind: "open_start_work""#),
+            "expected Start Work to use a global command instead of a Branches window action",
+        );
+        assert!(
+            html.contains("launchWizard.show_branch_controls !== false")
+                && html.contains("Workspace launch"),
+            "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
+        );
+        assert!(
+            html.contains("isStartWorkMode")
+                && html.contains("is-drawer")
+                && html.contains("is-drawer-shell"),
+            "expected Start Work wizard mode to opt into the SPEC-2356 drawer bridge",
+        );
+        assert!(
+            html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
+            "expected Start Work to keep the existing Agent settings renderer available",
         );
     }
 
