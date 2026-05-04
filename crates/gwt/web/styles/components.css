@@ -1711,3 +1711,34 @@ kbd.op-kbd {
   color: var(--color-state-active);
   font-weight: 700;
 }
+
+/* SPEC-2356 — Project Tab active-state subtle accent strip on the bottom
+   so the active project reads as "currently selected" with the same
+   visual vocabulary as the Project Bar accent line. */
+:root[data-theme] .project-tab.active {
+  position: relative;
+}
+
+:root[data-theme] .project-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    var(--color-state-active) 25%,
+    var(--color-state-active) 75%,
+    transparent 100%
+  );
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .project-tab.active::after {
+    background: Highlight;
+  }
+}
