@@ -387,6 +387,13 @@
       function setConnectionState(connected) {
         connectionDot.classList.toggle("connected", connected);
         connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
+        // SPEC-2356 — propagate connection state to the Operator Status Strip
+        // so the LIVE cell visibly reflects whether the WebSocket bridge is
+        // up. The class is set on the strip element and consumed via CSS.
+        const strip = document.getElementById("op-status-strip");
+        if (strip) {
+          strip.classList.toggle("op-status-strip--offline", !connected);
+        }
         if (!connected) {
           for (const [windowId] of branchListStateMap.entries()) {
             if (

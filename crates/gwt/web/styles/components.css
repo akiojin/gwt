@@ -1556,3 +1556,20 @@ kbd.op-kbd {
     animation: none;
   }
 }
+
+/* SPEC-2356 — Status Strip "offline" state when WebSocket bridge is down.
+   The LIVE indicator dot shifts from active to blocked colour, the entire
+   strip dim slightly, and counter values slide back to muted because they
+   are no longer fresh. */
+:root[data-theme] .op-status-strip--offline .op-status-strip__live-dot {
+  background: var(--color-state-blocked);
+  animation: none;
+}
+
+:root[data-theme] .op-status-strip--offline {
+  opacity: 0.85;
+}
+
+:root[data-theme] .op-status-strip--offline .op-status-strip__value {
+  color: var(--color-text-muted);
+}
