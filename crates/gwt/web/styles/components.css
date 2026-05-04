@@ -1376,3 +1376,55 @@ kbd.op-kbd {
     animation: none;
   }
 }
+
+/* ============================================================
+   Mission Briefing intro — animated progress bar between lines.
+
+   While the staged reveal lines come in, a subtle progress bar
+   sweeps from 0 → 100% behind the message column, finishing as
+   the OPERATOR ONLINE marker fades in. Visual, no functional
+   meaning; reduced-motion / forced-colors environments hide it.
+   ============================================================ */
+.op-briefing__progress {
+  position: relative;
+  width: min(360px, 64vw);
+  height: 2px;
+  background: color-mix(in oklab, var(--color-text-muted) 16%, transparent);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  margin-bottom: var(--space-4);
+}
+
+.op-briefing__progress::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    var(--color-state-active) 35%,
+    var(--agent-codex) 65%,
+    transparent 100%
+  );
+  width: 100%;
+  transform: translateX(-100%);
+  animation: op-briefing-sweep 1.4s ease-out forwards;
+}
+
+@keyframes op-briefing-sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-briefing__progress::after {
+    animation: none;
+    transform: translateX(0);
+  }
+}
+
+@media (forced-colors: active) {
+  .op-briefing__progress { display: none; }
+}
