@@ -198,7 +198,9 @@ impl AppRuntime {
     ) -> Result<(), String> {
         let base_branch = gwt::start_work::resolve_start_work_base_branch(project_root)
             .map_err(|error| error.to_string())?;
-        let work_branch = gwt::start_work::reserve_start_work_branch_name(project_root, Utc::now());
+        let work_branch =
+            gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
+                .map_err(|error| error.to_string())?;
         let quick_start_root = project_root.to_path_buf();
         let quick_start_entries = self
             .launch_wizard_cache
