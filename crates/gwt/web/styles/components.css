@@ -1144,3 +1144,11 @@ kbd.op-kbd {
   background: transparent;
   color: inherit;
 }
+
+.op-briefing__stamp {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-4);
+}

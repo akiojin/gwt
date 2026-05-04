@@ -146,6 +146,16 @@ function wireMissionBriefing({ doc, win }) {
     return;
   }
 
+  // SPEC-2356 — stamp the briefing with the current session timestamp so the
+  // splash reads like a mission-control boot log, not just a static splash.
+  const stamp = doc.getElementById("op-briefing-stamp");
+  if (stamp) {
+    const now = new Date();
+    const datePart = `${now.getFullYear()}.${pad2(now.getMonth() + 1)}.${pad2(now.getDate())}`;
+    const timePart = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+    stamp.textContent = `T+0 · ${datePart} ${timePart}`;
+  }
+
   const reduced = matchReduced(doc);
   const totalDelay = reduced.matches ? 250 : 1450;
 
