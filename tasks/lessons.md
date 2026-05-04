@@ -1,5 +1,49 @@
 # Lessons Learned
 
+## 2026-05-04 — Cache restore failures must not block the release pipeline
+
+### 事象
+
+v9.16.0 の release workflow (run 25321263396) で `Build MSI installer (Windows)`
+ジョブが失敗し、後続の `Upload to GitHub Release` と `Publish to npm` が
+skip されてリリース全体がブロックした。失敗ステップは
+`Swatinem/rust-cache@v2` の Restore Cache。Restoring cache → Post job
+cleanup までわずか 1.5 秒で終了しており、他のキャッシュ復元成功
+ジョブと同条件のため、cache provider 側の一過性失敗 (flaky) と判断。
+
+### 原因
+
+`Swatinem/rust-cache@v2` は GitHub Actions cache provider の応答失敗時
+にステップ自体を fail させる。すべての rust-cache 使用箇所に
+`continue-on-error` を付けていなかったため、cache infra の一過性
+障害がそのままジョブ失敗→release 全体失敗へ伝播した。Cache は
+ビルドの最適化であり correctness 要件ではないので、cache restore
+失敗時はキャッシュなしで build を続行すべきだった。
+
+### 再発防止策
+
+すべての workflow (`release.yml` / `build.yml` / `test.yml` / `lint.yml`
+/ `coverage.yml`) の `Swatinem/rust-cache@v2` ステップに
+`continue-on-error: true` を付与。cache provider の一過性失敗で job
+が落ちず、cache miss としてビルドが続行する。
+
+### 適用範囲
+
+- `.github/workflows/release.yml` (build-gwt, build-msi, build-dmg)
+- `.github/workflows/build.yml` (build, check-windows)
+- `.github/workflows/test.yml` (test, test-index-e2e, test-windows-rust)
+- `.github/workflows/lint.yml` (lint)
+- `.github/workflows/coverage.yml` (coverage)
+
+### 補足: 同種パターンへの一般化
+
+外部 GitHub Action のうち「ビルド/テスト correctness の前提ではない
+最適化系の action (cache, telemetry, artifact mirror など)」は、
+`continue-on-error: true` を default にして infra 由来の一過性失敗で
+リリース pipeline が止まらないようにする。Correctness 要件のステップ
+(toolchain install / build / test / sign / publish) は今まで通り
+default fail-fast を維持する。
+
 ## 2026-05-04 — Board projection guards must distinguish append order from chronology
 
 ### 事象

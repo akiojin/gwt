@@ -120,6 +120,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gwt-${{ matrix.platform }}
+        continue-on-error: true
       - name: Install WebView dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -228,6 +229,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gwt-msi
+        continue-on-error: true
       - name: Install WiX Toolset
         run: |
           dotnet tool install --global wix --version 6.0.2
@@ -257,6 +259,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gwt-dmg
+        continue-on-error: true
       - name: Build gwt bundle binaries for aarch64
         run: cargo build --release -p gwt --target aarch64-apple-darwin --bin gwt --bin gwtd
       - name: Build gwt bundle binaries for x86_64
