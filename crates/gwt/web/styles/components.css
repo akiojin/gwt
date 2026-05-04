@@ -1081,3 +1081,50 @@ kbd.op-kbd {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
+
+/* ============================================================
+   Scrollbar styling — Operator-themed, theme-aware.
+
+   Without this rule, browsers fall back to native scrollbars which
+   look starkly out of place against the carbon Dark theme.
+   Webkit / Blink based engines (which the WebView uses) get a
+   compact, token-driven scrollbar; standard `scrollbar-color` is
+   provided as a parallel hint for Firefox-based runtimes.
+   ============================================================ */
+
+:root[data-theme] {
+  scrollbar-color: var(--color-border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+:root[data-theme] ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+:root[data-theme] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:root[data-theme] ::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--color-text-muted) 32%, transparent);
+  border-radius: var(--radius-pill);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+:root[data-theme] ::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--color-text-muted) 56%, transparent);
+  background-clip: content-box;
+}
+
+:root[data-theme] ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* In forced-colors mode let the system paint scrollbars; do not override */
+@media (forced-colors: active) {
+  :root[data-theme] {
+    scrollbar-color: auto;
+  }
+}
