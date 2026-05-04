@@ -514,13 +514,15 @@
         align-items: center;
         gap: 6px;
         padding: 4px 8px;
-        border-radius: 999px;
-        background: rgba(148, 163, 184, 0.16);
-        font-size: 11px;
+        border-radius: var(--radius-pill);
+        background: color-mix(in oklab, var(--color-text-muted) 16%, transparent);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
       }
 
       .surface-terminal .status-chip {
-        color: #cbd5e1;
+        color: var(--color-text);
       }
 
       .surface-file-tree .status-chip,
@@ -1166,10 +1168,12 @@
 
       .memo-note-chip {
         padding: 4px 8px;
-        border-radius: 999px;
-        background: rgba(245, 158, 11, 0.14);
-        color: #b45309;
-        font-size: 11px;
+        border-radius: var(--radius-pill);
+        background: color-mix(in oklab, var(--agent-claude) 18%, transparent);
+        color: var(--agent-claude);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
       }
 
       .memo-note-time,
@@ -1430,9 +1434,9 @@
         max-height: 240px;
         overflow: auto;
         padding: 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        background: #f8fafc;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
       }
 
       .profile-preview-row {
@@ -1615,8 +1619,12 @@
       }
 
       .logs-filter-field span {
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        text-transform: uppercase;
         font-weight: 600;
-        color: #334155;
+        color: var(--color-text-muted);
       }
 
       .logs-filter-field select,
@@ -1624,9 +1632,10 @@
         min-width: 0;
         height: 32px;
         padding: 0 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #ffffff;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-strong);
+        background: var(--color-surface);
+        color: var(--color-text);
         font: inherit;
         color: #0f172a;
       }
@@ -1982,21 +1991,25 @@
       }
 
       .branch-cleanup-badge.loading {
-        background: rgba(148, 163, 184, 0.12);
-        color: #64748b;
+        background: color-mix(in oklab, var(--color-text-muted) 12%, transparent);
+        color: var(--color-text-muted);
       }
 
       .branch-summary {
-        font-size: 11px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .branch-notice {
         padding: 10px 12px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-        font-size: 12px;
-        color: #b45309;
-        background: rgba(245, 158, 11, 0.1);
+        border-bottom: 1px solid var(--color-border);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--agent-claude);
+        background: color-mix(in oklab, var(--agent-claude) 10%, transparent);
       }
 
       .branch-cleanup-list {
@@ -2007,9 +2020,9 @@
 
       .branch-cleanup-item {
         padding: 10px 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        background: #f8fafc;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
       }
 
       .branch-cleanup-item-header {
@@ -2081,40 +2094,49 @@
         list-style: disc;
         padding-left: 20px;
         margin: 8px 0 12px;
-        color: #334155;
-        font-size: 12px;
+        font-family: var(--font-body);
+        color: var(--color-text);
+        font-size: var(--type-xs);
       }
       .migration-modal-details li.blocked {
-        color: #b91c1c;
+        color: var(--color-state-blocked);
       }
       .migration-modal-hint {
-        background: #fef3c7;
-        border-left: 3px solid #f59e0b;
+        background: color-mix(in oklab, var(--agent-claude) 14%, transparent);
+        border-left: 3px solid var(--agent-claude);
         padding: 8px 12px;
-        border-radius: 4px;
-        font-size: 12px;
-        color: #78350f;
+        border-radius: var(--radius-sm);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--agent-claude);
         margin: 0 0 12px;
       }
       .migration-modal-phase-label {
-        font-weight: 600;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-display);
         margin: 8px 0 4px;
-        color: #1f2937;
+        color: var(--color-display-fg);
       }
       .migration-modal-progress {
         width: 100%;
         height: 8px;
       }
       .migration-modal-error-message {
-        color: #b91c1c;
+        color: var(--color-state-blocked);
         margin: 8px 0;
-        font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         word-break: break-word;
       }
       .migration-modal-recovery {
-        color: #334155;
-        font-size: 12px;
+        font-family: var(--font-body);
+        color: var(--color-text-muted);
+        font-size: var(--type-xs);
         margin: 4px 0 12px;
       }
 
@@ -2122,14 +2144,18 @@
 
       .mock-section {
         padding: 12px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .mock-label {
         margin-bottom: 8px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #475569;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-xs);
+        font-weight: 700;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-text-muted);
       }
 
       .mock-row {
@@ -2138,16 +2164,19 @@
         justify-content: space-between;
         gap: 12px;
         min-height: 32px;
-        font-size: 13px;
-        color: #0f172a;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text);
       }
 
       .mock-chip {
         padding: 4px 8px;
-        border-radius: 999px;
-        background: rgba(59, 130, 246, 0.1);
-        color: #1d4ed8;
-        font-size: 11px;
+        border-radius: var(--radius-pill);
+        background: color-mix(in oklab, var(--agent-codex) 18%, transparent);
+        color: var(--agent-codex);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
       }
 
       .resize-handle {
@@ -2248,10 +2277,15 @@
         width: 100%;
         text-align: left;
         padding: 10px 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #f8fafc;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface);
+        color: var(--color-text);
         cursor: pointer;
+      }
+      .preset-button:hover {
+        border-color: var(--color-focus-ring);
+        background: var(--color-surface-elevated);
       }
 
       .preset-button strong {
@@ -2502,9 +2536,9 @@
         display: grid;
         gap: 10px;
         padding: 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.24);
-        background: #ffffff;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
       }
 
       .quick-start-head {
@@ -2513,23 +2547,29 @@
       }
 
       .quick-start-title {
-        font-size: 13px;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-sm);
         font-weight: 700;
-        color: #0f172a;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
       }
 
       .quick-start-meta,
       .quick-start-secondary,
       .live-session-detail,
       .launch-note {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
         overflow-wrap: anywhere;
       }
 
       .quick-start-secondary,
       .launch-note {
-        font-size: 11px;
+        font-size: var(--type-xs);
       }
 
       .quick-start-actions {
@@ -2543,12 +2583,16 @@
         display: grid;
         gap: 4px;
         padding: 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        background: #ffffff;
-        color: #0f172a;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface);
+        color: var(--color-text);
         cursor: pointer;
         text-align: left;
+      }
+      .live-session-button:hover {
+        border-color: var(--color-focus-ring);
+        background: var(--color-surface-elevated);
       }
 
       .live-session-name {
