@@ -1,6 +1,139 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.15.0] - 2026-05-04
+
+### Bug Fixes
+
+- **gui:** Background project index bootstrap
+- **gui:** Scope background project index status
+- **cli:** Multi-remote / env override 対応で gwt pr remote 解決を堅牢化 (#2054)
+- **app_runtime:** Persist recent_projects stale entry pruning at load (#1678)
+- **daemon:** Board post の daemon publish を fire-and-forget + 短 timeout 化 (SPEC-2077 Phase H1)
+- **daemon:** CLI publish 同期化 + DaemonSubscriber endpoint resolver 化 (SPEC-2077)
+- **daemon:** Subscribe ack race + publish ack ordering + send timeout (SPEC-2077)
+- **daemon:** Protocol bump + forwarder leak + hub mutex hold + CLI ack race (SPEC-2077)
+- **daemon,gui:** Board scroll element + daemon startup flush + non-unix liveness (SPEC-2077)
+- **daemon:** Keep broadcast subscription alive after RecvError::Lagged (SPEC-2077)
+- **deny:** Restore unknown-git source denial (codex P2)
+- **skills:** Correct .claude/.codex path cross-references in Codex skill mirrors
+
+### Documentation
+
+- **skills:** Sync .codex/skills with .claude/ to remove outdated SPEC paths (#1679)
+- **daemon:** Publish_event 最大 stall を 400ms→600ms に修正 (SPEC-2077)
+- **lessons:** SPEC-2077 Phase H1 review-driven hardening lessons
+- **lessons:** Variant-aware error matching for async primitives
+- **readme:** Describe per-project runtime daemon and gwtd daemon status
+- **readme:** Scope runtime daemon description to macOS/Linux (codex P2)
+- **readme:** Correct Windows daemon status availability claim (codex P2)
+- **lessons:** Verify claims against actual code path before review
+- **daemon:** Refresh module docstrings to reflect Phase H1 ship
+- **daemon-contract:** Refresh DaemonFrame::Event comment to reflect Phase H1 ship
+- **daemon-publisher:** Correct default timeout from "2 s" to "200 ms" in module docstring
+- ***:** Clear all rustdoc broken-link and HTML warnings (12 sites)
+- ***:** Refresh stale references to retired gwt-gui / Tauri components
+- **architecture:** Refresh post-Tauri-migration + add SPEC-2077 daemon overview
+- ***:** Correct daemon auto-bootstrap claim and endpoint filename (codex P2 ×2)
+- ***:** Drop incorrect "GUI launch records endpoint metadata" claim (codex P2 ×3)
+- **lessons:** Add multi-round-correction-loop pattern from PRs #2335-#2337
+
+### Features
+
+- **launch-wizard:** SPEC/Issueウィンドウ起動時にブランチ名を自動 seed する (SPEC-2014 FR-024,025)
+- **cli:** Gwtd --help を 2 段階 family 階層出力に拡張 (SPEC-1942 T-204)
+- **daemon:** Gwtd daemon subcommand + Unix-socket IPC server (SPEC-2077)
+- **gui:** Board ウィンドウを open 時に最新エントリ (下端) へ自動 scroll
+- **daemon:** Gwt → gwtd Unix-socket IPC client (SPEC-2077 Phase 2)
+- **daemon:** Typed ClientFrame / DaemonFrame schema (SPEC-2077 Phase H1 前提)
+- **daemon:** BroadcastHub primitive for Phase H1 fan-out (SPEC-2077)
+- **daemon:** Wire BroadcastHub into server fan-out (SPEC-2077 Phase H1)
+- **daemon:** Gwtd daemon status が socket probe 結果を併記 (SPEC-2077)
+- **daemon:** ClientFrame::Status / DaemonStatus snapshot frame (SPEC-2077)
+- **daemon:** Gwtd daemon status の probe で uptime/channel 数も併記 (SPEC-2077)
+- **daemon:** DaemonStatus に live connection 数を追加 (SPEC-2077)
+- **daemon:** Gwtd daemon subscribe <channel> 補助 CLI (SPEC-2077)
+- **daemon:** DaemonSubscriber primitive (Phase H1+ subscriber thread, SPEC-2077)
+- **daemon:** ClientFrame::Publish + daemon-side fan-out (SPEC-2077 Phase H1)
+- **daemon:** Daemon_publisher 同期ヘルパー (Phase H1 GREEN 直前、 SPEC-2077)
+- **daemon:** Board post 後に daemon publish で broadcast (Phase H1 GREEN, SPEC-2077)
+- **daemon:** Main loop で BoardDaemonSubscriberRegistry を起動 (Phase H1 GREEN subscribe path、 SPEC-2077)
+- **daemon:** Gwtd board post でも daemon publish (Phase H1 GREEN 補完、 SPEC-2077)
+
+### Merge
+
+- Resolve Cargo.lock conflict by re-running cargo update against merged Cargo.toml
+
+### Miscellaneous Tasks
+
+- **ci:** Retrigger CI after transient Windows job failure
+- **ci:** Retrigger after transient auto-merge 504 on #2297
+- **daemon:** Drop stale dead_code allow on BroadcastHub::publish (SPEC-2077)
+- **deny:** Migrate deny.toml to cargo-deny 0.18+ schema with documented advisory ignores
+- **gitignore:** Drop 3 stale entries pointing at retired components
+- **deps-dev:** Bump @commitlint/config-conventional
+- **deps-dev:** Bump @commitlint/cli from 20.5.2 to 20.5.3
+
+### Refactor
+
+- **coordination:** Board_reminder.rs を 4 ファイルに分割 (SPEC-1974 Phase 10)
+- **app_runtime:** Board handler を board.rs に抽出 (SPEC-2077 Phase A)
+- **app_runtime:** Memory handler を memory.rs に抽出 (SPEC-2077 Phase B)
+- **app_runtime:** Window handler を window.rs に抽出 (SPEC-2077 Phase C)
+- **app_runtime:** Migration handler を migration.rs に抽出 (SPEC-2077 Phase D)
+- **app_runtime:** Profile handler を profile.rs に抽出 (SPEC-2077 Phase E redirect)
+- **app_runtime:** Wizard state helpers を wizard.rs に抽出 (SPEC-2077 Phase F1)
+- **app_runtime:** Wizard open helpers を wizard.rs に追加 (SPEC-2077 Phase F2a-1)
+- **app_runtime:** Wizard issue-level open helpers を wizard.rs に追加 (SPEC-2077 Phase F2a-2)
+- **app_runtime:** Handle_launch_wizard_action を wizard.rs に追加 (SPEC-2077 Phase F2b)
+- **app_runtime:** Spawn_wizard_shell_window を wizard.rs に追加 (SPEC-2077 Phase F3a)
+- **launch-wizard:** /simplify レビュー指摘を反映 (SPEC-2014)
+- **app_runtime:** Spawn_wizard_shell_window_async を wizard.rs に追加 (SPEC-2077 Phase F3b)
+- **cli:** CliCommand を family-nested 10 variant 構造へ分割 (SPEC-1942)
+- **cli:** Render_* helpers を family modules へ移行 (SPEC-1942)
+- **cli:** Fetch_pr_*_via_gh + edit_or_create_repo_guard を cli/pr.rs へ移行 (SPEC-1942)
+- **cli:** Issue + actions helpers を family modules へ移行 (SPEC-1942)
+- **cli:** Hook dispatch helpers を cli/hook/mod.rs へ移行 (SPEC-1942)
+- **cli:** Family-specific tests を family modules へ relocate (SPEC-1942)
+- **cli:** Pr.rs を mod.rs + gh.rs に分割 (SPEC-1942 SC-027)
+- **cli:** Update.rs を mod.rs + ops.rs + tests.rs に分割 (SPEC-1942 SC-027)
+- **cli:** Index.rs を mod.rs + runtime.rs + audit.rs に分割 (SPEC-1942 SC-027)
+- **cli:** Issue_spec.rs を mod.rs + structured.rs + tests.rs に分割 (SPEC-1942)
+- **cli:** Env.rs を mod.rs + default.rs + test_env.rs + tests.rs に分割 (SPEC-1942)
+- **daemon:** Remove unused read_ack and refresh client.rs module docstring
+- **docker:** Remove unused DevContainerLaunchDefaults::compose_file field
+- ***:** Inline format args across 7 files for consistency with codebase style
+- ***:** Convert 4 manual match-Ok/Some-else-continue blocks to let...else
+- ***:** Apply broad clippy auto-fix sweep (redundant clone/borrow/closure/conversion + redundant field names)
+- ***:** Apply additional clippy auto-fixes (single-char-pattern + if-not-else)
+- ***:** Apply broader clippy auto-fix sweep (redundant-closure-for-method-calls + 8 others)
+- ***:** Centralize is_process_alive helper into crate::process
+- ***:** Apply additional clippy auto-fixes (unnested-or-patterns + 5 others)
+- ***:** Add Eq derive where PartialEq exists with no float fields (clippy)
+- ***:** Drop redundant pub(crate) qualifiers from bin-private modules
+
+### Styling
+
+- **app_runtime:** Rustfmt fix on profile.rs (Phase E follow-up)
+
+### Testing
+
+- **daemon:** Regression for v1 endpoint rejection (SPEC-2077 protocol bump)
+- **daemon:** Multi-subscriber fan-out regression (SPEC-2077 Phase H2 prep)
+- **daemon:** Regression for auth_token rotation between sessions (SPEC-2077)
+- **app_runtime:** Fix flaky viewport/geometry persist test by locking HOME
+- **daemon:** Gate auth_token rotation flip on observable resolver call counter (codex P2)
+- **managed-assets:** Add diagnostic context to flaky assert in managed_assets_test
+- **process:** Use i32::MAX-as-u32 in far-unused-pid test (codex P2)
+- **gwt-docker:** Make read_invocation retry under FS flush latency (Issue #2349)
+- **gwt-docker:** Include path in intermediate read_invocation panic (coderabbit)
+
+### Ci
+
+- **lint:** Add cargo deny advisories + sources job
+- **lint:** Enforce zero rustdoc warnings on every PR (RUSTDOCFLAGS=-D warnings)
+- **coverage:** Update exclusions for split orchestration modules
+
 ## [9.14.0] - 2026-05-01
 
 ### Features
