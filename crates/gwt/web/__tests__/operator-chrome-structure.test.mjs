@@ -274,3 +274,24 @@ test("operator-shell wires sidebar collapse hotkey and Mission Briefing early di
     "expected Mission Briefing earlyDismiss helper",
   );
 });
+
+test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // PR #2414 introduced the pulse animation; PR #2404 the layer live dot.
+  assert.match(css, /op-status-strip-blocked-pulse/);
+  assert.match(css, /\.op-layer\[data-live="true"\] \.op-layer__label::before/);
+});
+
+test("components.css declares Operator scrollbar + tinted text selection", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  assert.match(css, /::-webkit-scrollbar-thumb/);
+  assert.match(css, /scrollbar-color:\s*var\(--color-border-strong\)/);
+  assert.match(css, /::selection/);
+});
+
+test("components.css uses op-divider utility class", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  assert.match(css, /\.op-divider\s*\{/);
+  assert.match(css, /\.op-divider--vertical/);
+  assert.match(css, /\.op-divider--strong/);
+});
