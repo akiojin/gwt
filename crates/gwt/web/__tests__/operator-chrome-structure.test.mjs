@@ -168,3 +168,51 @@ test("font preload hints exist for Mona/Hubot/JetBrains", () => {
     assert.ok(preloads.some((h) => h.endsWith(`/assets/fonts/${expected}`)), `missing preload: ${expected}`);
   }
 });
+
+test("Mission Briefing has accessible role and live region", () => {
+  const briefing = document.getElementById("op-briefing");
+  assert.ok(briefing);
+  assert.equal(briefing.getAttribute("role"), "status");
+  assert.equal(briefing.getAttribute("aria-live"), "polite");
+  assert.match(briefing.getAttribute("aria-label") ?? "", /boot|operator/i);
+});
+
+test("Status Strip is exposed as a live region with semantic value labels", () => {
+  const strip = document.getElementById("op-status-strip");
+  assert.ok(strip);
+  assert.equal(strip.getAttribute("role"), "status");
+  assert.equal(strip.getAttribute("aria-live"), "polite");
+  for (const id of ["op-strip-active", "op-strip-idle", "op-strip-blocked", "op-strip-branches"]) {
+    const el = document.getElementById(id);
+    assert.ok(el, `expected element ${id}`);
+    assert.ok(el.getAttribute("aria-label"), `${id} must have an aria-label`);
+  }
+  // clock cell is intentionally hidden from screen readers (per-second updates)
+  const clockCell = document.getElementById("op-strip-clock")?.parentElement;
+  assert.ok(clockCell, "clock cell exists");
+  assert.equal(clockCell.getAttribute("aria-hidden"), "true");
+});
+
+test("Sidebar Quick rows expose aria-keyshortcuts and kbd badges", () => {
+  for (const [cmd, key] of [
+    ["open-board", "B"],
+    ["open-git", "G"],
+    ["open-logs", "L"],
+  ]) {
+    const button = document.querySelector(`.op-layer[data-cmd="${cmd}"]`);
+    assert.ok(button, `expected Quick row for ${cmd}`);
+    const shortcut = button.getAttribute("aria-keyshortcuts");
+    assert.ok(shortcut, `${cmd} must declare aria-keyshortcuts`);
+    assert.match(shortcut, new RegExp(`Meta\\+${key}`));
+    const kbd = button.querySelector("kbd.op-layer__kbd");
+    assert.ok(kbd, `${cmd} must show a kbd badge`);
+  }
+});
+
+test("Command Palette trigger button declares aria-keyshortcuts", () => {
+  const trigger = document.getElementById("op-palette-button");
+  assert.ok(trigger, "palette trigger exists");
+  const shortcut = trigger.getAttribute("aria-keyshortcuts") ?? "";
+  assert.ok(shortcut.includes("Meta+K"), "trigger must declare Meta+K");
+  assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
+});
