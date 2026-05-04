@@ -35,6 +35,19 @@ require_not_contains() {
   fi
 }
 
+require_order() {
+  local file="$1"
+  local first="$2"
+  local second="$3"
+  local first_line
+  local second_line
+  first_line=$(grep -Fn "$first" "$file" | head -n 1 | cut -d: -f1 || true)
+  second_line=$(grep -Fn "$second" "$file" | head -n 1 | cut -d: -f1 || true)
+  if [ -z "$first_line" ] || [ -z "$second_line" ] || [ "$first_line" -ge "$second_line" ]; then
+    fail "Expected '$first' to appear before '$second' in $file"
+  fi
+}
+
 require_file "$PACKAGE_JSON"
 require_contains "$PACKAGE_JSON" '"prepare": "test -n \"$CI\" || bunx husky install"'
 require_contains "$PACKAGE_JSON" "\"lint:skills\": \"bash scripts/validate-skill-frontmatter.sh\""
@@ -47,6 +60,7 @@ require_contains "$PRE_PUSH" "ensure_coverage_tooling"
 require_contains "$PRE_PUSH" "rustup component add llvm-tools-preview"
 require_contains "$PRE_PUSH" "cargo install cargo-llvm-cov --locked"
 require_contains "$PRE_PUSH" "cargo llvm-cov --version"
+require_order "$PRE_PUSH" "if cargo llvm-cov --version >/dev/null 2>&1; then" "if command -v rustup >/dev/null 2>&1; then"
 require_contains "$PRE_PUSH" "cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json"
 require_contains "$PRE_PUSH" "node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90"
 require_contains "$PRE_PUSH" "bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md"

@@ -17,17 +17,6 @@ ensure_coverage_tooling() {
     exit 1
   fi
 
-  if command -v rustup >/dev/null 2>&1; then
-    echo "Ensuring llvm-tools-preview is available..."
-    if ! rustup component add llvm-tools-preview; then
-      echo "Failed to install llvm-tools-preview." >&2
-      echo "Run manually: rustup component add llvm-tools-preview" >&2
-      exit 1
-    fi
-  else
-    echo "rustup not found; assuming llvm tools are provided by the active toolchain."
-  fi
-
   if cargo llvm-cov --version >/dev/null 2>&1; then
     return
   fi
@@ -37,6 +26,17 @@ ensure_coverage_tooling() {
     echo "Failed to install cargo-llvm-cov." >&2
     echo "Run manually: cargo install cargo-llvm-cov --locked" >&2
     exit 1
+  fi
+
+  if command -v rustup >/dev/null 2>&1; then
+    echo "Ensuring llvm-tools-preview is available..."
+    if ! rustup component add llvm-tools-preview; then
+      echo "Warning: failed to install llvm-tools-preview." >&2
+      echo "Continuing; cargo llvm-cov will validate llvm tool availability." >&2
+      echo "Manual recovery: rustup component add llvm-tools-preview" >&2
+    fi
+  else
+    echo "rustup not found; assuming llvm tools are provided by the active toolchain."
   fi
 
   if ! cargo llvm-cov --version >/dev/null 2>&1; then
