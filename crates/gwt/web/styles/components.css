@@ -790,3 +790,167 @@ kbd.op-kbd {
   [data-agent-state] { animation: none; }
   .op-status-strip__live-dot { animation: none; }
 }
+
+/* ============================================================
+   Phase 3 Per-surface Adoption — legacy class theming bridge.
+
+   Existing surfaces inside index.html still ship a 2k-line
+   `<style>` block with hard-coded slate / sky colours from the
+   pre-Operator era. Rewriting every selector would be a massive
+   regression risk, so we add this token-driven adapter that
+   overrides the most prominent legacy classes on a theme-by-theme
+   basis. Each rule scopes through `:root[data-theme]` so it never
+   bleeds outside Operator and the legacy CSS keeps working in
+   environments where data-theme is unset (e.g. forced colors).
+   ============================================================ */
+
+:root[data-theme] .project-tab {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+:root[data-theme] .project-tab:hover {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface-elevated));
+}
+:root[data-theme] .project-tab.active {
+  background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface-elevated));
+  color: var(--color-text-strong);
+  border-color: var(--color-state-active);
+}
+:root[data-theme] .project-tab-close {
+  background: color-mix(in oklab, var(--color-text) 14%, transparent);
+  color: var(--color-text);
+}
+:root[data-theme] .project-tab-close:hover {
+  background: color-mix(in oklab, var(--color-text) 24%, transparent);
+}
+
+:root[data-theme] .app-version,
+:root[data-theme] .index-status {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+:root[data-theme] .index-status.ready { color: var(--color-state-active); border-color: var(--color-state-active); }
+:root[data-theme] .index-status.repair_required,
+:root[data-theme] .index-status.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
+
+:root[data-theme] .hint {
+  color: var(--color-text-muted);
+  background: color-mix(in oklab, var(--color-surface) 80%, transparent);
+}
+
+:root[data-theme] .arrange-button,
+:root[data-theme] .add-button,
+:root[data-theme] .wizard-button {
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  border-color: var(--color-button-border);
+}
+:root[data-theme] .arrange-button:hover,
+:root[data-theme] .add-button:hover,
+:root[data-theme] .wizard-button:hover {
+  background: var(--color-button-bg-hover);
+}
+:root[data-theme] .wizard-button.primary {
+  background: var(--color-state-active);
+  color: var(--color-canvas);
+  border-color: var(--color-state-active);
+}
+
+/* Floating window chrome */
+:root[data-theme] .window {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-2);
+}
+:root[data-theme] .window .title-bar,
+:root[data-theme] .window .window-header {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border-bottom: 1px solid var(--color-border);
+}
+:root[data-theme] .title-text {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  font-size: var(--type-xs);
+  color: var(--color-display-fg);
+}
+:root[data-theme] .status-chip {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+:root[data-theme] .status-chip.starting,
+:root[data-theme] .status-chip.running,
+:root[data-theme] .status-chip.waiting { color: var(--color-state-active); border-color: var(--color-state-active); }
+:root[data-theme] .status-chip.ready { color: var(--color-state-idle); border-color: var(--color-state-idle); }
+:root[data-theme] .status-chip.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
+:root[data-theme] .status-chip.stopped,
+:root[data-theme] .status-chip.exited { color: var(--color-state-done); border-color: var(--color-state-done); }
+
+/* Project picker / onboarding cards */
+:root[data-theme] .project-picker,
+:root[data-theme] .project-onboarding {
+  background: var(--color-overlay);
+  backdrop-filter: blur(2px);
+}
+:root[data-theme] .project-picker-card,
+:root[data-theme] .project-onboarding-card {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  box-shadow: var(--shadow-2);
+}
+:root[data-theme] .project-picker-title,
+:root[data-theme] .project-onboarding-title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+  color: var(--color-display-fg);
+}
+
+/* Preset modal (Add window) */
+:root[data-theme] .preset-section-label {
+  color: var(--color-text-muted);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-display);
+}
+:root[data-theme] .preset-button {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+:root[data-theme] .preset-button:hover {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-state-active);
+}
+:root[data-theme] .preset-button strong {
+  color: var(--color-text-strong);
+}
+
+/* Window list panel (in floating actions) */
+:root[data-theme] .window-list-panel {
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  box-shadow: var(--shadow-2);
+}
+
+/* Connection dot */
+:root[data-theme] .connection-dot {
+  background: var(--color-state-idle);
+}
+:root[data-theme] .connection-dot.connected { background: var(--color-state-active); }
+:root[data-theme] .connection-dot.error { background: var(--color-state-blocked); }
