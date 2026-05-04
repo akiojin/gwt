@@ -2242,15 +2242,21 @@
 
       .wizard-title {
         margin: 0;
-        font-size: 18px;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-lg);
         font-weight: 700;
-        color: #0f172a;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
       }
 
       .wizard-meta {
         margin-top: 4px;
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .wizard-summary {
@@ -2271,24 +2277,30 @@
       .wizard-summary-item {
         min-width: 0;
         padding: 10px 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.24);
-        background: #f8fafc;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
         display: grid;
         gap: 4px;
       }
 
       .wizard-summary-label {
-        font-size: 11px;
-        font-weight: 600;
-        color: #64748b;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-xs);
+        font-weight: 700;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-text-muted);
       }
 
       .wizard-summary-value {
         min-width: 0;
-        font-size: 13px;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
         font-weight: 700;
-        color: #0f172a;
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-strong);
         overflow-wrap: anywhere;
       }
 
@@ -2301,9 +2313,9 @@
         display: grid;
         gap: 12px;
         padding: 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        background: #f8fafc;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface-elevated);
       }
 
       .launch-section-header {
@@ -2314,14 +2326,19 @@
       }
 
       .launch-section-title {
-        font-size: 13px;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-sm);
         font-weight: 700;
-        color: #0f172a;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
       }
 
       .launch-section-copy {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text-muted);
       }
 
       .launch-form-grid {
@@ -2341,9 +2358,12 @@
       }
 
       .launch-field-label {
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        text-transform: uppercase;
         font-weight: 600;
-        color: #334155;
+        color: var(--color-text-muted);
       }
 
       .launch-select,
@@ -2352,16 +2372,23 @@
         min-width: 0;
         height: 38px;
         padding: 0 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #ffffff;
-        font-size: 13px;
-        color: #0f172a;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-strong);
+        background: var(--color-surface);
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text);
+      }
+      .launch-select:focus,
+      .launch-input:focus {
+        outline: none;
+        border-color: var(--color-focus-ring);
       }
 
       .launch-field-help {
-        font-size: 11px;
-        color: #64748b;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text-muted);
       }
 
       .launch-choice-row {
@@ -2375,17 +2402,18 @@
         display: grid;
         gap: 3px;
         padding: 10px 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #ffffff;
-        color: #0f172a;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface);
+        color: var(--color-text);
+        font-family: var(--font-body);
         cursor: pointer;
         text-align: left;
       }
 
       .launch-choice-button.selected {
-        border-color: rgba(37, 99, 235, 0.45);
-        background: rgba(59, 130, 246, 0.08);
+        border-color: var(--color-focus-ring);
+        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface));
       }
 
       .launch-choice-title {
