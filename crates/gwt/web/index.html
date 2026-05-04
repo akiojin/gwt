@@ -1180,11 +1180,21 @@
       .memo-body-input {
         width: 100%;
         padding: 10px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: #ffffff;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-strong);
+        background: var(--color-surface);
         font: inherit;
-        color: #0f172a;
+        font-family: var(--font-body);
+        color: var(--color-text);
+      }
+      .memo-title-input::placeholder,
+      .memo-body-input::placeholder {
+        color: var(--color-text-muted);
+      }
+      .memo-title-input:focus,
+      .memo-body-input:focus {
+        outline: none;
+        border-color: var(--color-focus-ring);
       }
 
       .memo-title-input {
@@ -1221,7 +1231,7 @@
 
       .profile-list-pane {
         overflow: auto;
-        border-right: 1px solid rgba(148, 163, 184, 0.18);
+        border-right: 1px solid var(--color-border);
         padding: 8px 0;
       }
 
@@ -1234,12 +1244,14 @@
       }
 
       .profile-status {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .profile-status.info {
-        color: #1d4ed8;
+        color: var(--color-state-active);
       }
 
       .profile-status.error {
