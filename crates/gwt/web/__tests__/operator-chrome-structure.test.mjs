@@ -222,3 +222,20 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+K"), "trigger must declare Meta+K");
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
+
+test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // The pseudo-element content lives only in CSS, not in the DOM, so we
+  // assert the rule itself contains the bracket-flanked brand string.
+  const projectBarBefore = css.match(/\.project-bar::before\s*\{[\s\S]*?\}/);
+  assert.ok(projectBarBefore, "expected .project-bar::before rule");
+  assert.match(projectBarBefore[0], /content:\s*"⌜ GWT · OPERATOR ⌟"/);
+});
+
+test("Mission Briefing splash has dismissible affordance (pointer-events + cursor)", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const briefing = css.match(/\.op-briefing\s*\{[\s\S]*?\}/);
+  assert.ok(briefing, "expected .op-briefing rule");
+  assert.match(briefing[0], /pointer-events:\s*auto/);
+  assert.match(briefing[0], /cursor:\s*pointer/);
+});
