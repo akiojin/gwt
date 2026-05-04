@@ -1589,3 +1589,13 @@ kbd.op-kbd {
 :root[data-theme] .op-palette__row[data-selected="true"] .op-palette__hint {
   color: var(--color-state-active);
 }
+
+/* SPEC-2356 — Cmd+\ collapses Sidebar Layers; the grid template tightens
+   to push canvas-area against the project bar's left edge. */
+:root[data-theme][data-op-sidebar="collapsed"] #app {
+  grid-template-columns: 0 1fr;
+}
+
+:root[data-theme][data-op-sidebar="collapsed"] .op-sidebar {
+  display: none;
+}

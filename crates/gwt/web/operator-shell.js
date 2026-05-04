@@ -447,6 +447,15 @@ function wireGlobalHotkeys({ doc, hotkey, palette }) {
   hotkey.register("cmd+b", send("open-board"));
   hotkey.register("cmd+g", send("open-git"));
   hotkey.register("cmd+l", send("open-logs"));
+  // SPEC-2356 — Cmd+\ collapses/expands the Sidebar Layers, freeing canvas
+  // real estate when the user wants more room for floating windows.
+  hotkey.register("cmd+\\", () => {
+    const root = doc.documentElement;
+    const next = root.dataset.opSidebar === "collapsed" ? "" : "collapsed";
+    if (next) root.dataset.opSidebar = next;
+    else delete root.dataset.opSidebar;
+    return true;
+  });
 
   if (typeof palette?.close === "function") {
     doc.addEventListener("keydown", (e) => {
