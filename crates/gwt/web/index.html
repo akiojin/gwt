@@ -188,14 +188,14 @@
       }
 
       .index-status.ready {
-        border-color: rgba(34, 197, 94, 0.34);
-        color: #166534;
+        border-color: var(--color-state-active);
+        color: var(--color-state-active);
       }
 
       .index-status.repair_required,
       .index-status.error {
-        border-color: rgba(245, 158, 11, 0.45);
-        color: #92400e;
+        border-color: var(--agent-claude);
+        color: var(--agent-claude);
       }
 
       .index-status[hidden] {
@@ -531,7 +531,7 @@
       .surface-logs .status-chip,
       .surface-knowledge .status-chip,
       .surface-mock .status-chip {
-        color: #334155;
+        color: var(--color-text);
       }
 
       .status-dot {
@@ -1029,8 +1029,13 @@
 
       .knowledge-detail-title {
         margin: 0;
-        font-size: 16px;
-        color: #0f172a;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-md);
+        font-weight: 700;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
       }
 
       .knowledge-detail-actions {
@@ -1161,9 +1166,10 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        font-size: 13px;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
         font-weight: 600;
-        color: #0f172a;
+        color: var(--color-text-strong);
       }
 
       .memo-note-chip {
@@ -1181,8 +1187,10 @@
       .memo-empty-copy,
       .memo-editor-meta,
       .memo-pin-toggle {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .memo-note-preview {
@@ -1281,7 +1289,7 @@
       }
 
       .profile-status.error {
-        color: #b91c1c;
+        color: var(--color-state-blocked);
       }
 
       .profile-row {
@@ -1445,15 +1453,19 @@
       }
 
       .profile-preview-key {
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         font-weight: 600;
-        color: #334155;
+        color: var(--color-text);
         overflow-wrap: anywhere;
       }
 
       .profile-preview-value {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
         overflow-wrap: anywhere;
       }
 
@@ -1614,8 +1626,10 @@
         display: grid;
         gap: 6px;
         min-width: 0;
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .logs-filter-field span {
@@ -1637,7 +1651,6 @@
         background: var(--color-surface);
         color: var(--color-text);
         font: inherit;
-        color: #0f172a;
       }
 
       .logs-status {
@@ -1773,7 +1786,6 @@
         letter-spacing: var(--tracking-mono);
         color: var(--color-text);
         line-height: 1.5;
-        color: #334155;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
@@ -2035,14 +2047,17 @@
 
       .branch-cleanup-item-title {
         min-width: 0;
-        font-size: 13px;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
         font-weight: 600;
-        color: #0f172a;
+        color: var(--color-text-strong);
       }
 
       .branch-cleanup-item-copy {
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .branch-cleanup-item-copy + .branch-cleanup-item-copy {
@@ -2054,8 +2069,9 @@
         align-items: center;
         gap: 8px;
         margin-top: 12px;
-        font-size: 12px;
-        color: #334155;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text);
       }
 
       .branch-cleanup-toggle-row input {
@@ -2064,31 +2080,37 @@
 
       .branch-cleanup-running {
         margin-top: 12px;
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .branch-cleanup-results-summary {
         margin-top: 12px;
-        font-size: 12px;
-        color: #334155;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text);
       }
 
       /* SPEC-1934 US-6 migration modal — built on the shared modal-shell
          layout, only the in-modal text/list/progress styles are migration
          specific. */
       .migration-modal-subtitle {
-        font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
-        color: #475569;
-        font-size: 12px;
+        font-family: var(--font-mono);
+        color: var(--color-text-muted);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         word-break: break-all;
         margin: 4px 0 12px;
       }
       .migration-modal-body {
         margin: 0 0 12px;
         line-height: 1.55;
-        font-size: 13px;
-        color: #1f2937;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text);
       }
       .migration-modal-details {
         list-style: disc;
@@ -2187,7 +2209,12 @@
         height: 18px;
         cursor: nwse-resize;
         background:
-          linear-gradient(135deg, transparent 0 50%, rgba(148, 163, 184, 0.5) 50% 60%, transparent 60% 70%, rgba(148, 163, 184, 0.5) 70% 80%, transparent 80%);
+          linear-gradient(135deg,
+            transparent 0 50%,
+            color-mix(in oklab, var(--color-text-muted) 50%, transparent) 50% 60%,
+            transparent 60% 70%,
+            color-mix(in oklab, var(--color-text-muted) 50%, transparent) 70% 80%,
+            transparent 80%);
       }
 
       /* SPEC-2008 FR-035: shared modal frame primitives. Surface modals
@@ -2263,9 +2290,13 @@
 
       .preset-section-label {
         margin-bottom: 8px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #475569;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-xs);
+        font-weight: 700;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-text-muted);
       }
 
       .preset-list {
@@ -2296,8 +2327,9 @@
 
       .preset-button span {
         display: block;
-        font-size: 12px;
-        color: #475569;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text-muted);
       }
 
       .modal-footer {
@@ -2309,9 +2341,13 @@
       .text-button {
         border: none;
         background: transparent;
-        color: #334155;
+        color: var(--color-text);
         cursor: pointer;
-        font-size: 12px;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+      }
+      .text-button:hover {
+        color: var(--color-focus-ring);
       }
 
       /* Launch Wizard backdrop and shell are unified with the shared modal
@@ -2518,8 +2554,10 @@
       }
 
       .launch-choice-detail {
-        font-size: 11px;
-        color: #64748b;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
       }
 
       .quick-start-grid,
@@ -2596,14 +2634,18 @@
       }
 
       .live-session-name {
-        font-size: 13px;
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
         font-weight: 700;
+        color: var(--color-text-strong);
       }
 
       .live-session-status {
-        font-size: 11px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         font-weight: 600;
-        color: #2563eb;
+        color: var(--color-state-active);
       }
 
       .launch-toggle-row {
@@ -2617,8 +2659,9 @@
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        font-size: 12px;
-        color: #334155;
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        color: var(--color-text);
       }
 
       .launch-inline-check input {
