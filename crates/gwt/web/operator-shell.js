@@ -150,6 +150,15 @@ export function applyTelemetryCounts(doc, counts = {}) {
   };
   if ("active" in counts) markLive("agents", (counts.active ?? 0) > 0);
   if ("branches" in counts) markLive("git", (counts.branches ?? 0) > 0);
+  // SPEC-2356 — toggle the blocked alert state so the BLOCKED cell pulses when
+  // anything actually needs attention, and stays still otherwise.
+  if ("blocked" in counts) {
+    const blockedCell = doc.querySelector(".op-status-strip__cell--blocked");
+    if (blockedCell) {
+      if ((counts.blocked ?? 0) > 0) blockedCell.classList.add("op-status-strip__cell--alert");
+      else blockedCell.classList.remove("op-status-strip__cell--alert");
+    }
+  }
   setText("op-strip-active", counts.active ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
   setText("op-strip-blocked", counts.blocked ?? 0);
