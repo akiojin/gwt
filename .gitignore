@@ -25,6 +25,8 @@ bun.lock
 # Downloaded native binaries (postinstall downloads these)
 bin/gwt
 bin/gwt.exe
+bin/gwtd
+bin/gwtd.exe
 
 # Environment variables
 .env
@@ -89,3 +91,4 @@ __pycache__/
 # (gwt-spec label). Prevent accidental recreation by legacy scripts.
 /specs/
 tasks/spec-*/
+package-lock.json

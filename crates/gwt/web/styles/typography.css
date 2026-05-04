@@ -1,2 +1,153 @@
-/* SPEC-2356 Operator Design System — Typography */
-/* Phase 1 で @font-face と type scale を定義する。 */
+/* SPEC-2356 Operator Design System — Typography.
+ *
+ * Mona Sans (variable, body) + Hubot Sans (display, three static weights:
+ * Regular / Bold / Condensed-Bold) + JetBrains Mono (variable wght). All OFL.
+ *
+ * Hubot Sans upstream does not publish a Variable WOFF2, so the wdth axis
+ * stretching is approximated by switching between the regular and condensed
+ * static cuts via `font-stretch`.
+ */
+
+@font-face {
+  font-family: "Mona Sans Variable";
+  src: url("/assets/fonts/MonaSans.woff2") format("woff2-variations"),
+       url("/assets/fonts/MonaSans.woff2") format("woff2");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hubot Sans";
+  src: url("/assets/fonts/HubotSans-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-stretch: 100%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hubot Sans";
+  src: url("/assets/fonts/HubotSans-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-stretch: 100%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hubot Sans";
+  src: url("/assets/fonts/HubotSansCondensed-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-stretch: 75%;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  src: url("/assets/fonts/JetBrainsMono.woff2") format("woff2-variations"),
+       url("/assets/fonts/JetBrainsMono.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-display: "Hubot Sans", "Hubot Sans Condensed", "Helvetica Neue Condensed", system-ui, sans-serif;
+  --font-body: "Mona Sans Variable", "Mona Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* Type scale (rem) — Operator industrial proportions */
+  --type-xs: 0.6875rem;   /* 11px — meta / strip */
+  --type-sm: 0.8125rem;   /* 13px — secondary body */
+  --type-base: 0.9375rem; /* 15px — body */
+  --type-md: 1rem;        /* 16px — emphasis body */
+  --type-lg: 1.125rem;    /* 18px — section title */
+  --type-xl: 1.5rem;      /* 24px — pane title */
+  --type-2xl: 2rem;       /* 32px — display */
+  --type-3xl: 2.75rem;    /* 44px — hero / mission briefing */
+
+  /* Tracking */
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0em;
+  --tracking-wide: 0.04em;
+  --tracking-display: 0.08em;
+  --tracking-mono: 0.005em;
+}
+
+/* Display utility — Hubot Sans, condensed for mission-control headlines */
+.t-display {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-stretch: 75%;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-display-fg);
+}
+
+.t-display--wide {
+  font-stretch: 100%;
+  letter-spacing: var(--tracking-wide);
+}
+
+.t-display--xl {
+  font-size: var(--type-3xl);
+  line-height: 1.05;
+}
+
+.t-display--lg {
+  font-size: var(--type-2xl);
+  line-height: 1.1;
+}
+
+/* Body utility — Mona Sans Variable */
+.t-body {
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: var(--type-base);
+  line-height: 1.5;
+  color: var(--color-text);
+  font-feature-settings: "ss01", "cv11";
+}
+
+.t-body--strong {
+  font-weight: 600;
+  color: var(--color-text-strong);
+}
+
+.t-body--muted {
+  color: var(--color-text-muted);
+}
+
+.t-body--sm {
+  font-size: var(--type-sm);
+}
+
+/* Mono utility — JetBrains Mono Variable */
+.t-mono {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: var(--type-sm);
+  line-height: 1.4;
+  letter-spacing: var(--tracking-mono);
+  font-feature-settings: "tnum";
+  color: var(--color-text);
+}
+
+.t-mono--xs {
+  font-size: var(--type-xs);
+}
+
+.t-mono--strong {
+  font-weight: 600;
+}
+
+/* Mission Control timestamp / counter */
+.t-counter {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum", "zero", "ss02";
+}

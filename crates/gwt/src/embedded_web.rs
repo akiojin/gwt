@@ -31,6 +31,48 @@ pub fn xterm_css() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.css")
 }
 
+// SPEC-2356 Operator Design System — module assets.
+pub fn theme_manager_js() -> &'static str {
+    include_str!("../web/theme-manager.js")
+}
+
+pub fn hotkey_js() -> &'static str {
+    include_str!("../web/hotkey.js")
+}
+
+pub fn styles_tokens_css() -> &'static str {
+    include_str!("../web/styles/tokens.css")
+}
+
+pub fn styles_typography_css() -> &'static str {
+    include_str!("../web/styles/typography.css")
+}
+
+pub fn styles_components_css() -> &'static str {
+    include_str!("../web/styles/components.css")
+}
+
+// SPEC-2356 Operator Design System — fonts (binary).
+pub fn font_mona_sans() -> &'static [u8] {
+    include_bytes!("../web/fonts/MonaSans.woff2")
+}
+
+pub fn font_hubot_regular() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSans-Regular.woff2")
+}
+
+pub fn font_hubot_bold() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSans-Bold.woff2")
+}
+
+pub fn font_hubot_condensed_bold() -> &'static [u8] {
+    include_bytes!("../web/fonts/HubotSansCondensed-Bold.woff2")
+}
+
+pub fn font_jetbrains_mono() -> &'static [u8] {
+    include_bytes!("../web/fonts/JetBrainsMono.woff2")
+}
+
 pub async fn index_handler() -> Html<&'static str> {
     Html(index_html())
 }
@@ -75,6 +117,72 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
     )
+}
+
+// SPEC-2356 — Operator Design System: module + style + font handlers.
+pub async fn theme_manager_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        theme_manager_js(),
+    )
+}
+
+pub async fn hotkey_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        hotkey_js(),
+    )
+}
+
+pub async fn styles_tokens_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_tokens_css(),
+    )
+}
+
+pub async fn styles_typography_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_typography_css(),
+    )
+}
+
+pub async fn styles_components_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        styles_components_css(),
+    )
+}
+
+fn font_response(bytes: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+}
+
+pub async fn font_mona_sans_handler() -> impl IntoResponse {
+    font_response(font_mona_sans())
+}
+
+pub async fn font_hubot_regular_handler() -> impl IntoResponse {
+    font_response(font_hubot_regular())
+}
+
+pub async fn font_hubot_bold_handler() -> impl IntoResponse {
+    font_response(font_hubot_bold())
+}
+
+pub async fn font_hubot_condensed_bold_handler() -> impl IntoResponse {
+    font_response(font_hubot_condensed_bold())
+}
+
+pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
+    font_response(font_jetbrains_mono())
 }
 
 #[cfg(test)]
