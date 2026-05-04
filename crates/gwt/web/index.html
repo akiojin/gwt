@@ -218,10 +218,10 @@
         position: absolute;
         inset: 0;
         transform-origin: 0 0;
-        background-image:
-          linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
-        background-size: 24px 24px;
+        /* SPEC-2356 — body::before already paints the Operator scan grid,
+           so the legacy 24px slate grid here only doubled the noise.
+           Leaving the stage transparent lets the Operator backdrop show. */
+        background: transparent;
       }
 
       .hint {
@@ -231,12 +231,14 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         padding: 8px 12px;
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.9);
-        border: 1px solid rgba(148, 163, 184, 0.45);
-        color: #334155;
+        border-radius: var(--radius-md);
+        background: color-mix(in oklab, var(--color-surface) 85%, transparent);
+        border: 1px solid var(--color-border);
+        color: var(--color-text-muted);
         backdrop-filter: blur(12px);
       }
 
@@ -244,11 +246,11 @@
         width: 8px;
         height: 8px;
         border-radius: 999px;
-        background: #f59e0b;
+        background: var(--color-state-idle);
       }
 
       .connection-dot.connected {
-        background: #22c55e;
+        background: var(--color-state-active);
       }
 
       .floating-actions {
