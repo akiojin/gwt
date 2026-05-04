@@ -30,6 +30,8 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
             worktree_path: Some(project_root.join("../work/20260504-1200")),
             branch: Some("work/20260504-1200".to_string()),
             last_board_entry_id: Some("board-1".to_string()),
+            last_board_entry_kind: Some(gwt_core::coordination::BoardEntryKind::Status),
+            coordination_scope: Some("SPEC-2359 / start-work".to_string()),
             updated_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
         }],
         git_details: Some(GitDetails {

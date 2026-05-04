@@ -162,6 +162,7 @@
             "requestBoard",
             "requestOlderBoardEntries",
             "submitBoardEntry",
+            "focusBoardEntry",
           ]),
         }),
         logStateMap: Object.freeze({
@@ -234,6 +235,7 @@
       let viewportRasterTimer = null;
       let launchWizard = null;
       let activeWorkProjection = null;
+      let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
       let wizardAdvancedOpen = false;
       let wizardBranchDraft = "";
@@ -1011,6 +1013,46 @@
         container.appendChild(createNode("span", "", value));
       }
 
+      function coordinationKindLabel(kind) {
+        switch (String(kind || "").toLowerCase()) {
+          case "blocked":
+            return "Blocked";
+          case "handoff":
+            return "Handoff";
+          case "next":
+            return "Next";
+          case "claim":
+            return "Claim";
+          case "decision":
+            return "Decision";
+          case "status":
+            return "Status";
+          default:
+            return "";
+        }
+      }
+
+      function activeBoardWindowIds() {
+        return (activeWorkspace().windows || [])
+          .filter((windowData) => windowData.preset === "board" && !windowData.minimized)
+          .map((windowData) => windowData.id);
+      }
+
+      function focusBoardEntry(entryId) {
+        if (!entryId) {
+          focusOrSpawnPreset("board");
+          return;
+        }
+        pendingBoardEntryFocusId = entryId;
+        for (const windowId of activeBoardWindowIds()) {
+          const state = ensureBoardState(windowId);
+          state.focusEntryId = entryId;
+          state.pendingFocusScroll = true;
+          renderBoard(windowId);
+        }
+        focusOrSpawnPreset("board");
+      }
+
       function renderActiveWorkOverview() {
         if (!activeWorkSummary || !activeWorkAgents) return;
         activeWorkSummary.innerHTML = "";
@@ -1048,7 +1090,7 @@
 
         const actions = createNode("div", "op-work-actions");
         if (activeWorkProjection.branch) {
-          const addAgent = createNode("button", "op-work-action", "Add Agent");
+          const addAgent = createNode("button", "op-work-action", "Add Agent to This Work");
           addAgent.type = "button";
           addAgent.addEventListener("click", () => {
             send({
@@ -1059,10 +1101,12 @@
           });
           actions.appendChild(addAgent);
         }
-        if ((activeWorkProjection.board_refs || []).length > 0) {
-          const openBoard = createNode("button", "op-work-action", "Open Board");
+        const boardRefs = activeWorkProjection.board_refs || [];
+        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
+        if (latestBoardRef) {
+          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
           openBoard.type = "button";
-          openBoard.addEventListener("click", () => focusOrSpawnPreset("board"));
+          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
           actions.appendChild(openBoard);
         }
         if (actions.childNodes.length > 0) {
@@ -1078,15 +1122,23 @@
 
         for (const agent of agents) {
           const state = agent.status_category || "unknown";
+          const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
+          const coordinationLabel = coordinationKindLabel(coordinationKind);
           const card = createNode("article", "op-agent-card");
           card.dataset.state = state;
+          if (coordinationKind) card.dataset.kind = coordinationKind;
           if (agent.last_board_entry_id) card.dataset.boardRef = agent.last_board_entry_id;
 
           const head = createNode("div", "op-agent-head");
           head.appendChild(
             createNode("div", "op-agent-name", agent.display_name || agent.agent_id || "Agent"),
           );
-          head.appendChild(createNode("div", "op-agent-state", state));
+          const chips = createNode("div", "op-agent-chips");
+          if (coordinationLabel) {
+            chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
+          }
+          chips.appendChild(createNode("div", "op-agent-state", state));
+          head.appendChild(chips);
           card.appendChild(head);
 
           const agentMeta = createNode("div", "op-agent-meta");
@@ -1095,8 +1147,15 @@
           appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
           card.appendChild(agentMeta);
 
+          if (agent.coordination_scope) {
+            card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
+          }
+
           if (agent.current_focus) {
-            card.appendChild(createNode("div", "op-agent-focus", agent.current_focus));
+            const focusText = coordinationLabel
+              ? `${coordinationLabel}: ${agent.current_focus}`
+              : agent.current_focus;
+            card.appendChild(createNode("div", "op-agent-focus", focusText));
           }
 
           const agentActions = createNode("div", "op-agent-actions");
@@ -1109,9 +1168,9 @@
             agentActions.appendChild(focusButton);
           }
           if (agent.last_board_entry_id) {
-            const boardButton = createNode("button", "op-agent-action", "Board");
+            const boardButton = createNode("button", "op-agent-action", "Open Entry");
             boardButton.type = "button";
-            boardButton.addEventListener("click", () => focusOrSpawnPreset("board"));
+            boardButton.addEventListener("click", () => focusBoardEntry(agent.last_board_entry_id));
             agentActions.appendChild(boardButton);
           }
           if (agentActions.childNodes.length > 0) {
@@ -1864,6 +1923,8 @@
             preserveBoardScrollPosition: false,
             shouldFollowBoardBottom: true,
             newEntriesAvailable: false,
+            focusEntryId: null,
+            pendingFocusScroll: false,
           });
         }
         return boardStateMap.get(windowId);
@@ -3289,6 +3350,10 @@
         if (!status || !timeline || !composer) {
           return;
         }
+        if (pendingBoardEntryFocusId && !state.focusEntryId) {
+          state.focusEntryId = pendingBoardEntryFocusId;
+          state.pendingFocusScroll = true;
+        }
 
         const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
@@ -3358,6 +3423,7 @@
             createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
           );
         }
+        let focusTarget = null;
         for (const entry of state.entries) {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
@@ -3370,6 +3436,14 @@
           }
           if (entry.agent_color) {
             card.dataset.agentColor = entry.agent_color;
+          }
+          if (entry.id) {
+            card.setAttribute("data-board-entry-id", entry.id);
+          }
+          if (state.focusEntryId && entry.id === state.focusEntryId) {
+            card.classList.add("focus-target");
+            card.tabIndex = -1;
+            focusTarget = card;
           }
 
           const meta = createNode("div", "board-message-meta");
@@ -3389,7 +3463,12 @@
         }
 
         if (scroller) {
-          if (state.pendingSelfPostScroll) {
+          if (focusTarget && state.pendingFocusScroll) {
+            focusTarget.scrollIntoView({ block: "center" });
+            focusTarget.focus({ preventScroll: true });
+            state.pendingFocusScroll = false;
+            pendingBoardEntryFocusId = null;
+          } else if (state.pendingSelfPostScroll) {
             forceBoardScrollToBottom(scroller);
             state.pendingSelfPostScroll = false;
             state.newEntriesAvailable = false;

@@ -47,6 +47,10 @@ pub struct WorkspaceAgentSummary {
     pub worktree_path: Option<PathBuf>,
     pub branch: Option<String>,
     pub last_board_entry_id: Option<String>,
+    #[serde(default)]
+    pub last_board_entry_kind: Option<BoardEntryKind>,
+    #[serde(default)]
+    pub coordination_scope: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -137,6 +141,8 @@ impl WorkspaceProjection {
                 .find(|agent| agent.session_id == session_id)
             {
                 agent.last_board_entry_id = Some(entry.id.clone());
+                agent.last_board_entry_kind = Some(entry.kind.clone());
+                agent.coordination_scope = coordination_scope_for_entry(entry);
                 agent.current_focus = Some(entry.body.clone());
                 agent.updated_at = entry.updated_at;
                 match entry.kind {
@@ -158,6 +164,23 @@ impl WorkspaceProjection {
         }
 
         self.updated_at = entry.updated_at;
+    }
+}
+
+fn coordination_scope_for_entry(entry: &BoardEntry) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(owner) = entry.related_owners.first() {
+        parts.push(owner.clone());
+    }
+    if let Some(topic) = entry.related_topics.first() {
+        if !parts.iter().any(|part| part == topic) {
+            parts.push(topic.clone());
+        }
+    }
+    if parts.is_empty() {
+        entry.origin_branch.clone()
+    } else {
+        Some(parts.join(" / "))
     }
 }
 
@@ -247,6 +270,8 @@ mod tests {
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
             updated_at: Utc::now(),
         });
 
@@ -276,6 +301,8 @@ mod tests {
         .expect("legacy summary");
 
         assert_eq!(summary.window_id, None);
+        assert_eq!(summary.last_board_entry_kind, None);
+        assert_eq!(summary.coordination_scope, None);
     }
 
     #[test]
@@ -292,6 +319,8 @@ mod tests {
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
             updated_at: Utc::now(),
         });
 
@@ -385,6 +414,8 @@ mod tests {
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
             updated_at: Utc::now(),
         });
         let mut blocked = BoardEntry::new(
@@ -442,6 +473,8 @@ mod tests {
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
             updated_at: Utc::now(),
         });
         let mut blocked = BoardEntry::new(
@@ -484,6 +517,52 @@ mod tests {
         assert_eq!(
             projection.next_action.as_deref(),
             Some("Try a different credential source")
+        );
+    }
+
+    #[test]
+    fn board_milestone_records_agent_coordination_kind_and_scope() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "sess-1".to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: Utc::now(),
+        });
+        let mut handoff = BoardEntry::new(
+            crate::coordination::AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Handoff,
+            "Implementation complete; reviewer should check visual states",
+            None,
+            None,
+            vec!["workspace-ux".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("sess-1");
+        handoff.id = "handoff-1".to_string();
+
+        projection.record_board_milestone(&handoff);
+
+        assert_eq!(
+            projection.agents[0].last_board_entry_kind,
+            Some(BoardEntryKind::Handoff)
+        );
+        assert_eq!(
+            projection.agents[0].coordination_scope.as_deref(),
+            Some("SPEC-2359 / workspace-ux")
+        );
+        assert_eq!(
+            projection.agents[0].current_focus.as_deref(),
+            Some("Implementation complete; reviewer should check visual states")
         );
     }
 }
