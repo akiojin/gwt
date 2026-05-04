@@ -11,10 +11,46 @@ unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
     GIT_NAMESPACE GIT_COMMON_DIR
 
+ensure_coverage_tooling() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo is required for pre-push checks but was not found on PATH." >&2
+    exit 1
+  fi
+
+  if command -v rustup >/dev/null 2>&1; then
+    echo "Ensuring llvm-tools-preview is available..."
+    if ! rustup component add llvm-tools-preview; then
+      echo "Failed to install llvm-tools-preview." >&2
+      echo "Run manually: rustup component add llvm-tools-preview" >&2
+      exit 1
+    fi
+  else
+    echo "rustup not found; assuming llvm tools are provided by the active toolchain."
+  fi
+
+  if cargo llvm-cov --version >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "cargo-llvm-cov is not installed. Installing it before coverage check..."
+  if ! cargo install cargo-llvm-cov --locked; then
+    echo "Failed to install cargo-llvm-cov." >&2
+    echo "Run manually: cargo install cargo-llvm-cov --locked" >&2
+    exit 1
+  fi
+
+  if ! cargo llvm-cov --version >/dev/null 2>&1; then
+    echo "cargo-llvm-cov was installed, but cargo llvm-cov is still unavailable." >&2
+    echo "Ensure Cargo's bin directory is on PATH, then retry push." >&2
+    exit 1
+  fi
+}
+
 echo "Running CI-equivalent lint checks..."
 
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
+ensure_coverage_tooling
 cargo llvm-cov -p gwt-core -p gwt --all-features --json --summary-only --output-path target/coverage-summary.json -- --test-threads=1
 node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90
 bunx --bun markdownlint-cli . --config .markdownlint.json --ignore target --ignore CHANGELOG.md --ignore tasks/todo.md
