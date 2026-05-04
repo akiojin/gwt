@@ -3,20 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>gwt</title>
+    <title>gwt — Operator</title>
+    <!-- SPEC-2356: theme bootstrap. Runs synchronously before paint to avoid FOUC. -->
+    <script>
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("gwt:ui:theme");
+          var pref = stored === "dark" || stored === "light" ? stored : "auto";
+          var effective =
+            pref === "auto"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : pref;
+          document.documentElement.setAttribute("data-theme", effective);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <link rel="preload" as="font" type="font/woff2" href="/assets/fonts/MonaSans.woff2" crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href="/assets/fonts/HubotSans-Bold.woff2" crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href="/assets/fonts/JetBrainsMono.woff2" crossorigin />
+    <link rel="stylesheet" href="/styles/tokens.css" />
+    <link rel="stylesheet" href="/styles/typography.css" />
+    <link rel="stylesheet" href="/styles/components.css" />
     <link rel="stylesheet" href="/assets/xterm/xterm.css" />
     <style>
       :root {
-        color-scheme: light;
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-          "Segoe UI", sans-serif;
-        --agent-claude: #f59e0b;
-        --agent-codex: #06b6d4;
-        --agent-gemini: #c026d3;
-        --agent-opencode: #16a34a;
-        --agent-copilot: #2563eb;
-        --agent-custom: #9ca3af;
+        font-family: var(--font-body);
       }
 
       [data-agent-color="yellow"] {
@@ -47,14 +62,19 @@
         box-sizing: border-box;
       }
 
+      /* SPEC-2356 — base layout. The Operator chrome (Project Bar / Sidebar
+         Layers / Canvas / Status Strip) is laid out via #app's grid declared
+         in components.css, so `.project-shell` becomes a passthrough via
+         `display: contents` and individual surfaces inherit the grid areas.
+         Body colours come from tokens.css; do not hard-code them here. */
       html,
       body {
         margin: 0;
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #edf1f6;
-        color: #0f172a;
+        background: var(--color-canvas);
+        color: var(--color-text);
       }
 
       #app {
@@ -64,20 +84,12 @@
       }
 
       .project-shell {
-        display: flex;
-        flex-direction: column;
-        width: 100vw;
-        height: 100vh;
+        display: contents;
       }
 
       .project-bar {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        min-height: 48px;
-        padding: 8px 12px;
-        background: rgba(255, 255, 255, 0.96);
-        border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+        background: var(--color-surface);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .project-tabs {
@@ -206,10 +218,10 @@
         position: absolute;
         inset: 0;
         transform-origin: 0 0;
-        background-image:
-          linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
-        background-size: 24px 24px;
+        /* SPEC-2356 — body::before already paints the Operator scan grid,
+           so the legacy 24px slate grid here only doubled the noise.
+           Leaving the stage transparent lets the Operator backdrop show. */
+        background: transparent;
       }
 
       .hint {
@@ -219,12 +231,14 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
         padding: 8px 12px;
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.9);
-        border: 1px solid rgba(148, 163, 184, 0.45);
-        color: #334155;
+        border-radius: var(--radius-md);
+        background: color-mix(in oklab, var(--color-surface) 85%, transparent);
+        border: 1px solid var(--color-border);
+        color: var(--color-text-muted);
         backdrop-filter: blur(12px);
       }
 
@@ -232,11 +246,11 @@
         width: 8px;
         height: 8px;
         border-radius: 999px;
-        background: #f59e0b;
+        background: var(--color-state-idle);
       }
 
       .connection-dot.connected {
-        background: #22c55e;
+        background: var(--color-state-active);
       }
 
       .floating-actions {
@@ -378,16 +392,18 @@
         background: #111f37;
       }
 
+      /* SPEC-2356 — workspace window chrome.
+         Box-shadows are heuristic depth values that look right on either
+         theme; the surface backgrounds and titlebar fills come from tokens
+         so the dual-theme layer can re-skin them without further surgery. */
       .workspace-window {
         position: absolute;
         min-width: 420px;
         min-height: 260px;
-        border-radius: 6px;
+        border-radius: var(--radius-md);
         overflow: hidden;
-        border: 1px solid rgba(15, 23, 42, 0.24);
-        box-shadow:
-          0 18px 42px rgba(15, 23, 42, 0.2),
-          0 2px 6px rgba(15, 23, 42, 0.1);
+        border: 1px solid var(--color-border-strong);
+        box-shadow: var(--shadow-2);
       }
 
       .workspace-window[data-agent-color]::before {
@@ -396,7 +412,7 @@
         top: 0;
         bottom: 0;
         left: 0;
-        width: 4px;
+        width: 3px;
         background: var(--current-agent);
         z-index: 2;
         pointer-events: none;
@@ -404,8 +420,8 @@
 
       .workspace-window.focused {
         box-shadow:
-          0 22px 54px rgba(15, 23, 42, 0.28),
-          0 0 0 1px rgba(37, 99, 235, 0.24);
+          var(--shadow-2),
+          0 0 0 1px var(--color-focus-ring);
       }
 
       .workspace-window.minimized {
@@ -413,7 +429,9 @@
       }
 
       .workspace-window.surface-terminal {
-        background: #0b1220;
+        /* Terminal panes follow the canvas colour so the xterm theme
+           adapter renders flush against the chrome. */
+        background: var(--color-canvas);
       }
 
       .workspace-window.surface-file-tree,
@@ -424,7 +442,7 @@
       .workspace-window.surface-knowledge,
       .workspace-window.surface-memo,
       .workspace-window.surface-profile {
-        background: rgba(255, 255, 255, 0.98);
+        background: var(--color-surface);
       }
 
       .titlebar {
@@ -439,8 +457,9 @@
       }
 
       .surface-terminal .titlebar {
-        background: rgba(15, 23, 42, 0.98);
-        color: #e2e8f0;
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .surface-file-tree .titlebar,
@@ -451,8 +470,9 @@
       .surface-knowledge .titlebar,
       .surface-memo .titlebar,
       .surface-profile .titlebar {
-        background: rgba(248, 250, 252, 0.98);
-        color: #0f172a;
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        border-bottom: 1px solid var(--color-border);
       }
 
       .titlebar:active {
@@ -2003,13 +2023,18 @@
          (preset, branch-cleanup, launch wizard) compose `.modal-backdrop` +
          `.modal-shell` and reuse `.modal-header` / `.modal-body` /
          `.modal-footer` for the inner regions. */
+      /* SPEC-2356 — Operator-themed modal/drawer hybrid. Existing
+         `.modal-backdrop` continues to compose with legacy modals, but the
+         palette now flows from tokens.css so it stays in sync with both
+         themes. Wizard-class shells keep their wide centred layout. */
       .modal-backdrop {
         position: absolute;
         inset: 0;
         display: none;
         align-items: center;
         justify-content: center;
-        background: rgba(15, 23, 42, 0.5);
+        background: var(--color-overlay);
+        backdrop-filter: blur(2px);
         z-index: 1000;
       }
 
@@ -2020,24 +2045,25 @@
       .modal-shell {
         display: flex;
         flex-direction: column;
-        gap: 10px;
+        gap: var(--space-3);
         width: min(520px, calc(100vw - 32px));
         max-height: calc(100vh - 48px);
         overflow: auto;
-        padding: 14px;
-        border-radius: 6px;
-        background: #ffffff;
-        border: 1px solid rgba(148, 163, 184, 0.45);
-        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
+        padding: var(--space-4);
+        border-radius: var(--radius-lg);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        border: 1px solid var(--color-border-strong);
+        box-shadow: var(--shadow-2);
       }
 
       .modal-shell.is-wizard {
         width: min(980px, calc(100vw - 32px));
-        padding: 18px;
-        gap: 12px;
+        padding: var(--space-5);
+        gap: var(--space-3);
         overflow: hidden;
         z-index: 2000;
-        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.22);
+        box-shadow: var(--shadow-2);
       }
 
       .modal-shell h2 {
@@ -2581,8 +2607,61 @@
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
             </button>
+            <button
+              class="op-theme-toggle"
+              id="op-theme-toggle"
+              type="button"
+              aria-label="Toggle theme"
+              data-theme-state="auto"
+            >
+              <span class="op-theme-toggle__label">Theme</span>
+              <span id="op-theme-toggle-value">AUTO</span>
+            </button>
           </div>
         </div>
+        <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar layers">
+          <div class="op-sidebar__section">
+            <h3 class="op-sidebar__heading">
+              <span>Layers</span>
+              <span class="op-sidebar__count" id="op-sidebar-count">0</span>
+            </h3>
+            <button class="op-layer" type="button" data-layer="agents" aria-pressed="true">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Agents</span>
+              <span class="op-layer__count" id="op-layer-count-agents">0</span>
+            </button>
+            <button class="op-layer" type="button" data-layer="git" aria-pressed="true">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Git</span>
+              <span class="op-layer__count" id="op-layer-count-git">0</span>
+            </button>
+            <button class="op-layer" type="button" data-layer="hooks" aria-pressed="true">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Hooks</span>
+              <span class="op-layer__count" id="op-layer-count-hooks">0</span>
+            </button>
+          </div>
+          <div class="op-sidebar__section">
+            <h3 class="op-sidebar__heading">
+              <span>Quick</span>
+            </h3>
+            <button class="op-layer" type="button" data-cmd="open-board">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Board</span>
+              <span class="op-layer__count">⌘B</span>
+            </button>
+            <button class="op-layer" type="button" data-cmd="open-git">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Git</span>
+              <span class="op-layer__count">⌘G</span>
+            </button>
+            <button class="op-layer" type="button" data-cmd="open-logs">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Logs</span>
+              <span class="op-layer__count">⌘L</span>
+            </button>
+          </div>
+        </aside>
         <div class="canvas-area">
           <div class="hint">
             <span class="connection-dot" id="connection-dot"></span>
@@ -2618,6 +2697,14 @@
             </div>
           </div>
           <div class="floating-actions">
+            <button
+              class="arrange-button"
+              id="op-palette-button"
+              aria-label="Command palette"
+              title="Command palette (⌘K / ⌘P)"
+            >
+              ⌘K
+            </button>
             <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
             <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
             <div class="window-list-shell">
@@ -2635,6 +2722,112 @@
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
             <button class="add-button" id="add-button" aria-label="Add window">+</button>
+          </div>
+        </div>
+        <footer class="op-status-strip" id="op-status-strip" aria-label="Operator status strip">
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__live-dot" aria-hidden="true"></span>
+            <span class="op-status-strip__label">LIVE</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">ACTIVE</span>
+            <span class="op-status-strip__value" id="op-strip-active">0</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">IDLE</span>
+            <span class="op-status-strip__value" id="op-strip-idle">0</span>
+          </div>
+          <div class="op-status-strip__cell op-status-strip__cell--blocked">
+            <span class="op-status-strip__label">BLOCKED</span>
+            <span class="op-status-strip__value" id="op-strip-blocked">0</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">BR</span>
+            <span class="op-status-strip__value" id="op-strip-branches">—</span>
+          </div>
+          <div class="op-status-strip__cell">
+            <span class="op-status-strip__label">T</span>
+            <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
+          </div>
+        </footer>
+      </div>
+      <div class="op-briefing" id="op-briefing" aria-hidden="true">
+        <h1 class="op-briefing__title">gwt://operator</h1>
+        <div class="op-briefing__lines" id="op-briefing-lines">
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 60ms">
+            ▪ resolving environment
+          </div>
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 220ms">
+            ▪ connecting daemon
+          </div>
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 380ms">
+            ▪ loading workspace
+          </div>
+          <div class="op-briefing__line" data-state="ok" style="animation-delay: 540ms">
+            ▪ board sync
+          </div>
+        </div>
+        <div class="op-briefing__online">— OPERATOR ONLINE —</div>
+      </div>
+      <div class="op-palette-backdrop" id="op-palette-backdrop" aria-hidden="true">
+        <div
+          class="op-palette"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Command palette"
+        >
+          <input
+            type="text"
+            class="op-palette__input"
+            id="op-palette-input"
+            placeholder="Run a command…"
+            autocomplete="off"
+            data-hotkey-override="true"
+          />
+          <ul class="op-palette__list" id="op-palette-list" role="listbox"></ul>
+        </div>
+      </div>
+      <div class="op-hotkey-overlay" id="op-hotkey-overlay" aria-hidden="true">
+        <div
+          class="op-hotkey-card"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Hotkey reference"
+        >
+          <h2 class="op-hotkey-card__title">Operator Hotkeys</h2>
+          <div class="op-hotkey-card__group">
+            <h3 class="op-hotkey-card__group-title">Navigation</h3>
+            <div class="op-hotkey-card__row">
+              <span>Command palette</span>
+              <kbd class="op-kbd">⌘ K</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Project switcher</span>
+              <kbd class="op-kbd">⌘ P</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Board surface</span>
+              <kbd class="op-kbd">⌘ B</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Git surface</span>
+              <kbd class="op-kbd">⌘ G</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Logs surface</span>
+              <kbd class="op-kbd">⌘ L</kbd>
+            </div>
+          </div>
+          <div class="op-hotkey-card__group">
+            <h3 class="op-hotkey-card__group-title">Help</h3>
+            <div class="op-hotkey-card__row">
+              <span>This card</span>
+              <kbd class="op-kbd">⌘ ?</kbd>
+            </div>
+            <div class="op-hotkey-card__row">
+              <span>Close overlay</span>
+              <kbd class="op-kbd">Esc</kbd>
+            </div>
           </div>
         </div>
       </div>
@@ -2711,13 +2904,18 @@
           </div>
         </div>
       </div>
-      <div class="modal-backdrop" id="branch-cleanup-modal">
-        <div class="modal-shell"></div>
+      <div class="modal-backdrop is-drawer" id="branch-cleanup-modal">
+        <div class="modal-shell is-drawer-shell"></div>
       </div>
       <!-- SPEC-1934 US-6: confirmation modal shown when a Normal Git layout
            is detected at startup. Renderer lives in /migration-modal.js. -->
-      <div class="modal-backdrop" id="migration-modal">
-        <div class="modal-shell"></div>
+      <!-- SPEC-2356 US-4 AS-5: branch-cleanup / migration modals adopt the
+           Drawer (slide-over) presentation while keeping the legacy
+           `.modal-backdrop` / `.modal-shell` classes so existing renderers
+           and smoke tests stay unchanged. The `is-drawer` opt-in class flips
+           layout in components.css. -->
+      <div class="modal-backdrop is-drawer" id="migration-modal">
+        <div class="modal-shell is-drawer-shell"></div>
       </div>
     </div>
 

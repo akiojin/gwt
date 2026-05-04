@@ -134,6 +134,48 @@ impl EmbeddedServer {
                 "/assets/xterm/xterm.css",
                 get(embedded_web::xterm_css_handler),
             )
+            // SPEC-2356 Operator Design System — module + styles + fonts.
+            .route(
+                "/theme-manager.js",
+                get(embedded_web::theme_manager_js_handler),
+            )
+            .route("/hotkey.js", get(embedded_web::hotkey_js_handler))
+            .route(
+                "/operator-shell.js",
+                get(embedded_web::operator_shell_js_handler),
+            )
+            .route(
+                "/styles/tokens.css",
+                get(embedded_web::styles_tokens_css_handler),
+            )
+            .route(
+                "/styles/typography.css",
+                get(embedded_web::styles_typography_css_handler),
+            )
+            .route(
+                "/styles/components.css",
+                get(embedded_web::styles_components_css_handler),
+            )
+            .route(
+                "/assets/fonts/MonaSans.woff2",
+                get(embedded_web::font_mona_sans_handler),
+            )
+            .route(
+                "/assets/fonts/HubotSans-Regular.woff2",
+                get(embedded_web::font_hubot_regular_handler),
+            )
+            .route(
+                "/assets/fonts/HubotSans-Bold.woff2",
+                get(embedded_web::font_hubot_bold_handler),
+            )
+            .route(
+                "/assets/fonts/HubotSansCondensed-Bold.woff2",
+                get(embedded_web::font_hubot_condensed_bold_handler),
+            )
+            .route(
+                "/assets/fonts/JetBrainsMono.woff2",
+                get(embedded_web::font_jetbrains_mono_handler),
+            )
             .route("/healthz", get(health_handler))
             .route("/internal/hook-live", post(hook_live_handler))
             .route("/ws", get(websocket_handler))

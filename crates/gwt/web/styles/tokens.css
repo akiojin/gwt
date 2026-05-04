@@ -1,0 +1,247 @@
+/* SPEC-2356 Operator Design System — Tokens.
+ *
+ * Two complete token sets (Dark Operator = Mission Control / carbon + neon,
+ * Light Operator = Drafting Table / bone + ink). Both share semantic keys —
+ * the contrast.test.mjs harness asserts WCAG 2.1 AA contrast for every pair
+ * defined in REQUIRED_PAIRS and that the two sets define the same names.
+ */
+
+:root {
+  color-scheme: light dark;
+}
+
+:root[data-theme="dark"] {
+  /* Surface palette */
+  --color-canvas: #0a0d12;
+  --color-surface: #11141b;
+  --color-surface-elevated: #1a1f29;
+  --color-overlay: rgba(4, 7, 12, 0.72);
+  --color-scrim: rgba(0, 0, 0, 0.55);
+
+  /* Text */
+  --color-text: #e8eaed;
+  --color-text-strong: #ffffff;
+  --color-text-muted: #b8c2cc;
+  --color-text-disabled: #6b7280;
+
+  /* Display surface (Hubot Sans on canvas) */
+  --color-display-fg: #f5f5f5;
+
+  /* Status Strip */
+  --color-status-strip-bg: #050709;
+  --color-status-strip-fg: #d8dde2;
+  --color-status-strip-divider: rgba(216, 221, 226, 0.18);
+
+  /* Buttons */
+  --color-button-bg: #2a3140;
+  --color-button-bg-hover: #353d4f;
+  --color-button-fg: #f5f5f5;
+  --color-button-border: rgba(232, 234, 237, 0.18);
+
+  /* Borders */
+  --color-border: rgba(232, 234, 237, 0.10);
+  --color-border-strong: rgba(232, 234, 237, 0.28);
+  --color-focus-ring: #06b6d4;
+
+  /* Link */
+  --color-link: #22d3ee;
+  --color-link-hover: #67e8f9;
+
+  /* Live status semantics */
+  --color-state-active: #22d3ee;
+  --color-state-idle: #6b7280;
+  --color-state-blocked: #f87171;
+  --color-state-done: #94a3b8;
+
+  /* Agent colors — SPEC-2133 semantic mapping, dark-tuned */
+  --agent-claude: #fbbf24;
+  --agent-codex: #22d3ee;
+  --agent-gemini: #e879f9;
+  --agent-opencode: #4ade80;
+  --agent-copilot: #60a5fa;
+  --agent-custom: #a1a8b3;
+
+  /* Backdrop (scan-grid, grain) */
+  --bg-scan-grid: rgba(232, 234, 237, 0.04);
+  --bg-grain: rgba(232, 234, 237, 0.05);
+  --bg-depth-glow: radial-gradient(ellipse at top, rgba(34, 211, 238, 0.08), transparent 60%);
+
+  /* Shadow */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active)),
+                        0 0 16px 0 color-mix(in oklab, var(--agent-color, var(--color-state-active)) 45%, transparent);
+
+  /* Layout primitives */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-medium: 200ms;
+  --motion-slow: 360ms;
+  --motion-pulse: 1800ms;
+  --motion-curve: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+:root[data-theme="light"] {
+  /* Surface palette — bone + ink */
+  --color-canvas: #f5f3ee;
+  --color-surface: #ffffff;
+  --color-surface-elevated: #fbfaf6;
+  --color-overlay: rgba(20, 22, 26, 0.62);
+  --color-scrim: rgba(20, 22, 26, 0.45);
+
+  /* Text */
+  --color-text: #1a1d24;
+  --color-text-strong: #000000;
+  --color-text-muted: #4a5159;
+  --color-text-disabled: #9ca3af;
+
+  /* Display */
+  --color-display-fg: #0a0d12;
+
+  /* Status Strip — inverted dark strip on light canvas (Mission control feel) */
+  --color-status-strip-bg: #1a1d24;
+  --color-status-strip-fg: #f5f3ee;
+  --color-status-strip-divider: rgba(245, 243, 238, 0.18);
+
+  /* Buttons */
+  --color-button-bg: #1a1d24;
+  --color-button-bg-hover: #2a3140;
+  --color-button-fg: #ffffff;
+  --color-button-border: rgba(26, 29, 36, 0.18);
+
+  /* Borders */
+  --color-border: rgba(26, 29, 36, 0.10);
+  --color-border-strong: rgba(26, 29, 36, 0.28);
+  --color-focus-ring: #0e7490;
+
+  /* Link */
+  --color-link: #0e7490;
+  --color-link-hover: #155e75;
+
+  /* Live status semantics */
+  --color-state-active: #0e7490;
+  --color-state-idle: #6b7280;
+  --color-state-blocked: #b91c1c;
+  --color-state-done: #4b5563;
+
+  /* Agent colors — dark-tuned chroma for bone background */
+  --agent-claude: #92400e;
+  --agent-codex: #155e75;
+  --agent-gemini: #86198f;
+  --agent-opencode: #166534;
+  --agent-copilot: #1e3a8a;
+  --agent-custom: #4b5563;
+
+  /* Backdrop */
+  --bg-scan-grid: rgba(26, 29, 36, 0.04);
+  --bg-grain: rgba(26, 29, 36, 0.04);
+  --bg-depth-glow: radial-gradient(ellipse at top, rgba(14, 116, 144, 0.06), transparent 60%);
+
+  /* Shadow */
+  --shadow-1: 0 1px 2px rgba(20, 22, 26, 0.06);
+  --shadow-2: 0 8px 24px rgba(20, 22, 26, 0.10);
+  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active)),
+                        0 0 12px 0 color-mix(in oklab, var(--agent-color, var(--color-state-active)) 30%, transparent);
+
+  /* Layout primitives — match dark for parity */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-medium: 200ms;
+  --motion-slow: 360ms;
+  --motion-pulse: 1800ms;
+  --motion-curve: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* prefers-reduced-motion: reduce — Living Telemetry / intro fall back to static */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-medium: 0ms;
+    --motion-slow: 0ms;
+    --motion-pulse: 0ms;
+  }
+}
+
+/* forced-colors — fall back to system colors so high-contrast environments still work */
+@media (forced-colors: active) {
+  :root[data-theme="dark"],
+  :root[data-theme="light"] {
+    --color-canvas: Canvas;
+    --color-surface: Canvas;
+    --color-surface-elevated: Canvas;
+    --color-overlay: Canvas;
+    --color-scrim: Canvas;
+
+    --color-text: CanvasText;
+    --color-text-strong: CanvasText;
+    --color-text-muted: GrayText;
+    --color-text-disabled: GrayText;
+    --color-display-fg: CanvasText;
+
+    --color-status-strip-bg: Canvas;
+    --color-status-strip-fg: CanvasText;
+    --color-status-strip-divider: GrayText;
+
+    --color-button-bg: ButtonFace;
+    --color-button-bg-hover: ButtonFace;
+    --color-button-fg: ButtonText;
+    --color-button-border: ButtonText;
+
+    --color-border: GrayText;
+    --color-border-strong: CanvasText;
+    --color-focus-ring: Highlight;
+    --color-link: LinkText;
+    --color-link-hover: LinkText;
+
+    --color-state-active: Highlight;
+    --color-state-idle: GrayText;
+    --color-state-blocked: Mark;
+    --color-state-done: GrayText;
+
+    --agent-claude: Highlight;
+    --agent-codex: Highlight;
+    --agent-gemini: Highlight;
+    --agent-opencode: Highlight;
+    --agent-copilot: Highlight;
+    --agent-custom: GrayText;
+
+    --bg-scan-grid: transparent;
+    --bg-grain: transparent;
+    --bg-depth-glow: none;
+    --shadow-1: none;
+    --shadow-2: none;
+    --shadow-glow-active: 0 0 0 2px Highlight;
+  }
+}

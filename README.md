@@ -175,6 +175,39 @@ confirmation modal with three actions:
 - Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
   focused window is recentered
 
+## Operator Design Language (SPEC-2356)
+
+Starting with the Operator Design System update, gwt is themed as a single
+mission-control surface with editorial-industrial typography (`Mona Sans` for
+body, `Hubot Sans` condensed for display, `JetBrains Mono` for terminal /
+counters). Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
+Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
+single token system that ships in two flagship themes:
+
+- **Dark Operator** (Mission Control / carbon + neon) — the default, optimized
+  for long sessions
+- **Light Operator** (Drafting Table / bone + ink) — for bright environments
+
+The active theme follows your OS `prefers-color-scheme`, but the **Theme**
+toggle in the Project Bar lets you cycle `auto → dark → light → auto`. The
+choice is persisted in browser storage and survives restarts. xterm terminal
+panes follow the overall theme automatically. `prefers-reduced-motion: reduce`
+disables the Living Telemetry pulse rim, status strip ticking, and Mission
+Briefing intro reveal so the UI stays usable in motion-sensitive environments.
+`forced-colors: active` (Windows High Contrast / macOS Increase Contrast)
+falls back to system colors so accessibility is preserved.
+
+### Hotkeys
+
+| Combo | Action |
+| --- | --- |
+| `⌘K` / `⌘P` | Open the Command Palette (fuzzy search over all surface actions) |
+| `⌘B` | Focus the Board surface |
+| `⌘G` | Focus the Git (Branches) surface |
+| `⌘L` | Focus the Logs surface |
+| `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
+| `Esc` | Close any open palette / overlay / drawer |
+
 ## Managed Hooks and SPEC Cache
 
 - gwt regenerates `.claude/settings.local.json` and merges `.codex/hooks.json`
