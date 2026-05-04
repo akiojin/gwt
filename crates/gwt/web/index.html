@@ -395,7 +395,7 @@
         background: var(--color-button-bg);
         color: var(--color-button-fg);
         font-family: var(--font-display);
-        font-size: 26px;
+        font-size: var(--type-2xl);
         font-weight: 700;
         cursor: pointer;
         box-shadow: var(--shadow-2);
@@ -504,7 +504,7 @@
       }
 
       .title-text {
-        font-size: 13px;
+        font-size: var(--type-sm);
         font-weight: 600;
         white-space: nowrap;
       }
@@ -655,7 +655,7 @@
       }
 
       .overlay-spinner {
-        font-size: 24px;
+        font-size: var(--type-xl);
         line-height: 1;
         display: inline-block;
         color: var(--color-state-active);
@@ -1233,7 +1233,7 @@
 
       .memo-title-input {
         min-height: 36px;
-        font-size: 14px;
+        font-size: var(--type-md);
         font-weight: 600;
       }
 
@@ -2266,7 +2266,13 @@
 
       .modal-shell h2 {
         margin: 0 0 10px;
-        font-size: 16px;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-md);
+        font-weight: 700;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
       }
 
       .modal-header {
@@ -2321,7 +2327,13 @@
 
       .preset-button strong {
         display: block;
-        font-size: 13px;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-size: var(--type-sm);
+        font-weight: 700;
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
         margin-bottom: 3px;
       }
 
@@ -2538,7 +2550,10 @@
       .launch-choice-title {
         display: inline-flex;
         align-items: center;
-        font-size: 12px;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        text-transform: uppercase;
         font-weight: 700;
       }
 
