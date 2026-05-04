@@ -1495,3 +1495,21 @@ kbd.op-kbd {
   text-transform: uppercase;
   color: var(--color-text-muted);
 }
+
+/* Sidebar Layer kbd badge — small kbd-styled chip on Quick rows */
+:root[data-theme] .op-layer__kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text);
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--space-1);
+}
+
+:root[data-theme] .op-layer:hover .op-layer__kbd {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  color: var(--color-state-active);
+  border-color: var(--color-state-active);
+}
