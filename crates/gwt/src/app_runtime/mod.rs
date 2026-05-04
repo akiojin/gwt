@@ -6549,6 +6549,82 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milestone() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("repo-work-20260504-1234");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[WindowPreset::Board],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let session = ActiveAgentSession {
+            window_id: "tab-1::agent-1".to_string(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260504-1234".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: worktree.clone(),
+            tab_id: "tab-1".to_string(),
+        };
+        runtime
+            .active_agent_sessions
+            .insert(session.window_id.clone(), session.clone());
+        save_start_work_workspace_projection(&repo, &session, "develop", None)
+            .expect("save initial projection");
+        let blocked = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Blocked,
+            "Waiting for API credentials",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1");
+        runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &blocked)
+            .expect("blocked projection broadcast");
+        let status = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "API credentials configured",
+            None,
+            None,
+            vec!["start-work".to_string()],
+            vec!["SPEC-2359".to_string()],
+        )
+        .with_origin_session_id("session-1");
+
+        let event = runtime
+            .record_workspace_board_milestone_event("tab-1", &repo, &status)
+            .expect("active projection broadcast");
+
+        assert!(matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.status_category == "active"
+                && projection.active_agents == 1
+                && projection.blocked_agents == 0
+                && projection.branch.as_deref() == Some("work/20260504-1234")
+        ));
+    }
+
+    #[test]
     fn app_runtime_board_projection_change_broadcasts_to_matching_board_windows_only() {
         let _env_lock = env_test_lock()
             .lock()
