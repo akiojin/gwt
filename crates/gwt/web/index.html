@@ -2577,41 +2577,53 @@
       .project-onboarding-card {
         width: min(560px, calc(100vw - 40px));
         padding: 18px;
-        border-radius: 6px;
-        background: rgba(255, 255, 255, 0.98);
-        border: 1px solid rgba(148, 163, 184, 0.32);
-        box-shadow: 0 22px 56px rgba(15, 23, 42, 0.18);
+        border-radius: var(--radius-lg);
+        background: var(--color-surface-elevated);
+        border: 1px solid var(--color-border-strong);
+        box-shadow: var(--shadow-2);
       }
 
       .project-picker-title,
       .project-onboarding-title {
         margin: 0 0 8px;
-        font-size: 20px;
-        color: #0f172a;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-weight: 700;
+        font-size: var(--type-xl);
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-display-fg);
       }
 
       .project-picker-copy,
       .project-onboarding-copy {
         margin: 0 0 16px;
-        font-size: 13px;
-        color: #475569;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        color: var(--color-text-muted);
       }
 
       .project-picker-error {
         margin-bottom: 12px;
         padding: 10px 12px;
-        border-radius: 6px;
-        background: rgba(239, 68, 68, 0.08);
-        border: 1px solid rgba(239, 68, 68, 0.18);
-        color: #b91c1c;
-        font-size: 12px;
+        border-radius: var(--radius-md);
+        background: color-mix(in oklab, var(--color-state-blocked) 12%, transparent);
+        border: 1px solid color-mix(in oklab, var(--color-state-blocked) 32%, transparent);
+        color: var(--color-state-blocked);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
       }
 
       .picker-section-label {
         margin: 16px 0 8px;
-        font-size: 12px;
-        font-weight: 600;
-        color: #475569;
+        font-family: var(--font-display);
+        font-stretch: 75%;
+        font-weight: 700;
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-display);
+        text-transform: uppercase;
+        color: var(--color-text-muted);
       }
 
       .project-recent-list {
@@ -2623,28 +2635,32 @@
         width: 100%;
         text-align: left;
         padding: 10px 12px;
-        border-radius: 6px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        background: #f8fafc;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border);
+        background: var(--color-surface);
+        color: var(--color-text);
         cursor: pointer;
       }
 
       .recent-project-row:hover {
-        background: #eef4ff;
+        background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
       }
 
       .recent-project-title {
         display: block;
-        font-size: 13px;
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
         font-weight: 600;
-        color: #0f172a;
+        color: var(--color-text-strong);
       }
 
       .recent-project-meta {
         display: block;
         margin-top: 4px;
-        font-size: 12px;
-        color: #64748b;
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-text-muted);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
