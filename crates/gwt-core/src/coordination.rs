@@ -834,6 +834,14 @@ fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegment
     let manifest: EventSegmentManifest = load_json_or_default(&path)?;
     if manifest.version == 0 || manifest.segments.is_empty() {
         Ok(initial_event_manifest())
+    } else if manifest
+        .segments
+        .iter()
+        .any(|segment| segment.entries > 0 && segment.max_updated_at.is_none())
+    {
+        let rebuilt = rebuild_event_manifest_from_segments(coordination_root)?;
+        write_event_manifest(coordination_root, &rebuilt)?;
+        Ok(rebuilt)
     } else {
         Ok(manifest)
     }
@@ -1821,6 +1829,94 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].body, "newer post appended first");
+    }
+
+    #[test]
+    fn legacy_segment_manifest_backfills_max_updated_at_before_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment_file = initial_segment_file_name();
+        let segment_path = coordination_events_segments_dir(dir.path()).join(&segment_file);
+
+        let mut new_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Claude",
+            BoardEntryKind::Status,
+            "newer pre-upgrade post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.updated_at = new_entry.created_at;
+
+        let mut old_entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "older pre-upgrade post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        old_entry.updated_at = old_entry.created_at;
+
+        write_events(
+            &segment_path,
+            &[
+                CoordinationEvent::MessageAppended {
+                    entry: new_entry.clone(),
+                },
+                CoordinationEvent::MessageAppended { entry: old_entry },
+            ],
+        );
+        let bytes = segment_path.metadata().unwrap().len();
+        let legacy_manifest = serde_json::json!({
+            "version": EVENT_MANIFEST_VERSION,
+            "active_segment": segment_file,
+            "segments": [{
+                "file": segment_file,
+                "entries": 2,
+                "bytes": bytes,
+                "first_created_at": new_entry.created_at,
+                "last_created_at": chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap(),
+                "first_entry_id": new_entry.id,
+                "last_entry_id": "legacy-old"
+            }],
+            "updated_at": chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 1).unwrap()
+        });
+        std::fs::write(
+            coordination_events_manifest_path(dir.path()),
+            serde_json::to_vec_pretty(&legacy_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let mut skewed_append = BoardEntry::new(
+            AuthorKind::Agent,
+            "Gemini",
+            BoardEntryKind::Status,
+            "skewed post-upgrade append",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        skewed_append.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+        skewed_append.updated_at = skewed_append.created_at;
+        post_entry(dir.path(), skewed_append).unwrap();
+
+        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let entries = load_entries_since(dir.path(), since).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].body, "newer pre-upgrade post");
+
+        let manifest = load_event_manifest(dir.path()).unwrap();
+        assert_eq!(
+            manifest.segments[0].max_updated_at,
+            Some(entries[0].updated_at)
+        );
     }
 
     #[test]
