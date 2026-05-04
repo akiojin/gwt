@@ -1040,3 +1040,40 @@ kbd.op-kbd {
   color: var(--color-border-strong);
   font-family: var(--font-mono);
 }
+
+/* ============================================================
+   Focus styles — keyboard accessibility (Operator focus ring).
+
+   Every interactive surface that the Operator chrome introduces
+   gets a unified `--color-focus-ring` outline on `:focus-visible`,
+   so power users navigating with Tab / arrow keys always know
+   where focus is. The ring lifts above the element via
+   `outline-offset` so it does not get clipped by tight chrome.
+   ============================================================ */
+
+:root[data-theme] .op-layer:focus-visible,
+:root[data-theme] .op-status-strip__cell:focus-visible,
+:root[data-theme] .op-palette__row:focus-visible,
+:root[data-theme] .op-drawer__close:focus-visible,
+:root[data-theme] .arrange-button:focus-visible,
+:root[data-theme] .add-button:focus-visible,
+:root[data-theme] .wizard-button:focus-visible,
+:root[data-theme] .preset-button:focus-visible,
+:root[data-theme] .branch-filter-button:focus-visible,
+:root[data-theme] .branch-cleanup-toggle:focus-visible,
+:root[data-theme] .icon-button:focus-visible,
+:root[data-theme] .text-button:focus-visible,
+:root[data-theme] .recent-project-row:focus-visible,
+:root[data-theme] .live-session-button:focus-visible,
+:root[data-theme] .launch-choice-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+:root[data-theme] .op-theme-toggle:focus-visible {
+  /* override the existing `border-color` focus state with the unified
+     ring, but keep the border-color animation so the toggle still
+     reads like an operator chrome button. */
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
