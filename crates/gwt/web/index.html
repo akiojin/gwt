@@ -3054,28 +3054,34 @@
             <button class="add-button" id="add-button" aria-label="Add window">+</button>
           </div>
         </div>
-        <footer class="op-status-strip" id="op-status-strip" aria-label="Operator status strip">
+        <footer
+          class="op-status-strip"
+          id="op-status-strip"
+          role="status"
+          aria-live="polite"
+          aria-label="Operator status strip"
+        >
           <div class="op-status-strip__cell">
             <span class="op-status-strip__live-dot" aria-hidden="true"></span>
             <span class="op-status-strip__label">LIVE</span>
           </div>
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">ACTIVE</span>
-            <span class="op-status-strip__value" id="op-strip-active">0</span>
+            <span class="op-status-strip__value" id="op-strip-active" aria-label="Active agents">0</span>
           </div>
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">IDLE</span>
-            <span class="op-status-strip__value" id="op-strip-idle">0</span>
+            <span class="op-status-strip__value" id="op-strip-idle" aria-label="Idle agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--blocked">
             <span class="op-status-strip__label">BLOCKED</span>
-            <span class="op-status-strip__value" id="op-strip-blocked">0</span>
+            <span class="op-status-strip__value" id="op-strip-blocked" aria-label="Blocked agents">0</span>
           </div>
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">BR</span>
-            <span class="op-status-strip__value" id="op-strip-branches">—</span>
+            <span class="op-status-strip__value" id="op-strip-branches" aria-label="Branches">—</span>
           </div>
-          <div class="op-status-strip__cell">
+          <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__label">T</span>
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
           </div>
