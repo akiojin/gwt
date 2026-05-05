@@ -501,6 +501,28 @@ test("Drawer modal renderers activate focus-trap on open and release on close", 
   }
 });
 
+test("Dynamically-created inputs without surrounding <label> have aria-label", () => {
+  // Inputs that aren't wrapped in a <label> element need aria-label so
+  // screen readers announce their purpose instead of just "edit text".
+  // This audit covers the launch wizard fields, memo title, and the env
+  // var grid rows in the profile editor.
+  const expected = [
+    { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
+    { selector: 'input\\.setAttribute\\("aria-label", "Issue number"\\)', desc: "wizard issue number" },
+    { selector: 'titleInput\\.setAttribute\\("aria-label", "Note title"\\)', desc: "memo note title" },
+    { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
+    { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
+    { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
+  ];
+  for (const { selector, desc } of expected) {
+    assert.match(
+      appSource,
+      new RegExp(selector),
+      `expected ${desc} input to have aria-label set`,
+    );
+  }
+});
+
 test("Every role=\"dialog\" element has a programmatic accessible name", () => {
   // Catch the case where a new dialog is added without aria-label or
   // aria-labelledby — without an accessible name, screen readers

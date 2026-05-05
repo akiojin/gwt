@@ -2792,6 +2792,10 @@
         titleInput.className = "memo-title-input";
         titleInput.type = "text";
         titleInput.placeholder = "Untitled note";
+        // SPEC-2356 — memo title input has no surrounding <label>; set
+        // aria-label so screen readers announce the purpose instead of
+        // just "edit text".
+        titleInput.setAttribute("aria-label", "Note title");
         titleInput.value = state.draftTitle;
         titleInput.addEventListener("input", () => {
           state.draftTitle = titleInput.value;
@@ -3193,6 +3197,10 @@
           const keyInput = document.createElement("input");
           keyInput.type = "text";
           keyInput.placeholder = "KEY";
+          // SPEC-2356 — env var rows have no surrounding <label>; use
+          // aria-label so screen readers announce purpose. The row index
+          // disambiguates rows within the same list.
+          keyInput.setAttribute("aria-label", `Env var key, row ${index + 1}`);
           keyInput.value = entry.key;
           keyInput.addEventListener("input", () => {
             state.draft.envVars[index].key = keyInput.value;
@@ -3204,6 +3212,7 @@
           const valueInput = document.createElement("input");
           valueInput.type = "text";
           valueInput.placeholder = "Value";
+          valueInput.setAttribute("aria-label", `Env var value, row ${index + 1}`);
           valueInput.value = entry.value;
           valueInput.addEventListener("input", () => {
             state.draft.envVars[index].value = valueInput.value;
@@ -3248,6 +3257,7 @@
           const keyInput = document.createElement("input");
           keyInput.type = "text";
           keyInput.placeholder = "SECRET_KEY";
+          keyInput.setAttribute("aria-label", `Disabled env key, row ${index + 1}`);
           keyInput.value = entry;
           keyInput.addEventListener("input", () => {
             state.draft.disabledEnv[index] = keyInput.value;
@@ -4003,6 +4013,11 @@
             const field = createLaunchField("Branch name", true);
             const input = createNode("input", "launch-input");
             input.type = "text";
+            // SPEC-2356 — launch-field labels are <div>s (not <label>s)
+            // so screen readers can't programmatically associate them
+            // with the input. Set aria-label directly so the input
+            // announces with its purpose ("Branch name, edit text").
+            input.setAttribute("aria-label", "Branch name");
             input.value = wizardBranchDraft;
             input.placeholder = "feature/my-task";
             input.addEventListener("input", () => {
@@ -4142,6 +4157,9 @@
           const input = createNode("input", "launch-input");
           input.type = "number";
           input.min = "1";
+          // SPEC-2356 — see createLaunchField comment: aria-label is the
+          // programmatic name since launch-field labels are non-<label> divs.
+          input.setAttribute("aria-label", "Issue number");
           input.value = launchWizard.linked_issue_number
             ? launchWizard.linked_issue_number.toString()
             : "";
