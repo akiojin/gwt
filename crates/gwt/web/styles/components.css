@@ -350,6 +350,15 @@ body::after {
   border-color: var(--color-state-active);
 }
 
+.op-agent-card[data-state="idle"] {
+  border-color: color-mix(in oklab, var(--color-state-idle) 55%, var(--color-border));
+}
+
+.op-agent-card[data-state="done"] {
+  border-color: color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  opacity: 0.82;
+}
+
 .op-agent-card[data-kind="handoff"] {
   border-color: var(--agent-codex);
   box-shadow: inset 3px 0 0 var(--agent-codex);
@@ -404,6 +413,14 @@ body::after {
 .op-agent-card[data-state="active"] .op-agent-state {
   border-color: var(--color-state-active);
   color: var(--color-state-active);
+}
+
+.op-agent-card[data-state="idle"] .op-agent-state {
+  color: var(--color-state-idle);
+}
+
+.op-agent-card[data-state="done"] .op-agent-state {
+  color: var(--color-state-done);
 }
 
 .op-agent-scope {
