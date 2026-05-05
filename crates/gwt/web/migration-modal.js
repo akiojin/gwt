@@ -121,6 +121,11 @@ export function renderMigrationModal({
       "migration-modal-phase-label",
       describePhase(m.phase),
     );
+    // SPEC-2356 — give the phase label a stable id so the <progress>
+    // element can reference it via aria-labelledby. Without this, screen
+    // readers announce just "progressbar 50%" with no context about
+    // which phase is running.
+    phaseLabel.id = "migration-modal-phase-label";
     dialogEl.appendChild(phaseLabel);
     const progress = createNode("progress", "migration-modal-progress");
     progress.setAttribute("max", "100");
@@ -128,6 +133,7 @@ export function renderMigrationModal({
       "value",
       String(Number.isFinite(m.percent) ? m.percent : 0),
     );
+    progress.setAttribute("aria-labelledby", "migration-modal-phase-label");
     dialogEl.appendChild(progress);
     dialogEl.appendChild(
       createNode(

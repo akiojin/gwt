@@ -501,6 +501,27 @@ test("Drawer modal renderers activate focus-trap on open and release on close", 
   }
 });
 
+test("Migration progress bar references the phase label via aria-labelledby", () => {
+  // The native <progress> element gets an implicit role="progressbar"
+  // but no programmatic name unless aria-label or aria-labelledby is
+  // provided. Without it, screen readers announce just "progressbar 50%"
+  // and the user doesn't know which phase is running.
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  assert.match(
+    migrationSrc,
+    /phaseLabel\.id\s*=\s*"migration-modal-phase-label"/,
+    "expected migration phase label to have a stable id",
+  );
+  assert.match(
+    migrationSrc,
+    /progress\.setAttribute\("aria-labelledby",\s*"migration-modal-phase-label"\)/,
+    "expected migration <progress> to reference the phase label via aria-labelledby",
+  );
+});
+
 test("Drawer modal renderers signal busy state via aria-busy during async stages", () => {
   // The branch-cleanup running stage and migration running stage are
   // synchronous async operations. Without aria-busy, screen readers don't
