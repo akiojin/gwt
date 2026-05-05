@@ -501,17 +501,24 @@ test("Drawer modal renderers activate focus-trap on open and release on close", 
   }
 });
 
-test("Launch wizard inputs have programmatic names via aria-label", () => {
-  // The wizard's launch-field uses <div> labels (not <label> elements)
-  // so screen readers can't programmatically associate them with inputs.
-  // Every dynamically-created launch-input must call setAttribute on
-  // aria-label. Without this, the input announces just "edit text"
-  // with no purpose context.
-  for (const expected of ["Branch name", "Issue number"]) {
+test("Dynamically-created inputs without surrounding <label> have aria-label", () => {
+  // Inputs that aren't wrapped in a <label> element need aria-label so
+  // screen readers announce their purpose instead of just "edit text".
+  // This audit covers the launch wizard fields, memo title, and the env
+  // var grid rows in the profile editor.
+  const expected = [
+    { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
+    { selector: 'input\\.setAttribute\\("aria-label", "Issue number"\\)', desc: "wizard issue number" },
+    { selector: 'titleInput\\.setAttribute\\("aria-label", "Note title"\\)', desc: "memo note title" },
+    { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
+    { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
+    { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
+  ];
+  for (const { selector, desc } of expected) {
     assert.match(
       appSource,
-      new RegExp(`input\\.setAttribute\\("aria-label",\\s*"${expected}"\\)`),
-      `expected wizard input "${expected}" to set aria-label`,
+      new RegExp(selector),
+      `expected ${desc} input to have aria-label set`,
     );
   }
 });
