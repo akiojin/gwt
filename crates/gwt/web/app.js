@@ -3,6 +3,7 @@
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
+      import { createFocusTrap } from "/focus-trap.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -768,6 +769,7 @@
       }
 
       let presetModalFocusReturn = null;
+      let presetModalFocusTrapRelease = null;
       function openModal() {
         // SPEC-2356 — capture trigger BEFORE adding .open so we can
         // restore focus on close. The preset modal is invoked via the
@@ -780,15 +782,26 @@
           try { presetShell.focus({ preventScroll: true }); }
           catch { presetShell.focus(); }
         }
+        // SPEC-2356 — trap Tab inside the modal so keyboard users can't
+        // escape into background content while the modal is open.
+        if (presetShell) {
+          presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
+        }
       }
 
       function closeModal() {
         const wasOpenPreset = modal.classList.contains("open");
         modal.classList.remove("open");
         modal.setAttribute("aria-hidden", "true");
-        if (wasOpenPreset && presetModalFocusReturn && typeof presetModalFocusReturn.focus === "function") {
-          try { presetModalFocusReturn.focus({ preventScroll: true }); }
-          catch { presetModalFocusReturn.focus(); }
+        if (wasOpenPreset) {
+          if (typeof presetModalFocusTrapRelease === "function") {
+            presetModalFocusTrapRelease();
+            presetModalFocusTrapRelease = null;
+          }
+          if (presetModalFocusReturn && typeof presetModalFocusReturn.focus === "function") {
+            try { presetModalFocusReturn.focus({ preventScroll: true }); }
+            catch { presetModalFocusReturn.focus(); }
+          }
           presetModalFocusReturn = null;
         }
       }
@@ -3733,6 +3746,7 @@
       }
 
       let wizardFocusReturn = null;
+      let wizardFocusTrapRelease = null;
 
       function renderLaunchWizard() {
         if (!launchWizard) {
@@ -3741,6 +3755,12 @@
           // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
           // readers stop announcing the wizard when it slides closed.
           wizardModal.setAttribute("aria-hidden", "true");
+          // SPEC-2356 — release the focus trap before restoring focus so
+          // the trap doesn't intercept the focus move and pull it back in.
+          if (wasOpenBeforeClose && typeof wizardFocusTrapRelease === "function") {
+            wizardFocusTrapRelease();
+            wizardFocusTrapRelease = null;
+          }
           // SPEC-2356 — restore focus to the trigger that opened the wizard
           // so keyboard users land back on Start Work / Launch Agent / etc.
           if (wasOpenBeforeClose && wizardFocusReturn && typeof wizardFocusReturn.focus === "function") {
@@ -3779,6 +3799,11 @@
           // announce "Launch Agent dialog" and keyboard users land inside.
           try { wizardDialog.focus({ preventScroll: true }); }
           catch { wizardDialog.focus(); }
+        }
+        if (!wasOpenWizard && wizardDialog) {
+          // SPEC-2356 — trap Tab inside the wizard while it's open so
+          // keyboard users can't escape into background content.
+          wizardFocusTrapRelease = createFocusTrap(wizardDialog, { document });
         }
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false

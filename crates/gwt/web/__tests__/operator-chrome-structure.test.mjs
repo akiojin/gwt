@@ -341,6 +341,37 @@ test("Error regions declare role=\"alert\" so screen readers announce them", () 
   }
 });
 
+test("Wizard and preset modals activate focus-trap on open and release on close (app.js inline)", () => {
+  // The wizard and preset modals are rendered inline in app.js (not in
+  // separate renderer modules), so they need closure-scoped trap-release
+  // variables. Pin both pairs.
+  assert.match(appSource, /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/);
+  // Wizard
+  assert.match(appSource, /let\s+wizardFocusTrapRelease\s*=\s*null/);
+  assert.match(
+    appSource,
+    /wizardFocusTrapRelease\s*=\s*createFocusTrap\(wizardDialog,\s*\{\s*document\s*\}\)/,
+    "wizard must activate focus trap on the dialog",
+  );
+  assert.match(
+    appSource,
+    /typeof\s+wizardFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*wizardFocusTrapRelease\(\)/,
+    "wizard must release focus trap on close",
+  );
+  // Preset
+  assert.match(appSource, /let\s+presetModalFocusTrapRelease\s*=\s*null/);
+  assert.match(
+    appSource,
+    /presetModalFocusTrapRelease\s*=\s*createFocusTrap\(presetShell,\s*\{\s*document\s*\}\)/,
+    "preset modal must activate focus trap on the shell",
+  );
+  assert.match(
+    appSource,
+    /typeof\s+presetModalFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*presetModalFocusTrapRelease\(\)/,
+    "preset modal must release focus trap on close",
+  );
+});
+
 test("Drawer modal renderers activate focus-trap on open and release on close", () => {
   // Focus trap prevents Tab from escaping the modal into background
   // content. Both renderers must:
