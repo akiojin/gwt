@@ -70,6 +70,40 @@ for (const themeName of ["dark", "light"]) {
   }
 }
 
+// SPEC-2356 — State colors render as TEXT inside agent cards (chip foreground)
+// and status chips (.ready / .error etc), so each state token must clear
+// WCAG AA against --color-surface AND --color-surface-elevated in both
+// themes. Lesson #2026-05-04: missed this for idle in dark theme — fixed.
+const STATE_TEXT_TOKENS = [
+  "--color-state-active",
+  "--color-state-idle",
+  "--color-state-blocked",
+  "--color-state-done",
+];
+const SURFACE_BACKGROUNDS = [
+  "--color-surface",
+  "--color-surface-elevated",
+];
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const stateToken of STATE_TEXT_TOKENS) {
+    for (const bgToken of SURFACE_BACKGROUNDS) {
+      test(`[${themeName}] WCAG AA: ${stateToken} text on ${bgToken}`, () => {
+        const fg = theme[stateToken];
+        const bg = theme[bgToken];
+        assert.ok(fg, `${stateToken} missing in ${themeName}`);
+        assert.ok(bg, `${bgToken} missing in ${themeName}`);
+        const ratio = contrastRatio(fg, bg);
+        assert.ok(
+          ratio >= NORMAL_AA,
+          `${stateToken} on ${bgToken}: ${ratio.toFixed(2)} < ${NORMAL_AA} (fg=${fg}, bg=${bg})`,
+        );
+      });
+    }
+  }
+}
+
 test("components.css scopes the on-strip state palette to bright on-dark variants", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const stripBlock = css.match(/\.op-status-strip\s*\{([\s\S]*?)\n\}/);

@@ -47,9 +47,14 @@
   --color-link: #22d3ee;
   --color-link-hover: #67e8f9;
 
-  /* Live status semantics */
+  /* Live status semantics — dark.
+     idle was #6b7280 (slate-500) but failed WCAG AA when used as TEXT on
+     --color-surface (3.81:1) and --color-surface-elevated (3.40:1). The
+     replacement #828c9b is a slate-450 that clears 4.5:1 on all dark
+     surface variants while staying visibly subtler than --color-text-muted
+     (#b8c2cc) and clearly darker than --color-state-done (#94a3b8). */
   --color-state-active: #22d3ee;
-  --color-state-idle: #6b7280;
+  --color-state-idle: #828c9b;
   --color-state-blocked: #f87171;
   --color-state-done: #94a3b8;
 
