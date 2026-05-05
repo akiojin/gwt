@@ -80,6 +80,9 @@ const STATE_TEXT_TOKENS = [
   "--color-state-blocked",
   "--color-state-done",
 ];
+// State colors are used as TEXT inside cards / status chips that sit on
+// surface bg. They are NOT used directly on canvas as text — canvas text
+// uses --color-text. So canvas is excluded from the surface set.
 const SURFACE_BACKGROUNDS = [
   "--color-surface",
   "--color-surface-elevated",
