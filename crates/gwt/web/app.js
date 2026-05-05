@@ -2807,6 +2807,7 @@
         const bodyInput = document.createElement("textarea");
         bodyInput.className = "memo-body-input";
         bodyInput.placeholder = "Capture context, next steps, or review notes";
+        bodyInput.setAttribute("aria-label", "Note body");
         bodyInput.value = state.draftBody;
         bodyInput.addEventListener("input", () => {
           state.draftBody = bodyInput.value;
@@ -3649,6 +3650,10 @@
       ) {
         const field = createLaunchField(label, wide);
         const select = createNode("select", "launch-select");
+        // SPEC-2356 — launch-field labels are non-<label> divs, so set
+        // aria-label directly. Reuses the visible label text so screen
+        // readers and visual users see the same name.
+        select.setAttribute("aria-label", label);
         if (options.length === 0) {
           select.disabled = true;
           const option = document.createElement("option");
