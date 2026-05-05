@@ -378,6 +378,24 @@ test("Drawer modal renderers move focus into dialog on fresh open", () => {
   }
 });
 
+test("Preset (Add Window) modal manages focus on open and restores on close", () => {
+  // The "+" Add Window modal opens via openModal()/closeModal() in app.js.
+  // Verify the same focus-management pattern is wired: capture trigger,
+  // move focus to modal-shell on open, restore on close.
+  assert.match(appSource, /let\s+presetModalFocusReturn\s*=\s*null/);
+  assert.match(appSource, /presetModalFocusReturn\s*=\s*document\.activeElement/);
+  assert.match(
+    appSource,
+    /presetShell\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
+    "expected preset modal shell focus on open with preventScroll",
+  );
+  assert.match(
+    appSource,
+    /presetModalFocusReturn\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
+    "expected preset modal restore focus on close with preventScroll",
+  );
+});
+
 test("Wizard modal manages focus on open and restores on close", () => {
   // The wizard modal's renderer lives in app.js (not a separate module),
   // so focus management is wired inline. Verify the same pattern as the
