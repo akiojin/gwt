@@ -20,6 +20,9 @@ export function renderBranchCleanupModal({
 }) {
   if (!windowId || !state || !state.cleanupModal.open) {
     modalEl.classList.remove("open");
+    // SPEC-2356 — flip aria-hidden alongside the .open class so screen
+    // readers stop announcing the dialog when it slides closed.
+    modalEl.setAttribute("aria-hidden", "true");
     while (dialogEl.firstChild) {
       dialogEl.removeChild(dialogEl.firstChild);
     }
@@ -30,6 +33,7 @@ export function renderBranchCleanupModal({
     Boolean(entry.cleanup.upstream),
   );
   modalEl.classList.add("open");
+  modalEl.removeAttribute("aria-hidden");
   while (dialogEl.firstChild) {
     dialogEl.removeChild(dialogEl.firstChild);
   }

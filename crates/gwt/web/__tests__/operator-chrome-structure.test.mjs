@@ -296,6 +296,61 @@ test("components.css uses op-divider utility class", () => {
   assert.match(css, /\.op-divider--strong/);
 });
 
+test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
+  // Every modal-backdrop must declare aria-hidden initially and contain a
+  // modal-shell with role="dialog" + aria-modal="true". Without this, screen
+  // readers don't recognize the modal as a dialog and the inert state isn't
+  // signaled when closed.
+  for (const id of ["branch-cleanup-modal", "migration-modal", "preset-modal"]) {
+    const backdrop = document.getElementById(id);
+    assert.ok(backdrop, `expected modal backdrop #${id}`);
+    assert.equal(
+      backdrop.getAttribute("aria-hidden"),
+      "true",
+      `${id} backdrop must start aria-hidden="true"`,
+    );
+    const shell = backdrop.querySelector(".modal-shell");
+    assert.ok(shell, `${id} must contain a .modal-shell`);
+    assert.equal(shell.getAttribute("role"), "dialog", `${id} shell needs role="dialog"`);
+    assert.equal(shell.getAttribute("aria-modal"), "true", `${id} shell needs aria-modal="true"`);
+    assert.equal(shell.getAttribute("tabindex"), "-1", `${id} shell needs tabindex="-1" for focus management`);
+    // Either aria-label or aria-labelledby must point at a real label
+    const label = shell.getAttribute("aria-label");
+    const labelledby = shell.getAttribute("aria-labelledby");
+    assert.ok(label || labelledby, `${id} shell needs aria-label or aria-labelledby`);
+    if (labelledby) {
+      assert.ok(
+        document.getElementById(labelledby),
+        `${id}: aria-labelledby="${labelledby}" must point at an existing element`,
+      );
+    }
+  }
+});
+
+test("Drawer modal renderers toggle aria-hidden alongside .open class", () => {
+  const branchCleanupSrc = readFileSync(
+    resolve(here, "../branch-cleanup-modal.js"),
+    "utf8",
+  );
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  // Both renderers must flip aria-hidden in lockstep with the .open class.
+  for (const [src, name] of [[branchCleanupSrc, "branch-cleanup-modal"], [migrationSrc, "migration-modal"]]) {
+    assert.match(
+      src,
+      /modalEl\.setAttribute\("aria-hidden",\s*"true"\)/,
+      `${name} must set aria-hidden="true" on close`,
+    );
+    assert.match(
+      src,
+      /modalEl\.removeAttribute\("aria-hidden"\)/,
+      `${name} must remove aria-hidden on open`,
+    );
+  }
+});
+
 test("Hotkey overlay manages focus on open / close (modal dialog a11y)", () => {
   // The dialog must be focusable so we can move focus inside on open and
   // return it to the trigger on close — without this, screen readers don't
