@@ -295,3 +295,16 @@ test("components.css uses op-divider utility class", () => {
   assert.match(css, /\.op-divider--vertical/);
   assert.match(css, /\.op-divider--strong/);
 });
+
+test("agent cards style all four Living Telemetry states (active / blocked / idle / done)", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // Each of the four states must have a distinct visual treatment so operators
+  // can scan card boundaries at a glance — not just the high-priority pair.
+  assert.match(css, /\.op-agent-card\[data-state="active"\]\s*\{[^}]*--color-state-active/);
+  assert.match(css, /\.op-agent-card\[data-state="blocked"\]\s*\{[^}]*--color-state-blocked/);
+  assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\{[^}]*--color-state-idle/);
+  assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\{[^}]*--color-state-done/);
+  // The chip labels also need the matching foreground tint per state.
+  assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\.op-agent-state\s*\{[^}]*--color-state-idle/);
+  assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\.op-agent-state\s*\{[^}]*--color-state-done/);
+});
