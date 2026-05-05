@@ -1305,7 +1305,15 @@ kbd.op-kbd {
 :root[data-theme] .text-button:focus-visible,
 :root[data-theme] .recent-project-row:focus-visible,
 :root[data-theme] .live-session-button:focus-visible,
-:root[data-theme] .launch-choice-button:focus-visible {
+:root[data-theme] .launch-choice-button:focus-visible,
+/* SPEC-2356 — keyboard-navigable row patterns added in PRs #2464/#2465.
+   Without these focus-visible rules, keyboard users couldn't see which
+   row currently has focus when Tab'ing through the file tree or
+   Branches surface. .project-tab is the same pattern (div + role=
+   button + tabindex=0) and was overlooked in the original group. */
+:root[data-theme] .project-tab:focus-visible,
+:root[data-theme] .file-tree-row:focus-visible,
+:root[data-theme] .branch-row:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }

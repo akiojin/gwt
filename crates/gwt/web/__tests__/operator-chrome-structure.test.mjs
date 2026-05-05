@@ -420,6 +420,24 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
+test("Keyboard-navigable rows have :focus-visible outlines", () => {
+  // After PRs #2464/#2465 made file-tree-row and branch-row keyboard-
+  // navigable, the rows could receive focus but had no visible outline
+  // — keyboard users couldn't see where focus was. Project tabs use
+  // the same div+role+tabindex pattern and need the same focus-visible
+  // treatment. Source-of-truth audit: every selector in app.js that
+  // sets `tabIndex = 0` and `role="button"` must be in the CSS group.
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  for (const selector of [".project-tab", ".file-tree-row", ".branch-row"]) {
+    const re = new RegExp(`:root\\[data-theme\\] \\${selector}:focus-visible`);
+    assert.match(
+      css,
+      re,
+      `expected ${selector} to be in the unified focus-visible group`,
+    );
+  }
+});
+
 test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
   // <div>-based rows can't be Tab'd to or activated with the keyboard
   // unless explicitly opted in. Add tabindex, role="button", and a
