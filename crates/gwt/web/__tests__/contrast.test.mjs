@@ -25,11 +25,17 @@ const REQUIRED_PAIRS = [
   ["--color-text-strong", "--color-surface", NORMAL_AA, "strong text on surface"],
   ["--color-text-strong", "--color-surface-elevated", NORMAL_AA, "strong text on surface-elevated"],
   ["--color-display-fg", "--color-canvas", LARGE_AA, "display text on canvas"],
+  ["--color-display-fg", "--color-surface", LARGE_AA, "display text on surface"],
+  ["--color-display-fg", "--color-surface-elevated", LARGE_AA, "display text on surface-elevated (drawer / palette / hotkey card titles)"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
   ["--color-button-fg", "--color-button-bg", NORMAL_AA, "primary button label"],
   ["--color-button-fg", "--color-button-bg-hover", NORMAL_AA, "primary button label on hover"],
   ["--color-link", "--color-canvas", NORMAL_AA, "link on canvas"],
+  ["--color-link", "--color-surface", NORMAL_AA, "link on surface"],
+  ["--color-link", "--color-surface-elevated", NORMAL_AA, "link on surface-elevated"],
   ["--color-link-hover", "--color-canvas", NORMAL_AA, "link on canvas (hover)"],
+  ["--color-link-hover", "--color-surface", NORMAL_AA, "link on surface (hover)"],
+  ["--color-link-hover", "--color-surface-elevated", NORMAL_AA, "link on surface-elevated (hover)"],
   ["--agent-claude", "--color-canvas", LARGE_AA, "agent claude indicator"],
   ["--agent-codex", "--color-canvas", LARGE_AA, "agent codex indicator"],
   ["--agent-gemini", "--color-canvas", LARGE_AA, "agent gemini indicator"],
@@ -168,6 +174,33 @@ test("dark and light token sets define identical semantic keys", () => {
     lightKeys,
     "dark and light token sets must define the same semantic keys",
   );
+});
+
+test("every color token has a forced-colors fallback for high-contrast mode", () => {
+  // forced-colors: active mode requires every --color-* token used by the
+  // chrome to fall back to a system color (Canvas / CanvasText / Highlight
+  // / GrayText / etc) so Windows High Contrast and macOS Increase Contrast
+  // render correctly. Without this, custom tokens leak through and the
+  // user sees the design system colors instead of system colors.
+  const forcedColorsBlock = tokensCss.match(
+    /@media\s*\(\s*forced-colors:\s*active\s*\)\s*\{([\s\S]*?)\n\}\s*\n/,
+  );
+  assert.ok(forcedColorsBlock, "tokens.css must contain a forced-colors media query");
+  const fallbackKeys = new Set();
+  for (const line of forcedColorsBlock[1].split("\n")) {
+    const m = line.match(/^\s*(--[a-z][a-z0-9-]*)\s*:/);
+    if (m) fallbackKeys.add(m[1]);
+  }
+  // Every --color-* token defined in the base dark theme must have a
+  // forced-colors fallback (other token families like --space-*, --type-*
+  // are layout/typography and don't need system-color overrides).
+  for (const key of Object.keys(dark)) {
+    if (!key.startsWith("--color-")) continue;
+    assert.ok(
+      fallbackKeys.has(key),
+      `${key} has no forced-colors fallback — high-contrast mode will leak the design token`,
+    );
+  }
 });
 
 test("token names are kebab-case CSS custom properties", () => {
