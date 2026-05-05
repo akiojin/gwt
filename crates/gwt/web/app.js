@@ -6982,6 +6982,35 @@
           frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
         }
       });
+      // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
+      // Without this, Esc only worked for the Hotkey overlay and Command
+      // Palette; users were trapped in branch-cleanup / migration with
+      // pointer escape only.
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        if (branchCleanupModal.classList.contains("open")) {
+          // Reuse the same close path as backdrop click and explicit
+          // Cancel button so all three pathways behave identically.
+          frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
+          event.preventDefault();
+          return;
+        }
+        if (migrationModal && migrationModal.classList.contains("open")) {
+          // Migration "skip" is the cancellation path; map Esc to the
+          // same intent so the modal isn't a keyboard trap. Must use
+          // tab_id (not id) to match the backend protocol.
+          const tabId = migrationModalState.tabId;
+          migrationModalState.open = false;
+          migrationModalState.stage = "confirm";
+          migrationModalState.message = "";
+          migrationModalState.recovery = "";
+          renderMigrationModal();
+          if (tabId) {
+            send({ kind: "skip_migration", tab_id: tabId });
+          }
+          event.preventDefault();
+        }
+      });
       window.addEventListener("resize", () => {
         frontendUnits.projectWorkspaceShell.renderWindowList();
         syncMaximizedWindowsToViewport();

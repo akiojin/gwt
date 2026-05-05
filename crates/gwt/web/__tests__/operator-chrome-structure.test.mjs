@@ -327,6 +327,28 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("Drawer modals close on Escape — keyboard parity with backdrop click", () => {
+  // The Hotkey overlay and Command Palette already had Esc-close (PR #2440).
+  // branch-cleanup and migration modals previously closed only on backdrop
+  // click — keyboard users were trapped. app.js must wire a global keydown
+  // that maps Escape to the same close path for both modals.
+  assert.match(
+    appSource,
+    /event\.key\s*!==?\s*"Escape"/,
+    "expected app.js to gate keydown on Escape",
+  );
+  assert.match(
+    appSource,
+    /branchCleanupModal\.classList\.contains\("open"\)[\s\S]*closeBranchCleanupModal/,
+    "expected Esc to call closeBranchCleanupModal when that modal is open",
+  );
+  assert.match(
+    appSource,
+    /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*skip_migration/,
+    "expected Esc to send skip_migration when migration modal is open",
+  );
+});
+
 test("Drawer modal renderers toggle aria-hidden alongside .open class", () => {
   const branchCleanupSrc = readFileSync(
     resolve(here, "../branch-cleanup-modal.js"),
