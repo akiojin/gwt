@@ -249,14 +249,29 @@ function wireMissionBriefing({ doc, win }) {
 function wireHotkeyOverlay({ doc, hotkey }) {
   const overlay = doc.getElementById("op-hotkey-overlay");
   if (!overlay) return;
+  const card = overlay.querySelector(".op-hotkey-card");
+
+  // SPEC-2356 — modal-dialog focus management: remember the trigger so we can
+  // restore focus on close, and move focus into the dialog on open so screen
+  // readers announce "Hotkey reference dialog" instead of staying on whatever
+  // surface invoked ⌘?.
+  let returnFocusTo = null;
 
   const open = () => {
+    returnFocusTo = doc.activeElement instanceof Element ? doc.activeElement : null;
     overlay.dataset.open = "true";
     overlay.removeAttribute("aria-hidden");
+    if (card) {
+      try { card.focus({ preventScroll: true }); } catch { card.focus(); }
+    }
   };
   const close = () => {
     delete overlay.dataset.open;
     overlay.setAttribute("aria-hidden", "true");
+    if (returnFocusTo && typeof returnFocusTo.focus === "function") {
+      try { returnFocusTo.focus({ preventScroll: true }); } catch { returnFocusTo.focus(); }
+    }
+    returnFocusTo = null;
   };
 
   overlay.addEventListener("click", (e) => {
@@ -295,6 +310,9 @@ function wireCommandPalette({ doc, hotkey }) {
   function open() {
     overlay.dataset.open = "true";
     overlay.removeAttribute("aria-hidden");
+    // SPEC-2356 — combobox accessibility: announce that the popup is now open
+    // so screen readers attach the listbox to the input.
+    input.setAttribute("aria-expanded", "true");
     input.value = "";
     selectedIndex = 0;
     render();
@@ -304,6 +322,8 @@ function wireCommandPalette({ doc, hotkey }) {
   function close() {
     delete overlay.dataset.open;
     overlay.setAttribute("aria-hidden", "true");
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
     if (doc.activeElement === input) input.blur();
   }
 
@@ -338,6 +358,11 @@ function wireCommandPalette({ doc, hotkey }) {
         li.className = "op-palette__row";
         li.dataset.index = String(idx);
         li.dataset.selected = idx === selectedIndex ? "true" : "false";
+        // SPEC-2356 — combobox/listbox a11y: each row is an option with a
+        // stable id so the input can target it via aria-activedescendant.
+        li.id = `op-palette-row-${idx}`;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", idx === selectedIndex ? "true" : "false");
         li.innerHTML = `<span></span><span class="op-palette__hint"></span>`;
         li.firstChild.textContent = a.label;
         li.lastChild.textContent = a.hint ?? "";
@@ -360,9 +385,17 @@ function wireCommandPalette({ doc, hotkey }) {
   function updateSelection() {
     const rows = list.querySelectorAll(".op-palette__row");
     rows.forEach((row, i) => {
-      row.dataset.selected = i === selectedIndex ? "true" : "false";
-      if (i === selectedIndex) row.scrollIntoView({ block: "nearest" });
+      const isSelected = i === selectedIndex;
+      row.dataset.selected = isSelected ? "true" : "false";
+      row.setAttribute("aria-selected", isSelected ? "true" : "false");
+      if (isSelected) {
+        row.scrollIntoView({ block: "nearest" });
+        // SPEC-2356 — point the combobox input at the active option so screen
+        // readers announce the highlighted command without moving DOM focus.
+        input.setAttribute("aria-activedescendant", row.id);
+      }
     });
+    if (rows.length === 0) input.removeAttribute("aria-activedescendant");
   }
 
   function execute(action) {

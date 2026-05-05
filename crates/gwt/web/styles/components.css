@@ -672,6 +672,13 @@ body::after {
   transform: translateX(0);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .op-drawer-backdrop,
+  .op-drawer {
+    transition: none;
+  }
+}
+
 .op-drawer__header {
   padding: var(--space-4);
   border-bottom: 1px solid var(--color-border);

@@ -3130,6 +3130,11 @@
             placeholder="Run a command…"
             autocomplete="off"
             data-hotkey-override="true"
+            role="combobox"
+            aria-controls="op-palette-list"
+            aria-autocomplete="list"
+            aria-expanded="false"
+            aria-label="Search commands"
           />
           <ul class="op-palette__list" id="op-palette-list" role="listbox"></ul>
         </div>
@@ -3140,6 +3145,7 @@
           role="dialog"
           aria-modal="true"
           aria-label="Hotkey reference"
+          tabindex="-1"
         >
           <h2 class="op-hotkey-card__title">Operator Hotkeys</h2>
           <div class="op-hotkey-card__group">

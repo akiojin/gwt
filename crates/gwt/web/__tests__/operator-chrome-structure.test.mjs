@@ -296,6 +296,58 @@ test("components.css uses op-divider utility class", () => {
   assert.match(css, /\.op-divider--strong/);
 });
 
+test("Hotkey overlay manages focus on open / close (modal dialog a11y)", () => {
+  // The dialog must be focusable so we can move focus inside on open and
+  // return it to the trigger on close — without this, screen readers don't
+  // announce the dialog and keyboard users get stranded after Esc.
+  const card = document.querySelector("#op-hotkey-overlay .op-hotkey-card");
+  assert.ok(card, "expected hotkey overlay card");
+  assert.equal(card.getAttribute("tabindex"), "-1");
+  assert.equal(card.getAttribute("role"), "dialog");
+  assert.equal(card.getAttribute("aria-modal"), "true");
+  // operator-shell.js wires the dynamic focus pieces.
+  assert.match(operatorShellSource, /returnFocusTo\s*=\s*doc\.activeElement/);
+  assert.match(operatorShellSource, /card\.focus\(\{\s*preventScroll:\s*true\s*\}\)/);
+  assert.match(operatorShellSource, /returnFocusTo\.focus/);
+});
+
+test("Command Palette implements the WAI-ARIA combobox/listbox pattern", () => {
+  // The input must be a combobox that controls the list and announces the
+  // active option via aria-activedescendant. Without these the listbox role
+  // already on the <ul> is meaningless to screen readers.
+  const paletteInput = document.querySelector("#op-palette-input");
+  assert.ok(paletteInput, "expected palette input");
+  assert.equal(paletteInput.getAttribute("role"), "combobox");
+  assert.equal(paletteInput.getAttribute("aria-controls"), "op-palette-list");
+  assert.equal(paletteInput.getAttribute("aria-autocomplete"), "list");
+  // aria-expanded starts false; operator-shell flips it on open/close.
+  assert.equal(paletteInput.getAttribute("aria-expanded"), "false");
+  assert.match(paletteInput.getAttribute("aria-label") ?? "", /command/i);
+  // operator-shell.js must wire the dynamic pieces.
+  assert.match(operatorShellSource, /input\.setAttribute\("aria-expanded",\s*"true"\)/);
+  assert.match(operatorShellSource, /input\.setAttribute\("aria-activedescendant"/);
+  assert.match(operatorShellSource, /input\.removeAttribute\("aria-activedescendant"\)/);
+  assert.match(operatorShellSource, /li\.setAttribute\("role",\s*"option"\)/);
+  assert.match(operatorShellSource, /li\.setAttribute\("aria-selected"/);
+  assert.match(operatorShellSource, /li\.id\s*=\s*`op-palette-row-\$\{idx\}`/);
+});
+
+test("op-drawer scaffold honors prefers-reduced-motion (parity with legacy is-drawer modal)", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // The legacy `.modal-backdrop.is-drawer .modal-shell.is-drawer-shell` already
+  // suppresses its slide transform under reduced-motion. The forward-looking
+  // op-drawer scaffold needed parity — without this guard, future direct
+  // adoption would slide in even for users who opted out of motion.
+  const reducedMotionBlocks = css.match(
+    /@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)\s*\{[\s\S]*?\n\}/g,
+  );
+  assert.ok(reducedMotionBlocks, "expected at least one prefers-reduced-motion block");
+  const opDrawerCovered = reducedMotionBlocks.some(
+    (block) => /\.op-drawer\b/.test(block) && /transition:\s*none/.test(block),
+  );
+  assert.ok(opDrawerCovered, ".op-drawer scaffold must drop its transition under reduced-motion");
+});
+
 test("mapAgentTelemetryState emits only the four Living Telemetry states CSS handles", () => {
   // app.js has a closure-scoped runtime→Living Telemetry mapper. CSS only
   // styles `[data-agent-state]` for active/idle/blocked/done — any drift
