@@ -4,6 +4,11 @@
 // pure function over the dependency bag; app.js wires the DOM refs, state
 // lookup, helpers, and callbacks.
 
+// SPEC-2356 — remember the element focused when the modal opens so we can
+// restore focus to it on close. WeakMap keyed on the modal element survives
+// across renderer calls without leaking when the element is detached.
+const focusReturnMap = new WeakMap();
+
 export function renderBranchCleanupModal({
   modalEl,
   dialogEl,
@@ -19,6 +24,7 @@ export function renderBranchCleanupModal({
   onDeleteRemoteToggle,
 }) {
   if (!windowId || !state || !state.cleanupModal.open) {
+    const wasOpenBeforeClose = modalEl.classList.contains("open");
     modalEl.classList.remove("open");
     // SPEC-2356 — flip aria-hidden alongside the .open class so screen
     // readers stop announcing the dialog when it slides closed.
@@ -26,12 +32,34 @@ export function renderBranchCleanupModal({
     while (dialogEl.firstChild) {
       dialogEl.removeChild(dialogEl.firstChild);
     }
+    // SPEC-2356 — restore focus to whatever was focused when the modal
+    // opened (typically the Cleanup button that triggered it). Without
+    // this, focus would land on document.body and keyboard users would
+    // lose their place.
+    if (wasOpenBeforeClose) {
+      const returnTo = focusReturnMap.get(modalEl);
+      focusReturnMap.delete(modalEl);
+      if (returnTo && typeof returnTo.focus === "function") {
+        try { returnTo.focus({ preventScroll: true }); } catch { returnTo.focus(); }
+      }
+    }
     return;
   }
 
   const supportsRemoteDelete = selectedEntries.some((entry) =>
     Boolean(entry.cleanup.upstream),
   );
+  // SPEC-2356 — capture whether this is a fresh open (transition from
+  // closed) so we can move focus into the dialog. Re-renders during the
+  // running / result stages skip the focus move so users keep their place.
+  const wasOpen = modalEl.classList.contains("open");
+  if (!wasOpen) {
+    // Save the trigger so close() can restore focus there.
+    const ownerDoc = modalEl.ownerDocument || (typeof document !== "undefined" ? document : null);
+    if (ownerDoc) {
+      focusReturnMap.set(modalEl, ownerDoc.activeElement);
+    }
+  }
   modalEl.classList.add("open");
   modalEl.removeAttribute("aria-hidden");
   while (dialogEl.firstChild) {
@@ -176,4 +204,10 @@ export function renderBranchCleanupModal({
   submit.addEventListener("click", onSubmit);
   footer.appendChild(submit);
   dialogEl.appendChild(footer);
+  // SPEC-2356 — on a fresh open (transition from closed → open), move focus
+  // to the dialog so screen readers announce it and keyboard users land
+  // inside the modal instead of staying on the trigger button.
+  if (!wasOpen && typeof dialogEl.focus === "function") {
+    try { dialogEl.focus({ preventScroll: true }); } catch { dialogEl.focus(); }
+  }
 }
