@@ -327,6 +327,28 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("Drawer modal renderers restore focus on close (WeakMap pattern)", () => {
+  // Companion to fresh-open focus management: when the modal closes the
+  // trigger element captured at open time must regain focus, otherwise
+  // keyboard users land on document.body. Both renderers must implement
+  // the WeakMap-keyed return-focus pattern.
+  const branchCleanupSrc = readFileSync(
+    resolve(here, "../branch-cleanup-modal.js"),
+    "utf8",
+  );
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  for (const [src, name] of [[branchCleanupSrc, "branch-cleanup-modal"], [migrationSrc, "migration-modal"]]) {
+    assert.match(src, /const\s+focusReturnMap\s*=\s*new\s+WeakMap\(\)/, `${name} must define focusReturnMap WeakMap`);
+    assert.match(src, /focusReturnMap\.set\(modalEl,\s*ownerDoc\.activeElement\)/, `${name} must save activeElement on open`);
+    assert.match(src, /focusReturnMap\.get\(modalEl\)/, `${name} must read trigger on close`);
+    assert.match(src, /focusReturnMap\.delete\(modalEl\)/, `${name} must clear the map after close`);
+    assert.match(src, /returnTo\.focus\(\{\s*preventScroll:\s*true\s*\}\)/, `${name} must restore focus with preventScroll`);
+  }
+});
+
 test("Drawer modal renderers move focus into dialog on fresh open", () => {
   // The Hotkey overlay (PR #2440) already does this; the drawer modals
   // need parity so screen readers announce them and keyboard users land
