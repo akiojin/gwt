@@ -296,6 +296,43 @@ test("components.css uses op-divider utility class", () => {
   assert.match(css, /\.op-divider--strong/);
 });
 
+test("mapAgentTelemetryState emits only the four Living Telemetry states CSS handles", () => {
+  // app.js has a closure-scoped runtime→Living Telemetry mapper. CSS only
+  // styles `[data-agent-state]` for active/idle/blocked/done — any drift
+  // (e.g. emitting "warn" or "exited") would silently render no rim. Pin
+  // the contract so refactors can't introduce undeclared states.
+  const mapperBlock = appSource.match(
+    /function\s+mapAgentTelemetryState\s*\([^)]*\)\s*\{[\s\S]*?\n\s{6,8}\}/,
+  );
+  assert.ok(mapperBlock, "expected mapAgentTelemetryState to be defined in app.js");
+  const returnedStates = new Set();
+  for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
+    returnedStates.add(m[1]);
+  }
+  const allowed = new Set(["active", "idle", "blocked", "done"]);
+  for (const state of returnedStates) {
+    assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
+  }
+  // And the four design states must all be reachable, not just allowed.
+  for (const required of allowed) {
+    assert.ok(returnedStates.has(required), `Living Telemetry state never emitted: ${required}`);
+  }
+});
+
+test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // The ACTIVE / IDLE cells previously had no tonal hint — only BLOCKED did.
+  // Add parallel symmetry so the three count cells render with matching state
+  // colors (cyan / gray / red) for at-a-glance scanning.
+  assert.match(css, /\.op-status-strip__cell--active\s+\.op-status-strip__value\s*\{[^}]*--color-state-active/);
+  assert.match(css, /\.op-status-strip__cell--idle\s+\.op-status-strip__value\s*\{[^}]*--color-state-idle/);
+  assert.match(css, /\.op-status-strip__cell--blocked\s+\.op-status-strip__value\s*\{[^}]*--color-state-blocked/);
+  // Markup also needs the modifiers wired so the CSS selectors actually match.
+  const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
+});
+
 test("agent cards style all four Living Telemetry states (active / blocked / idle / done)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Each of the four states must have a distinct visual treatment so operators

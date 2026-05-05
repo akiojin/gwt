@@ -495,6 +495,14 @@ body::after {
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 
+.op-status-strip__cell--active .op-status-strip__value {
+  color: var(--color-state-active);
+}
+
+.op-status-strip__cell--idle .op-status-strip__value {
+  color: var(--color-state-idle);
+}
+
 .op-status-strip__cell--blocked .op-status-strip__value {
   color: var(--color-state-blocked);
 }
