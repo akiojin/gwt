@@ -767,14 +767,30 @@
         renderWindowList();
       }
 
+      let presetModalFocusReturn = null;
       function openModal() {
+        // SPEC-2356 — capture trigger BEFORE adding .open so we can
+        // restore focus on close. The preset modal is invoked via the
+        // "+" Add Window button; without restore, focus falls to body.
+        presetModalFocusReturn = document.activeElement;
         modal.classList.add("open");
         modal.removeAttribute("aria-hidden");
+        const presetShell = modal.querySelector(".modal-shell");
+        if (presetShell && typeof presetShell.focus === "function") {
+          try { presetShell.focus({ preventScroll: true }); }
+          catch { presetShell.focus(); }
+        }
       }
 
       function closeModal() {
+        const wasOpenPreset = modal.classList.contains("open");
         modal.classList.remove("open");
         modal.setAttribute("aria-hidden", "true");
+        if (wasOpenPreset && presetModalFocusReturn && typeof presetModalFocusReturn.focus === "function") {
+          try { presetModalFocusReturn.focus({ preventScroll: true }); }
+          catch { presetModalFocusReturn.focus(); }
+          presetModalFocusReturn = null;
+        }
       }
 
       function clamp(value, min) {
