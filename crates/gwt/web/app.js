@@ -4358,6 +4358,12 @@
           for (const entry of entries) {
             const row = document.createElement("div");
             row.className = "file-tree-row";
+            // SPEC-2356 — make the row keyboard-navigable. tabindex=0
+            // puts the row in the natural Tab order; role="button"
+            // tells assistive tech the row is activatable. The keydown
+            // handler below mirrors the click handler for Enter/Space.
+            row.tabIndex = 0;
+            row.setAttribute("role", "button");
             // SPEC-2356 — file tree rows have a selected state but are
             // <div>s, not buttons. aria-current="true" works on any
             // element and announces "current item" to screen readers.
@@ -4386,7 +4392,7 @@
               <span class="tree-icon ${isDirectory ? "dir" : "file"}">${isDirectory ? "▣" : "•"}</span>
               <span class="tree-name">${entry.name}</span>
             `;
-            row.addEventListener("click", () => {
+            const activate = () => {
               state.selectedPath = entry.path;
               if (isDirectory) {
                 if (state.expanded.has(entry.path)) {
@@ -4399,6 +4405,16 @@
                 }
               }
               renderFileTree(windowId);
+            };
+            row.addEventListener("click", activate);
+            // SPEC-2356 — keyboard activation: Enter and Space invoke the
+            // same handler as click so keyboard users can navigate and
+            // activate rows without a pointing device.
+            row.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                activate();
+              }
             });
             list.appendChild(row);
 
