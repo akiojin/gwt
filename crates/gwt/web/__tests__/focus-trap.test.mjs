@@ -164,6 +164,34 @@ test("non-Tab keys are ignored", () => {
   release();
 });
 
+test("focusable selector excludes [disabled] and [aria-disabled=\"true\"]", async () => {
+  // Verify the constant in the module matches the documented contract.
+  // Use module URL import to read the file content.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname, resolve } = await import("node:path");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(resolve(here, "../focus-trap.js"), "utf8");
+
+  // Each focusable role must exclude the disabled state — the trap should
+  // skip programmatically-disabled buttons (e.g. wizard Migrate when
+  // hasLocked is true).
+  for (const role of ["button", "input", "select", "textarea"]) {
+    assert.ok(
+      src.includes(`${role}:not([disabled]):not([aria-disabled="true"])`),
+      `${role} entry must exclude both [disabled] and [aria-disabled="true"]`,
+    );
+  }
+  assert.ok(
+    src.includes('[href]:not([aria-disabled="true"])'),
+    "[href] must exclude [aria-disabled=\"true\"]",
+  );
+  assert.ok(
+    src.includes('[tabindex]:not([tabindex="-1"]):not([aria-disabled="true"])'),
+    "[tabindex] must exclude tabindex=-1 and aria-disabled=true",
+  );
+});
+
 test("trap with no focusable children pins focus on the container", () => {
   const stub = makeStubDoc({ focusables: [] });
   const release = createFocusTrap(stub.container, { document: stub.doc });

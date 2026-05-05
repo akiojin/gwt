@@ -12,13 +12,18 @@
 // could call preventDefault first and the trap would never see the
 // event.
 
+// SPEC-2356 — focusable selector. Each entry excludes both the native
+// `disabled` attribute (where supported) and `aria-disabled="true"`. The
+// trap should treat aria-disabled elements as non-focusable so a button
+// that's been programmatically disabled (the wizard Migrate button when
+// hasLocked is true, for instance) doesn't trap users on it.
 const FOCUSABLE_SELECTOR = [
-  'button:not([disabled])',
-  '[href]',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])',
+  'button:not([disabled]):not([aria-disabled="true"])',
+  '[href]:not([aria-disabled="true"])',
+  'input:not([disabled]):not([aria-disabled="true"])',
+  'select:not([disabled]):not([aria-disabled="true"])',
+  'textarea:not([disabled]):not([aria-disabled="true"])',
+  '[tabindex]:not([tabindex="-1"]):not([aria-disabled="true"])',
 ].join(',');
 
 export function createFocusTrap(container, options = {}) {
