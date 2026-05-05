@@ -18,6 +18,8 @@ const REQUIRED_PAIRS = [
   ["--color-text", "--color-canvas", NORMAL_AA, "body text on canvas"],
   ["--color-text", "--color-surface", NORMAL_AA, "body text on surface"],
   ["--color-text-muted", "--color-canvas", NORMAL_AA, "muted text on canvas"],
+  ["--color-text-muted", "--color-surface", NORMAL_AA, "muted text on surface"],
+  ["--color-text-muted", "--color-surface-elevated", NORMAL_AA, "muted text on surface-elevated (palette placeholder etc)"],
   ["--color-text-strong", "--color-canvas", NORMAL_AA, "strong text on canvas"],
   ["--color-display-fg", "--color-canvas", LARGE_AA, "display text on canvas"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
