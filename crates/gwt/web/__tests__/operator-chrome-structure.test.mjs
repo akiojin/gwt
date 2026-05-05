@@ -296,6 +296,20 @@ test("components.css uses op-divider utility class", () => {
   assert.match(css, /\.op-divider--strong/);
 });
 
+test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // The ACTIVE / IDLE cells previously had no tonal hint — only BLOCKED did.
+  // Add parallel symmetry so the three count cells render with matching state
+  // colors (cyan / gray / red) for at-a-glance scanning.
+  assert.match(css, /\.op-status-strip__cell--active\s+\.op-status-strip__value\s*\{[^}]*--color-state-active/);
+  assert.match(css, /\.op-status-strip__cell--idle\s+\.op-status-strip__value\s*\{[^}]*--color-state-idle/);
+  assert.match(css, /\.op-status-strip__cell--blocked\s+\.op-status-strip__value\s*\{[^}]*--color-state-blocked/);
+  // Markup also needs the modifiers wired so the CSS selectors actually match.
+  const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
+});
+
 test("agent cards style all four Living Telemetry states (active / blocked / idle / done)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Each of the four states must have a distinct visual treatment so operators
