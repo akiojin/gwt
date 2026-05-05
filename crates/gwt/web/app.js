@@ -7027,7 +7027,8 @@
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
-      // with pointer escape only.
+      // with pointer escape only. The window list dropdown also gets Esc
+      // close so the operator chrome offers consistent keyboard escape.
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;
         if (branchCleanupModal.classList.contains("open")) {
@@ -7056,6 +7057,19 @@
           renderMigrationModal();
           if (tabId) {
             send({ kind: "skip_migration", tab_id: tabId });
+          }
+          event.preventDefault();
+          return;
+        }
+        if (windowListOpen) {
+          // Close the Windows dropdown and return focus to its trigger
+          // button (matches the modal pattern of restoring focus to the
+          // element that opened the dropdown).
+          windowListOpen = false;
+          frontendUnits.projectWorkspaceShell.renderWindowList();
+          if (windowListButton && typeof windowListButton.focus === "function") {
+            try { windowListButton.focus({ preventScroll: true }); }
+            catch { windowListButton.focus(); }
           }
           event.preventDefault();
         }
