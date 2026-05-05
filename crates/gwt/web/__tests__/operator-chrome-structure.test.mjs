@@ -420,6 +420,25 @@ test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
   );
 });
 
+test("Keyboard-navigable rows have :focus-visible outlines", () => {
+  // After PRs #2464/#2465 made file-tree-row and branch-row keyboard-
+  // navigable, the rows could receive focus but had no visible outline
+  // — keyboard users couldn't see where focus was. Both row types must
+  // join the unified :focus-visible group with the same 2px focus-ring
+  // outline as buttons / palette rows / drawer close.
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  assert.match(
+    css,
+    /:root\[data-theme\] \.file-tree-row:focus-visible/,
+    "expected .file-tree-row to be in the unified focus-visible group",
+  );
+  assert.match(
+    css,
+    /:root\[data-theme\] \.branch-row:focus-visible/,
+    "expected .branch-row to be in the unified focus-visible group",
+  );
+});
+
 test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
   // <div>-based rows can't be Tab'd to or activated with the keyboard
   // unless explicitly opted in. Add tabindex, role="button", and a
