@@ -398,6 +398,50 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   }
 });
 
+test("Launch wizard choice buttons expose toggle state via aria-pressed", () => {
+  // The wizard's agent / preset picker uses createChoiceButton for
+  // mutually-exclusive options. Without aria-pressed, screen readers
+  // can't announce which option is currently chosen — they just hear
+  // a button list with no selection state.
+  assert.match(
+    appSource,
+    /button\.setAttribute\("aria-pressed",\s*selected\s*\?\s*"true"\s*:\s*"false"\)/,
+    "expected createChoiceButton to set aria-pressed based on selected",
+  );
+});
+
+test("Selected list rows mark active item with aria-current", () => {
+  // Same pattern as project tabs (PR #2455): list-style buttons with a
+  // selected state need aria-current to announce which row is active.
+  // Coverage: knowledge-row, memo-note-row, profile-row, logs-entry.
+  // The set/remove pair is required so a previously-selected row
+  // doesn't retain the marker after the user picks a different row.
+  for (const desc of [
+    "knowledge",
+    "memo note",
+    "profile",
+    "logs entry",
+  ]) {
+    // Each list iterates over its rows and conditionally sets
+    // aria-current="true" on the selected one. We assert both the
+    // setAttribute and removeAttribute calls exist somewhere in app.js.
+    // The descriptive label is just for the failure message.
+  }
+  // Count occurrences — should be at least 4 set + 4 remove for the
+  // four list-with-selection surfaces (knowledge / memo / profile /
+  // logs) plus the project-tabs case from PR #2455.
+  const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
+  const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
+  assert.ok(
+    setMatches.length >= 5,
+    `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
+  );
+  assert.ok(
+    removeMatches.length >= 5,
+    `expected >= 5 aria-current remove calls (one per set call), got ${removeMatches.length}`,
+  );
+});
+
 test("Project tabs mark the active project with aria-current=\"page\"", () => {
   // Project tabs use role="button" but represent a navigation choice. The
   // appropriate ARIA pattern is aria-current="page" on the active tab so
@@ -720,6 +764,13 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     appSource,
     /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
     "expected Esc to close window list dropdown and restore focus to trigger",
+  );
+  // SPEC-2356 — preset modal Esc-close: closes via closeModal() which
+  // handles both the .open class flip and focus restore.
+  assert.match(
+    appSource,
+    /if\s*\(modal\.classList\.contains\("open"\)\)\s*\{[\s\S]*closeModal\(\)/,
+    "expected Esc to call closeModal when preset modal is open",
   );
 });
 

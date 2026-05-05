@@ -2423,6 +2423,9 @@
           row.type = "button";
           if (selectedEntry && selectedEntry.id === entry.id) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => {
             state.selectedEntryId = entry.id;
@@ -2708,6 +2711,9 @@
           row.type = "button";
           if (note.id === state.selectedNoteId) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => selectMemoNote(windowId, note.id));
 
@@ -3081,6 +3087,9 @@
           row.type = "button";
           if (profile.name === state.selectedProfile) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => selectProfile(windowId, profile.name));
           const header = createNode("div", "profile-row-header");
@@ -3598,6 +3607,12 @@
       function createChoiceButton(option, selected, onSelect) {
         const button = createNode("button", "launch-choice-button");
         button.type = "button";
+        // SPEC-2356 — choice buttons toggle between mutually-exclusive
+        // options (which agent to launch / which preset). aria-pressed
+        // exposes the toggled state so screen readers announce which
+        // option is currently selected without relying on the visual
+        // .selected class alone.
+        button.setAttribute("aria-pressed", selected ? "true" : "false");
         if (selected) {
           button.classList.add("selected");
         }
@@ -4777,6 +4792,12 @@
             row.type = "button";
             if (state.selectedNumber === entry.number) {
               row.classList.add("selected");
+              // SPEC-2356 — selected knowledge entry gets aria-current
+              // so screen readers announce which row is currently
+              // displayed in the detail pane (parallel to project tabs).
+              row.setAttribute("aria-current", "true");
+            } else {
+              row.removeAttribute("aria-current");
             }
             const main = createNode("div", "knowledge-row-main");
             const titleWrap = createNode("div", "");
@@ -7097,6 +7118,14 @@
           // Wizard cancel is the explicit cancellation path; map Esc to
           // the same action so the modal isn't a keyboard trap.
           frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          event.preventDefault();
+          return;
+        }
+        if (modal.classList.contains("open")) {
+          // SPEC-2356 — preset (Add Window) modal also needs Esc-close.
+          // closeModal() handles both the .open class flip and the focus
+          // restore via the WeakMap-style closure variables.
+          closeModal();
           event.preventDefault();
           return;
         }
