@@ -4358,8 +4358,14 @@
           for (const entry of entries) {
             const row = document.createElement("div");
             row.className = "file-tree-row";
+            // SPEC-2356 — file tree rows have a selected state but are
+            // <div>s, not buttons. aria-current="true" works on any
+            // element and announces "current item" to screen readers.
             if (state.selectedPath === entry.path) {
               row.classList.add("selected");
+              row.setAttribute("aria-current", "true");
+            } else {
+              row.removeAttribute("aria-current");
             }
             row.style.paddingLeft = `${12 + depth * 18}px`;
 

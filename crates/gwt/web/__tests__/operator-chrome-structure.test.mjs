@@ -427,18 +427,18 @@ test("Selected list rows mark active item with aria-current", () => {
     // setAttribute and removeAttribute calls exist somewhere in app.js.
     // The descriptive label is just for the failure message.
   }
-  // Count occurrences — should be at least 4 set + 4 remove for the
-  // four list-with-selection surfaces (knowledge / memo / profile /
-  // logs) plus the project-tabs case from PR #2455.
+  // Count occurrences — should be at least 5 set + 5 remove for the
+  // five list-with-selection surfaces (knowledge / memo / profile /
+  // logs / file-tree) plus the project-tabs case from PR #2455.
   const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
   const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
-    setMatches.length >= 5,
-    `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
+    setMatches.length >= 6,
+    `expected >= 6 aria-current set calls (project tab + 5 row types), got ${setMatches.length}`,
   );
   assert.ok(
-    removeMatches.length >= 5,
-    `expected >= 5 aria-current remove calls (one per set call), got ${removeMatches.length}`,
+    removeMatches.length >= 6,
+    `expected >= 6 aria-current remove calls (one per set call), got ${removeMatches.length}`,
   );
 });
 
