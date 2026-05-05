@@ -101,6 +101,7 @@ run("package scripts keep the GUI front door and release contract explicit", () 
     "node --check crates/gwt/web/theme-manager.js",
     "node --check crates/gwt/web/hotkey.js",
     "node --check crates/gwt/web/operator-shell.js",
+    "node --check crates/gwt/web/focus-trap.js",
   ]) {
     assert.ok(
       pkg.scripts["test:frontend-bundle"].includes(required),

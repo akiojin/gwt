@@ -144,6 +144,7 @@ impl EmbeddedServer {
                 "/operator-shell.js",
                 get(embedded_web::operator_shell_js_handler),
             )
+            .route("/focus-trap.js", get(embedded_web::focus_trap_js_handler))
             .route(
                 "/styles/tokens.css",
                 get(embedded_web::styles_tokens_css_handler),
