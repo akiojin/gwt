@@ -4003,6 +4003,11 @@
             const field = createLaunchField("Branch name", true);
             const input = createNode("input", "launch-input");
             input.type = "text";
+            // SPEC-2356 — launch-field labels are <div>s (not <label>s)
+            // so screen readers can't programmatically associate them
+            // with the input. Set aria-label directly so the input
+            // announces with its purpose ("Branch name, edit text").
+            input.setAttribute("aria-label", "Branch name");
             input.value = wizardBranchDraft;
             input.placeholder = "feature/my-task";
             input.addEventListener("input", () => {
@@ -4142,6 +4147,9 @@
           const input = createNode("input", "launch-input");
           input.type = "number";
           input.min = "1";
+          // SPEC-2356 — see createLaunchField comment: aria-label is the
+          // programmatic name since launch-field labels are non-<label> divs.
+          input.setAttribute("aria-label", "Issue number");
           input.value = launchWizard.linked_issue_number
             ? launchWizard.linked_issue_number.toString()
             : "";

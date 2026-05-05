@@ -501,6 +501,21 @@ test("Drawer modal renderers activate focus-trap on open and release on close", 
   }
 });
 
+test("Launch wizard inputs have programmatic names via aria-label", () => {
+  // The wizard's launch-field uses <div> labels (not <label> elements)
+  // so screen readers can't programmatically associate them with inputs.
+  // Every dynamically-created launch-input must call setAttribute on
+  // aria-label. Without this, the input announces just "edit text"
+  // with no purpose context.
+  for (const expected of ["Branch name", "Issue number"]) {
+    assert.match(
+      appSource,
+      new RegExp(`input\\.setAttribute\\("aria-label",\\s*"${expected}"\\)`),
+      `expected wizard input "${expected}" to set aria-label`,
+    );
+  }
+});
+
 test("Every role=\"dialog\" element has a programmatic accessible name", () => {
   // Catch the case where a new dialog is added without aria-label or
   // aria-labelledby — without an accessible name, screen readers
