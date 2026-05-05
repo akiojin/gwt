@@ -12,6 +12,37 @@ const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 
+// SPEC-2356 — extract every @media block matching the supplied condition,
+// using brace-depth tracking so nested rules don't truncate the body.
+function extractMediaBlocks(css, condition) {
+  const out = [];
+  const marker = `@media`;
+  let cursor = 0;
+  while (true) {
+    const at = css.indexOf(marker, cursor);
+    if (at < 0) break;
+    const headerEnd = css.indexOf("{", at);
+    if (headerEnd < 0) break;
+    const header = css.slice(at, headerEnd);
+    if (!header.includes(condition)) {
+      cursor = headerEnd + 1;
+      continue;
+    }
+    // Walk forward from headerEnd, tracking brace depth.
+    let depth = 1;
+    let i = headerEnd + 1;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+      i += 1;
+    }
+    out.push(css.slice(headerEnd + 1, i - 1));
+    cursor = i;
+  }
+  return out.join("\n");
+}
+
 test("index.html declares Operator chrome scaffold", () => {
   for (const sel of [
     "#op-theme-toggle",
@@ -324,6 +355,46 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
         `${id}: aria-labelledby="${labelledby}" must point at an existing element`,
       );
     }
+  }
+});
+
+test("Every keyframes-driven animation has a prefers-reduced-motion override", () => {
+  // Catch the gap where someone adds a new @keyframes + animation without
+  // pairing it with a reduced-motion override. Approach: for each
+  // keyframes name, find its `animation: <name>` use site, walk back to
+  // the enclosing selector, and verify that selector (or a parent
+  // matching it) appears in any prefers-reduced-motion block.
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const keyframes = [...new Set([...css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)].map((m) => m[1]))];
+  assert.ok(keyframes.length >= 6, `expected >= 6 keyframes, got ${keyframes.length}`);
+
+  // CSS @media blocks have nested rules with their own closing braces, so
+  // a naive regex with `[^}]*` or `[\s\S]*?\n\}` undercaptures. Walk the
+  // string and use depth tracking to extract every prefers-reduced-motion
+  // block in full.
+  const reducedMotionUnion = extractMediaBlocks(css, "prefers-reduced-motion: reduce");
+  assert.ok(reducedMotionUnion.length > 0, "expected at least one prefers-reduced-motion block");
+
+  for (const name of keyframes) {
+    // Locate `animation: <name>` (skip the @keyframes definition itself).
+    const useIndex = css.search(new RegExp(`animation:[^;]*\\b${name}\\b[^;]*;`));
+    assert.ok(useIndex > 0, `@keyframes ${name} has no animation: use site`);
+    // Walk back from the use site to the most recent `{` to find the
+    // enclosing selector — that's the line that opens the rule.
+    const before = css.slice(0, useIndex);
+    const lastOpenBrace = before.lastIndexOf("{");
+    assert.ok(lastOpenBrace > 0, `cannot locate opening brace for ${name}`);
+    // Selector text is the line(s) immediately before the `{`. Walk
+    // backward to the previous `}` (or BOF) for the rule start.
+    const ruleStart = before.lastIndexOf("}", lastOpenBrace - 1);
+    const selectorText = before.slice(ruleStart + 1, lastOpenBrace).trim();
+    // Grab every class, attribute selector, or id used in the selector.
+    const tokens = selectorText.match(/\.[\w-]+|\[[\w-]+(="[^"]*")?\]|#[\w-]+/g) || [];
+    const hasOverride = tokens.some((tok) => reducedMotionUnion.includes(tok));
+    assert.ok(
+      hasOverride,
+      `@keyframes ${name} (selector "${selectorText}") has no prefers-reduced-motion override`,
+    );
   }
 });
 
