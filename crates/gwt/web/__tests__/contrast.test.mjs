@@ -35,6 +35,15 @@ const REQUIRED_PAIRS = [
   ["--agent-gemini", "--color-canvas", LARGE_AA, "agent gemini indicator"],
   ["--agent-opencode", "--color-canvas", LARGE_AA, "agent opencode indicator"],
   ["--agent-copilot", "--color-canvas", LARGE_AA, "agent copilot indicator"],
+  // Agent colors are also used as TEXT (e.g. .op-agent-kind chip foreground
+  // for codex). Lock in NORMAL_AA on surface bg for every agent so future
+  // surfaces that route agent colors to text don't introduce contrast
+  // regressions.
+  ["--agent-claude", "--color-surface", NORMAL_AA, "agent claude as text on surface"],
+  ["--agent-codex", "--color-surface", NORMAL_AA, "agent codex as text on surface"],
+  ["--agent-gemini", "--color-surface", NORMAL_AA, "agent gemini as text on surface"],
+  ["--agent-opencode", "--color-surface", NORMAL_AA, "agent opencode as text on surface"],
+  ["--agent-copilot", "--color-surface", NORMAL_AA, "agent copilot as text on surface"],
 ];
 
 for (const themeName of ["dark", "light"]) {
