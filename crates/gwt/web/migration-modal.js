@@ -82,11 +82,21 @@ export function renderMigrationModal({
   }
   modalEl.classList.add("open");
   modalEl.removeAttribute("aria-hidden");
+
+  const m = state.migrationModal;
+
+  // SPEC-2356 — aria-busy signals to screen readers that the dialog is in
+  // a loading state during the async migration. Set true during running,
+  // false otherwise.
+  if (m.stage === "running") {
+    dialogEl.setAttribute("aria-busy", "true");
+  } else {
+    dialogEl.setAttribute("aria-busy", "false");
+  }
+
   while (dialogEl.firstChild) {
     dialogEl.removeChild(dialogEl.firstChild);
   }
-
-  const m = state.migrationModal;
 
   if (m.stage === "running") {
     dialogEl.appendChild(createNode("h2", "", "Migrating repository"));

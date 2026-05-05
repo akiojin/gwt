@@ -62,6 +62,14 @@ export function renderBranchCleanupModal({
   }
   modalEl.classList.add("open");
   modalEl.removeAttribute("aria-hidden");
+  // SPEC-2356 — aria-busy signals to screen readers that the dialog is
+  // in a loading state. Set true during the async "running" stage and
+  // clear (set false) once we move into confirm or result.
+  if (state.cleanupModal.stage === "running") {
+    dialogEl.setAttribute("aria-busy", "true");
+  } else {
+    dialogEl.setAttribute("aria-busy", "false");
+  }
   while (dialogEl.firstChild) {
     dialogEl.removeChild(dialogEl.firstChild);
   }

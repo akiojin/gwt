@@ -327,6 +327,33 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("Drawer modal renderers signal busy state via aria-busy during async stages", () => {
+  // The branch-cleanup running stage and migration running stage are
+  // synchronous async operations. Without aria-busy, screen readers don't
+  // signal that the dialog is in a loading state — users may try to
+  // interact with controls that are about to disappear.
+  const branchCleanupSrc = readFileSync(
+    resolve(here, "../branch-cleanup-modal.js"),
+    "utf8",
+  );
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  for (const [src, name] of [[branchCleanupSrc, "branch-cleanup-modal"], [migrationSrc, "migration-modal"]]) {
+    assert.match(
+      src,
+      /dialogEl\.setAttribute\("aria-busy",\s*"true"\)/,
+      `${name} must set aria-busy="true" during the running stage`,
+    );
+    assert.match(
+      src,
+      /dialogEl\.setAttribute\("aria-busy",\s*"false"\)/,
+      `${name} must clear aria-busy in non-running stages`,
+    );
+  }
+});
+
 test("Drawer modal renderers restore focus on close (WeakMap pattern)", () => {
   // Companion to fresh-open focus management: when the modal closes the
   // trigger element captured at open time must regain focus, otherwise
