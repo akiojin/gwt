@@ -7100,6 +7100,14 @@
           event.preventDefault();
           return;
         }
+        if (modal.classList.contains("open")) {
+          // SPEC-2356 — preset (Add Window) modal also needs Esc-close.
+          // closeModal() handles both the .open class flip and the focus
+          // restore via the WeakMap-style closure variables.
+          closeModal();
+          event.preventDefault();
+          return;
+        }
         if (migrationModal && migrationModal.classList.contains("open")) {
           // Migration "skip" is the cancellation path; map Esc to the
           // same intent so the modal isn't a keyboard trap. Must use
