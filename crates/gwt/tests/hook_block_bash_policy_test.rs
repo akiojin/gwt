@@ -75,6 +75,19 @@ fn blocks_workflow_focused_github_cli_commands() {
 }
 
 #[test]
+fn blocks_long_sleep_pr_ci_polling_commands() {
+    block("sleep 280 && gwtd pr view 1949");
+    block("sleep 280 && /Applications/GWT.app/Contents/MacOS/gwtd pr checks 1949");
+    block("sleep 280 && gh run view 123456789");
+}
+
+#[test]
+fn allows_bounded_or_non_pr_sleep_commands() {
+    allow("sleep 30 && gwtd pr checks 1949");
+    allow("sleep 280 && echo done");
+}
+
+#[test]
 fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
     // `permissionDecisionReason` is the single field PreToolUse actually
     // surfaces, so the canonical alternatives and the blocked command
@@ -91,6 +104,27 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
         "gwtd actions logs",
         "gwt-search",
         "Blocked command: gh pr view 1949",
+    ] {
+        assert!(
+            visible.contains(required),
+            "{required:?} missing from permission_decision_reason: {visible}"
+        );
+    }
+}
+
+#[test]
+fn long_sleep_pr_ci_block_message_points_to_board_handoff() {
+    let command = "sleep 280 && gwtd pr checks 1949";
+    let decision = block_bash_policy::evaluate_bash_command(command, &root())
+        .expect("long PR polling sleep must block");
+    let visible = decision.permission_decision_reason();
+
+    for required in [
+        "Long PR/CI polling sleeps are not allowed",
+        "gwtd pr checks <number>",
+        "gwtd board post --kind blocked",
+        "instead of sleeping indefinitely",
+        command,
     ] {
         assert!(
             visible.contains(required),
