@@ -1296,10 +1296,38 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Auto-detect the operation mode from arguments")
-                    && content.contains("broadcast"),
-                "expected agent auto-detect contract in {relative}"
+                    && content.contains("gwtd board post")
+                    && content.contains("--target")
+                    && content.contains("handoff")
+                    && content.contains("request"),
+                "expected agent Board coordination contract in {relative}"
+            );
+            assert!(
+                !content.contains("pane send")
+                    && !content.contains("pane broadcast")
+                    && !content.contains("<pane-id> <message>")
+                    && !content.contains("broadcast <message>"),
+                "unexpected direct pane communication contract in {relative}"
             );
         }
+
+        let command = std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-agent.md"))
+            .unwrap_or_else(|err| panic!("failed to read gwt-agent command: {err}"));
+        assert!(
+            command.contains("Board")
+                && command.contains("gwtd board post")
+                && !command.contains("[message]")
+                && !command.contains("sending"),
+            "expected gwt-agent command to route communication through Board"
+        );
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        assert!(
+            agents.contains("Use Board for agent-to-agent communication")
+                && !agents.contains("pane ID + message"),
+            "expected AGENTS.md to document the Board-first gwt-agent contract"
+        );
     }
 
     #[test]
