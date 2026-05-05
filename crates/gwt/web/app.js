@@ -3607,6 +3607,12 @@
       function createChoiceButton(option, selected, onSelect) {
         const button = createNode("button", "launch-choice-button");
         button.type = "button";
+        // SPEC-2356 — choice buttons toggle between mutually-exclusive
+        // options (which agent to launch / which preset). aria-pressed
+        // exposes the toggled state so screen readers announce which
+        // option is currently selected without relying on the visual
+        // .selected class alone.
+        button.setAttribute("aria-pressed", selected ? "true" : "false");
         if (selected) {
           button.classList.add("selected");
         }

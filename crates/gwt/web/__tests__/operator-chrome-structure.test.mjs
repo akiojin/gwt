@@ -398,6 +398,18 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   }
 });
 
+test("Launch wizard choice buttons expose toggle state via aria-pressed", () => {
+  // The wizard's agent / preset picker uses createChoiceButton for
+  // mutually-exclusive options. Without aria-pressed, screen readers
+  // can't announce which option is currently chosen — they just hear
+  // a button list with no selection state.
+  assert.match(
+    appSource,
+    /button\.setAttribute\("aria-pressed",\s*selected\s*\?\s*"true"\s*:\s*"false"\)/,
+    "expected createChoiceButton to set aria-pressed based on selected",
+  );
+});
+
 test("Selected list rows mark active item with aria-current", () => {
   // Same pattern as project tabs (PR #2455): list-style buttons with a
   // selected state need aria-current to announce which row is active.
