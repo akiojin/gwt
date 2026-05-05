@@ -140,6 +140,22 @@ test("Tab from outside the trap pulls focus into the first element", () => {
   release();
 });
 
+test("Shift+Tab from outside the trap pulls focus to the last element", () => {
+  const stub = makeStubDoc({ focusables: ["b1", "b2", "b3"] });
+  const outside = { id: "outside", focus() {} };
+  const release = createFocusTrap(stub.container, { document: stub.doc });
+
+  stub.setActive(outside);
+  const event = tabEvent(true); // Shift+Tab
+  stub.doc.dispatch("keydown", event);
+  assert.equal(event.defaultPrevented, true);
+  // Shift+Tab from outside wraps to LAST, mirroring how Tab-out-from-end
+  // wraps to first. Without this, Shift+Tab from outside would land on
+  // first which violates the natural reverse-tab cycle.
+  assert.equal(stub.focusCalls[0].id, stub.items[2].id);
+  release();
+});
+
 test("release() detaches the listener", () => {
   const stub = makeStubDoc({ focusables: ["b1", "b2"] });
   const release = createFocusTrap(stub.container, { document: stub.doc });
