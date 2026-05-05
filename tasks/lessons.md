@@ -1,5 +1,67 @@
 # Lessons Learned
 
+## 2026-05-04 — Audit-driven a11y coverage finds gaps that audit-by-checklist misses
+
+### 事象
+
+SPEC-2356 polish iteration で modal accessibility を完成させた後、当初は
+「全 modal に WAI-ARIA dialog convention 適用」「focus trap 実装」で
+work が完了したと判断していた。しかし Ralph Loop で iteration を
+続ける中で audit-driven approach (各 surface の form fields / status
+indicators / error regions / progress bars 等を 1 surface ずつ網羅
+チェックする) を採用したところ、以下のような「checklist では拾えな
+い」accessibility gap が次々と検出された:
+
+- 動的に生成される input / textarea / select に `aria-label` がない
+  (memo / profile / wizard の form fields。`<label>` で wrap されて
+  いない 8 fields)
+- 動的に生成される `<progress>` element に `aria-labelledby` がない
+  (migration の phase progress)
+- preset (Add Window) modal が Esc-close handler 配列から漏れていた
+  (他の 5 modal は全部 covered だったが 1 つだけ漏れ)
+- live-dot pulse が `forced-colors: active` ブロックには入って
+  いたが `prefers-reduced-motion: reduce` には入っていなかった
+  (PR #2456 で structural assertion が catch)
+
+これらは「modal a11y チェックリストを埋める」感覚では発見できず、
+実際に `grep "createElement\\|createNode" | filter` で全 fields を
+列挙して 1 つずつ aria-label の有無を audit する作業で初めて捕捉
+できた。
+
+### 原因
+
+Accessibility は HTML / ARIA の組み合わせ問題で、cross-cutting concern
+として全 surface に均等にかかるが、開発時は surface 単位で feature を
+追加する。1 surface 完了時点では他の surface の同類 element の有無
+は意識されず、結果として「ある場所では aria-label が wired、ある場所
+では wired していない」という不均一さが生まれる。Code review 時にも
+「この surface だけ見ているとそれ単体で OK に見える」ため検出されない。
+
+### 再発防止策
+
+1. **Surface 横断 audit を accessibility 追加時の standard practice
+   にする。** 新しい aria-* / role / 役割属性を追加した PR では、
+   その属性が他の surface でも必要になる可能性を query で確認:
+   - `grep -nE 'createElement\\("input"\\)' src/**/*.js` で input 全箇所
+   - `grep -nE 'createNode\\("button"' src/**/*.js` で button 全箇所
+   - `grep -n 'role="dialog"' src/**/*.html` で dialog 全箇所
+2. **Meta-assertion を chrome-structure tests に置く。** 「全
+   `[role="dialog"]` element に accessible name があること」のような
+   meta-assertion は新しい dialog が追加されただけで自動的に検証
+   範囲に含まれるため、surface 横断の網羅を test layer に固定できる。
+   `operator-chrome-structure.test.mjs` の `Every role="dialog" has
+   programmatic accessible name` test がこの pattern。
+3. **Audit list は test file に書く、document に書かない。** Document
+   は drift しやすいが test は CI で実行される。「全 form field の
+   aria-label coverage」のような expected 一覧は assertion の expected
+   array にまとめておく。
+
+### 適用範囲
+
+- 新しい WAI-ARIA pattern (combobox / tablist / tree 等) を追加する PR
+- 新しい role / aria-* attribute を 1 surface に wired した PR
+- Lessons-driven feedback loop の継続的な audit cycle
+
 ## 2026-05-04 — `[\s\S]*?` regex undercapture masks bugs in nested CSS blocks
 
 ### 事象
