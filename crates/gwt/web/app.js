@@ -4446,6 +4446,13 @@
         const row = document.createElement("div");
         row.className = "branch-row";
         row.dataset.branchName = branchName;
+        // SPEC-2356 — make the row keyboard-navigable. tabindex=0 puts
+        // the row in the natural Tab order; role="button" tells assistive
+        // tech the row is activatable. The keydown handler below mirrors
+        // the click handler for Enter/Space (matches the file tree
+        // pattern from PR #2464).
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
 
         const toggle = document.createElement("button");
         toggle.type = "button";
@@ -4503,22 +4510,36 @@
           summary,
         };
 
-        row.addEventListener("click", () => {
+        const select = () => {
           const state = ensureBranchListState(windowId);
           state.selectedBranchName = branchName;
           state.notice = "";
           renderBranches(windowId);
-        });
-        row.addEventListener("dblclick", () => {
-          const state = ensureBranchListState(windowId);
-          state.selectedBranchName = branchName;
-          state.notice = "";
-          renderBranches(windowId);
+        };
+        const activate = () => {
+          select();
           send({
             kind: "open_launch_wizard",
             id: windowId,
             branch_name: branchName,
           });
+        };
+        row.addEventListener("click", select);
+        row.addEventListener("dblclick", activate);
+        // SPEC-2356 — keyboard activation parity:
+        //   Enter/Space → select (same as click)
+        //   Cmd/Ctrl+Enter → activate (same as dblclick — open wizard)
+        // Without this, keyboard-only users could Tab to a branch row
+        // (after the tabindex/role wiring above) but couldn't select
+        // or open the launch wizard from it.
+        row.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            activate();
+          } else {
+            select();
+          }
         });
 
         return row;
