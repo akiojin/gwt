@@ -176,6 +176,33 @@ test("dark and light token sets define identical semantic keys", () => {
   );
 });
 
+test("every color token has a forced-colors fallback for high-contrast mode", () => {
+  // forced-colors: active mode requires every --color-* token used by the
+  // chrome to fall back to a system color (Canvas / CanvasText / Highlight
+  // / GrayText / etc) so Windows High Contrast and macOS Increase Contrast
+  // render correctly. Without this, custom tokens leak through and the
+  // user sees the design system colors instead of system colors.
+  const forcedColorsBlock = tokensCss.match(
+    /@media\s*\(\s*forced-colors:\s*active\s*\)\s*\{([\s\S]*?)\n\}\s*\n/,
+  );
+  assert.ok(forcedColorsBlock, "tokens.css must contain a forced-colors media query");
+  const fallbackKeys = new Set();
+  for (const line of forcedColorsBlock[1].split("\n")) {
+    const m = line.match(/^\s*(--[a-z][a-z0-9-]*)\s*:/);
+    if (m) fallbackKeys.add(m[1]);
+  }
+  // Every --color-* token defined in the base dark theme must have a
+  // forced-colors fallback (other token families like --space-*, --type-*
+  // are layout/typography and don't need system-color overrides).
+  for (const key of Object.keys(dark)) {
+    if (!key.startsWith("--color-")) continue;
+    assert.ok(
+      fallbackKeys.has(key),
+      `${key} has no forced-colors fallback — high-contrast mode will leak the design token`,
+    );
+  }
+});
+
 test("token names are kebab-case CSS custom properties", () => {
   const all = new Set([...Object.keys(dark), ...Object.keys(light)]);
   for (const name of all) {
