@@ -118,6 +118,32 @@ test("components.css scopes the on-strip state palette to bright on-dark variant
   assert.match(stripBlock[1], /--color-state-blocked:\s*#f87171/i);
 });
 
+// SPEC-2356 — Focus ring is a UI component, so WCAG 2.2 SC 1.4.11
+// applies (non-text contrast minimum 3:1). The focus ring must stand
+// out against canvas, surface, and surface-elevated.
+const FOCUS_RING_BACKGROUNDS = [
+  "--color-canvas",
+  "--color-surface",
+  "--color-surface-elevated",
+];
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const bgToken of FOCUS_RING_BACKGROUNDS) {
+    test(`[${themeName}] WCAG 2.2 SC 1.4.11 (3:1): focus ring on ${bgToken}`, () => {
+      const fg = theme["--color-focus-ring"];
+      const bg = theme[bgToken];
+      assert.ok(fg, `--color-focus-ring missing in ${themeName}`);
+      assert.ok(bg, `${bgToken} missing in ${themeName}`);
+      const ratio = contrastRatio(fg, bg);
+      assert.ok(
+        ratio >= LARGE_AA,
+        `focus ring on ${bgToken}: ${ratio.toFixed(2)} < ${LARGE_AA} (fg=${fg}, bg=${bg})`,
+      );
+    });
+  }
+}
+
 test("dark and light token sets define identical semantic keys", () => {
   const darkKeys = Object.keys(dark).sort();
   const lightKeys = Object.keys(light).sort();
