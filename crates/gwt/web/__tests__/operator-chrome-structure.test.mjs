@@ -327,6 +327,35 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("Drawer modal renderers move focus into dialog on fresh open", () => {
+  // The Hotkey overlay (PR #2440) already does this; the drawer modals
+  // need parity so screen readers announce them and keyboard users land
+  // inside. Re-renders during running/result stages must NOT re-move focus
+  // (users keep their place navigating buttons).
+  const branchCleanupSrc = readFileSync(
+    resolve(here, "../branch-cleanup-modal.js"),
+    "utf8",
+  );
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  for (const [src, name] of [[branchCleanupSrc, "branch-cleanup-modal"], [migrationSrc, "migration-modal"]]) {
+    // Each renderer must capture wasOpen BEFORE adding the .open class
+    // and gate the focus move on !wasOpen.
+    assert.match(
+      src,
+      /const\s+wasOpen\s*=\s*modalEl\.classList\.contains\("open"\)/,
+      `${name} must capture wasOpen before adding the .open class`,
+    );
+    assert.match(
+      src,
+      /!wasOpen[\s\S]*dialogEl\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
+      `${name} must focus dialogEl with preventScroll only on fresh open`,
+    );
+  }
+});
+
 test("Drawer modals close on Escape — keyboard parity with backdrop click", () => {
   // The Hotkey overlay and Command Palette already had Esc-close (PR #2440).
   // branch-cleanup and migration modals previously closed only on backdrop

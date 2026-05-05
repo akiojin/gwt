@@ -55,6 +55,10 @@ export function renderMigrationModal({
     return;
   }
 
+  // SPEC-2356 — capture fresh-open transition so we can move focus into
+  // the dialog only on the initial render (subsequent re-renders during
+  // running / done stages keep focus where the user already navigated).
+  const wasOpen = modalEl.classList.contains("open");
   modalEl.classList.add("open");
   modalEl.removeAttribute("aria-hidden");
   while (dialogEl.firstChild) {
@@ -196,4 +200,9 @@ export function renderMigrationModal({
   footer.appendChild(migrate);
 
   dialogEl.appendChild(footer);
+  // SPEC-2356 — on a fresh open, move focus to the dialog so screen readers
+  // announce "Worktree migration dialog" and keyboard users land inside.
+  if (!wasOpen && typeof dialogEl.focus === "function") {
+    try { dialogEl.focus({ preventScroll: true }); } catch { dialogEl.focus(); }
+  }
 }

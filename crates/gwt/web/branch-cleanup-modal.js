@@ -32,6 +32,10 @@ export function renderBranchCleanupModal({
   const supportsRemoteDelete = selectedEntries.some((entry) =>
     Boolean(entry.cleanup.upstream),
   );
+  // SPEC-2356 — capture whether this is a fresh open (transition from
+  // closed) so we can move focus into the dialog. Re-renders during the
+  // running / result stages skip the focus move so users keep their place.
+  const wasOpen = modalEl.classList.contains("open");
   modalEl.classList.add("open");
   modalEl.removeAttribute("aria-hidden");
   while (dialogEl.firstChild) {
@@ -176,4 +180,10 @@ export function renderBranchCleanupModal({
   submit.addEventListener("click", onSubmit);
   footer.appendChild(submit);
   dialogEl.appendChild(footer);
+  // SPEC-2356 — on a fresh open (transition from closed → open), move focus
+  // to the dialog so screen readers announce it and keyboard users land
+  // inside the modal instead of staying on the trigger button.
+  if (!wasOpen && typeof dialogEl.focus === "function") {
+    try { dialogEl.focus({ preventScroll: true }); } catch { dialogEl.focus(); }
+  }
 }
