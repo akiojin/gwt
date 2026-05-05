@@ -301,7 +301,7 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   // modal-shell with role="dialog" + aria-modal="true". Without this, screen
   // readers don't recognize the modal as a dialog and the inert state isn't
   // signaled when closed.
-  for (const id of ["branch-cleanup-modal", "migration-modal", "preset-modal"]) {
+  for (const id of ["branch-cleanup-modal", "migration-modal", "preset-modal", "wizard-modal"]) {
     const backdrop = document.getElementById(id);
     assert.ok(backdrop, `expected modal backdrop #${id}`);
     assert.equal(
@@ -397,6 +397,11 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     appSource,
     /migrationModal\s*&&\s*migrationModal\.classList\.contains\("open"\)[\s\S]*skip_migration/,
     "expected Esc to send skip_migration when migration modal is open",
+  );
+  assert.match(
+    appSource,
+    /wizardModal\.classList\.contains\("open"\)[\s\S]*launchWizardSurface\.sendAction\(\{\s*kind:\s*"cancel"/,
+    "expected Esc to send cancel when wizard modal is open",
   );
 });
 

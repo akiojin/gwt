@@ -3719,6 +3719,9 @@
       function renderLaunchWizard() {
         if (!launchWizard) {
           wizardModal.classList.remove("open");
+          // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
+          // readers stop announcing the wizard when it slides closed.
+          wizardModal.setAttribute("aria-hidden", "true");
           wizardModal.classList.remove("is-drawer");
           wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
@@ -3738,6 +3741,7 @@
         wizardModal.classList.toggle("is-drawer", isStartWorkMode);
         wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         wizardModal.classList.add("open");
+        wizardModal.removeAttribute("aria-hidden");
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Workspace launch"
@@ -6984,14 +6988,21 @@
       });
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
-      // Palette; users were trapped in branch-cleanup / migration with
-      // pointer escape only.
+      // Palette; users were trapped in branch-cleanup / migration / wizard
+      // with pointer escape only.
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;
         if (branchCleanupModal.classList.contains("open")) {
           // Reuse the same close path as backdrop click and explicit
           // Cancel button so all three pathways behave identically.
           frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
+          event.preventDefault();
+          return;
+        }
+        if (wizardModal.classList.contains("open")) {
+          // Wizard cancel is the explicit cancellation path; map Esc to
+          // the same action so the modal isn't a keyboard trap.
+          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
           event.preventDefault();
           return;
         }
