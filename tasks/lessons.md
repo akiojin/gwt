@@ -1,5 +1,50 @@
 # Lessons Learned
 
+## 2026-05-04 — Chrome-structure assertions alone don't catch contrast regressions
+
+### 事象
+
+SPEC-2356 polish iteration の PR #2439 で、Status Strip の ACTIVE / IDLE
+セルに state-color tinting を追加した。chrome-structure assertions で
+「`color: var(--color-state-*)` が定義されていること」を機械的に検証して
+GREEN になったため merge した。しかし light-theme で実際に rendering を
+確認すると、IDLE = 3.49:1 / ACTIVE = 3.15:1 / BLOCKED = 2.61:1 と
+すべて WCAG AA (4.5:1) を下回っていた。BLOCKED の 2.61:1 は PR #2439 で
+新規導入した訳ではなく、それ以前から存在した既存バグだったが、PR #2439
+が assertion で「現状維持」をロックインしてしまった。
+
+### 原因
+
+Status Strip の bg は dark/light 両テーマで dark (`#050709` / `#1a1d24`)
+である一方、`--color-state-*` トークンは theme 別に「その theme の bg
+に合う色」として tuned されていた。light-theme の state-* は light bg
+向けの暗い saturated 色で、dark な strip bg に重ねると contrast が
+急落する。chrome-structure tests は「セレクタとプロパティが存在するか」
+しか検証していなかったため、実際の color 値と bg の組み合わせは見逃し
+た。
+
+### 再発防止策
+
+1. **テキストを表示する chrome surface には必ず contrast assertion を
+   追加する** ―― selector 存在チェック (chrome-structure tests) だけでは
+   AA 違反を検出できない。`contrast.test.mjs` に theme × state ×
+   surface_bg の組み合わせを必ず assert する (PR #2441 で active / idle /
+   blocked × dark / light の 6 件 + structure 1 件を追加)。
+2. **theme-agnostic な surface (両テーマで bg が同じ系統の chrome) は、
+   token を local に scope-override して固定値にする** ―― theme tokens
+   をそのまま使うと、片方のテーマで AA を満たしても他方で破綻する。
+   `.op-status-strip { --color-state-*: #...; }` のように surface 単位で
+   scoped custom property override を入れて、「両テーマで同じ on-bg
+   palette」を強制する。
+
+### 適用範囲
+
+- `--color-state-*` を直接 chrome surface に流しているすべての箇所
+  (現在は Status Strip のみ; 将来 Header chrome / Floating overlay 等に
+  同パターンが現れたら必ず scoped override + contrast test を併設)。
+- chrome-structure assertions を新設するときは、検証対象が「テキスト
+  色」を含むなら **必ず併せて contrast assertion を追加** する。
+
 ## 2026-05-04 — Cache restore failures must not block the release pipeline
 
 ### 事象

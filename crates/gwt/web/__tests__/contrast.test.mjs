@@ -47,6 +47,40 @@ for (const themeName of ["dark", "light"]) {
   }
 }
 
+// SPEC-2356 — Status Strip is a permanent dark chrome band. Its scoped state
+// palette in components.css must clear WCAG AA against both themes' strip bg.
+const STRIP_PALETTE = {
+  active: "#22d3ee",
+  idle: "#94a3b8",
+  blocked: "#f87171",
+};
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const [stateName, color] of Object.entries(STRIP_PALETTE)) {
+    test(`[${themeName}] WCAG AA: status strip ${stateName} (${color}) on strip bg`, () => {
+      const bg = theme["--color-status-strip-bg"];
+      assert.ok(bg, `--color-status-strip-bg missing in ${themeName}`);
+      const ratio = contrastRatio(color, bg);
+      assert.ok(
+        ratio >= NORMAL_AA,
+        `strip ${stateName}: ratio ${ratio.toFixed(2)} < ${NORMAL_AA} (${color} on ${bg})`,
+      );
+    });
+  }
+}
+
+test("components.css scopes the on-strip state palette to bright on-dark variants", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const stripBlock = css.match(/\.op-status-strip\s*\{([\s\S]*?)\n\}/);
+  assert.ok(stripBlock, "expected .op-status-strip block");
+  // The block must override --color-state-active/-idle/-blocked locally so
+  // the strip cell values render with AA-clearing colors regardless of theme.
+  assert.match(stripBlock[1], /--color-state-active:\s*#22d3ee/i);
+  assert.match(stripBlock[1], /--color-state-idle:\s*#94a3b8/i);
+  assert.match(stripBlock[1], /--color-state-blocked:\s*#f87171/i);
+});
+
 test("dark and light token sets define identical semantic keys", () => {
   const darkKeys = Object.keys(dark).sort();
   const lightKeys = Object.keys(light).sort();
