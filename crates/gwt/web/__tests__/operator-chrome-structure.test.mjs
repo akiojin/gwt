@@ -327,6 +327,20 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("Error regions declare role=\"alert\" so screen readers announce them", () => {
+  // Without role="alert" (or aria-live="assertive"), errors that appear
+  // in wizard-error and project-picker-error are silent for screen reader
+  // users — they only see them after manually navigating to the error
+  // element. role="alert" implies aria-live="assertive" + aria-atomic so
+  // the full message is announced immediately when the element becomes
+  // non-hidden.
+  for (const id of ["wizard-error", "project-picker-error"]) {
+    const el = document.getElementById(id);
+    assert.ok(el, `expected error region #${id}`);
+    assert.equal(el.getAttribute("role"), "alert", `${id} must have role="alert"`);
+  }
+});
+
 test("Drawer modal renderers signal busy state via aria-busy during async stages", () => {
   // The branch-cleanup running stage and migration running stage are
   // synchronous async operations. Without aria-busy, screen readers don't
