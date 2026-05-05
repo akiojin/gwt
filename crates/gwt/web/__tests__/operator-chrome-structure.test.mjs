@@ -441,6 +441,11 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /wizardModal\.classList\.contains\("open"\)[\s\S]*launchWizardSurface\.sendAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc to send cancel when wizard modal is open",
   );
+  assert.match(
+    appSource,
+    /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
+    "expected Esc to close window list dropdown and restore focus to trigger",
+  );
 });
 
 test("Drawer modal renderers toggle aria-hidden alongside .open class", () => {
