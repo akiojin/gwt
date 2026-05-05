@@ -3716,12 +3716,22 @@
         }
       }
 
+      let wizardFocusReturn = null;
+
       function renderLaunchWizard() {
         if (!launchWizard) {
+          const wasOpenBeforeClose = wizardModal.classList.contains("open");
           wizardModal.classList.remove("open");
           // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
           // readers stop announcing the wizard when it slides closed.
           wizardModal.setAttribute("aria-hidden", "true");
+          // SPEC-2356 — restore focus to the trigger that opened the wizard
+          // so keyboard users land back on Start Work / Launch Agent / etc.
+          if (wasOpenBeforeClose && wizardFocusReturn && typeof wizardFocusReturn.focus === "function") {
+            try { wizardFocusReturn.focus({ preventScroll: true }); }
+            catch { wizardFocusReturn.focus(); }
+            wizardFocusReturn = null;
+          }
           wizardModal.classList.remove("is-drawer");
           wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
@@ -3740,8 +3750,20 @@
         const isStartWorkMode = launchWizard.show_branch_controls === false;
         wizardModal.classList.toggle("is-drawer", isStartWorkMode);
         wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
+        const wasOpenWizard = wizardModal.classList.contains("open");
+        if (!wasOpenWizard) {
+          // Capture trigger BEFORE flipping .open so render-driven focus
+          // moves don't overwrite our save.
+          wizardFocusReturn = document.activeElement;
+        }
         wizardModal.classList.add("open");
         wizardModal.removeAttribute("aria-hidden");
+        if (!wasOpenWizard && wizardDialog && typeof wizardDialog.focus === "function") {
+          // SPEC-2356 — move focus into the dialog so screen readers
+          // announce "Launch Agent dialog" and keyboard users land inside.
+          try { wizardDialog.focus({ preventScroll: true }); }
+          catch { wizardDialog.focus(); }
+        }
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Workspace launch"

@@ -378,6 +378,26 @@ test("Drawer modal renderers move focus into dialog on fresh open", () => {
   }
 });
 
+test("Wizard modal manages focus on open and restores on close", () => {
+  // The wizard modal's renderer lives in app.js (not a separate module),
+  // so focus management is wired inline. Verify the same pattern as the
+  // drawer modals: wizardFocusReturn captures activeElement on open,
+  // wizardDialog.focus({ preventScroll: true }) moves focus into the
+  // dialog, and wizardFocusReturn.focus() restores on close.
+  assert.match(appSource, /let\s+wizardFocusReturn\s*=\s*null/);
+  assert.match(appSource, /wizardFocusReturn\s*=\s*document\.activeElement/);
+  assert.match(
+    appSource,
+    /wizardDialog\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
+    "expected wizardDialog focus on open with preventScroll",
+  );
+  assert.match(
+    appSource,
+    /wizardFocusReturn\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
+    "expected wizardFocusReturn focus on close with preventScroll",
+  );
+});
+
 test("Drawer modals close on Escape — keyboard parity with backdrop click", () => {
   // The Hotkey overlay and Command Palette already had Esc-close (PR #2440).
   // branch-cleanup and migration modals previously closed only on backdrop
