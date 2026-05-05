@@ -398,6 +398,25 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   }
 });
 
+test("File tree directory rows expose collapse state via aria-expanded", () => {
+  // The file tree shows directories with ▾/▸ caret glyphs to indicate
+  // expand/collapse state visually. Without aria-expanded, screen
+  // readers can't tell whether a directory is open or closed, so the
+  // user has to guess via context. File (non-directory) rows must
+  // explicitly removeAttribute so a row that was a directory and
+  // became a file (via state change) doesn't keep the marker.
+  assert.match(
+    appSource,
+    /isDirectory[\s\S]*row\.setAttribute\("aria-expanded",\s*expanded\s*\?\s*"true"\s*:\s*"false"\)/,
+    "expected directory rows to set aria-expanded based on expanded state",
+  );
+  assert.match(
+    appSource,
+    /row\.removeAttribute\("aria-expanded"\)/,
+    "expected non-directory rows to remove aria-expanded",
+  );
+});
+
 test("Launch wizard choice buttons expose toggle state via aria-pressed", () => {
   // The wizard's agent / preset picker uses createChoiceButton for
   // mutually-exclusive options. Without aria-pressed, screen readers

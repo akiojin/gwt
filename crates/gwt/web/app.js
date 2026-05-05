@@ -4371,6 +4371,16 @@
 
             const expanded = state.expanded.has(entry.path);
             const isDirectory = entry.kind === "directory";
+            // SPEC-2356 — directory rows expose collapse state via
+            // aria-expanded so screen readers announce "expanded" or
+            // "collapsed" alongside the visual ▾/▸ caret. File rows
+            // (non-directories) should not expose aria-expanded —
+            // that would falsely signal the element is collapsible.
+            if (isDirectory) {
+              row.setAttribute("aria-expanded", expanded ? "true" : "false");
+            } else {
+              row.removeAttribute("aria-expanded");
+            }
             row.innerHTML = `
               <span class="tree-caret">${isDirectory ? (expanded ? "▾" : "▸") : ""}</span>
               <span class="tree-icon ${isDirectory ? "dir" : "file"}">${isDirectory ? "▣" : "•"}</span>
