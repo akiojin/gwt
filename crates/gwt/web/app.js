@@ -676,8 +676,15 @@
           button.title = tab.project_root;
           button.setAttribute("role", "button");
           button.tabIndex = 0;
+          // SPEC-2356 — aria-current="page" announces the active tab to
+          // screen readers without changing the role semantics. Inactive
+          // tabs explicitly clear the attribute so the previously-active
+          // tab doesn't keep the marker after a switch.
           if (tab.id === appState.active_tab_id) {
             button.classList.add("active");
+            button.setAttribute("aria-current", "page");
+          } else {
+            button.removeAttribute("aria-current");
           }
           button.innerHTML = `
             <span class="project-tab-label">${tab.title}</span>
