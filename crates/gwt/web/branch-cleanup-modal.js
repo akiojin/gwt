@@ -4,10 +4,16 @@
 // pure function over the dependency bag; app.js wires the DOM refs, state
 // lookup, helpers, and callbacks.
 
+import { createFocusTrap } from "./focus-trap.js";
+
 // SPEC-2356 — remember the element focused when the modal opens so we can
 // restore focus to it on close. WeakMap keyed on the modal element survives
 // across renderer calls without leaking when the element is detached.
 const focusReturnMap = new WeakMap();
+// SPEC-2356 — track the active focus trap release so we can detach the
+// listener when the modal closes. Keyed on the modal element to mirror
+// the focus-return pattern.
+const focusTrapMap = new WeakMap();
 
 export function renderBranchCleanupModal({
   modalEl,
@@ -37,6 +43,12 @@ export function renderBranchCleanupModal({
     // this, focus would land on document.body and keyboard users would
     // lose their place.
     if (wasOpenBeforeClose) {
+      // Release the focus trap before restoring focus so the trap doesn't
+      // intercept the focus move and pull it back into the (closed) modal.
+      const releaseTrap = focusTrapMap.get(modalEl);
+      focusTrapMap.delete(modalEl);
+      if (typeof releaseTrap === "function") releaseTrap();
+
       const returnTo = focusReturnMap.get(modalEl);
       focusReturnMap.delete(modalEl);
       if (returnTo && typeof returnTo.focus === "function") {
@@ -58,6 +70,10 @@ export function renderBranchCleanupModal({
     const ownerDoc = modalEl.ownerDocument || (typeof document !== "undefined" ? document : null);
     if (ownerDoc) {
       focusReturnMap.set(modalEl, ownerDoc.activeElement);
+      // Activate the focus trap so Tab cycles within the modal instead
+      // of escaping to background content. The trap is detached on close.
+      const release = createFocusTrap(dialogEl, { document: ownerDoc });
+      focusTrapMap.set(modalEl, release);
     }
   }
   modalEl.classList.add("open");

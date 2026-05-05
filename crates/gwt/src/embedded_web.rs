@@ -44,6 +44,10 @@ pub fn operator_shell_js() -> &'static str {
     include_str!("../web/operator-shell.js")
 }
 
+pub fn focus_trap_js() -> &'static str {
+    include_str!("../web/focus-trap.js")
+}
+
 pub fn styles_tokens_css() -> &'static str {
     include_str!("../web/styles/tokens.css")
 }
@@ -142,6 +146,13 @@ pub async fn operator_shell_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         operator_shell_js(),
+    )
+}
+
+pub async fn focus_trap_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        focus_trap_js(),
     )
 }
 

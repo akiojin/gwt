@@ -3,10 +3,15 @@
 // the dependency bag so app.js can wire DOM refs, state, and callbacks while
 // the renderer stays unit-testable.
 
+import { createFocusTrap } from "./focus-trap.js";
+
 // SPEC-2356 — remember the trigger that opened the modal so close can
 // restore focus there. WeakMap keyed on modal element matches the
 // branch-cleanup-modal pattern.
 const focusReturnMap = new WeakMap();
+// SPEC-2356 — track the active focus trap release so Tab cycles within
+// the modal and detach the listener on close.
+const focusTrapMap = new WeakMap();
 
 const PHASE_LABELS = {
   confirm: "Preparing",
@@ -61,6 +66,11 @@ export function renderMigrationModal({
     // SPEC-2356 — restore focus to whatever was focused when the modal
     // opened so keyboard users don't lose their place.
     if (wasOpenBeforeClose) {
+      // Release the focus trap before restoring focus.
+      const releaseTrap = focusTrapMap.get(modalEl);
+      focusTrapMap.delete(modalEl);
+      if (typeof releaseTrap === "function") releaseTrap();
+
       const returnTo = focusReturnMap.get(modalEl);
       focusReturnMap.delete(modalEl);
       if (returnTo && typeof returnTo.focus === "function") {
@@ -78,6 +88,9 @@ export function renderMigrationModal({
     const ownerDoc = modalEl.ownerDocument || (typeof document !== "undefined" ? document : null);
     if (ownerDoc) {
       focusReturnMap.set(modalEl, ownerDoc.activeElement);
+      // Activate focus trap so Tab cycles within the modal.
+      const release = createFocusTrap(dialogEl, { document: ownerDoc });
+      focusTrapMap.set(modalEl, release);
     }
   }
   modalEl.classList.add("open");

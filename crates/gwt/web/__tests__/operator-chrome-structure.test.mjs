@@ -341,6 +341,46 @@ test("Error regions declare role=\"alert\" so screen readers announce them", () 
   }
 });
 
+test("Drawer modal renderers activate focus-trap on open and release on close", () => {
+  // Focus trap prevents Tab from escaping the modal into background
+  // content. Both renderers must:
+  // - Import createFocusTrap
+  // - Maintain a focusTrapMap WeakMap to track release functions
+  // - Call createFocusTrap on fresh open and store the release
+  // - Invoke the release before restoring focus on close
+  const branchCleanupSrc = readFileSync(
+    resolve(here, "../branch-cleanup-modal.js"),
+    "utf8",
+  );
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  for (const [src, name] of [[branchCleanupSrc, "branch-cleanup-modal"], [migrationSrc, "migration-modal"]]) {
+    assert.match(
+      src,
+      /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\.\/focus-trap\.js"/,
+      `${name} must import createFocusTrap from ./focus-trap.js (relative path so Node tests resolve)`,
+    );
+    assert.match(src, /const\s+focusTrapMap\s*=\s*new\s+WeakMap\(\)/, `${name} must define focusTrapMap`);
+    assert.match(
+      src,
+      /const\s+release\s*=\s*createFocusTrap\(dialogEl,\s*\{\s*document:\s*ownerDoc\s*\}\)/,
+      `${name} must activate focus trap on open with the dialog as container`,
+    );
+    assert.match(
+      src,
+      /focusTrapMap\.set\(modalEl,\s*release\)/,
+      `${name} must store the trap release in focusTrapMap`,
+    );
+    assert.match(
+      src,
+      /releaseTrap\s*=\s*focusTrapMap\.get\(modalEl\)[\s\S]*if\s*\(typeof\s+releaseTrap\s*===\s*"function"\)\s*releaseTrap\(\)/,
+      `${name} must release the trap before restoring focus on close`,
+    );
+  }
+});
+
 test("Drawer modal renderers signal busy state via aria-busy during async stages", () => {
   // The branch-cleanup running stage and migration running stage are
   // synchronous async operations. Without aria-busy, screen readers don't
