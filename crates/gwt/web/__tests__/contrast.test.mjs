@@ -17,8 +17,13 @@ const LARGE_AA = 3.0;
 const REQUIRED_PAIRS = [
   ["--color-text", "--color-canvas", NORMAL_AA, "body text on canvas"],
   ["--color-text", "--color-surface", NORMAL_AA, "body text on surface"],
+  ["--color-text", "--color-surface-elevated", NORMAL_AA, "body text on surface-elevated"],
   ["--color-text-muted", "--color-canvas", NORMAL_AA, "muted text on canvas"],
+  ["--color-text-muted", "--color-surface", NORMAL_AA, "muted text on surface"],
+  ["--color-text-muted", "--color-surface-elevated", NORMAL_AA, "muted text on surface-elevated (palette placeholder etc)"],
   ["--color-text-strong", "--color-canvas", NORMAL_AA, "strong text on canvas"],
+  ["--color-text-strong", "--color-surface", NORMAL_AA, "strong text on surface"],
+  ["--color-text-strong", "--color-surface-elevated", NORMAL_AA, "strong text on surface-elevated"],
   ["--color-display-fg", "--color-canvas", LARGE_AA, "display text on canvas"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
   ["--color-button-fg", "--color-button-bg", NORMAL_AA, "primary button label"],
@@ -30,6 +35,15 @@ const REQUIRED_PAIRS = [
   ["--agent-gemini", "--color-canvas", LARGE_AA, "agent gemini indicator"],
   ["--agent-opencode", "--color-canvas", LARGE_AA, "agent opencode indicator"],
   ["--agent-copilot", "--color-canvas", LARGE_AA, "agent copilot indicator"],
+  // Agent colors are also used as TEXT (e.g. .op-agent-kind chip foreground
+  // for codex). Lock in NORMAL_AA on surface bg for every agent so future
+  // surfaces that route agent colors to text don't introduce contrast
+  // regressions.
+  ["--agent-claude", "--color-surface", NORMAL_AA, "agent claude as text on surface"],
+  ["--agent-codex", "--color-surface", NORMAL_AA, "agent codex as text on surface"],
+  ["--agent-gemini", "--color-surface", NORMAL_AA, "agent gemini as text on surface"],
+  ["--agent-opencode", "--color-surface", NORMAL_AA, "agent opencode as text on surface"],
+  ["--agent-copilot", "--color-surface", NORMAL_AA, "agent copilot as text on surface"],
 ];
 
 for (const themeName of ["dark", "light"]) {
