@@ -398,6 +398,25 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   }
 });
 
+test("File tree directory rows expose collapse state via aria-expanded", () => {
+  // The file tree shows directories with ▾/▸ caret glyphs to indicate
+  // expand/collapse state visually. Without aria-expanded, screen
+  // readers can't tell whether a directory is open or closed, so the
+  // user has to guess via context. File (non-directory) rows must
+  // explicitly removeAttribute so a row that was a directory and
+  // became a file (via state change) doesn't keep the marker.
+  assert.match(
+    appSource,
+    /isDirectory[\s\S]*row\.setAttribute\("aria-expanded",\s*expanded\s*\?\s*"true"\s*:\s*"false"\)/,
+    "expected directory rows to set aria-expanded based on expanded state",
+  );
+  assert.match(
+    appSource,
+    /row\.removeAttribute\("aria-expanded"\)/,
+    "expected non-directory rows to remove aria-expanded",
+  );
+});
+
 test("Launch wizard choice buttons expose toggle state via aria-pressed", () => {
   // The wizard's agent / preset picker uses createChoiceButton for
   // mutually-exclusive options. Without aria-pressed, screen readers
@@ -427,18 +446,18 @@ test("Selected list rows mark active item with aria-current", () => {
     // setAttribute and removeAttribute calls exist somewhere in app.js.
     // The descriptive label is just for the failure message.
   }
-  // Count occurrences — should be at least 4 set + 4 remove for the
-  // four list-with-selection surfaces (knowledge / memo / profile /
-  // logs) plus the project-tabs case from PR #2455.
+  // Count occurrences — should be at least 5 set + 5 remove for the
+  // five list-with-selection surfaces (knowledge / memo / profile /
+  // logs / file-tree) plus the project-tabs case from PR #2455.
   const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
   const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
-    setMatches.length >= 5,
-    `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
+    setMatches.length >= 6,
+    `expected >= 6 aria-current set calls (project tab + 5 row types), got ${setMatches.length}`,
   );
   assert.ok(
-    removeMatches.length >= 5,
-    `expected >= 5 aria-current remove calls (one per set call), got ${removeMatches.length}`,
+    removeMatches.length >= 6,
+    `expected >= 6 aria-current remove calls (one per set call), got ${removeMatches.length}`,
   );
 });
 
