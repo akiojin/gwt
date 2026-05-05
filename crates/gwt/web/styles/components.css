@@ -1309,7 +1309,9 @@ kbd.op-kbd {
 /* SPEC-2356 — keyboard-navigable row patterns added in PRs #2464/#2465.
    Without these focus-visible rules, keyboard users couldn't see which
    row currently has focus when Tab'ing through the file tree or
-   Branches surface. */
+   Branches surface. .project-tab is the same pattern (div + role=
+   button + tabindex=0) and was overlooked in the original group. */
+:root[data-theme] .project-tab:focus-visible,
 :root[data-theme] .file-tree-row:focus-visible,
 :root[data-theme] .branch-row:focus-visible {
   outline: 2px solid var(--color-focus-ring);
