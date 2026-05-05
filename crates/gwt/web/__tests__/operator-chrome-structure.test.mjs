@@ -398,6 +398,25 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   }
 });
 
+test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
+  // <div>-based rows can't be Tab'd to or activated with the keyboard
+  // unless explicitly opted in. Add tabindex, role="button", and a
+  // keydown handler that mirrors the click handler for Enter/Space.
+  // Without all three, keyboard-only users couldn't browse the file
+  // tree — only mouse users could.
+  assert.match(appSource, /row\.tabIndex\s*=\s*0/, "expected file tree row tabindex=0");
+  assert.match(
+    appSource,
+    /row\.setAttribute\("role",\s*"button"\)/,
+    "expected file tree row role='button'",
+  );
+  assert.match(
+    appSource,
+    /row\.addEventListener\("keydown",[\s\S]*event\.key === "Enter" \|\| event\.key === " "[\s\S]*activate\(\)/,
+    "expected file tree row keydown handler invoking the click activate path on Enter/Space",
+  );
+});
+
 test("File tree directory rows expose collapse state via aria-expanded", () => {
   // The file tree shows directories with ▾/▸ caret glyphs to indicate
   // expand/collapse state visually. Without aria-expanded, screen
