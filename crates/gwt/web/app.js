@@ -2423,6 +2423,9 @@
           row.type = "button";
           if (selectedEntry && selectedEntry.id === entry.id) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => {
             state.selectedEntryId = entry.id;
@@ -2708,6 +2711,9 @@
           row.type = "button";
           if (note.id === state.selectedNoteId) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => selectMemoNote(windowId, note.id));
 
@@ -3081,6 +3087,9 @@
           row.type = "button";
           if (profile.name === state.selectedProfile) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => selectProfile(windowId, profile.name));
           const header = createNode("div", "profile-row-header");
@@ -4777,6 +4786,12 @@
             row.type = "button";
             if (state.selectedNumber === entry.number) {
               row.classList.add("selected");
+              // SPEC-2356 — selected knowledge entry gets aria-current
+              // so screen readers announce which row is currently
+              // displayed in the detail pane (parallel to project tabs).
+              row.setAttribute("aria-current", "true");
+            } else {
+              row.removeAttribute("aria-current");
             }
             const main = createNode("div", "knowledge-row-main");
             const titleWrap = createNode("div", "");
