@@ -25,6 +25,8 @@ const REQUIRED_PAIRS = [
   ["--color-text-strong", "--color-surface", NORMAL_AA, "strong text on surface"],
   ["--color-text-strong", "--color-surface-elevated", NORMAL_AA, "strong text on surface-elevated"],
   ["--color-display-fg", "--color-canvas", LARGE_AA, "display text on canvas"],
+  ["--color-display-fg", "--color-surface", LARGE_AA, "display text on surface"],
+  ["--color-display-fg", "--color-surface-elevated", LARGE_AA, "display text on surface-elevated (drawer / palette / hotkey card titles)"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
   ["--color-button-fg", "--color-button-bg", NORMAL_AA, "primary button label"],
   ["--color-button-fg", "--color-button-bg-hover", NORMAL_AA, "primary button label on hover"],
