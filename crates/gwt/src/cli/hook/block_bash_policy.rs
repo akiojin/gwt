@@ -77,16 +77,16 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
 
 fn evaluate_long_pr_ci_polling_sleep(command: &str) -> Option<HookOutput> {
     let segments = super::segments::split_command_segments(command);
-    for index in 0..segments.len() {
-        let tokens = command_tokens(&segments[index]);
-        if !is_long_sleep_segment(&tokens) {
-            continue;
-        }
+    let has_pr_ci_polling = segments
+        .iter()
+        .any(|segment| is_pr_ci_polling_segment(segment));
+    if !has_pr_ci_polling {
+        return None;
+    }
 
-        if segments[index + 1..]
-            .iter()
-            .any(|segment| is_pr_ci_polling_segment(segment))
-        {
+    for segment in &segments {
+        let tokens = command_tokens(segment);
+        if is_long_sleep_segment(&tokens) {
             return Some(long_pr_ci_polling_sleep_block_decision(command));
         }
     }
@@ -101,16 +101,34 @@ fn is_long_sleep_segment(tokens: &[&str]) -> bool {
         return false;
     }
 
-    tokens
-        .get(1)
-        .and_then(|duration| parse_sleep_seconds(duration))
-        .is_some_and(|seconds| seconds >= 120)
+    parse_sleep_args_seconds(&tokens[1..]).is_some_and(|seconds| seconds >= 120.0)
 }
 
-fn parse_sleep_seconds(duration: &str) -> Option<u64> {
+fn parse_sleep_args_seconds(args: &[&str]) -> Option<f64> {
+    let mut total = 0.0;
+    let mut parsed_any = false;
+    for arg in args {
+        let seconds = parse_sleep_duration_seconds(arg)?;
+        total += seconds;
+        parsed_any = true;
+    }
+    parsed_any.then_some(total)
+}
+
+fn parse_sleep_duration_seconds(duration: &str) -> Option<f64> {
     let duration = duration.trim_matches(|ch| ch == '\'' || ch == '"');
-    let numeric = duration.strip_suffix('s').unwrap_or(duration);
-    numeric.parse().ok()
+    let (numeric, multiplier) = match duration.chars().last() {
+        Some('s') => (&duration[..duration.len() - 1], 1.0),
+        Some('m') => (&duration[..duration.len() - 1], 60.0),
+        Some('h') => (&duration[..duration.len() - 1], 60.0 * 60.0),
+        Some('d') => (&duration[..duration.len() - 1], 24.0 * 60.0 * 60.0),
+        _ => (duration, 1.0),
+    };
+    let value: f64 = numeric.parse().ok()?;
+    if value.is_sign_negative() {
+        return None;
+    }
+    Some(value * multiplier)
 }
 
 fn is_pr_ci_polling_segment(segment: &str) -> bool {
@@ -185,6 +203,13 @@ Blocked command: {command}"
 fn command_tokens(segment: &str) -> Vec<&str> {
     let raw: Vec<&str> = segment.split_whitespace().collect();
     let mut start = 0;
+
+    while raw
+        .get(start)
+        .is_some_and(|token| matches!(*token, "do" | "then"))
+    {
+        start += 1;
+    }
 
     if raw.get(start) == Some(&"env") {
         start += 1;
