@@ -274,7 +274,19 @@ falls back to system colors so accessibility is preserved.
 | `⌘L` | Focus the Logs surface |
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `⌘\` | Collapse / expand the Sidebar Layers |
-| `Esc` | Close any open palette / overlay / drawer |
+| `Esc` | Close any open palette / overlay / drawer / dropdown |
+
+### Accessibility
+
+Every modal dialog (Command Palette, Hotkey Overlay, branch cleanup,
+worktree migration, launch wizard, Add Window) follows the WAI-ARIA
+dialog convention: `role="dialog"` with an accessible name, `aria-modal`,
+focus moves into the dialog on open and returns to the trigger on close,
+Tab cycles within the dialog (no keyboard trap escape), and Escape
+dismisses. Async loading stages signal `aria-busy="true"` so screen
+readers track progress. Error regions use `role="alert"` for immediate
+announcement. WCAG 2.1 AA contrast is asserted across every text /
+surface combination in both themes.
 
 ## SPEC and Runtime Quick Reference
 
