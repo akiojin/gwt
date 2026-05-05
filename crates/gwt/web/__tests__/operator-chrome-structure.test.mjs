@@ -721,6 +721,13 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
     "expected Esc to close window list dropdown and restore focus to trigger",
   );
+  // SPEC-2356 — preset modal Esc-close: closes via closeModal() which
+  // handles both the .open class flip and focus restore.
+  assert.match(
+    appSource,
+    /if\s*\(modal\.classList\.contains\("open"\)\)\s*\{[\s\S]*closeModal\(\)/,
+    "expected Esc to call closeModal when preset modal is open",
+  );
 });
 
 test("Drawer modal renderers toggle aria-hidden alongside .open class", () => {
