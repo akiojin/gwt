@@ -77,8 +77,11 @@ fn blocks_workflow_focused_github_cli_commands() {
 #[test]
 fn blocks_long_sleep_pr_ci_polling_commands() {
     block("sleep 280 && gwtd pr view 1949");
+    block("gwtd pr checks 1949; sleep 280");
+    block("while true; do gwtd pr checks 1949; sleep 2m; done");
     block("sleep 280 && /Applications/GWT.app/Contents/MacOS/gwtd pr checks 1949");
     block("sleep 280 && gh run view 123456789");
+    block("gh run view 123456789; sleep 0.5h");
 }
 
 #[test]
