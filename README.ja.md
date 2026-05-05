@@ -270,7 +270,19 @@ Contrast) では system colors にフォールバックします。
 | `⌘L` | Logs サーフェスを focus |
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `⌘\` | Sidebar Layers を折り畳み / 復帰 |
-| `Esc` | 開いている Palette / Overlay / Drawer を閉じる |
+| `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
+
+### アクセシビリティ
+
+すべてのモーダルダイアログ (Command Palette / Hotkey Overlay / Branch
+Cleanup / Worktree Migration / Launch Wizard / Add Window) は WAI-ARIA
+dialog convention に従います。`role="dialog"` + accessible name、
+`aria-modal`、open 時にフォーカスがダイアログ内へ移動し close 時に
+トリガーへ戻る、Tab がダイアログ内で循環 (キーボードトラップなしの
+escape)、Esc で dismiss。非同期ロード段階は `aria-busy="true"` で
+スクリーンリーダーに進捗を伝えます。エラー領域は `role="alert"` で
+即座に読み上げられます。WCAG 2.1 AA コントラストは両テーマの全
+text/surface 組合せでテストレイヤーに pin されています。
 
 ## SPEC と runtime クイックリファレンス
 
