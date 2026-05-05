@@ -77,7 +77,7 @@ Blocking items: <N>
 
 ### Category labels
 
-`CONFLICT`, `BRANCH-BEHIND`, `CI-FAILURE`, `CHANGE-REQUEST`, `UNRESOLVED-THREAD`, `REVIEW-COMMENT`
+`CONFLICT`, `BRANCH-BEHIND`, `CI-FAILURE`, `CI-PENDING`, `CHANGE-REQUEST`, `UNRESOLVED-THREAD`, `REVIEW-COMMENT`
 
 ### Auto-fix judgment
 
@@ -144,9 +144,9 @@ Blocking items: <N>
 - Re-run inspection with `--mode all` (regardless of initial mode).
 - Exit code 0 --> all resolved --> report success.
 - Exit code 1 --> issues remain --> go back to step 4.
-- No iteration limit. Continue until all resolved.
-- CI pending/queued --> poll at 30-second intervals until ALL checks complete.
-- After fix push, re-enter polling for new CI run.
+- CI pending/queued --> check at most 3 times with `gwtd pr checks <number>`, waiting no more than 30 seconds between checks.
+- If checks are still pending after the bounded checks, post `gwtd board post --kind blocked` with the PR number, pending check names, and resume command, then stop instead of sleeping indefinitely.
+- After fix push, run the same bounded CI check path for the new run.
 
 ## Loop Safety Guard
 
