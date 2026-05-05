@@ -46,6 +46,9 @@ export function renderMigrationModal({
 }) {
   if (!state || !state.migrationModal || !state.migrationModal.open) {
     modalEl.classList.remove("open");
+    // SPEC-2356 — flip aria-hidden alongside the .open class so screen
+    // readers stop announcing the dialog when it slides closed.
+    modalEl.setAttribute("aria-hidden", "true");
     while (dialogEl.firstChild) {
       dialogEl.removeChild(dialogEl.firstChild);
     }
@@ -53,6 +56,7 @@ export function renderMigrationModal({
   }
 
   modalEl.classList.add("open");
+  modalEl.removeAttribute("aria-hidden");
   while (dialogEl.firstChild) {
     dialogEl.removeChild(dialogEl.firstChild);
   }

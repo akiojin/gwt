@@ -769,10 +769,12 @@
 
       function openModal() {
         modal.classList.add("open");
+        modal.removeAttribute("aria-hidden");
       }
 
       function closeModal() {
         modal.classList.remove("open");
+        modal.setAttribute("aria-hidden", "true");
       }
 
       function clamp(value, min) {
