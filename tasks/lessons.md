@@ -1,5 +1,50 @@
 # Lessons Learned
 
+## 2026-05-04 — `[\s\S]*?` regex undercapture masks bugs in nested CSS blocks
+
+### 事象
+
+SPEC-2356 polish iteration で `@media (prefers-reduced-motion: reduce)`
+ブロックを検証する chrome-structure assertion を書いたとき、最初は
+naive な regex `/@media\s*\([^)]*\)\s*\{[\s\S]*?\n\}/g` を使った。これだと
+ネストしたルール (`.selector { animation: none; }`) の最初の `}` で
+マッチが終了するため、ブロック全体ではなく最初のルールしか拾えない。
+その結果、`op-live-pulse` を使っている `.op-status-strip__live-dot`
+が reduced-motion で無効化されていない (実際は `forced-colors: active`
+にしか入っていなかった) 既存バグを assertion がスルーしてしまった。
+
+depth-tracked extraction (`{` `}` を数えて対応する閉じを探す) に
+書き直したところ、即座に live-dot が reduced-motion でカバーされて
+いないことが捕捉された。
+
+### 原因
+
+CSS の `@media` ブロックは内部に複数のルールを持ち、それぞれが `{}` を
+使う。regex の `[^}]*` や `[\s\S]*?\n\}` で「最初の `}` まで」を
+切ると、ブロックの先頭の少数ルールしか captured されない。assertion
+は cover されたか否かしか見ないので、cover 漏れが「該当ルールが存在
+しない」と誤判定され、本来検出すべきバグを GREEN で見逃してしまう。
+
+### 再発防止策
+
+1. **CSS の `@media` / 入れ子ブロックを regex で切るときは brace-depth
+   tracking を使う。** ヘルパ関数 `extractMediaBlocks(css, condition)`
+   を新設し、`{` と `}` を数えて対応する閉じを探す。テスト時は単純な
+   regex に逃げず、ヘルパを再利用する。
+2. **新しい coverage assertion を書いたら、その assertion が確実に
+   gap を捕捉できる「false case」を意識的に作って verify する。**
+   今回の assertion は最初から GREEN で通ってしまっていたが、もし
+   live-dot のような実バグが既に存在していれば即座に RED になるべき
+   だった。assertion 設計時は「バグがあれば落ちる」を必ず確認する。
+
+### 適用範囲
+
+- すべての CSS 構造解析 assertion (`@media` / `@supports` / `@keyframes` /
+  `@layer` 等のネストブロック)。
+- 同種のパターンを抱える HTML / source 解析 assertion も同じ落とし穴
+  を避けるため、構文認識の必要があるものは regex に逃げず depth /
+  parser を使う。
+
 ## 2026-05-04 — Chrome-structure assertions alone don't catch contrast regressions
 
 ### 事象
