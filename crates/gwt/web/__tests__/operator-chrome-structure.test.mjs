@@ -501,6 +501,56 @@ test("Drawer modal renderers activate focus-trap on open and release on close", 
   }
 });
 
+test("Every role=\"dialog\" element has a programmatic accessible name", () => {
+  // Catch the case where a new dialog is added without aria-label or
+  // aria-labelledby — without an accessible name, screen readers
+  // announce just "dialog" with no context. Iterates the live DOM
+  // tree so future additions are covered automatically.
+  const dialogs = document.querySelectorAll('[role="dialog"]');
+  assert.ok(dialogs.length >= 5, `expected >= 5 role="dialog" elements, got ${dialogs.length}`);
+  for (const dialog of dialogs) {
+    const label = dialog.getAttribute("aria-label");
+    const labelledby = dialog.getAttribute("aria-labelledby");
+    const id = dialog.getAttribute("id") || dialog.parentElement?.getAttribute("id") || "(no id)";
+    assert.ok(
+      (label && label.length > 0) || (labelledby && labelledby.length > 0),
+      `role="dialog" at #${id} must have aria-label or aria-labelledby`,
+    );
+    if (labelledby) {
+      const target = document.getElementById(labelledby);
+      assert.ok(
+        target,
+        `role="dialog" at #${id} aria-labelledby="${labelledby}" must point at an existing element`,
+      );
+      assert.ok(
+        target.textContent && target.textContent.trim().length > 0,
+        `role="dialog" at #${id} aria-labelledby target must have non-empty text`,
+      );
+    }
+  }
+});
+
+test("Migration progress bar references the phase label via aria-labelledby", () => {
+  // The native <progress> element gets an implicit role="progressbar"
+  // but no programmatic name unless aria-label or aria-labelledby is
+  // provided. Without it, screen readers announce just "progressbar 50%"
+  // and the user doesn't know which phase is running.
+  const migrationSrc = readFileSync(
+    resolve(here, "../migration-modal.js"),
+    "utf8",
+  );
+  assert.match(
+    migrationSrc,
+    /phaseLabel\.id\s*=\s*"migration-modal-phase-label"/,
+    "expected migration phase label to have a stable id",
+  );
+  assert.match(
+    migrationSrc,
+    /progress\.setAttribute\("aria-labelledby",\s*"migration-modal-phase-label"\)/,
+    "expected migration <progress> to reference the phase label via aria-labelledby",
+  );
+});
+
 test("Drawer modal renderers signal busy state via aria-busy during async stages", () => {
   // The branch-cleanup running stage and migration running stage are
   // synchronous async operations. Without aria-busy, screen readers don't

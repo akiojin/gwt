@@ -182,12 +182,14 @@ test("every color token has a forced-colors fallback for high-contrast mode", ()
   // / GrayText / etc) so Windows High Contrast and macOS Increase Contrast
   // render correctly. Without this, custom tokens leak through and the
   // user sees the design system colors instead of system colors.
-  const forcedColorsBlock = tokensCss.match(
-    /@media\s*\(\s*forced-colors:\s*active\s*\)\s*\{([\s\S]*?)\n\}\s*\n/,
-  );
-  assert.ok(forcedColorsBlock, "tokens.css must contain a forced-colors media query");
+  //
+  // Lesson 2 (tasks/lessons.md 2026-05-04): naive regex `[\s\S]*?\n\}`
+  // undercaptures @media bodies because nested rules have their own
+  // closing braces. Use brace-depth tracking instead.
+  const forcedColorsBody = extractMediaBlock(tokensCss, "forced-colors: active");
+  assert.ok(forcedColorsBody, "tokens.css must contain a forced-colors media query");
   const fallbackKeys = new Set();
-  for (const line of forcedColorsBlock[1].split("\n")) {
+  for (const line of forcedColorsBody.split("\n")) {
     const m = line.match(/^\s*(--[a-z][a-z0-9-]*)\s*:/);
     if (m) fallbackKeys.add(m[1]);
   }
@@ -202,6 +204,34 @@ test("every color token has a forced-colors fallback for high-contrast mode", ()
     );
   }
 });
+
+// SPEC-2356 Lesson 2 — extract a single @media block body using brace-
+// depth tracking instead of a naive regex. The naive
+// /@media\s*\(...\)\s*\{[\s\S]*?\n\}/ truncates at the first nested `}`
+// when the @media body contains rules with their own closing braces,
+// which causes coverage assertions to silently miss bugs.
+function extractMediaBlock(css, condition) {
+  const marker = "@media";
+  let cursor = 0;
+  while (true) {
+    const at = css.indexOf(marker, cursor);
+    if (at < 0) return null;
+    const headerEnd = css.indexOf("{", at);
+    if (headerEnd < 0) return null;
+    if (!css.slice(at, headerEnd).includes(condition)) {
+      cursor = headerEnd + 1;
+      continue;
+    }
+    let depth = 1;
+    let i = headerEnd + 1;
+    while (i < css.length && depth > 0) {
+      if (css[i] === "{") depth += 1;
+      else if (css[i] === "}") depth -= 1;
+      i += 1;
+    }
+    return css.slice(headerEnd + 1, i - 1);
+  }
+}
 
 test("token names are kebab-case CSS custom properties", () => {
   const all = new Set([...Object.keys(dark), ...Object.keys(light)]);
