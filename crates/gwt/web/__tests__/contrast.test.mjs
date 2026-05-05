@@ -22,7 +22,9 @@ const REQUIRED_PAIRS = [
   ["--color-display-fg", "--color-canvas", LARGE_AA, "display text on canvas"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
   ["--color-button-fg", "--color-button-bg", NORMAL_AA, "primary button label"],
+  ["--color-button-fg", "--color-button-bg-hover", NORMAL_AA, "primary button label on hover"],
   ["--color-link", "--color-canvas", NORMAL_AA, "link on canvas"],
+  ["--color-link-hover", "--color-canvas", NORMAL_AA, "link on canvas (hover)"],
   ["--agent-claude", "--color-canvas", LARGE_AA, "agent claude indicator"],
   ["--agent-codex", "--color-canvas", LARGE_AA, "agent codex indicator"],
   ["--agent-gemini", "--color-canvas", LARGE_AA, "agent gemini indicator"],
@@ -117,6 +119,32 @@ test("components.css scopes the on-strip state palette to bright on-dark variant
   assert.match(stripBlock[1], /--color-state-idle:\s*#94a3b8/i);
   assert.match(stripBlock[1], /--color-state-blocked:\s*#f87171/i);
 });
+
+// SPEC-2356 — Focus ring is a UI component, so WCAG 2.2 SC 1.4.11
+// applies (non-text contrast minimum 3:1). The focus ring must stand
+// out against canvas, surface, and surface-elevated.
+const FOCUS_RING_BACKGROUNDS = [
+  "--color-canvas",
+  "--color-surface",
+  "--color-surface-elevated",
+];
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const bgToken of FOCUS_RING_BACKGROUNDS) {
+    test(`[${themeName}] WCAG 2.2 SC 1.4.11 (3:1): focus ring on ${bgToken}`, () => {
+      const fg = theme["--color-focus-ring"];
+      const bg = theme[bgToken];
+      assert.ok(fg, `--color-focus-ring missing in ${themeName}`);
+      assert.ok(bg, `${bgToken} missing in ${themeName}`);
+      const ratio = contrastRatio(fg, bg);
+      assert.ok(
+        ratio >= LARGE_AA,
+        `focus ring on ${bgToken}: ${ratio.toFixed(2)} < ${LARGE_AA} (fg=${fg}, bg=${bg})`,
+      );
+    });
+  }
+}
 
 test("dark and light token sets define identical semantic keys", () => {
   const darkKeys = Object.keys(dark).sort();
