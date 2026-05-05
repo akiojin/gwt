@@ -327,6 +327,24 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("Project tabs mark the active project with aria-current=\"page\"", () => {
+  // Project tabs use role="button" but represent a navigation choice. The
+  // appropriate ARIA pattern is aria-current="page" on the active tab so
+  // screen readers announce it as the current location. Inactive tabs
+  // must explicitly clear the attribute so the previously-active tab
+  // doesn't retain the marker after a switch.
+  assert.match(
+    appSource,
+    /button\.setAttribute\("aria-current",\s*"page"\)/,
+    "expected the active project tab to set aria-current=\"page\"",
+  );
+  assert.match(
+    appSource,
+    /button\.removeAttribute\("aria-current"\)/,
+    "expected inactive project tabs to remove aria-current",
+  );
+});
+
 test("Error regions declare role=\"alert\" so screen readers announce them", () => {
   // Without role="alert" (or aria-live="assertive"), errors that appear
   // in wizard-error and project-picker-error are silent for screen reader
