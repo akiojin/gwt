@@ -249,14 +249,29 @@ function wireMissionBriefing({ doc, win }) {
 function wireHotkeyOverlay({ doc, hotkey }) {
   const overlay = doc.getElementById("op-hotkey-overlay");
   if (!overlay) return;
+  const card = overlay.querySelector(".op-hotkey-card");
+
+  // SPEC-2356 — modal-dialog focus management: remember the trigger so we can
+  // restore focus on close, and move focus into the dialog on open so screen
+  // readers announce "Hotkey reference dialog" instead of staying on whatever
+  // surface invoked ⌘?.
+  let returnFocusTo = null;
 
   const open = () => {
+    returnFocusTo = doc.activeElement instanceof Element ? doc.activeElement : null;
     overlay.dataset.open = "true";
     overlay.removeAttribute("aria-hidden");
+    if (card) {
+      try { card.focus({ preventScroll: true }); } catch { card.focus(); }
+    }
   };
   const close = () => {
     delete overlay.dataset.open;
     overlay.setAttribute("aria-hidden", "true");
+    if (returnFocusTo && typeof returnFocusTo.focus === "function") {
+      try { returnFocusTo.focus({ preventScroll: true }); } catch { returnFocusTo.focus(); }
+    }
+    returnFocusTo = null;
   };
 
   overlay.addEventListener("click", (e) => {

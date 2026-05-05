@@ -296,6 +296,21 @@ test("components.css uses op-divider utility class", () => {
   assert.match(css, /\.op-divider--strong/);
 });
 
+test("Hotkey overlay manages focus on open / close (modal dialog a11y)", () => {
+  // The dialog must be focusable so we can move focus inside on open and
+  // return it to the trigger on close — without this, screen readers don't
+  // announce the dialog and keyboard users get stranded after Esc.
+  const card = document.querySelector("#op-hotkey-overlay .op-hotkey-card");
+  assert.ok(card, "expected hotkey overlay card");
+  assert.equal(card.getAttribute("tabindex"), "-1");
+  assert.equal(card.getAttribute("role"), "dialog");
+  assert.equal(card.getAttribute("aria-modal"), "true");
+  // operator-shell.js wires the dynamic focus pieces.
+  assert.match(operatorShellSource, /returnFocusTo\s*=\s*doc\.activeElement/);
+  assert.match(operatorShellSource, /card\.focus\(\{\s*preventScroll:\s*true\s*\}\)/);
+  assert.match(operatorShellSource, /returnFocusTo\.focus/);
+});
+
 test("Command Palette implements the WAI-ARIA combobox/listbox pattern", () => {
   // The input must be a combobox that controls the list and announces the
   // active option via aria-activedescendant. Without these the listbox role
