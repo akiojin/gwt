@@ -606,6 +606,12 @@ body::after {
   [data-agent-state="blocked"] {
     animation: none;
   }
+  /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
+     Motion-sensitive users get a static dot that still indicates online
+     state via colour, just without the scale+opacity pulse. */
+  .op-status-strip__live-dot {
+    animation: none;
+  }
 }
 
 /* ============================================================
