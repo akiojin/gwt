@@ -398,6 +398,28 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   }
 });
 
+test("Branch rows are keyboard-navigable with click + dblclick parity", () => {
+  // Branch rows are <div>s with both click (select) and dblclick (open
+  // launch wizard) handlers. Keyboard parity:
+  //   Enter / Space → select (same as click)
+  //   Cmd/Ctrl + Enter → activate (same as dblclick — open wizard)
+  // Without keyboard support, keyboard-only users could Tab to a row
+  // but couldn't pick branches or launch agents from the Branches
+  // surface at all.
+  assert.match(
+    appSource,
+    /row\.tabIndex\s*=\s*0[\s\S]*row\.setAttribute\("role",\s*"button"\)[\s\S]*createBranchRow|createBranchRow[\s\S]*row\.tabIndex\s*=\s*0[\s\S]*row\.setAttribute\("role",\s*"button"\)/,
+    "expected createBranchRow to set tabindex and role=button",
+  );
+  // The keydown handler must distinguish plain Enter/Space (select)
+  // from modified Enter (activate / open wizard).
+  assert.match(
+    appSource,
+    /event\.metaKey\s*\|\|\s*event\.ctrlKey[\s\S]*activate\(\)/,
+    "expected modified Enter to invoke activate (open launch wizard)",
+  );
+});
+
 test("File tree rows are keyboard-navigable (tabindex + role + keydown)", () => {
   // <div>-based rows can't be Tab'd to or activated with the keyboard
   // unless explicitly opted in. Add tabindex, role="button", and a
