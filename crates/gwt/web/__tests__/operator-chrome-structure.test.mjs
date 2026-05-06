@@ -386,11 +386,53 @@ test("chrome visibility uses edge handles instead of Project Bar text toggles", 
   assert.equal(sidebarToggle.textContent.trim(), "<<");
   assert.equal(windowControlsToggle.textContent.trim(), "vv");
   assert.equal(sidebarToggle.getAttribute("aria-controls"), "op-sidebar");
-  assert.equal(windowControlsToggle.getAttribute("aria-controls"), "floating-window-controls");
+  assert.equal(
+    windowControlsToggle.getAttribute("aria-controls"),
+    "floating-window-controls-primary floating-window-controls-add",
+  );
   assert.equal(sidebarToggle.getAttribute("aria-expanded"), "true");
   assert.equal(windowControlsToggle.getAttribute("aria-expanded"), "true");
   assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /hide sidebar/i);
   assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /hide window controls/i);
+});
+
+test("window controls edge handle targets only collapsible control groups", () => {
+  const windowControlsToggle = document.getElementById("op-window-controls-edge-toggle");
+  assert.ok(windowControlsToggle, "expected bottom window controls edge visibility handle");
+
+  const controlledIds = (windowControlsToggle.getAttribute("aria-controls") ?? "")
+    .split(/\s+/)
+    .filter(Boolean);
+  assert.deepEqual(controlledIds, [
+    "floating-window-controls-primary",
+    "floating-window-controls-add",
+  ]);
+  assert.ok(!controlledIds.includes("floating-window-controls"));
+
+  const primaryGroup = document.getElementById("floating-window-controls-primary");
+  const addGroup = document.getElementById("floating-window-controls-add");
+  assert.ok(primaryGroup, "expected primary window controls group");
+  assert.ok(addGroup, "expected add-window control group");
+
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(primaryGroup.contains(control), `${id} must be inside the primary controlled group`);
+  }
+
+  const addButton = document.getElementById("add-button");
+  assert.ok(addButton, "expected add-button");
+  assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
+
+  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.equal(
+      primaryGroup.contains(control) || addGroup.contains(control),
+      false,
+      `${id} must remain outside collapsible window controls groups`,
+    );
+  }
 });
 
 test("floating window controls mark only window operations as hideable", () => {
@@ -516,7 +558,9 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
 
 test("components.css hides only marked floating window controls", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
+  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+#floating-window-controls-primary/);
+  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+#floating-window-controls-add/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
   assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
   assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
 });

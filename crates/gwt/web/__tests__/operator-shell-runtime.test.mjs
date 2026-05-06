@@ -57,6 +57,10 @@ test("Operator shell toggles chrome visibility through edge handles", async () =
     const windowControlsHandle = document.getElementById("op-window-controls-edge-toggle");
     assert.ok(sidebarHandle, "fixture must include sidebar edge handle");
     assert.ok(windowControlsHandle, "fixture must include window controls edge handle");
+    assert.equal(
+      windowControlsHandle.getAttribute("aria-controls"),
+      "floating-window-controls-primary floating-window-controls-add",
+    );
 
     sidebarHandle.click();
     assert.equal(document.documentElement.dataset.opSidebar, "collapsed");
