@@ -1,6 +1,119 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.17.0] - 2026-05-06
+
+### Bug Fixes
+
+- **ui:** SPEC-2356 — Mission Briefing has accessible role / aria-live / aria-label
+- **ui:** SPEC-2356 — Status Strip aria-live with semantic labels
+- **ui:** SPEC-2356 — Mission Briefing splash accepts click + shows pointer cursor
+- **ui:** SPEC-2356 — Status Strip cell values clear WCAG AA in light theme
+- **ui:** SPEC-2356 — dark-theme state-idle text clears WCAG AA on agent cards
+- **ui:** SPEC-2356 — Status Strip live-dot honors prefers-reduced-motion
+- **skills:** Route gwt-agent coordination through board
+- **hooks:** Block long PR CI polling sleeps
+- **hooks:** Catch reversed PR CI polling sleeps
+
+### Documentation
+
+- **ui:** SPEC-2356 — document Cmd+backslash sidebar toggle in Hotkey Overlay
+- SPEC-2356 — README に Cmd+backslash sidebar toggle を追記
+- **lessons:** SPEC-2356 — chrome-structure assertions alone don't catch contrast regressions
+- **ui:** SPEC-2356 — clarify why canvas is excluded from state-color contrast coverage
+- SPEC-2356 — README accessibility section reflects modal a11y completion
+- **lessons:** SPEC-2356 — regex undercapture masks bugs in nested CSS blocks
+- **lessons:** SPEC-2356 — audit-driven a11y coverage finds gaps that checklists miss
+
+### Features
+
+- **ui:** SPEC-2356 — Command Palette trigger button shows kbd + label
+- **ui:** SPEC-2356 — Sidebar Quick rows show kbd badges + a11y shortcuts
+- **ui:** SPEC-2356 — universal input focus-visible ring fallback
+- **ui:** SPEC-2356 — prefers-contrast: more support (token-level boost)
+- **ui:** SPEC-2356 — Mission Briefing session id hash on the timestamp stamp
+- **ui:** SPEC-2356 — Status Strip BLOCKED cell pulses when count > 0
+- **ui:** SPEC-2356 — Status Strip reflects WebSocket connection state
+- **ui:** SPEC-2356 — connection hint exposes role/aria-live to screen readers
+- **ui:** SPEC-2356 — Command Palette UX micro-polish
+- **ui:** SPEC-2356 — Cmd+backslash toggles Sidebar Layers
+- **ui:** SPEC-2356 — animate Sidebar collapse with grid-template-columns transition
+- **ui:** SPEC-2356 — micro hover transitions on Operator row buttons
+- **ui:** SPEC-2356 — soften theme-switch with cross-fade on chrome surfaces
+- **ui:** SPEC-2356 — Operator brand prefix gains bracket flank + cyan glow
+- **ui:** SPEC-2356 — OPERATOR ONLINE marker gains cyan glow
+- **ui:** SPEC-2356 — Mission Briefing supports early dismiss (any key / click)
+- **ui:** SPEC-2356 — collapsed sidebar shows accent strip on Project Bar
+- **ui:** SPEC-2356 — theme toggle value glows in state-active cyan
+- **ui:** SPEC-2356 — active project tab gets bottom accent strip
+- **ui:** SPEC-2356 — theme toggle exposes live preference via aria-label
+- **ui:** SPEC-2356 — Project Tab hover bottom indicator
+- **ui:** SPEC-2356 — add op-divider utility class for token-driven separators
+- **ui:** SPEC-2356 — distinct Living Telemetry styling for idle and done agent cards
+- **ui:** SPEC-2356 — Status Strip ACTIVE/IDLE cells tint with their state color
+- **ui:** SPEC-2356 — op-drawer scaffold honors prefers-reduced-motion
+- **ui:** SPEC-2356 — Command Palette implements WAI-ARIA combobox/listbox
+- **ui:** SPEC-2356 — Hotkey overlay manages focus on open / close
+- **ui:** SPEC-2356 — modal dialogs declare role/aria-modal/aria-hidden
+- **ui:** SPEC-2356 — Escape closes branch-cleanup and migration modals
+- **ui:** SPEC-2356 — drawer modals move focus into dialog on fresh open
+- **ui:** SPEC-2356 — drawer modals restore focus to trigger on close
+- **ui:** SPEC-2356 — wizard modal joins the WAI-ARIA dialog convention
+- **ui:** SPEC-2356 — wizard modal manages focus on open and restores on close
+- **ui:** SPEC-2356 — preset modal manages focus on open and restores on close
+- **ui:** SPEC-2356 — Escape closes window list dropdown and restores focus
+- **ui:** SPEC-2356 — drawer modals signal busy state via aria-busy
+- **ui:** SPEC-2356 — error regions declare role="alert" for screen reader announcement
+- **ui:** SPEC-2356 — focus trap completes the modal a11y story
+- **ui:** SPEC-2356 — wizard and preset modals get focus trap (app.js inline)
+- **ui:** SPEC-2356 — focus-trap selector excludes [aria-disabled="true"]
+- **ui:** SPEC-2356 — project tabs mark the active project with aria-current="page"
+- **ui:** SPEC-2356 — migration progress bar references phase label via aria-labelledby
+- **ui:** SPEC-2356 — launch wizard inputs gain aria-label for screen readers
+- **ui:** SPEC-2356 — memo title + env var rows gain aria-label
+- **ui:** SPEC-2356 — memo body textarea + launch-field select gain aria-label
+- **ui:** SPEC-2356 — preset (Add Window) modal closes on Escape
+- **ui:** SPEC-2356 — list rows with selection state mark active row with aria-current
+- **ui:** SPEC-2356 — launch wizard choice buttons expose toggle state via aria-pressed
+- **ui:** SPEC-2356 — file tree row marks selected entry with aria-current
+- **ui:** SPEC-2356 — file tree directory rows expose aria-expanded for collapse state
+- **ui:** SPEC-2356 — file tree rows are keyboard-navigable
+- **ui:** SPEC-2356 — branch rows are keyboard-navigable with click+dblclick parity
+- **ui:** SPEC-2356 — file-tree-row and branch-row join :focus-visible group
+- **ui:** SPEC-2356 — project tabs join the keyboard focus-visible group
+
+### Miscellaneous Tasks
+
+- SPEC-2356 — re-trigger auto-merge for PR #2421
+- SPEC-2356 — retry auto-merge after GitHub API transient 502
+- SPEC-2356 — re-enable auto-merge after develop fast-forward
+- SPEC-2356 — re-trigger auto-merge (transient API)
+
+### Testing
+
+- **ui:** SPEC-2356 — assert a11y structure for chrome surfaces
+- **ui:** SPEC-2356 — chrome structure asserts hotkey overlay layout group + ⌘\
+- **ui:** SPEC-2356 — assert Project Bar brand prefix and Mission Briefing dismiss affordance
+- **ui:** SPEC-2356 — assert operator-shell wires for theme aria + sidebar hotkey + briefing dismiss
+- **ui:** SPEC-2356 — assert Status Strip pulse / scrollbar / divider in CSS
+- **ui:** SPEC-2356 — pin mapAgentTelemetryState contract to four CSS-handled states
+- **ui:** SPEC-2356 — pin focus ring contrast to WCAG 2.2 SC 1.4.11 (3:1)
+- **ui:** SPEC-2356 — pin button-hover and link-hover contrast
+- **ui:** SPEC-2356 — pin muted text contrast on surface and surface-elevated
+- **ui:** SPEC-2356 — pin body and strong text contrast on every surface
+- **ui:** SPEC-2356 — pin agent colors at NORMAL_AA when used as text on surface
+- **ui:** SPEC-2356 — pin link and link-hover contrast on every surface
+- **ui:** SPEC-2356 — pin display-fg contrast on surface variants
+- **ui:** SPEC-2356 — pin forced-colors fallback completeness for every --color-* token
+- **ui:** SPEC-2356 — pin Shift+Tab from outside the trap wraps to last
+- **rust:** SPEC-2356 — pin Operator module embed + content-type contract
+- **ui:** SPEC-2356 — apply Lesson 2 to forced-colors fallback assertion
+- **ui:** SPEC-2356 — assert every role="dialog" has a programmatic accessible name
+
+### Ci
+
+- **workflows:** Make rust-cache restore failures non-blocking
+
 ## [9.16.0] - 2026-05-04
 
 ### Bug Fixes
