@@ -120,6 +120,18 @@ test("Workspace sidebar exposes active work and per-agent overview", () => {
   );
 });
 
+test("Workspace sidebar keeps Quick before the expanding active work list", () => {
+  const sections = Array.from(document.querySelectorAll(".op-sidebar > .op-sidebar__section"));
+  const headings = sections.map((section) =>
+    section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
+  );
+  assert.deepEqual(
+    headings.slice(0, 3),
+    ["Layers", "Quick", "Active Work"],
+    "Quick must stay above Active Work so agent cards do not push it off-screen",
+  );
+});
+
 test("Workspace active work overview behaves like a command center", () => {
   assert.match(
     appSource,
