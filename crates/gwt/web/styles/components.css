@@ -1779,7 +1779,8 @@ kbd.op-kbd {
   left: 8px;
 }
 
-:root[data-theme][data-op-window-controls="hidden"] .floating-actions [data-window-control="true"] {
+:root[data-theme][data-op-window-controls="hidden"] #floating-window-controls-primary,
+:root[data-theme][data-op-window-controls="hidden"] #floating-window-controls-add {
   display: none;
 }
 
