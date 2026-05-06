@@ -133,8 +133,9 @@ body::after {
   font-weight: 500;
 }
 
-/* Theme toggle button (Project Bar trailing) */
-.op-theme-toggle {
+/* Project Bar trailing chrome buttons */
+.op-theme-toggle,
+.op-chrome-toggle {
   appearance: none;
   background: transparent;
   border: 1px solid var(--color-border-strong);
@@ -154,10 +155,18 @@ body::after {
 }
 
 .op-theme-toggle:hover,
-.op-theme-toggle:focus-visible {
+.op-theme-toggle:focus-visible,
+.op-chrome-toggle:hover,
+.op-chrome-toggle:focus-visible {
   outline: none;
   border-color: var(--color-focus-ring);
   color: var(--color-focus-ring);
+}
+
+.op-chrome-toggle[aria-pressed="false"] {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
 }
 
 .op-theme-toggle__label {
@@ -1688,6 +1697,10 @@ kbd.op-kbd {
   display: none;
 }
 
+:root[data-theme][data-op-window-controls="hidden"] .floating-actions [data-window-control="true"] {
+  display: none;
+}
+
 /* SPEC-2356 — smooth Sidebar collapse transition.
    When user toggles ⌘\, the grid template columns animate from
    240px ↔ 0 instead of snapping. reduced-motion env keeps the
@@ -2143,5 +2156,4 @@ kbd.op-kbd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-
 
