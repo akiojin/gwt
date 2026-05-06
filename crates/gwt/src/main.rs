@@ -729,6 +729,8 @@ mod tests {
             persist: true,
             agent_id: None,
             agent_color: None,
+            tab_group_id: None,
+            tab_group_active: false,
         }
     }
 

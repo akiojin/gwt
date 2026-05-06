@@ -598,6 +598,74 @@
         bottom: 0;
       }
 
+      .workspace-window.tabbed .window-body {
+        top: 70px;
+      }
+
+      .window-tab-strip {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        height: 32px;
+        padding: 0 10px;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-surface);
+        overflow-x: auto;
+      }
+
+      .workspace-window.tabbed .window-tab-strip {
+        display: flex;
+      }
+
+      .window-tab-item {
+        display: inline-flex;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .window-tab {
+        display: inline-flex;
+        align-items: center;
+        max-width: 180px;
+        height: 24px;
+        padding: 0 9px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        font-size: var(--type-xs);
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        cursor: grab;
+      }
+
+      .window-tab-close {
+        width: 22px;
+        height: 24px;
+        margin-left: -2px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+      }
+
+      .window-tab.active {
+        border-color: var(--color-border-strong);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+      }
+
+      .window-tab:active {
+        cursor: grabbing;
+      }
+
+      .window-tab-close:hover {
+        background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
+        color: var(--color-text);
+      }
+
       .workspace-window.minimized .window-body,
       .workspace-window.minimized .resize-handle,
       .workspace-window.maximized .resize-handle {

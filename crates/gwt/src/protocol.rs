@@ -83,6 +83,17 @@ pub enum FrontendEvent {
     RestoreWindow {
         id: String,
     },
+    DockWindowTab {
+        id: String,
+        target_id: String,
+    },
+    ActivateWindowTab {
+        id: String,
+    },
+    DetachWindowTab {
+        id: String,
+        geometry: WindowGeometry,
+    },
     ListWindows,
     UpdateWindowGeometry {
         id: String,
