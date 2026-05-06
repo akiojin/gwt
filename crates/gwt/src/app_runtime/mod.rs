@@ -497,6 +497,7 @@ fn active_work_projection_from_saved(
         title: projection.title,
         status_category,
         status_text: projection.status_text,
+        summary: projection.summary,
         owner: projection.owner,
         next_action: projection.next_action,
         active_agents,
@@ -671,6 +672,40 @@ fn merge_active_sessions_into_projection<'a>(
             &mut projection.agents,
             active_agent_summary_from_session(session, updated_at),
         );
+    }
+}
+
+fn retain_live_workspace_agents(
+    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
+    sessions: &[&ActiveAgentSession],
+    updated_at: chrono::DateTime<chrono::Utc>,
+) {
+    let live_session_ids = sessions
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let live_window_ids = sessions
+        .iter()
+        .map(|session| session.window_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    projection.agents.retain(|agent| {
+        live_session_ids.contains(agent.session_id.as_str())
+            || agent
+                .window_id
+                .as_deref()
+                .is_some_and(|window_id| live_window_ids.contains(window_id))
+    });
+    if !projection.agents.iter().any(|agent| {
+        matches!(
+            agent.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+                | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
+        )
+    }) {
+        projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
+        projection.status_text = "No active work".to_string();
+        projection.next_action = None;
+        projection.updated_at = updated_at;
     }
 }
 
@@ -1343,6 +1378,15 @@ impl AppRuntime {
         ))
     }
 
+    fn active_work_projection_broadcast_for_active_tab(&self) -> Option<OutboundEvent> {
+        let tab_id = self.active_tab_id.as_ref()?;
+        let tab = self.tab(tab_id)?;
+        let projection = self.active_work_projection_for_tab(tab_id, tab)?;
+        Some(OutboundEvent::broadcast(
+            BackendEvent::ActiveWorkProjection { projection },
+        ))
+    }
+
     fn active_work_projection_for_tab(
         &self,
         tab_id: &str,
@@ -1362,6 +1406,7 @@ impl AppRuntime {
                 sessions.iter().copied(),
                 chrono::Utc::now(),
             );
+            retain_live_workspace_agents(&mut projection, &sessions, chrono::Utc::now());
             return Some(active_work_projection_from_saved(projection));
         }
 
@@ -1389,6 +1434,7 @@ impl AppRuntime {
             } else {
                 format!("{active_agents} active agents")
             },
+            summary: None,
             owner: None,
             next_action: Some("Check Board for latest updates".to_string()),
             active_agents,
@@ -2577,7 +2623,11 @@ impl AppRuntime {
                 return Vec::new();
             }
             let _ = self.persist();
-            return vec![self.workspace_state_broadcast()];
+            let mut events = vec![self.workspace_state_broadcast()];
+            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
+            }
+            return events;
         }
         if matches!(
             status,
@@ -2590,6 +2640,14 @@ impl AppRuntime {
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];
+        if matches!(
+            status,
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
+        ) {
+            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
+            }
+        }
         events.extend(Self::status_events(id, composed_status, detail));
         events
     }
@@ -2629,11 +2687,22 @@ impl AppRuntime {
             ) {
                 let _ = self.persist();
                 events.push(self.workspace_state_broadcast());
+                if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+                    events.push(event);
+                }
             }
             return events;
         }
         let _ = self.persist();
         events.push(self.workspace_state_broadcast());
+        if matches!(
+            composed_state,
+            WindowProcessStatus::Error | WindowProcessStatus::Stopped
+        ) {
+            if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+                events.push(event);
+            }
+        }
         events.extend(Self::status_events(window_id, composed_state, detail));
         events
     }
@@ -3149,6 +3218,24 @@ impl AppRuntime {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
             return;
         };
+        if let Some(project_root) = self
+            .tab(&session.tab_id)
+            .map(|tab| tab.project_root.clone())
+        {
+            if let Err(error) = gwt_core::workspace_projection::mark_workspace_agent_stopped(
+                &project_root,
+                &session.session_id,
+                Some(&session.window_id),
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    project_root = %project_root.display(),
+                    session_id = %session.session_id,
+                    window_id = %session.window_id,
+                    "failed to clean stopped Agent from Workspace projection"
+                );
+            }
+        }
         let _ = gwt_agent::persist_session_status(
             &self.sessions_dir,
             &session.session_id,
@@ -5626,6 +5713,112 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_active_work_projection_filters_stale_saved_agents_when_no_agent_is_live() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection.status_text = "Old agent is running".to_string();
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "stale-session".to_string(),
+                window_id: Some("tab-1::agent-1".to_string()),
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Old focus".to_string()),
+                worktree_path: None,
+                branch: Some("work/old".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save stale projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_agents, 0);
+        assert_eq!(view.blocked_agents, 0);
+        assert!(view.agents.is_empty());
+        assert_eq!(view.status_category, "idle");
+        assert_eq!(view.status_text, "No active work");
+    }
+
+    #[test]
+    fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_idle() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "codex-1",
+            repo.clone(),
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        let session = ActiveAgentSession {
+            window_id: window_id.clone(),
+            session_id: "session-1".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260506-1652".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: temp.path().join("work/20260506-1652"),
+            tab_id: "tab-1".to_string(),
+        };
+        runtime
+            .active_agent_sessions
+            .insert(window_id.clone(), session.clone());
+        save_start_work_workspace_projection(&repo, &session, "origin/main", None)
+            .expect("save projection");
+
+        let events = runtime.handle_runtime_status(
+            window_id.clone(),
+            WindowProcessStatus::Stopped,
+            Some("Process exited".to_string()),
+        );
+
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        assert!(projection.agents.is_empty());
+        assert_eq!(
+            projection.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::ActiveWorkProjection { projection },
+            } if projection.active_agents == 0
+                && projection.agents.is_empty()
+                && projection.status_category == "idle"
+        )));
+    }
+
+    #[test]
     fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab_with_window(
@@ -7119,14 +7312,20 @@ exit 0
         );
         assert_eq!(projection.owner.as_deref(), Some("SPEC-2359"));
         assert_eq!(projection.board_refs.len(), 1);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::ActiveWorkProjection { projection },
-            } if projection.next_action.as_deref() == Some("Run final verification")
-                && projection.board_refs == vec![board_entry_id.clone()]
-        )));
+        let projected_event = events
+            .iter()
+            .find_map(|event| match event {
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::ActiveWorkProjection { projection },
+                } => Some(projection),
+                _ => None,
+            })
+            .expect("active work projection broadcast");
+        assert_eq!(projected_event.board_refs, vec![board_entry_id.clone()]);
+        assert_eq!(projected_event.active_agents, 0);
+        assert_eq!(projected_event.status_category, "idle");
+        assert_eq!(projected_event.next_action, None);
     }
 
     #[test]
