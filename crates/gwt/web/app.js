@@ -38,6 +38,7 @@
       const addButton = document.getElementById("add-button");
       const tileButton = document.getElementById("tile-button");
       const stackButton = document.getElementById("stack-button");
+      const alignButton = document.getElementById("align-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const activeWorkCount = document.getElementById("op-active-work-count");
@@ -7619,6 +7620,7 @@
       });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
+      alignButton.addEventListener("click", () => arrangeWindows("align"));
       windowListButton.addEventListener(
         "click",
         frontendUnits.projectWorkspaceShell.toggleWindowList,
