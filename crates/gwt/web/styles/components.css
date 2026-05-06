@@ -465,6 +465,10 @@ body::after {
   color: var(--agent-codex);
 }
 
+.op-agent-state {
+  text-transform: none;
+}
+
 .op-agent-card[data-state="blocked"] .op-agent-state {
   border-color: var(--color-state-blocked);
   color: var(--color-state-blocked);

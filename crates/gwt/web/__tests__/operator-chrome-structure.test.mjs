@@ -110,8 +110,8 @@ test("Workspace sidebar exposes active work and per-agent overview", () => {
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkProjection\.agents/,
-    "expected frontend to render per-agent projection data, not only aggregate counters",
+    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkFocusableAgents\(activeWorkProjection\)/,
+    "expected frontend to render focusable per-agent projection data, not only aggregate counters",
   );
   assert.match(
     appSource,
@@ -207,6 +207,39 @@ test("Workspace active work overview behaves like a command center", () => {
     appSource,
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
+  );
+});
+
+test("Active Work sidebar only focuses live Agent windows and falls back to Quick Start", () => {
+  assert.match(
+    appSource,
+    /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
+    "expected Active Work cards to be filtered against live workspace windows",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderActiveWorkQuickStart\(\)[\s\S]+Quick Start[\s\S]+kind:\s*"open_start_work"/,
+    "expected no-Agent Active Work state to offer Quick Start through Start Work",
+  );
+  assert.match(
+    appSource,
+    /function\s+focusActiveWorkAgentWindow\(agent\)[\s\S]+restore_window[\s\S]+focusWindowRemotely\(agent\.window_id,\s*\{\s*center:\s*true\s*\}\)/,
+    "expected Focus to restore minimized Agent windows before focusing them",
+  );
+  assert.match(
+    appSource,
+    /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
+    "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("div",\s*"op-agent-state",\s*state\)/,
+    "Active Work must not render raw status wire values such as ACTIVE",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
+    "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
   );
 });
 
