@@ -387,11 +387,13 @@ mod tests {
         );
         assert!(
             html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
-                && html.contains(
-                    "const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized",
-                )
+                && html.contains("const previousWidth = parseFloat(element.style.width")
+                && html.contains("const previousHeight = parseFloat(element.style.height")
+                && html.contains("const dimensionsChanged =")
+                && html.contains("(wasMinimized && !windowData.minimized) || dimensionsChanged",)
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
-            "expected restored terminals to persist fitted geometry after becoming visible",
+            "expected terminals to persist fitted geometry to backend on \
+             restore-from-minimized OR window resize (Tile/Stack/Align)",
         );
     }
 
