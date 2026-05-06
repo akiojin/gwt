@@ -204,6 +204,17 @@ pub struct LaunchWizardPreviousProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentLaunchDraft {
+    model: String,
+    reasoning: String,
+    version: String,
+    mode: String,
+    resume_session_id: Option<String>,
+    skip_permissions: bool,
+    codex_fast_mode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLaunchConfig {
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,
@@ -502,6 +513,7 @@ pub struct LaunchWizardState {
     pub base_branch_name: Option<String>,
     pub launch_target: LaunchTargetKind,
     pub agent_id: String,
+    agent_drafts: HashMap<String, AgentLaunchDraft>,
     pub model: String,
     pub reasoning: String,
     pub version: String,
@@ -578,6 +590,7 @@ impl LaunchWizardState {
             base_branch_name: None,
             launch_target: LaunchTargetKind::Agent,
             agent_id: String::new(),
+            agent_drafts: HashMap::new(),
             model: String::new(),
             reasoning: String::new(),
             version: String::new(),
@@ -1090,10 +1103,13 @@ impl LaunchWizardState {
                 });
             }
             LaunchWizardStep::AgentSelect => {
-                if let Some(agent) = self.detected_agents.get(self.selected) {
-                    self.agent_id = agent.id.clone();
+                if let Some(agent_id) = self
+                    .detected_agents
+                    .get(self.selected)
+                    .map(|agent| agent.id.clone())
+                {
+                    self.set_agent_id(&agent_id);
                 }
-                self.sync_selected_agent_options();
             }
             LaunchWizardStep::ModelSelect => {
                 if let Some(model) =
@@ -1365,6 +1381,9 @@ impl LaunchWizardState {
     }
 
     fn set_launch_target(&mut self, target: LaunchTargetKind) {
+        if self.launch_target_is_agent() && target == LaunchTargetKind::Shell {
+            self.save_current_agent_draft();
+        }
         self.launch_target = target;
         if self.launch_target_is_shell() {
             self.mode = "normal".to_string();
@@ -1372,7 +1391,7 @@ impl LaunchWizardState {
             self.skip_permissions = false;
             self.codex_fast_mode = false;
         } else {
-            self.sync_selected_agent_options();
+            self.restore_agent_draft_or_defaults();
         }
     }
 
@@ -1383,11 +1402,12 @@ impl LaunchWizardState {
             .position(|candidate| candidate.id == agent_id)
         {
             Some(index) => {
+                self.save_current_agent_draft();
                 self.agent_id = agent_id.to_string();
                 if self.step == LaunchWizardStep::AgentSelect {
                     self.selected = index;
                 }
-                self.sync_selected_agent_options();
+                self.restore_agent_draft_or_defaults();
             }
             _ => {
                 self.error = Some("Agent option is unavailable".to_string());
@@ -1918,6 +1938,76 @@ impl LaunchWizardState {
         self.selected_agent()
             .map(|agent| self.current_version_options_for(agent))
             .unwrap_or_default()
+    }
+
+    fn current_agent_draft_key(&self) -> Option<String> {
+        if !self.launch_target_is_agent() {
+            return None;
+        }
+        if !self.agent_id.is_empty() {
+            return Some(self.agent_id.clone());
+        }
+        self.detected_agents.first().map(|agent| agent.id.clone())
+    }
+
+    fn save_current_agent_draft(&mut self) {
+        let Some(agent_id) = self.current_agent_draft_key() else {
+            return;
+        };
+        self.agent_drafts.insert(
+            agent_id,
+            AgentLaunchDraft {
+                model: self.model.clone(),
+                reasoning: self.reasoning.clone(),
+                version: self.version.clone(),
+                mode: self.mode.clone(),
+                resume_session_id: self.resume_session_id.clone(),
+                skip_permissions: self.skip_permissions,
+                codex_fast_mode: self.codex_fast_mode && self.agent_is_codex(),
+            },
+        );
+    }
+
+    fn restore_agent_draft_or_defaults(&mut self) {
+        let draft = self.agent_drafts.get(&self.agent_id).cloned();
+        match draft {
+            Some(draft) => self.apply_agent_draft(draft),
+            None => self.reset_agent_draft_defaults(),
+        }
+        self.sync_selected_agent_options();
+        self.normalize_execution_mode();
+    }
+
+    fn apply_agent_draft(&mut self, draft: AgentLaunchDraft) {
+        self.model = draft.model;
+        self.reasoning = draft.reasoning;
+        self.version = draft.version;
+        self.mode = draft.mode;
+        self.resume_session_id = draft.resume_session_id;
+        self.skip_permissions = draft.skip_permissions;
+        self.codex_fast_mode = draft.codex_fast_mode && self.agent_is_codex();
+    }
+
+    fn reset_agent_draft_defaults(&mut self) {
+        self.model.clear();
+        self.reasoning.clear();
+        self.version.clear();
+        self.mode = "normal".to_string();
+        self.resume_session_id = None;
+        self.skip_permissions = false;
+        self.codex_fast_mode = false;
+    }
+
+    fn normalize_execution_mode(&mut self) {
+        if !EXECUTION_MODE_OPTIONS
+            .iter()
+            .any(|option| option.value == self.mode)
+        {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+        } else if self.mode != "resume" {
+            self.resume_session_id = None;
+        }
     }
 
     fn current_reasoning_options(&self) -> &'static [ReasoningDisplayOption] {
@@ -4372,6 +4462,96 @@ mod tests {
             .launch_summary
             .iter()
             .any(|item| item.label == "Fast mode" && item.value == "on"));
+    }
+
+    #[test]
+    fn switching_agents_restores_each_agents_open_wizard_draft() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetModel {
+            model: "gpt-5.4".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetReasoning {
+            reasoning: "high".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetVersion {
+            version: "0.110.0".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetExecutionMode {
+            mode: "continue".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetSkipPermissions { enabled: true });
+        state.apply(LaunchWizardAction::SetCodexFastMode { enabled: true });
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetModel {
+            model: "sonnet".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetReasoning {
+            reasoning: "low".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetVersion {
+            version: "installed".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetExecutionMode {
+            mode: "normal".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetSkipPermissions { enabled: false });
+
+        let claude_view = state.view();
+        assert_eq!(claude_view.selected_agent_id, "claude");
+        assert_eq!(claude_view.selected_model, "sonnet");
+        assert_eq!(claude_view.selected_reasoning, "low");
+        assert_eq!(claude_view.selected_version, "installed");
+        assert_eq!(claude_view.selected_execution_mode, "normal");
+        assert!(!claude_view.skip_permissions);
+        assert!(!claude_view.show_codex_fast_mode);
+        assert!(!claude_view.codex_fast_mode);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+
+        let codex_view = state.view();
+        assert_eq!(codex_view.selected_agent_id, "codex");
+        assert_eq!(codex_view.selected_model, "gpt-5.4");
+        assert_eq!(codex_view.selected_reasoning, "high");
+        assert_eq!(codex_view.selected_version, "0.110.0");
+        assert_eq!(codex_view.selected_execution_mode, "continue");
+        assert!(codex_view.skip_permissions);
+        assert!(codex_view.codex_fast_mode);
+    }
+
+    #[test]
+    fn hidden_codex_fast_mode_draft_does_not_affect_claude_launch() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetCodexFastMode { enabled: true });
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetSkipPermissions { enabled: false });
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+        assert!(!config.codex_fast_mode);
+        assert!(!config.skip_permissions);
     }
 
     #[test]
