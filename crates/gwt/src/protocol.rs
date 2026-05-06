@@ -374,6 +374,20 @@ pub struct ActiveWorkAgentView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceJournalEntryView {
+    pub id: String,
+    pub updated_at: String,
+    pub title: Option<String>,
+    pub status_category: Option<String>,
+    pub status_text: Option<String>,
+    pub summary: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub agent_current_focus: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
     pub title: String,
@@ -388,6 +402,7 @@ pub struct ActiveWorkProjectionView {
     pub worktree_path: Option<String>,
     pub pr_number: Option<u64>,
     pub board_refs: Vec<String>,
+    pub journal_entries: Vec<WorkspaceJournalEntryView>,
     pub agents: Vec<ActiveWorkAgentView>,
 }
 
@@ -773,6 +788,18 @@ mod tests {
                 worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                 pr_number: None,
                 board_refs: vec!["board-1".to_string()],
+                journal_entries: vec![super::WorkspaceJournalEntryView {
+                    id: "journal-1".to_string(),
+                    updated_at: "2026-05-04T12:01:00Z".to_string(),
+                    title: Some("Implement Start Work".to_string()),
+                    status_category: Some("active".to_string()),
+                    status_text: Some("Launching from Project Bar".to_string()),
+                    summary: Some("Launching from Project Bar".to_string()),
+                    owner: Some("SPEC-2359".to_string()),
+                    next_action: Some("Run launch tests".to_string()),
+                    agent_session_id: Some("session-1".to_string()),
+                    agent_current_focus: Some("Run launch tests".to_string()),
+                }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
                     window_id: Some("tab-1::agent-1".to_string()),
@@ -821,6 +848,13 @@ mod tests {
                 .pointer("/projection/agents/0/coordination_scope")
                 .and_then(Value::as_str),
             Some("SPEC-2359 / start-work")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/journal_entries/0/summary")
+                .and_then(Value::as_str),
+            Some("Launching from Project Bar"),
+            "Workspace Overview should receive recent summary journal entries without replaying Board history"
         );
     }
 

@@ -441,8 +441,18 @@ fn workspace_status_category_wire(
     }
 }
 
+const WORKSPACE_OVERVIEW_JOURNAL_LIMIT: usize = 8;
+
+#[cfg(test)]
 fn active_work_projection_from_saved(
     projection: gwt_core::workspace_projection::WorkspaceProjection,
+) -> gwt::ActiveWorkProjectionView {
+    active_work_projection_from_saved_with_journal(projection, Vec::new())
+}
+
+fn active_work_projection_from_saved_with_journal(
+    projection: gwt_core::workspace_projection::WorkspaceProjection,
+    journal_entries: Vec<gwt::WorkspaceJournalEntryView>,
 ) -> gwt::ActiveWorkProjectionView {
     use gwt_core::workspace_projection::WorkspaceStatusCategory;
 
@@ -506,7 +516,30 @@ fn active_work_projection_from_saved(
         worktree_path,
         pr_number,
         board_refs: projection.board_refs,
+        journal_entries,
         agents,
+    }
+}
+
+fn workspace_journal_entry_view_from_entry(
+    entry: &gwt_core::workspace_projection::WorkspaceJournalEntry,
+) -> gwt::WorkspaceJournalEntryView {
+    gwt::WorkspaceJournalEntryView {
+        id: entry.id.clone(),
+        updated_at: entry
+            .updated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        title: entry.title.clone(),
+        status_category: entry
+            .status_category
+            .map(workspace_status_category_wire)
+            .map(str::to_string),
+        status_text: entry.status_text.clone(),
+        summary: entry.summary.clone(),
+        owner: entry.owner.clone(),
+        next_action: entry.next_action.clone(),
+        agent_session_id: entry.agent_session_id.clone(),
+        agent_current_focus: entry.agent_current_focus.clone(),
     }
 }
 
@@ -1407,7 +1440,19 @@ impl AppRuntime {
                 chrono::Utc::now(),
             );
             retain_live_workspace_agents(&mut projection, &sessions, chrono::Utc::now());
-            return Some(active_work_projection_from_saved(projection));
+            let journal_entries =
+                gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+                    &tab.project_root,
+                    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+                )
+                .unwrap_or_default()
+                .iter()
+                .map(workspace_journal_entry_view_from_entry)
+                .collect::<Vec<_>>();
+            return Some(active_work_projection_from_saved_with_journal(
+                projection,
+                journal_entries,
+            ));
         }
 
         let first = sessions.first()?;
@@ -1443,6 +1488,7 @@ impl AppRuntime {
             worktree_path: Some(first.worktree_path.display().to_string()),
             pr_number: None,
             board_refs: Vec::new(),
+            journal_entries: Vec::new(),
             agents,
         })
     }
@@ -5757,6 +5803,54 @@ exit 0
         assert!(view.agents.is_empty());
         assert_eq!(view.status_category, "idle");
         assert_eq!(view.status_text, "No active work");
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_includes_recent_workspace_journal_entries() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        gwt_core::workspace_projection::update_workspace_projection_with_journal(
+            &repo,
+            gwt_core::workspace_projection::WorkspaceProjectionUpdate {
+                title: Some("Workspace Overview".to_string()),
+                status_category: Some(
+                    gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+                ),
+                status_text: Some("Ready for review".to_string()),
+                owner: Some("SPEC-2359".to_string()),
+                next_action: Some("Review summary".to_string()),
+                summary: Some("Overview summary is persisted.".to_string()),
+                agent_session_id: None,
+                agent_current_focus: None,
+            },
+        )
+        .expect("workspace update");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(
+            view.summary.as_deref(),
+            Some("Overview summary is persisted.")
+        );
+        assert_eq!(view.journal_entries.len(), 1);
+        assert_eq!(
+            view.journal_entries[0].summary.as_deref(),
+            Some("Overview summary is persisted.")
+        );
+        assert_eq!(
+            view.journal_entries[0].next_action.as_deref(),
+            Some("Review summary")
+        );
     }
 
     #[test]

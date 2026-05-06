@@ -253,6 +253,41 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
   );
 });
 
+test("Workspace Overview is separate from live-only Active Work", () => {
+  assert.ok(
+    document.querySelector("#op-workspace-overview-entry"),
+    "expected Sidebar to expose a Workspace Overview entry even when Active Work is hidden",
+  );
+  assert.ok(
+    document.querySelector("#project-workspace-overview-button"),
+    "expected Project Bar to expose Workspace Overview",
+  );
+  assert.ok(
+    document.querySelector("#workspace-overview-drawer"),
+    "expected Workspace Overview to use a drawer surface",
+  );
+  assert.match(
+    appSource,
+    /function\s+openWorkspaceOverview\(/,
+    "expected a shared opener for Sidebar and Project Bar",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderWorkspaceOverview\(\)[\s\S]+journal_entries/,
+    "expected Overview to render Workspace journal entries from active_work_projection",
+  );
+  assert.match(
+    appSource,
+    /op-workspace-overview-entry[\s\S]+openWorkspaceOverview/,
+    "expected Sidebar Workspace Overview entry to open the overview",
+  );
+  assert.match(
+    appSource,
+    /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
+    "expected Project Bar Workspace Overview button to open the same overview",
+  );
+});
+
 test("Agent window chrome resolves dynamic purpose titles before legacy titles", () => {
   assert.match(
     appSource,
