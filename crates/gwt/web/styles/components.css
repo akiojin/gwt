@@ -469,6 +469,83 @@ body::after {
   overflow-wrap: anywhere;
 }
 
+.workspace-overview-drawer .op-drawer__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.workspace-overview-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-overview-heading {
+  color: var(--color-text-muted);
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+  font-stretch: 80%;
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+}
+
+.workspace-overview-card,
+.workspace-journal-entry {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  padding: var(--space-3);
+}
+
+.workspace-overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-overview-title {
+  color: var(--color-text-strong);
+  font-family: var(--font-display);
+  font-size: var(--type-md);
+  font-stretch: 80%;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.workspace-overview-summary,
+.workspace-overview-next,
+.workspace-journal-summary {
+  color: var(--color-text);
+  font-size: var(--type-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workspace-overview-meta,
+.workspace-journal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+
+.workspace-overview-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-overview-empty {
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+}
+
 /* ============================================================
    Status Strip — bottom chrome
    ============================================================ */
