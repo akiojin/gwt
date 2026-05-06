@@ -166,6 +166,43 @@ impl std::str::FromStr for BoardMention {
     }
 }
 
+pub fn normalize_board_mentions(values: &[BoardMention]) -> Vec<BoardMention> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let target = value.target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        let label = value
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string);
+        let mention = BoardMention {
+            target_kind: value.target_kind.clone(),
+            target: target.to_string(),
+            label,
+        };
+        if normalized.iter().any(|item| item == &mention) {
+            continue;
+        }
+        normalized.push(mention);
+    }
+    normalized
+}
+
+pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
+    entry
+        .target_owners
+        .iter()
+        .any(|target| match_keys.iter().any(|key| key == target))
+        || entry
+            .mentions
+            .iter()
+            .any(|mention| match_keys.iter().any(|key| key == &mention.typed_key()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardEntry {
     pub id: String,
@@ -1422,6 +1459,66 @@ mod tests {
         assert_eq!(mention.target_kind, BoardMentionTargetKind::Session);
         assert_eq!(mention.target, "sess-a3f2");
         assert_eq!(mention.typed_key(), "session:sess-a3f2");
+    }
+
+    #[test]
+    fn board_mentions_normalize_trim_dedup_and_skip_empty_targets() {
+        let values = vec![
+            BoardMention::new(BoardMentionTargetKind::User, " akiojin ").with_label(" Akio "),
+            BoardMention::new(BoardMentionTargetKind::User, "akiojin").with_label("Akio"),
+            BoardMention::new(BoardMentionTargetKind::Agent, " codex "),
+            BoardMention::new(BoardMentionTargetKind::Session, " "),
+        ];
+
+        let normalized = normalize_board_mentions(&values);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].typed_key(), "user:akiojin");
+        assert_eq!(normalized[0].label.as_deref(), Some("Akio"));
+        assert_eq!(normalized[1].typed_key(), "agent:codex");
+        assert_eq!(normalized[1].label, None);
+    }
+
+    #[test]
+    fn board_entry_targets_self_matches_legacy_targets_and_typed_mentions() {
+        let legacy_target = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Question,
+            "legacy target",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_target_owner("sess-a3f2");
+        let typed_target = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Question,
+            "typed target",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_mention(BoardMention::new(BoardMentionTargetKind::Agent, "codex"));
+        let broadcast = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "broadcast",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+
+        let keys = vec!["sess-a3f2".to_string(), "agent:codex".to_string()];
+
+        assert!(board_entry_targets_self(&legacy_target, &keys));
+        assert!(board_entry_targets_self(&typed_target, &keys));
+        assert!(!board_entry_targets_self(&broadcast, &keys));
     }
 
     #[test]

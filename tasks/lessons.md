@@ -4798,3 +4798,28 @@ Agent が残っていない状態でも Sidebar の Active Work が残り、Focu
 2. Agent 停止・window close 経路では保存済み Workspace projection から該当 Agent を除去し、0 件なら idle/no active work に戻す。
 3. Board は履歴・共有・報告に使い、現在状態と LLM 要約は Workspace current projection と summary journal に保存する契約を SPEC とテストに残す。
 4. no-Agent 状態では Active Work セクションを非表示にし、Quick Start は既存の Quick section / Start Work entrypoint に任せる。
+
+## 2026-05-07 — 新規 frontend root module は bundle syntax check に必ず追加する
+
+### 事象
+
+Board UI の helper を `board-surface.js` に分離した際、初回実装では
+embedded serving と unit test は追加したが、`package.json` の
+`test:frontend-bundle` syntax check 対象に新規 root module を含めて
+いなかった。
+
+### 原因
+
+既存の embedded import contract test は root module の配信漏れを検出
+できる一方、`node --check` 対象は `package.json` の明示リストであり、
+新規ファイル追加時に自動で追随しない。配信検証と syntax check の
+責務が別であることを差分レビュー時に最初から確認していなかった。
+
+### 再発防止策
+
+1. `app.js` から import する root-level frontend module を追加したら、
+   `embedded_web` の配信テストと `package.json` の `test:frontend-bundle`
+   の両方に追加する。
+2. frontend module 分割の差分レビューでは、`rg "from \"/.*\\.js\""`
+   で root import を確認し、配信・syntax check・unit test の3点が
+   揃っているかを見る。

@@ -111,7 +111,7 @@ impl AppRuntime {
         let topics = sanitize_board_list(&topics);
         let owners = sanitize_board_list(&owners);
         let targets = sanitize_board_list(&targets);
-        let mentions = sanitize_board_mentions(&mentions);
+        let mentions = coordination::normalize_board_mentions(&mentions);
 
         if let Some(parent_id) = parent_id.as_deref() {
             let parent_exists = match coordination::board_entry_exists(&tab.project_root, parent_id)
@@ -313,32 +313,6 @@ fn sanitize_board_list(values: &[String]) -> Vec<String> {
             continue;
         }
         sanitized.push(trimmed.to_string());
-    }
-    sanitized
-}
-
-fn sanitize_board_mentions(values: &[BoardMention]) -> Vec<BoardMention> {
-    let mut sanitized = Vec::new();
-    for value in values {
-        let target = value.target.trim();
-        if target.is_empty() {
-            continue;
-        }
-        let label = value
-            .label
-            .as_deref()
-            .map(str::trim)
-            .filter(|label| !label.is_empty())
-            .map(str::to_string);
-        let mention = BoardMention {
-            target_kind: value.target_kind.clone(),
-            target: target.to_string(),
-            label,
-        };
-        if sanitized.iter().any(|item| item == &mention) {
-            continue;
-        }
-        sanitized.push(mention);
     }
     sanitized
 }

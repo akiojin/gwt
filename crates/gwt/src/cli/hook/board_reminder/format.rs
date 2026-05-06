@@ -6,7 +6,7 @@
 //! so that the entry-line prefix and reminder body never share verbatim
 //! substrings.
 
-use gwt_core::coordination::BoardEntry;
+use gwt_core::coordination::{self, BoardEntry};
 
 use super::texts::{FOR_YOU_MARKER, INJECTION_HEADER, SESSION_START_HEADER, USER_PROMPT_REMINDER};
 
@@ -46,14 +46,7 @@ pub(super) fn session_start_text(entries: &[BoardEntry], match_keys: &[String]) 
 }
 
 pub(super) fn entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
-    entry
-        .target_owners
-        .iter()
-        .any(|t| match_keys.iter().any(|k| k == t))
-        || entry
-            .mentions
-            .iter()
-            .any(|mention| match_keys.iter().any(|k| k == &mention.typed_key()))
+    coordination::board_entry_targets_self(entry, match_keys)
 }
 
 pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> String {
