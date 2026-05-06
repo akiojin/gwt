@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.20.2] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Align without overlap and persist arrange resize to terminal backend
+
 ## [9.20.1] - 2026-05-06
 
 ### Bug Fixes
