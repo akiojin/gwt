@@ -160,6 +160,28 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
   );
 });
 
+test("canvas world grid is synchronized from viewport state", () => {
+  assert.ok(
+    document.querySelector("#canvas-world-grid.canvas-world-grid"),
+    "expected canvas to expose a dedicated world-space grid layer",
+  );
+  assert.match(
+    appSource,
+    /const\s+worldGrid\s*=\s*document\.getElementById\("canvas-world-grid"\)/,
+    "expected app.js to bind the canvas world grid element",
+  );
+  assert.match(
+    appSource,
+    /function\s+applyWorldGridViewport\(\)[\s\S]+viewport\.x[\s\S]+viewport\.y[\s\S]+viewport\.zoom/,
+    "expected world grid sync to derive position and size from the viewport",
+  );
+  assert.match(
+    appSource,
+    /function\s+applyViewport\(\)[\s\S]+applyWorldGridViewport\(\)/,
+    "expected applyViewport to update the grid together with the stage transform",
+  );
+});
+
 test("Workspace active work overview behaves like a command center", () => {
   assert.match(
     appSource,
