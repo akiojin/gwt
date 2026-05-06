@@ -3060,24 +3060,6 @@
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
             </button>
-            <button
-              class="op-chrome-toggle"
-              id="op-sidebar-toggle"
-              type="button"
-              aria-label="Hide sidebar"
-              aria-pressed="true"
-            >
-              Sidebar
-            </button>
-            <button
-              class="op-chrome-toggle"
-              id="op-window-controls-toggle"
-              type="button"
-              aria-label="Hide window controls"
-              aria-pressed="true"
-            >
-              Windows
-            </button>
             <div
               class="op-theme-toggle"
               id="op-theme-toggle"
@@ -3211,7 +3193,15 @@
               </button>
             </div>
           </div>
-          <div class="floating-actions">
+          <div class="floating-actions" id="floating-window-controls">
+            <button
+              class="op-edge-handle op-edge-handle--windows"
+              id="op-window-controls-edge-toggle"
+              type="button"
+              aria-label="Hide window controls"
+              aria-controls="floating-window-controls"
+              aria-expanded="true"
+            >vv</button>
             <button
               class="arrange-button op-palette-trigger"
               id="op-palette-button"
@@ -3242,6 +3232,14 @@
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
             <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
           </div>
+          <button
+            class="op-edge-handle op-edge-handle--sidebar"
+            id="op-sidebar-edge-toggle"
+            type="button"
+            aria-label="Hide sidebar"
+            aria-controls="op-sidebar"
+            aria-expanded="true"
+          ><<</button>
         </div>
         <footer
           class="op-status-strip"
