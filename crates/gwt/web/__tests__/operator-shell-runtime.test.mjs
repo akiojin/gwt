@@ -33,6 +33,54 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
   assert.equal(briefing.hidden, true, "Mission Briefing must not block app startup");
 });
 
+test("Operator shell toggles chrome visibility through edge handles", async () => {
+  const { initOperatorShell } = await importOperatorShell();
+  const { document, window } = parseHTML(html);
+  const storage = memoryStorage();
+  const testWindow = {
+    ...window,
+    localStorage: storage,
+    sessionStorage: memoryStorage(),
+    matchMedia: () => {
+      throw new Error("skip animated shell loops in runtime fixture");
+    },
+  };
+
+  const originalWarn = console.warn;
+  const originalCustomEvent = globalThis.CustomEvent;
+  console.warn = () => {};
+  globalThis.CustomEvent = window.CustomEvent;
+  try {
+    initOperatorShell({ document, window: testWindow });
+
+    const sidebarHandle = document.getElementById("op-sidebar-edge-toggle");
+    const windowControlsHandle = document.getElementById("op-window-controls-edge-toggle");
+    assert.ok(sidebarHandle, "fixture must include sidebar edge handle");
+    assert.ok(windowControlsHandle, "fixture must include window controls edge handle");
+    assert.equal(
+      windowControlsHandle.getAttribute("aria-controls"),
+      "floating-window-controls-primary floating-window-controls-add",
+    );
+
+    sidebarHandle.click();
+    assert.equal(document.documentElement.dataset.opSidebar, "collapsed");
+    assert.equal(sidebarHandle.textContent, ">>");
+    assert.equal(sidebarHandle.getAttribute("aria-expanded"), "false");
+    assert.equal(sidebarHandle.getAttribute("aria-label"), "Show sidebar");
+    assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), "true");
+
+    windowControlsHandle.click();
+    assert.equal(document.documentElement.dataset.opWindowControls, "hidden");
+    assert.equal(windowControlsHandle.textContent, "^^");
+    assert.equal(windowControlsHandle.getAttribute("aria-expanded"), "false");
+    assert.equal(windowControlsHandle.getAttribute("aria-label"), "Show window controls");
+    assert.equal(storage.getItem("gwt:ui:window-controls"), "hidden");
+  } finally {
+    console.warn = originalWarn;
+    globalThis.CustomEvent = originalCustomEvent;
+  }
+});
+
 function throwingStorage() {
   return {
     getItem() {
@@ -43,6 +91,21 @@ function throwingStorage() {
     },
     removeItem() {
       throw new Error("storage unavailable");
+    },
+  };
+}
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
     },
   };
 }

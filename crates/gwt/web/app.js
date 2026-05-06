@@ -868,6 +868,7 @@
         renderProjectOnboarding(tab);
         renderWorkspace(tab?.workspace || emptyWorkspace());
         renderWindowList();
+        renderActiveWorkOverview();
       }
 
       let presetModalFocusReturn = null;
@@ -1270,10 +1271,55 @@
         }
       }
 
-      function activeWorkAgentCount(projection) {
+      function activeWorkFocusableAgents(projection) {
         const agents = Array.isArray(projection?.agents) ? projection.agents : [];
-        if (agents.length > 0) return agents.length;
-        return Number(projection?.active_agents || 0) + Number(projection?.blocked_agents || 0);
+        return agents.filter((agent) => {
+          if (!agent?.window_id) return false;
+          const windowData = workspaceWindowById(agent.window_id);
+          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) return false;
+          const status = String(windowData.status || "running").toLowerCase();
+          return status !== "stopped" && status !== "exited" && status !== "error";
+        });
+      }
+
+      function agentStatusLabel(state) {
+        switch (String(state || "").toLowerCase()) {
+          case "active":
+            return "Running";
+          case "blocked":
+            return "Blocked";
+          case "idle":
+            return "Idle";
+          case "done":
+            return "Done";
+          default:
+            return "Unknown";
+        }
+      }
+
+      function focusActiveWorkAgentWindow(agent) {
+        if (!agent?.window_id) return;
+        const windowData = workspaceWindowById(agent.window_id);
+        if (!windowData) return;
+        if (windowData.minimized) {
+          send({ kind: "restore_window", id: agent.window_id });
+        }
+        focusWindowRemotely(agent.window_id, { center: true });
+      }
+
+      function renderActiveWorkQuickStart() {
+        activeWorkSummary.appendChild(createNode("div", "op-work-title", "Quick Start"));
+        activeWorkSummary.appendChild(
+          createNode("div", "op-work-status", "No agents are running."),
+        );
+        const actions = createNode("div", "op-work-actions");
+        const quickStart = createNode("button", "op-work-action", "Quick Start");
+        quickStart.type = "button";
+        quickStart.addEventListener("click", () => {
+          send({ kind: "open_start_work" });
+        });
+        actions.appendChild(quickStart);
+        activeWorkSummary.appendChild(actions);
       }
 
       function projectionIssueNumber(projection) {
@@ -1341,15 +1387,18 @@
 
         if (!activeWorkProjection) {
           if (activeWorkCount) activeWorkCount.textContent = "0";
-          activeWorkSummary.appendChild(createNode("div", "op-work-empty", "No active work"));
+          renderActiveWorkQuickStart();
           return;
         }
 
-        const agents = Array.isArray(activeWorkProjection.agents)
-          ? activeWorkProjection.agents
-          : [];
-        const agentCount = activeWorkAgentCount(activeWorkProjection);
+        const agents = activeWorkFocusableAgents(activeWorkProjection);
+        const agentCount = agents.length;
         if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
+
+        if (agentCount === 0) {
+          renderActiveWorkQuickStart();
+          return;
+        }
 
         activeWorkSummary.appendChild(
           createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
@@ -1393,15 +1442,8 @@
           activeWorkSummary.appendChild(actions);
         }
 
-        if (agents.length === 0) {
-          activeWorkAgents.appendChild(
-            createNode("div", "op-work-empty", "Agent details unavailable"),
-          );
-          return;
-        }
-
         for (const agent of agents) {
-          const state = agent.status_category || "unknown";
+          const state = String(agent.status_category || "unknown").toLowerCase();
           const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
           const coordinationLabel = coordinationKindLabel(coordinationKind);
           const card = createNode("article", "op-agent-card");
@@ -1417,7 +1459,7 @@
           if (coordinationLabel) {
             chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
           }
-          chips.appendChild(createNode("div", "op-agent-state", state));
+          chips.appendChild(createNode("div", "op-agent-state", agentStatusLabel(state)));
           head.appendChild(chips);
           card.appendChild(head);
 
@@ -1437,14 +1479,12 @@
           }
 
           const agentActions = createNode("div", "op-agent-actions");
-          if (agent.window_id) {
-            const focusButton = createNode("button", "op-agent-action", "Focus");
-            focusButton.type = "button";
-            focusButton.addEventListener("click", () => {
-              focusWindowRemotely(agent.window_id, { center: true });
-            });
-            agentActions.appendChild(focusButton);
-          }
+          const focusButton = createNode("button", "op-agent-action", "Focus");
+          focusButton.type = "button";
+          focusButton.addEventListener("click", () => {
+            focusActiveWorkAgentWindow(agent);
+          });
+          agentActions.appendChild(focusButton);
           if (agent.last_board_entry_id) {
             const boardButton = createNode("button", "op-agent-action", "Open Entry");
             boardButton.type = "button";

@@ -94,8 +94,8 @@ function hideMissionBriefingImmediately(doc) {
 // ------------------------------------------------------------
 
 function wireChromeVisibility({ doc, win }) {
-  const sidebarButton = doc.getElementById("op-sidebar-toggle");
-  const windowControlsButton = doc.getElementById("op-window-controls-toggle");
+  const sidebarButton = doc.getElementById("op-sidebar-edge-toggle");
+  const windowControlsButton = doc.getElementById("op-window-controls-edge-toggle");
   const root = doc.documentElement;
 
   let sidebarVisible = readBoolean(win, SIDEBAR_COLLAPSED_KEY, false) !== true;
@@ -105,7 +105,8 @@ function wireChromeVisibility({ doc, win }) {
     if (sidebarVisible) delete root.dataset.opSidebar;
     else root.dataset.opSidebar = "collapsed";
     if (!sidebarButton) return;
-    sidebarButton.setAttribute("aria-pressed", sidebarVisible ? "true" : "false");
+    sidebarButton.textContent = sidebarVisible ? "<<" : ">>";
+    sidebarButton.setAttribute("aria-expanded", sidebarVisible ? "true" : "false");
     sidebarButton.setAttribute("aria-label", sidebarVisible ? "Hide sidebar" : "Show sidebar");
   };
 
@@ -113,7 +114,8 @@ function wireChromeVisibility({ doc, win }) {
     if (windowControlsVisible) delete root.dataset.opWindowControls;
     else root.dataset.opWindowControls = "hidden";
     if (!windowControlsButton) return;
-    windowControlsButton.setAttribute("aria-pressed", windowControlsVisible ? "true" : "false");
+    windowControlsButton.textContent = windowControlsVisible ? "vv" : "^^";
+    windowControlsButton.setAttribute("aria-expanded", windowControlsVisible ? "true" : "false");
     windowControlsButton.setAttribute(
       "aria-label",
       windowControlsVisible ? "Hide window controls" : "Show window controls",

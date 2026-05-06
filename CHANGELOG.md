@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.20.1] - 2026-05-06
+
+### Bug Fixes
+
+- Make active work sidebar actionable
+- **gui:** Replace chrome text toggles with edge handles
+- **gui:** Align window controls aria target
+- Show owner purpose in agent window titles
+
+### Miscellaneous Tasks
+
+- Merge develop into work branch
+
 ## [9.20.0] - 2026-05-06
 
 ### Bug Fixes

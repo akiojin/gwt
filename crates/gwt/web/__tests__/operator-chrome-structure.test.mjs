@@ -110,8 +110,8 @@ test("Workspace sidebar exposes active work and per-agent overview", () => {
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkProjection\.agents/,
-    "expected frontend to render per-agent projection data, not only aggregate counters",
+    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkFocusableAgents\(activeWorkProjection\)/,
+    "expected frontend to render focusable per-agent projection data, not only aggregate counters",
   );
   assert.match(
     appSource,
@@ -207,6 +207,39 @@ test("Workspace active work overview behaves like a command center", () => {
     appSource,
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
+  );
+});
+
+test("Active Work sidebar only focuses live Agent windows and falls back to Quick Start", () => {
+  assert.match(
+    appSource,
+    /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
+    "expected Active Work cards to be filtered against live workspace windows",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderActiveWorkQuickStart\(\)[\s\S]+Quick Start[\s\S]+kind:\s*"open_start_work"/,
+    "expected no-Agent Active Work state to offer Quick Start through Start Work",
+  );
+  assert.match(
+    appSource,
+    /function\s+focusActiveWorkAgentWindow\(agent\)[\s\S]+restore_window[\s\S]+focusWindowRemotely\(agent\.window_id,\s*\{\s*center:\s*true\s*\}\)/,
+    "expected Focus to restore minimized Agent windows before focusing them",
+  );
+  assert.match(
+    appSource,
+    /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
+    "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("div",\s*"op-agent-state",\s*state\)/,
+    "Active Work must not render raw status wire values such as ACTIVE",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
+    "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
   );
 });
 
@@ -334,15 +367,72 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("Project Bar exposes persistent chrome visibility toggles", () => {
-  const sidebarToggle = document.getElementById("op-sidebar-toggle");
-  const windowControlsToggle = document.getElementById("op-window-controls-toggle");
-  assert.ok(sidebarToggle, "expected Project Bar sidebar visibility toggle");
-  assert.ok(windowControlsToggle, "expected Project Bar window controls visibility toggle");
-  assert.equal(sidebarToggle.getAttribute("aria-pressed"), "true");
-  assert.equal(windowControlsToggle.getAttribute("aria-pressed"), "true");
-  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /sidebar/i);
-  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /window controls/i);
+test("chrome visibility uses edge handles instead of Project Bar text toggles", () => {
+  assert.equal(
+    document.getElementById("op-sidebar-toggle"),
+    null,
+    "Project Bar must not expose a SIDEBAR text toggle",
+  );
+  assert.equal(
+    document.getElementById("op-window-controls-toggle"),
+    null,
+    "Project Bar must not expose a WINDOWS text toggle",
+  );
+
+  const sidebarToggle = document.getElementById("op-sidebar-edge-toggle");
+  const windowControlsToggle = document.getElementById("op-window-controls-edge-toggle");
+  assert.ok(sidebarToggle, "expected sidebar edge visibility handle");
+  assert.ok(windowControlsToggle, "expected bottom window controls edge visibility handle");
+  assert.equal(sidebarToggle.textContent.trim(), "<<");
+  assert.equal(windowControlsToggle.textContent.trim(), "vv");
+  assert.equal(sidebarToggle.getAttribute("aria-controls"), "op-sidebar");
+  assert.equal(
+    windowControlsToggle.getAttribute("aria-controls"),
+    "floating-window-controls-primary floating-window-controls-add",
+  );
+  assert.equal(sidebarToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(windowControlsToggle.getAttribute("aria-expanded"), "true");
+  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /hide sidebar/i);
+  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /hide window controls/i);
+});
+
+test("window controls edge handle targets only collapsible control groups", () => {
+  const windowControlsToggle = document.getElementById("op-window-controls-edge-toggle");
+  assert.ok(windowControlsToggle, "expected bottom window controls edge visibility handle");
+
+  const controlledIds = (windowControlsToggle.getAttribute("aria-controls") ?? "")
+    .split(/\s+/)
+    .filter(Boolean);
+  assert.deepEqual(controlledIds, [
+    "floating-window-controls-primary",
+    "floating-window-controls-add",
+  ]);
+  assert.ok(!controlledIds.includes("floating-window-controls"));
+
+  const primaryGroup = document.getElementById("floating-window-controls-primary");
+  const addGroup = document.getElementById("floating-window-controls-add");
+  assert.ok(primaryGroup, "expected primary window controls group");
+  assert.ok(addGroup, "expected add-window control group");
+
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(primaryGroup.contains(control), `${id} must be inside the primary controlled group`);
+  }
+
+  const addButton = document.getElementById("add-button");
+  assert.ok(addButton, "expected add-button");
+  assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
+
+  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.equal(
+      primaryGroup.contains(control) || addGroup.contains(control),
+      false,
+      `${id} must remain outside collapsible window controls groups`,
+    );
+  }
 });
 
 test("floating window controls mark only window operations as hideable", () => {
@@ -468,7 +558,9 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
 
 test("components.css hides only marked floating window controls", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
+  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+#floating-window-controls-primary/);
+  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+#floating-window-controls-add/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
   assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
   assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
 });
@@ -490,6 +582,10 @@ test("operator-shell persists sidebar and window controls visibility independent
   assert.match(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
   assert.match(operatorShell, /opWindowControls/);
   assert.match(operatorShell, /window-controls-changed/);
+  assert.match(operatorShell, /op-sidebar-edge-toggle/);
+  assert.match(operatorShell, /op-window-controls-edge-toggle/);
+  assert.doesNotMatch(operatorShell, /op-sidebar-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-toggle/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {

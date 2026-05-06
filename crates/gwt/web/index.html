@@ -279,6 +279,12 @@
         gap: 8px;
       }
 
+      .floating-window-controls-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
       .window-list-shell {
         position: relative;
       }
@@ -3060,24 +3066,6 @@
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
             </button>
-            <button
-              class="op-chrome-toggle"
-              id="op-sidebar-toggle"
-              type="button"
-              aria-label="Hide sidebar"
-              aria-pressed="true"
-            >
-              Sidebar
-            </button>
-            <button
-              class="op-chrome-toggle"
-              id="op-window-controls-toggle"
-              type="button"
-              aria-label="Hide window controls"
-              aria-pressed="true"
-            >
-              Windows
-            </button>
             <div
               class="op-theme-toggle"
               id="op-theme-toggle"
@@ -3211,7 +3199,15 @@
               </button>
             </div>
           </div>
-          <div class="floating-actions">
+          <div class="floating-actions" id="floating-window-controls">
+            <button
+              class="op-edge-handle op-edge-handle--windows"
+              id="op-window-controls-edge-toggle"
+              type="button"
+              aria-label="Hide window controls"
+              aria-controls="floating-window-controls-primary floating-window-controls-add"
+              aria-expanded="true"
+            >vv</button>
             <button
               class="arrange-button op-palette-trigger"
               id="op-palette-button"
@@ -3222,26 +3218,38 @@
               <span class="op-palette-trigger__label">⌘K</span>
               <span class="op-palette-trigger__hint">Palette</span>
             </button>
-            <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
-            <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
-            <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
-            <div class="window-list-shell" data-window-control="true">
-              <button
-                class="arrange-button"
-                id="window-list-button"
-                aria-label="List windows"
-                aria-expanded="false"
-                data-window-control="true"
-              >
-                Windows
-              </button>
-              <div class="window-list-panel" id="window-list-panel" hidden></div>
+            <div class="floating-window-controls-group" id="floating-window-controls-primary">
+              <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
+              <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
+              <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
+              <div class="window-list-shell" data-window-control="true">
+                <button
+                  class="arrange-button"
+                  id="window-list-button"
+                  aria-label="List windows"
+                  aria-expanded="false"
+                  data-window-control="true"
+                >
+                  Windows
+                </button>
+                <div class="window-list-panel" id="window-list-panel" hidden></div>
+              </div>
             </div>
             <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-            <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+            <div class="floating-window-controls-group" id="floating-window-controls-add">
+              <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+            </div>
           </div>
+          <button
+            class="op-edge-handle op-edge-handle--sidebar"
+            id="op-sidebar-edge-toggle"
+            type="button"
+            aria-label="Hide sidebar"
+            aria-controls="op-sidebar"
+            aria-expanded="true"
+          ><<</button>
         </div>
         <footer
           class="op-status-strip"
