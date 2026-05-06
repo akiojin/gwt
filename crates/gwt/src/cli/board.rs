@@ -65,8 +65,11 @@ pub(super) fn run<E: CliEnv>(
                     )));
                 }
             };
-            let (author_kind, author) =
-                current_author_from_env().unwrap_or((AuthorKind::User, "user".to_string()));
+            let current_session = current_session_from_env().ok().flatten();
+            let (author_kind, author) = current_session
+                .as_ref()
+                .map(|session| (AuthorKind::Agent, session.display_name.clone()))
+                .unwrap_or((AuthorKind::User, "user".to_string()));
             let mut entry = BoardEntry::new(
                 author_kind,
                 author,
@@ -77,6 +80,17 @@ pub(super) fn run<E: CliEnv>(
                 topics,
                 owners,
             );
+            if let Some(session) = current_session.as_ref() {
+                if !session.branch.trim().is_empty() {
+                    entry = entry.with_origin_branch(session.branch.clone());
+                }
+                if !session.id.trim().is_empty() {
+                    entry = entry.with_origin_session_id(session.id.clone());
+                }
+                if !session.display_name.trim().is_empty() {
+                    entry = entry.with_origin_agent_id(session.display_name.clone());
+                }
+            }
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
             }
@@ -232,11 +246,6 @@ fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
     Ok(mentions)
 }
 
-fn current_author_from_env() -> Option<(AuthorKind, String)> {
-    let session = current_session_from_env().ok().flatten()?;
-    Some((AuthorKind::Agent, session.display_name))
-}
-
 fn current_session_from_env() -> io::Result<Option<Session>> {
     let Some(session_id) = std::env::var_os(GWT_SESSION_ID_ENV) else {
         return Ok(None);
@@ -299,7 +308,10 @@ fn gwt_error_to_spec_ops_error(err: gwt_core::GwtError) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::coordination::BoardEntryKind;
+
+    use crate::cli::test_support::{fake_gh_test_lock, ScopedEnvVar};
 
     use super::*;
 
@@ -464,6 +476,50 @@ mod tests {
             snapshot.board.entries[0].mentions[1].typed_key(),
             "agent:codex"
         );
+    }
+
+    #[test]
+    fn board_family_run_post_attaches_current_session_origin_metadata() {
+        let _env_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post {
+                kind: "status".into(),
+                body: Some("Implement current focus title sync".into()),
+                file: None,
+                parent: None,
+                topics: vec![],
+                owners: vec!["2359".into()],
+                targets: vec![],
+                mentions: vec![],
+            },
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+        assert_eq!(entry.author_kind, AuthorKind::Agent);
+        assert_eq!(entry.author, "Codex");
+        assert_eq!(
+            entry.origin_session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(entry.origin_branch.as_deref(), Some("work/20260506-1706"));
+        assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
     }
 
     #[test]

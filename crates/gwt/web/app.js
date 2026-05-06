@@ -53,6 +53,7 @@
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const worldGrid = document.getElementById("canvas-world-grid");
+      const activeWorkSection = document.getElementById("op-active-work");
       const activeWorkCount = document.getElementById("op-active-work-count");
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
@@ -1305,19 +1306,10 @@
         focusWindowRemotely(agent.window_id, { center: true });
       }
 
-      function renderActiveWorkQuickStart() {
-        activeWorkSummary.appendChild(createNode("div", "op-work-title", "Quick Start"));
-        activeWorkSummary.appendChild(
-          createNode("div", "op-work-status", "No agents are running."),
-        );
-        const actions = createNode("div", "op-work-actions");
-        const quickStart = createNode("button", "op-work-action", "Quick Start");
-        quickStart.type = "button";
-        quickStart.addEventListener("click", () => {
-          send({ kind: "open_start_work" });
-        });
-        actions.appendChild(quickStart);
-        activeWorkSummary.appendChild(actions);
+      function setActiveWorkSectionVisible(visible) {
+        if (activeWorkSection) {
+          activeWorkSection.hidden = !visible;
+        }
       }
 
       function projectionIssueNumber(projection) {
@@ -1393,7 +1385,7 @@
 
         if (!activeWorkProjection) {
           if (activeWorkCount) activeWorkCount.textContent = "0";
-          renderActiveWorkQuickStart();
+          setActiveWorkSectionVisible(false);
           return;
         }
 
@@ -1402,9 +1394,11 @@
         if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
 
         if (agentCount === 0) {
-          renderActiveWorkQuickStart();
+          setActiveWorkSectionVisible(false);
           return;
         }
+
+        setActiveWorkSectionVisible(true);
 
         activeWorkSummary.appendChild(
           createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
@@ -1967,8 +1961,8 @@
           theme: XTERM_THEME_DARK,
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          fontSize: 13,
-          lineHeight: 1.2,
+          fontSize: 14,
+          lineHeight: 1.28,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();

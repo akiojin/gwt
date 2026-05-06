@@ -186,6 +186,7 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         "plan" => super::parse_plan_args(&rest),
         "build" => super::parse_build_args(&rest),
         "daemon" => super::parse_daemon_args(&rest),
+        "workspace" => super::parse_workspace_args(&rest),
         "update" => {
             let mode = if rest.iter().any(|a| a == "--check") {
                 super::UpdateCommand::CheckOnly
