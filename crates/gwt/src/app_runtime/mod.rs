@@ -1141,6 +1141,7 @@ impl AppRuntime {
                 topics,
                 owners,
                 targets,
+                mentions,
             } => self.post_board_entry_events(
                 &client_id,
                 BoardPostRequest {
@@ -1151,6 +1152,7 @@ impl AppRuntime {
                     topics,
                     owners,
                     targets,
+                    mentions,
                 },
             ),
             FrontendEvent::CreateMemoNote {
@@ -4011,7 +4013,10 @@ mod tests {
     };
     use gwt_config::{Profile, Settings};
     use gwt_core::{
-        coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind},
+        coordination::{
+            load_snapshot, post_entry, AuthorKind, BoardEntry, BoardEntryKind, BoardMention,
+            BoardMentionTargetKind,
+        },
         logging::{current_log_file, LogEvent, LogLevel},
         notes::{
             create_note as create_memo_note, load_snapshot as load_memo_snapshot, MemoNoteDraft,
@@ -7175,6 +7180,9 @@ exit 0
                 topics: vec!["coordination".to_string(), "phase-1b".to_string()],
                 owners: vec!["2018".to_string()],
                 targets: Vec::new(),
+                mentions: vec![
+                    BoardMention::new(BoardMentionTargetKind::User, "akiojin").with_label("Akio")
+                ],
             },
         );
 
@@ -7190,6 +7198,8 @@ exit 0
                     && entry.parent_id.as_deref() == Some(parent.id.as_str())
                     && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
                     && entry.related_owners == vec!["2018".to_string()]
+                    && entry.mentions.len() == 1
+                    && entry.mentions[0].typed_key() == "user:akiojin"
                 )
         )));
 
@@ -7198,7 +7208,9 @@ exit 0
             == "I will take the next slice"
             && entry.parent_id.as_deref() == Some(parent.id.as_str())
             && entry.related_topics == vec!["coordination".to_string(), "phase-1b".to_string()]
-            && entry.related_owners == vec!["2018".to_string()]));
+            && entry.related_owners == vec!["2018".to_string()]
+            && entry.mentions.len() == 1
+            && entry.mentions[0].typed_key() == "user:akiojin"));
     }
 
     #[test]
@@ -7254,6 +7266,7 @@ exit 0
                 topics: vec![],
                 owners: vec![],
                 targets: Vec::new(),
+                mentions: Vec::new(),
             },
         );
 
@@ -7301,6 +7314,7 @@ exit 0
                 topics: vec!["start-work".to_string()],
                 owners: vec!["SPEC-2359".to_string()],
                 targets: Vec::new(),
+                mentions: Vec::new(),
             },
         );
 

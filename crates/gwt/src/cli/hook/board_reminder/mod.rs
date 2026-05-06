@@ -81,18 +81,24 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
 }
 
 /// Build the OR-match key list for self-targeted entry detection
-/// (SPEC-1974 FR-041). Includes the session id, the active branch, and
-/// the agent display name when each is non-empty.
+/// (SPEC-1974 FR-041). Includes legacy raw target keys and typed
+/// mention keys so `target_owners` and `mentions` stay backward-compatible.
 fn build_self_match_keys(session: &Session) -> Vec<String> {
-    let mut keys = Vec::with_capacity(3);
+    let mut keys = Vec::with_capacity(6);
     if !session.id.trim().is_empty() {
         keys.push(session.id.clone());
+        keys.push(format!("session:{}", session.id));
     }
     if !session.branch.trim().is_empty() {
         keys.push(session.branch.clone());
+        keys.push(format!("branch:{}", session.branch));
     }
     if !session.display_name.trim().is_empty() {
         keys.push(session.display_name.clone());
+    }
+    let agent_command = session.agent_id.command();
+    if !agent_command.trim().is_empty() {
+        keys.push(format!("agent:{agent_command}"));
     }
     keys
 }
@@ -238,6 +244,18 @@ mod tests {
         assert!(keys.iter().any(|k| k == &session.id), "session id missing");
         assert!(keys.iter().any(|k| k == "feature/me"), "branch missing");
         assert!(keys.iter().any(|k| k == "Codex"), "display name missing");
+        assert!(
+            keys.iter().any(|k| k == &format!("session:{}", session.id)),
+            "typed session mention key missing"
+        );
+        assert!(
+            keys.iter().any(|k| k == "branch:feature/me"),
+            "typed branch mention key missing"
+        );
+        assert!(
+            keys.iter().any(|k| k == "agent:codex"),
+            "typed agent mention key missing"
+        );
     }
 
     #[test]
@@ -246,9 +264,12 @@ mod tests {
         let mut session = Session::new(dir.path(), "", AgentId::Codex);
         session.display_name = String::new();
         let keys = build_self_match_keys(&session);
-        // Only the session id (always non-empty after Session::new) survives.
-        assert_eq!(keys.len(), 1);
+        // Raw and typed session id survive; typed agent identity survives even
+        // when optional branch/display fields are empty.
+        assert_eq!(keys.len(), 3);
         assert_eq!(keys[0], session.id);
+        assert_eq!(keys[1], format!("session:{}", session.id));
+        assert_eq!(keys[2], "agent:codex");
     }
 
     #[test]

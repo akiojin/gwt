@@ -84,6 +84,89 @@ impl BoardEntryKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardMentionTargetKind {
+    User,
+    Agent,
+    Session,
+    Branch,
+}
+
+impl std::str::FromStr for BoardMentionTargetKind {
+    type Err = GwtError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "user" => Ok(Self::User),
+            "agent" => Ok(Self::Agent),
+            "session" => Ok(Self::Session),
+            "branch" => Ok(Self::Branch),
+            other => Err(GwtError::Other(format!(
+                "unknown board mention target kind: {other}"
+            ))),
+        }
+    }
+}
+
+impl BoardMentionTargetKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Session => "session",
+            Self::Branch => "branch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardMention {
+    pub target_kind: BoardMentionTargetKind,
+    pub target: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl BoardMention {
+    pub fn new(target_kind: BoardMentionTargetKind, target: impl Into<String>) -> Self {
+        Self {
+            target_kind,
+            target: target.into(),
+            label: None,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn typed_key(&self) -> String {
+        format!("{}:{}", self.target_kind.as_str(), self.target)
+    }
+}
+
+impl std::str::FromStr for BoardMention {
+    type Err = GwtError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let trimmed = value.trim();
+        let Some((kind, target)) = trimmed.split_once(':') else {
+            return Err(GwtError::Other(format!(
+                "board mention must use <kind>:<target>: {trimmed}"
+            )));
+        };
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(GwtError::Other(format!(
+                "board mention target is empty: {trimmed}"
+            )));
+        }
+        Ok(Self::new(kind.trim().parse()?, target))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardEntry {
     pub id: String,
     pub author_kind: AuthorKind,
@@ -108,6 +191,8 @@ pub struct BoardEntry {
     pub origin_agent_id: Option<String>,
     #[serde(default)]
     pub target_owners: Vec<String>,
+    #[serde(default)]
+    pub mentions: Vec<BoardMention>,
 }
 
 impl BoardEntry {
@@ -133,6 +218,16 @@ impl BoardEntry {
 
     pub fn with_target_owner(mut self, value: impl Into<String>) -> Self {
         self.target_owners.push(value.into());
+        self
+    }
+
+    pub fn with_mentions(mut self, values: Vec<BoardMention>) -> Self {
+        self.mentions = values;
+        self
+    }
+
+    pub fn with_mention(mut self, value: BoardMention) -> Self {
+        self.mentions.push(value);
         self
     }
 
@@ -164,6 +259,7 @@ impl BoardEntry {
             origin_session_id: None,
             origin_agent_id: None,
             target_owners: Vec::new(),
+            mentions: Vec::new(),
         }
     }
 }
@@ -1273,6 +1369,59 @@ mod tests {
         assert!(!coordination_dir(dir.path())
             .join("cards.latest.json")
             .exists());
+    }
+
+    #[test]
+    fn board_entry_mentions_default_empty_and_legacy_compatible() {
+        let legacy = serde_json::json!({
+            "id": "entry-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-05-07T00:00:00Z",
+            "updated_at": "2026-05-07T00:00:00Z"
+        });
+
+        let entry: BoardEntry = serde_json::from_value(legacy).unwrap();
+
+        assert!(entry.mentions.is_empty());
+    }
+
+    #[test]
+    fn board_entry_round_trips_typed_mentions() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Question,
+            "Can you confirm this?",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_mention(BoardMention::new(BoardMentionTargetKind::User, "akiojin").with_label("Akio"))
+        .with_mention(BoardMention::new(BoardMentionTargetKind::Agent, "codex"));
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(encoded["mentions"][0]["target_kind"], "user");
+        assert_eq!(encoded["mentions"][0]["target"], "akiojin");
+        assert_eq!(encoded["mentions"][0]["label"], "Akio");
+        assert_eq!(encoded["mentions"][1]["target_kind"], "agent");
+        assert_eq!(encoded["mentions"][1]["target"], "codex");
+
+        let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.mentions, entry.mentions);
+    }
+
+    #[test]
+    fn board_mention_parses_typed_reference() {
+        let mention = BoardMention::from_str("session:sess-a3f2").unwrap();
+
+        assert_eq!(mention.target_kind, BoardMentionTargetKind::Session);
+        assert_eq!(mention.target, "sess-a3f2");
+        assert_eq!(mention.typed_key(), "session:sess-a3f2");
     }
 
     #[test]

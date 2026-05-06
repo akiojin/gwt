@@ -1365,6 +1365,14 @@
           const state = ensureBoardState(windowId);
           state.focusEntryId = entryId;
           state.pendingFocusScroll = true;
+          state.audienceFilter = "all";
+          if (
+            !state.entries.some((entry) => entry.id === entryId) &&
+            state.hasMoreBefore &&
+            !state.loadingOlder
+          ) {
+            requestOlderBoardEntries(windowId);
+          }
           renderBoard(windowId);
         }
         focusOrSpawnPreset("board");
@@ -2304,6 +2312,9 @@
             newEntriesAvailable: false,
             focusEntryId: null,
             pendingFocusScroll: false,
+            audienceFilter: "all",
+            forYouUnread: 0,
+            lastNotifiedMentionEntryId: null,
           });
         }
         return boardStateMap.get(windowId);
@@ -3677,6 +3688,7 @@
           renderBoard(windowId);
           return;
         }
+        const mentions = mentionsForBoardSubmit(state);
         state.loading = true;
         state.submitting = true;
         state.error = "";
@@ -3694,6 +3706,7 @@
           parent_id: parentId,
           topics: [],
           owners: [],
+          mentions,
         });
         renderBoard(windowId);
       }
@@ -3725,6 +3738,98 @@
           return leftKey.localeCompare(rightKey)
             || String(left.id || "").localeCompare(String(right.id || ""));
         });
+      }
+
+      function boardMentionKind(mention) {
+        return String(mention?.target_kind || mention?.targetKind || "").toLowerCase();
+      }
+
+      function boardMentionLabel(mention) {
+        const label = String(mention?.label || "").trim();
+        if (label) return label;
+        const target = String(mention?.target || "").trim();
+        if (!target) return "Unknown";
+        return target;
+      }
+
+      function boardEntryMentionsUser(entry) {
+        return (entry.mentions || []).some((mention) => boardMentionKind(mention) === "user");
+      }
+
+      function boardEntryAudienceLabels(entry) {
+        const mentions = entry.mentions || [];
+        if (mentions.length > 0) {
+          return mentions.map((mention) => {
+            const kind = boardMentionKind(mention);
+            const label = boardMentionLabel(mention);
+            if (kind === "user") return "For you";
+            if (kind === "agent") return `To: ${label}`;
+            if (kind === "session") return `Session: ${label}`;
+            if (kind === "branch") return `Branch: ${label}`;
+            return `To: ${label}`;
+          });
+        }
+        const targets = entry.target_owners || [];
+        if (targets.length > 0) {
+          return targets.map((target) => `To: ${target}`);
+        }
+        return ["Broadcast"];
+      }
+
+      function boardEntryPreview(entry) {
+        const body = String(entry?.body || "").replace(/\s+/g, " ").trim();
+        if (!body) return "Empty entry";
+        return body.length > 96 ? `${body.slice(0, 96)}...` : body;
+      }
+
+      function findBoardEntry(state, entryId) {
+        return (state.entries || []).find((entry) => entry.id === entryId) || null;
+      }
+
+      function mentionForReplyParent(parentEntry) {
+        if (!parentEntry) return null;
+        const authorKind = String(parentEntry.author_kind || "").toLowerCase();
+        if (authorKind === "user") {
+          return { target_kind: "user", target: "you", label: parentEntry.author || "You" };
+        }
+        if (authorKind === "agent") {
+          const target = parentEntry.origin_agent_id || parentEntry.author;
+          if (target) {
+            return { target_kind: "agent", target, label: parentEntry.author || target };
+          }
+        }
+        return null;
+      }
+
+      function mentionsForBoardSubmit(state) {
+        const parent = findBoardEntry(state, state.replyParentId);
+        const mention = mentionForReplyParent(parent);
+        return mention ? [mention] : [];
+      }
+
+      function showBoardMentionNotification(entry, windowId) {
+        if (!entry?.id) return;
+        let toast = document.getElementById("board-mention-toast");
+        if (!toast) {
+          toast = document.createElement("button");
+          toast.id = "board-mention-toast";
+          toast.className = "board-mention-toast";
+          toast.type = "button";
+          document.body.appendChild(toast);
+        }
+        toast.textContent = `Board reply for you - ${boardEntryPreview(entry)}`;
+        toast.onclick = () => {
+          const state = ensureBoardState(windowId);
+          state.audienceFilter = "all";
+          state.forYouUnread = 0;
+          focusBoardEntry(entry.id);
+          toast.remove();
+        };
+        setTimeout(() => {
+          if (document.getElementById("board-mention-toast") === toast) {
+            toast.remove();
+          }
+        }, 8000);
       }
 
       function handleBoardHookEvent(event) {
@@ -3764,6 +3869,7 @@
         const status = body.querySelector(".board-status");
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
+        const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
         if (!status || !timeline || !composer) {
           return;
         }
@@ -3789,6 +3895,15 @@
           status.classList.add("error");
         } else if (state.loading) {
           status.classList.add("info");
+        }
+        if (forYouFilter) {
+          forYouFilter.setAttribute(
+            "aria-pressed",
+            state.audienceFilter === "for_you" ? "true" : "false",
+          );
+          forYouFilter.classList.toggle("active", state.audienceFilter === "for_you");
+          forYouFilter.textContent =
+            state.forYouUnread > 0 ? `For you (${state.forYouUnread})` : "For you";
         }
 
         // The actual scroll viewport is `.board-timeline-scroll`, the
@@ -3823,6 +3938,10 @@
           });
         }
 
+        const visibleEntries = state.audienceFilter === "for_you"
+          ? state.entries.filter(boardEntryMentionsUser)
+          : state.entries;
+
         timeline.innerHTML = "";
         if (state.hasMoreBefore) {
           const loadOlder = createNode(
@@ -3835,13 +3954,19 @@
           loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
           timeline.appendChild(loadOlder);
         }
-        if (!state.loading && state.entries.length === 0) {
+        if (!state.loading && visibleEntries.length === 0) {
           timeline.appendChild(
-            createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
+            createNode(
+              "div",
+              "board-empty workspace-empty-state",
+              state.audienceFilter === "for_you"
+                ? "No posts addressed to you."
+                : "No coordination entries yet.",
+            ),
           );
         }
         let focusTarget = null;
-        for (const entry of state.entries) {
+        for (const entry of visibleEntries) {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
           if (authorKind === "user") {
@@ -3862,6 +3987,10 @@
             card.tabIndex = -1;
             focusTarget = card;
           }
+          if (boardEntryMentionsUser(entry)) {
+            card.classList.add("for-you");
+            card.setAttribute("aria-label", "Board post addressed to you");
+          }
 
           const meta = createNode("div", "board-message-meta");
           if (entry.agent_color) {
@@ -3874,8 +4003,39 @@
               )}`,
             ),
           );
+          for (const label of boardEntryAudienceLabels(entry)) {
+            const badge = createNode("span", "board-audience-badge", label);
+            if (label === "For you") {
+              badge.classList.add("for-you");
+            }
+            meta.appendChild(badge);
+          }
           card.appendChild(meta);
+          if (entry.parent_id) {
+            const parent = findBoardEntry(state, entry.parent_id);
+            const quote = createNode(
+              "button",
+              "board-reply-quote",
+              parent
+                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                : "Reply to earlier Board entry",
+            );
+            quote.type = "button";
+            quote.addEventListener("click", () => focusBoardEntry(entry.parent_id));
+            card.appendChild(quote);
+          }
           card.appendChild(createNode("div", "board-message-body", entry.body));
+          const messageActions = createNode("div", "board-message-actions");
+          const replyButton = createNode("button", "board-reply-button", "Reply");
+          replyButton.type = "button";
+          replyButton.addEventListener("click", () => {
+            state.replyParentId = entry.id;
+            renderBoard(windowId);
+            const input = body.querySelector(".board-textarea");
+            input?.focus();
+          });
+          messageActions.appendChild(replyButton);
+          card.appendChild(messageActions);
           timeline.appendChild(card);
         }
 
@@ -3901,6 +4061,32 @@
         }
 
         composer.innerHTML = "";
+        if (state.replyParentId) {
+          const parent = findBoardEntry(state, state.replyParentId);
+          const banner = createNode("div", "board-reply-banner");
+          banner.appendChild(
+            createNode(
+              "span",
+              "board-reply-banner-text",
+              parent
+                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                : "Replying to earlier Board entry",
+            ),
+          );
+          const jump = createNode("button", "text-button", "Jump to original");
+          jump.type = "button";
+          jump.addEventListener("click", () => focusBoardEntry(state.replyParentId));
+          const cancel = createNode("button", "icon-button", "×");
+          cancel.type = "button";
+          cancel.setAttribute("aria-label", "Cancel reply");
+          cancel.addEventListener("click", () => {
+            state.replyParentId = null;
+            renderBoard(windowId);
+          });
+          banner.appendChild(jump);
+          banner.appendChild(cancel);
+          composer.appendChild(banner);
+        }
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
         const bodyInput = document.createElement("textarea");
@@ -6085,6 +6271,7 @@
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -6109,6 +6296,17 @@
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
               state.error = "";
               frontendUnits.boardSurface.requestBoard(windowData.id);
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-for-you']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter = state.audienceFilter === "for_you" ? "all" : "for_you";
+              if (state.audienceFilter === "for_you") {
+                state.forYouUnread = 0;
+              }
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
@@ -7076,6 +7274,12 @@
             const addedEntry = incomingEntries.some(
               (entry) => Boolean(entry.id) && !existingEntryIds.has(entry.id),
             );
+            const addressedEntry = incomingEntries.find(
+              (entry) =>
+                Boolean(entry.id) &&
+                !existingEntryIds.has(entry.id) &&
+                boardEntryMentionsUser(entry),
+            );
             const pendingSubmit = state.pendingSubmit;
             const completedSubmit = Boolean(pendingSubmit)
               && incomingEntries.some((entry) => {
@@ -7108,6 +7312,14 @@
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
+            if (
+              addressedEntry &&
+              addressedEntry.id !== state.lastNotifiedMentionEntryId
+            ) {
+              state.forYouUnread += 1;
+              state.lastNotifiedMentionEntryId = addressedEntry.id;
+              showBoardMentionNotification(addressedEntry, event.id);
+            }
             state.loading = false;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
@@ -7126,6 +7338,13 @@
             state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
+            if (
+              state.focusEntryId &&
+              !state.entries.some((entry) => entry.id === state.focusEntryId) &&
+              state.hasMoreBefore
+            ) {
+              frontendUnits.boardSurface.requestOlderBoardEntries(event.id);
+            }
             break;
           }
           case "log_entries": {

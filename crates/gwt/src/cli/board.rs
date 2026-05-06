@@ -2,7 +2,7 @@ use std::io;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
-    coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry},
+    coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry, BoardMention},
     paths::gwt_sessions_dir,
 };
 use gwt_github::SpecOpsError;
@@ -54,6 +54,7 @@ pub(super) fn run<E: CliEnv>(
             topics,
             owners,
             targets,
+            mentions,
         } => {
             let body = match (body, file) {
                 (Some(body), None) => body,
@@ -92,6 +93,10 @@ pub(super) fn run<E: CliEnv>(
             }
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
+            }
+            let mentions = parse_mentions(&mentions).map_err(gwt_error_to_spec_ops_error)?;
+            if !mentions.is_empty() {
+                entry = entry.with_mentions(mentions);
             }
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
@@ -151,6 +156,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut topics = Vec::new();
     let mut owners = Vec::new();
     let mut targets = Vec::new();
+    let mut mentions = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -204,6 +210,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                 }
                 targets.push(args[i].clone());
             }
+            "--mention" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--mention"));
+                }
+                mentions.push(args[i].clone());
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -217,7 +230,20 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         topics,
         owners,
         targets,
+        mentions,
     })
+}
+
+fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
+    let mut mentions = Vec::new();
+    for value in values {
+        let mention = value.parse::<BoardMention>()?;
+        if mentions.iter().any(|existing| existing == &mention) {
+            continue;
+        }
+        mentions.push(mention);
+    }
+    Ok(mentions)
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {
@@ -321,6 +347,7 @@ mod tests {
                 topics: vec!["coordination".into()],
                 owners: vec![],
                 targets: vec![],
+                mentions: vec![],
             }
         );
     }
@@ -349,6 +376,37 @@ mod tests {
                 topics: vec![],
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/foo".into()],
+                mentions: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_collects_typed_mentions() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("question"),
+            s("--body"),
+            s("Can you confirm this?"),
+            s("--mention"),
+            s("user:akiojin"),
+            s("--mention"),
+            s("agent:codex"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post {
+                kind: "question".into(),
+                body: Some("Can you confirm this?".into()),
+                file: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec!["user:akiojin".into(), "agent:codex".into()],
             }
         );
     }
@@ -369,6 +427,7 @@ mod tests {
                 topics: vec![],
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/x".into()],
+                mentions: vec![],
             },
             &mut out,
         )
@@ -380,6 +439,42 @@ mod tests {
         assert_eq!(
             snapshot.board.entries[0].target_owners,
             vec!["sess-a3f2".to_string(), "feature/x".to_string()]
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_persists_typed_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post {
+                kind: "question".into(),
+                body: Some("Can you confirm this?".into()),
+                file: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+            },
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].mentions.len(), 2);
+        assert_eq!(
+            snapshot.board.entries[0].mentions[0].typed_key(),
+            "user:akiojin"
+        );
+        assert_eq!(
+            snapshot.board.entries[0].mentions[1].typed_key(),
+            "agent:codex"
         );
     }
 
@@ -408,6 +503,7 @@ mod tests {
                 topics: vec![],
                 owners: vec!["2359".into()],
                 targets: vec![],
+                mentions: vec![],
             },
             &mut out,
         )
@@ -448,6 +544,7 @@ mod tests {
                 topics: vec!["coordination".into()],
                 owners: vec!["1974".into()],
                 targets: vec![],
+                mentions: vec![],
             },
             &mut out,
         )
