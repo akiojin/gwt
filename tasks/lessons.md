@@ -1,5 +1,36 @@
 # Lessons Learned
 
+## 2026-05-07 — Window interaction features need behavior tests, not only source-string contracts
+
+### 事象
+
+SPEC-2008 Window Tabs で backend / protocol / persistence と grouped tab
+strip は実装済みだったが、ungrouped window から tab group を作る初回
+入口がなく、ユーザーは実際にはタブ化できなかった。既存 frontend test
+は `dock_window_tab` などの文字列存在を見ていたため、titlebar drag が
+有効な drop target を解決できるか、body/canvas drop を dock 扱いしな
+いかを検出できなかった。
+
+### 原因
+
+DOM 生成や event 名の存在を source-string contract で固定しても、pointer
+座標、target hit-test、z-index、hidden tab の除外といった interaction
+behavior は保証されない。さらに embedded frontend の asset route は
+`/assets/xterm/...` や font route を Rust server が提供するため、単純な
+static file server を Playwright smoke の代替にすると 404 や boot 差分
+が混ざる。
+
+### 再発防止策
+
+1. Pointer / DnD / keyboard interaction を追加するときは、可能な限り
+   hit-test や state transition を小さな純粋関数に切り出し、`node --test`
+   で座標・負例・優先順位まで固定する。
+2. Source-string contract は配線漏れ検出に限定し、操作可能性の唯一の
+   根拠にしない。
+3. GUI smoke で embedded frontend を検証する場合は `cargo run -p gwt --bin gwt`
+   が出す `gwt browser URL` を使う。static web root 配信は embedded route
+   と同等ではない。
+
 ## 2026-05-04 — Audit-driven a11y coverage finds gaps that audit-by-checklist misses
 
 ### 事象

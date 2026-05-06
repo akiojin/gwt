@@ -4,6 +4,10 @@
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import {
+        TITLEBAR_DOCK_HIT_HEIGHT,
+        findTitlebarDockTarget,
+      } from "/window-docking.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -519,6 +523,53 @@
           width,
           height,
         };
+      }
+
+      function pointerWorldPoint(event) {
+        const bounds = visibleBounds();
+        const canvasRect = canvas.getBoundingClientRect();
+        return {
+          x: bounds.x + (event.clientX - canvasRect.left) / viewport.zoom,
+          y: bounds.y + (event.clientY - canvasRect.top) / viewport.zoom,
+        };
+      }
+
+      function titlebarDockTargetAt(event, sourceId) {
+        const point = pointerWorldPoint(event);
+        return findTitlebarDockTarget(
+          activeWorkspace().windows || [],
+          point,
+          sourceId,
+          TITLEBAR_DOCK_HIT_HEIGHT,
+        );
+      }
+
+      function clearTitlebarDockPreview() {
+        for (const element of windowMap.values()) {
+          element.classList.remove("dock-target");
+        }
+      }
+
+      function updateTitlebarDockPreview(event) {
+        if (!dragState || !dragState.moved || !dragState.allowMove) {
+          clearTitlebarDockPreview();
+          if (dragState) {
+            dragState.dockTargetId = null;
+          }
+          return null;
+        }
+        const targetId = titlebarDockTargetAt(event, dragState.id);
+        if (dragState.dockTargetId === targetId) {
+          return targetId;
+        }
+        if (dragState.dockTargetId) {
+          windowMap.get(dragState.dockTargetId)?.classList.remove("dock-target");
+        }
+        if (targetId) {
+          windowMap.get(targetId)?.classList.add("dock-target");
+        }
+        dragState.dockTargetId = targetId;
+        return targetId;
       }
 
       function sendOpenProjectDialog() {
@@ -6671,6 +6722,7 @@
               top: parseNumber(element.style.top),
               moved: false,
               allowMove: !currentWindow?.maximized,
+              dockTargetId: null,
             };
             titlebar.setPointerCapture(event.pointerId);
           });
@@ -7676,6 +7728,7 @@
           }
           element.style.left = `${dragState.left + deltaX}px`;
           element.style.top = `${dragState.top + deltaY}px`;
+          updateTitlebarDockPreview(event);
           return;
         }
 
@@ -7708,13 +7761,26 @@
 
         if (dragState && dragState.pointerId === event.pointerId) {
           if (dragState.moved) {
-            const runtime = terminalMap.get(dragState.id);
-            sendGeometry(
-              dragState.id,
-              runtime?.terminal.cols || 80,
-              runtime?.terminal.rows || 24,
-            );
+            dragState.dockTargetId = dragState.allowMove
+              ? titlebarDockTargetAt(event, dragState.id)
+              : null;
+            clearTitlebarDockPreview();
+            if (dragState.dockTargetId) {
+              send({
+                kind: "dock_window_tab",
+                id: dragState.id,
+                target_id: dragState.dockTargetId,
+              });
+            } else {
+              const runtime = terminalMap.get(dragState.id);
+              sendGeometry(
+                dragState.id,
+                runtime?.terminal.cols || 80,
+                runtime?.terminal.rows || 24,
+              );
+            }
           } else {
+            clearTitlebarDockPreview();
             handleTitlebarClick(dragState.id);
           }
           dragState = null;
@@ -7729,6 +7795,13 @@
             runtime?.terminal.rows || 24,
           );
           resizeState = null;
+        }
+      });
+
+      window.addEventListener("pointercancel", (event) => {
+        if (dragState && dragState.pointerId === event.pointerId) {
+          clearTitlebarDockPreview();
+          dragState = null;
         }
       });
 
