@@ -254,6 +254,30 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
+test("Project Bar exposes persistent chrome visibility toggles", () => {
+  const sidebarToggle = document.getElementById("op-sidebar-toggle");
+  const windowControlsToggle = document.getElementById("op-window-controls-toggle");
+  assert.ok(sidebarToggle, "expected Project Bar sidebar visibility toggle");
+  assert.ok(windowControlsToggle, "expected Project Bar window controls visibility toggle");
+  assert.equal(sidebarToggle.getAttribute("aria-pressed"), "true");
+  assert.equal(windowControlsToggle.getAttribute("aria-pressed"), "true");
+  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /sidebar/i);
+  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /window controls/i);
+});
+
+test("floating window controls mark only window operations as hideable", () => {
+  for (const id of ["tile-button", "stack-button", "window-list-button", "add-button"]) {
+    const button = document.getElementById(id);
+    assert.ok(button, `expected ${id}`);
+    assert.equal(button.dataset.windowControl, "true", `${id} should be hidden by the window controls toggle`);
+  }
+  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const button = document.getElementById(id);
+    assert.ok(button, `expected ${id}`);
+    assert.notEqual(button.dataset.windowControl, "true", `${id} should remain visible when window controls are hidden`);
+  }
+});
+
 test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The pseudo-element content lives only in CSS, not in the DOM, so we
@@ -296,14 +320,30 @@ test("operator-shell wires sidebar collapse hotkey and Mission Briefing early di
   );
   assert.match(
     operatorShell,
-    /opSidebar\s*===\s*"collapsed"/,
-    "expected collapsed state toggle on documentElement.dataset.opSidebar",
+    /toggleSidebar/,
+    "expected Cmd+backslash to route through the persistent sidebar visibility controller",
   );
+  assert.match(operatorShell, /root\.dataset\.opSidebar\s*=\s*"collapsed"/);
   assert.match(
     operatorShell,
     /earlyDismiss/,
     "expected Mission Briefing earlyDismiss helper",
   );
+});
+
+test("components.css hides only marked floating window controls", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
+});
+
+test("operator-shell persists sidebar and window controls visibility independently", () => {
+  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
+  assert.match(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
+  assert.match(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
+  assert.match(operatorShell, /opWindowControls/);
+  assert.match(operatorShell, /window-controls-changed/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
