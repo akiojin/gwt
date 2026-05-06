@@ -6695,7 +6695,13 @@
           delete element.dataset.agentColor;
         }
         const wasMinimized = element.classList.contains("minimized");
-        const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized;
+        const previousWidth = parseFloat(element.style.width || "0");
+        const previousHeight = parseFloat(element.style.height || "0");
+        const dimensionsChanged =
+          previousWidth !== windowData.geometry.width ||
+          previousHeight !== windowData.geometry.height;
+        const shouldPersistTerminalGeometry =
+          (wasMinimized && !windowData.minimized) || dimensionsChanged;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
