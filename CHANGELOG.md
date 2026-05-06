@@ -1,6 +1,20 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.20.0] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Sync canvas grid with viewport
+
+### Features
+
+- Support workspace home without default worktree
+
+### Miscellaneous Tasks
+
+- Merge develop into workspace home work
+
 ## [9.19.2] - 2026-05-06
 
 ### Bug Fixes
