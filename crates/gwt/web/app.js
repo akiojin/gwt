@@ -1909,6 +1909,15 @@
             emptyMessage: "",
             baseEmptyMessage: "",
             refreshEnabled: true,
+            // SPEC-2017 — Kanban state. hideDone hydrates from
+            // localStorage so the user's preference survives reloads;
+            // dndSnapshot stores the pre-drop column index to enable
+            // optimistic-UI rollback when phase write-back fails;
+            // pendingPhaseUpdates tracks in-flight requests so cards
+            // render a spinner until the server confirms the move.
+            hideDone: readKanbanHideDonePreference(),
+            dndSnapshot: null,
+            pendingPhaseUpdates: new Map(),
           });
         }
         const state = knowledgeBridgeStateMap.get(windowId);
@@ -1916,7 +1925,35 @@
         if (!state.listScope) {
           state.listScope = "open";
         }
+        if (state.hideDone === undefined) {
+          state.hideDone = readKanbanHideDonePreference();
+        }
+        if (!state.pendingPhaseUpdates) {
+          state.pendingPhaseUpdates = new Map();
+        }
         return state;
+      }
+
+      function readKanbanHideDonePreference() {
+        try {
+          if (typeof localStorage === "undefined") return false;
+          return localStorage.getItem("kanban-hide-done") === "1";
+        } catch (_err) {
+          return false;
+        }
+      }
+
+      function writeKanbanHideDonePreference(value) {
+        try {
+          if (typeof localStorage === "undefined") return;
+          if (value) {
+            localStorage.setItem("kanban-hide-done", "1");
+          } else {
+            localStorage.removeItem("kanban-hide-done");
+          }
+        } catch (_err) {
+          // localStorage may be unavailable in private mode; ignore.
+        }
       }
 
       function clearKnowledgeBridgeState(windowId) {
@@ -1930,6 +1967,8 @@
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
+          state.pendingPhaseUpdates?.clear();
+          state.dndSnapshot = null;
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
@@ -4774,6 +4813,103 @@
         renderKnowledgeBridge(windowId);
       }
 
+      function kanbanEmptyMessage(state, phase) {
+        if (state.searching) return "Searching";
+        if (state.loading) return "Loading";
+        if (phase === "backlog") return "No backlog items";
+        return "Empty";
+      }
+
+      function renderKanbanCard(windowId, state, entry) {
+        const card = createNode("button", "kanban-card");
+        card.type = "button";
+        card.dataset.issueNumber = String(entry.number);
+        // Plain (non-spec) Issues cannot be moved through phase columns
+        // because they carry no canonical phase labels. We surface a
+        // (plain) chip and disable HTML5 D&D so the user understands
+        // the constraint at a glance.
+        const isPlain = entry.is_spec === false;
+        card.draggable = !isPlain;
+        if (isPlain) {
+          card.classList.add("kanban-card--plain");
+        }
+        if (state.selectedNumber === entry.number) {
+          card.classList.add("is-selected");
+          // SPEC-2356 — selected card announces aria-current="true" so
+          // screen readers read which Kanban card is currently shown
+          // in the detail pane (parallel to project tabs and the old
+          // knowledge-row pattern).
+          card.setAttribute("aria-current", "true");
+        } else {
+          card.removeAttribute("aria-current");
+        }
+        if (state.pendingPhaseUpdates && state.pendingPhaseUpdates.has(entry.number)) {
+          card.classList.add("is-pending");
+        }
+
+        const head = createNode("div", "kanban-card-head");
+        head.appendChild(
+          createNode("span", "kanban-card-number", `#${entry.number}`),
+        );
+        const stateChip = createNode(
+          "span",
+          `kanban-card-chip kanban-card-chip--state-${entry.state}`,
+          entry.state,
+        );
+        head.appendChild(stateChip);
+        card.appendChild(head);
+
+        card.appendChild(
+          createNode("div", "kanban-card-title", entry.title),
+        );
+
+        const meta = createNode("div", "kanban-card-meta");
+        if (isPlain) {
+          meta.appendChild(
+            createNode("span", "kanban-card-chip kanban-card-chip--plain", "(plain)"),
+          );
+        }
+        if (entry.has_unknown_phase) {
+          meta.appendChild(
+            createNode(
+              "span",
+              "kanban-card-chip kanban-card-chip--warning",
+              "Unknown phase",
+            ),
+          );
+        }
+        if (Number.isFinite(entry.match_score)) {
+          meta.appendChild(
+            createNode(
+              "span",
+              "kanban-card-chip",
+              `${entry.match_score}% match`,
+            ),
+          );
+        }
+        if ((entry.linked_branch_count || 0) > 0) {
+          meta.appendChild(
+            createNode(
+              "span",
+              "kanban-card-chip",
+              `${entry.linked_branch_count} branch${entry.linked_branch_count === 1 ? "" : "es"}`,
+            ),
+          );
+        }
+        if (meta.childElementCount > 0) {
+          card.appendChild(meta);
+        }
+
+        card.addEventListener("click", () => {
+          if (state.selectedNumber === entry.number && !state.detailLoading) {
+            return;
+          }
+          requestKnowledgeDetail(windowId, state.kind, entry.number);
+          renderKnowledgeBridge(windowId);
+        });
+        return card;
+      }
+
       function renderKnowledgeBridge(windowId) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -4783,13 +4919,14 @@
           windowId,
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
-        const list = element.querySelector(".knowledge-list");
+        const board = element.querySelector(".kanban-board");
         const detailPane = element.querySelector(".knowledge-detail-pane");
         const status = element.querySelector(".knowledge-status");
         const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
         const searchInput = element.querySelector(".knowledge-search");
         const scopeButtons = element.querySelectorAll("[data-knowledge-scope]");
-        if (!list || !detailPane || !status || !refreshButton || !searchInput) {
+        const hideDoneToggle = element.querySelector("[data-action='kanban-hide-done']");
+        if (!board || !detailPane || !status || !refreshButton || !searchInput) {
           return;
         }
 
@@ -4803,6 +4940,10 @@
           button.classList.toggle("active", active);
           button.disabled = state.loading && !active;
         }
+        if (hideDoneToggle) {
+          hideDoneToggle.checked = state.hideDone === true;
+        }
+        board.dataset.hideDone = state.hideDone === true ? "true" : "false";
 
         status.className = "knowledge-status";
         status.textContent = "";
@@ -4820,87 +4961,55 @@
         } else if (state.loading && state.entries.length === 0) {
           status.classList.add("visible", "info");
           status.textContent = "Loading cache-backed data";
-        } else if (state.emptyMessage && state.entries.length === 0) {
+        } else if (state.entries.length === 0 && !state.searching) {
           status.classList.add("visible", "info");
-          status.textContent = state.emptyMessage;
+          status.textContent = state.emptyMessage || "No cached items";
         }
 
-        list.innerHTML = "";
+        // SPEC-2017 — Kanban grouping. Each entry routes to a single
+        // column: closed Issues land in "done" regardless of phase
+        // label so the Done column unifies state="closed" with the
+        // phase/done open Issues; otherwise we trust entry.phase, with
+        // null falling back to "backlog" so plain Issues and unlabeled
+        // SPECs are never lost. Unknown phase labels stay in their
+        // backend-extracted column but flag has_unknown_phase so the
+        // card can warn the user about malformed metadata.
         const visibleEntries = state.query.trim()
           ? state.entries
           : filteredKnowledgeEntries(state);
-        if (visibleEntries.length === 0) {
-          const empty = createNode("div", "knowledge-empty workspace-empty-state");
-          if (state.searching) {
-            empty.textContent = "Searching semantic index";
-          } else if (state.entries.length === 0) {
-            empty.textContent = state.emptyMessage || "No cached items";
-          } else {
-            empty.textContent = "No semantic matches";
+        const columnsByPhase = new Map();
+        for (const column of board.querySelectorAll(".kanban-column[data-phase]")) {
+          const body = column.querySelector("[data-role='body']");
+          if (body) {
+            body.innerHTML = "";
           }
-          list.appendChild(empty);
-        } else {
-          for (const entry of visibleEntries) {
-            const row = createNode("button", "knowledge-row");
-            row.type = "button";
-            if (state.selectedNumber === entry.number) {
-              row.classList.add("selected");
-              // SPEC-2356 — selected knowledge entry gets aria-current
-              // so screen readers announce which row is currently
-              // displayed in the detail pane (parallel to project tabs).
-              row.setAttribute("aria-current", "true");
-            } else {
-              row.removeAttribute("aria-current");
-            }
-            const main = createNode("div", "knowledge-row-main");
-            const titleWrap = createNode("div", "");
-            titleWrap.appendChild(
-              createNode("div", "knowledge-row-number", `#${entry.number}`),
+          columnsByPhase.set(column.dataset.phase, column);
+        }
+        const counts = new Map();
+        for (const entry of visibleEntries) {
+          const phaseKey =
+            entry.state === "closed" ? "done" : entry.phase || "backlog";
+          const column = columnsByPhase.get(phaseKey) || columnsByPhase.get("backlog");
+          if (!column) continue;
+          const body = column.querySelector("[data-role='body']");
+          if (!body) continue;
+          const card = renderKanbanCard(windowId, state, entry);
+          body.appendChild(card);
+          counts.set(phaseKey, (counts.get(phaseKey) || 0) + 1);
+        }
+        for (const [phase, column] of columnsByPhase) {
+          const countLabel = column.querySelector("[data-role='count']");
+          if (countLabel) {
+            countLabel.textContent = String(counts.get(phase) || 0);
+          }
+          const body = column.querySelector("[data-role='body']");
+          if (body && body.childElementCount === 0) {
+            const empty = createNode(
+              "div",
+              "kanban-column-empty",
+              kanbanEmptyMessage(state, phase),
             );
-            titleWrap.appendChild(
-              createNode("div", "knowledge-row-title", entry.title),
-            );
-            main.appendChild(titleWrap);
-            const stateChip = createNode(
-              "span",
-              `knowledge-state-chip ${entry.state}`,
-              entry.state,
-            );
-            main.appendChild(stateChip);
-            row.appendChild(main);
-
-            const meta = createNode("div", "knowledge-row-meta");
-            meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
-            if (Number.isFinite(entry.match_score)) {
-              meta.appendChild(
-                createNode(
-                  "span",
-                  "knowledge-chip knowledge-match-score",
-                  `${entry.match_score}% match`,
-                ),
-              );
-            }
-            if ((entry.linked_branch_count || 0) > 0) {
-              meta.appendChild(
-                createNode(
-                  "span",
-                  "knowledge-chip",
-                  `${entry.linked_branch_count} linked branch${entry.linked_branch_count === 1 ? "" : "es"}`,
-                ),
-              );
-            }
-            for (const label of entry.labels || []) {
-              meta.appendChild(createNode("span", "knowledge-chip", label));
-            }
-            row.appendChild(meta);
-            row.addEventListener("click", () => {
-              if (state.selectedNumber === entry.number && !state.detailLoading) {
-                return;
-              }
-              requestKnowledgeDetail(windowId, state.kind, entry.number);
-              renderKnowledgeBridge(windowId);
-            });
-            list.appendChild(row);
+            body.appendChild(empty);
           }
         }
 
@@ -5677,9 +5786,17 @@
 
         if (surface === "knowledge") {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
+          // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
+          // Backlog / Draft / Planning / Implementation / Review / Done.
+          // The columns are hard-coded so the source carries every
+          // canonical data-phase literal (asserted by kanban-structure
+          // tests) and so the renderer can simply locate columns via
+          // .kanban-column[data-phase="..."]. The right-hand detail
+          // pane survives Phase 1 unchanged; SPEC-2017 Phase 3 replaces
+          // it with the SPEC-2356 Drawer pattern.
           body.innerHTML = `
-            <div class="knowledge-root">
-              <div class="workspace-toolbar is-stacked">
+            <div class="knowledge-root kanban-root">
+              <div class="workspace-toolbar kanban-toolbar is-stacked">
                 <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
                   ${
@@ -5691,15 +5808,67 @@
                       : ""
                   }
                   <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
+                  <label class="kanban-hide-done-toggle" for="kanban-hide-done-${windowData.id}">
+                    <input
+                      type="checkbox"
+                      id="kanban-hide-done-${windowData.id}"
+                      class="kanban-hide-done"
+                      data-action="kanban-hide-done"
+                    />
+                    <span>Hide done</span>
+                  </label>
                 </div>
                 <div class="workspace-toolbar-actions">
                   <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached knowledge">↻</button>
                 </div>
               </div>
               <div class="knowledge-status"></div>
-              <div class="knowledge-split workspace-split">
-                <div class="knowledge-list-pane">
-                  <div class="knowledge-list"></div>
+              <div class="knowledge-split workspace-split kanban-shell">
+                <div class="knowledge-list-pane kanban-list-pane">
+                  <div class="kanban-board" role="list" aria-label="Knowledge Bridge Kanban Board">
+                    <div class="kanban-column" data-phase="backlog" aria-label="Backlog column">
+                      <div class="kanban-column-header">
+                        <span class="kanban-column-name">Backlog</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column" data-phase="draft" aria-label="Draft column">
+                      <div class="kanban-column-header">
+                        <span class="kanban-column-name">Draft</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column" data-phase="planning" aria-label="Planning column">
+                      <div class="kanban-column-header">
+                        <span class="kanban-column-name">Planning</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column" data-phase="implementation" aria-label="Implementation column">
+                      <div class="kanban-column-header">
+                        <span class="kanban-column-name">Implementation</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column" data-phase="review" aria-label="Review column">
+                      <div class="kanban-column-header">
+                        <span class="kanban-column-name">Review</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column" data-phase="done" aria-label="Done column">
+                      <div class="kanban-column-header">
+                        <span class="kanban-column-name">Done</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                  </div>
                 </div>
                 <div class="knowledge-detail-pane"></div>
               </div>
@@ -5744,6 +5913,24 @@
                 windowData.id,
               );
             });
+          // SPEC-2017 — Hide done toggle persists via localStorage so
+          // reloads honour the user preference. The hidden state hides
+          // the Done column entirely (CSS-driven via data-hide-done on
+          // the board) and updates state in place without reloading.
+          const hideDoneToggle = body.querySelector("[data-action='kanban-hide-done']");
+          if (hideDoneToggle) {
+            hideDoneToggle.checked = state.hideDone === true;
+            hideDoneToggle.addEventListener("change", (event) => {
+              event.stopPropagation();
+              state.hideDone = hideDoneToggle.checked === true;
+              frontendUnits.knowledgeSettingsSurface.persistKanbanHideDone(
+                state.hideDone,
+              );
+              frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(
+                windowData.id,
+              );
+            });
+          }
           if (!state.detail && !state.loading) {
             frontendUnits.knowledgeSettingsSurface.requestKnowledgeBridge(
               windowData.id,
@@ -6292,6 +6479,7 @@
         renderSettingsAgentList,
         setSettingsStatus,
         completeAddFromPreset,
+        persistKanbanHideDone: writeKanbanHideDonePreference,
       });
 
       const frontendUnits = Object.freeze({

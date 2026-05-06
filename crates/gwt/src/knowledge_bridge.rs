@@ -16,6 +16,67 @@ use crate::issue_cache::{
 const SPEC_LABEL: &str = "gwt-spec";
 const KNOWLEDGE_SEARCH_RESULT_LIMIT: usize = 50;
 
+/// Canonical SPEC phase labels in lifecycle order.
+///
+/// `phase/<value>` labels matching one of these values map to the canonical
+/// phase. Any other `phase/*` label is reported as unknown/legacy via
+/// [`ExtractedPhase::has_unknown_phase`] and not promoted to a column.
+pub const KNOWLEDGE_PHASE_LABELS: &[&str] =
+    &["draft", "planning", "implementation", "review", "done"];
+
+/// Result of [`extract_phase`]: the canonical phase (if any), whether any
+/// unknown `phase/*` label is present, and whether the entry is a SPEC
+/// (`gwt-spec` label).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExtractedPhase {
+    pub phase: Option<String>,
+    pub has_unknown_phase: bool,
+    pub is_spec: bool,
+}
+
+/// Extract the canonical phase from an Issue's labels, plus auxiliary flags
+/// used by Kanban grouping.
+///
+/// - `phase` is `Some("<canonical>")` when exactly one of `phase/draft`,
+///   `phase/planning`, `phase/implementation`, `phase/review`, `phase/done`
+///   appears. The first canonical match wins; further canonical or legacy
+///   `phase/*` labels also raise `has_unknown_phase` so the UI can surface a
+///   warning for malformed input.
+/// - `has_unknown_phase` is `true` when any `phase/*` label outside the
+///   canonical set is present, OR when more than one canonical phase label
+///   is present.
+/// - `is_spec` mirrors the `gwt-spec` label.
+pub fn extract_phase(labels: &[String]) -> ExtractedPhase {
+    let mut phase: Option<String> = None;
+    let mut has_unknown_phase = false;
+    let mut is_spec = false;
+
+    for label in labels {
+        if label == SPEC_LABEL {
+            is_spec = true;
+            continue;
+        }
+        let Some(rest) = label.strip_prefix("phase/") else {
+            continue;
+        };
+        if KNOWLEDGE_PHASE_LABELS.contains(&rest) {
+            if phase.is_none() {
+                phase = Some(rest.to_string());
+            } else {
+                has_unknown_phase = true;
+            }
+        } else {
+            has_unknown_phase = true;
+        }
+    }
+
+    ExtractedPhase {
+        phase,
+        has_unknown_phase,
+        is_spec,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeKind {
@@ -40,6 +101,20 @@ pub struct KnowledgeListItem {
     pub labels: Vec<String>,
     pub linked_branch_count: usize,
     pub match_score: Option<u8>,
+    /// Canonical phase value (`"draft"`, `"planning"`, `"implementation"`,
+    /// `"review"`, `"done"`) when a `phase/*` label is present, otherwise
+    /// `None`. Used by the Kanban view for column grouping.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// `true` when an unknown / legacy `phase/*` label is present (or when
+    /// more than one canonical phase label is set). The UI shows a warning
+    /// indicator for these entries.
+    #[serde(default)]
+    pub has_unknown_phase: bool,
+    /// `true` when the entry carries the `gwt-spec` label. Plain Issues are
+    /// always grouped into the Backlog column and are not draggable.
+    #[serde(default)]
+    pub is_spec: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +576,7 @@ fn issue_list_item(
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
+    let phase_info = extract_phase(&entry.snapshot.labels);
     KnowledgeListItem {
         number: entry.snapshot.number.0,
         title: entry.snapshot.title.clone(),
@@ -512,6 +588,9 @@ fn issue_list_item(
             .map(Vec::len)
             .unwrap_or_default(),
         match_score,
+        phase: phase_info.phase,
+        has_unknown_phase: phase_info.has_unknown_phase,
+        is_spec: phase_info.is_spec,
     }
 }
 
@@ -520,6 +599,7 @@ fn spec_list_item(
     linked_branches: &HashMap<u64, Vec<String>>,
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
+    let phase_info = extract_phase(&entry.snapshot.labels);
     KnowledgeListItem {
         number: entry.snapshot.number.0,
         title: entry.snapshot.title.clone(),
@@ -531,6 +611,9 @@ fn spec_list_item(
             .map(Vec::len)
             .unwrap_or_default(),
         match_score,
+        phase: phase_info.phase,
+        has_unknown_phase: phase_info.has_unknown_phase,
+        is_spec: phase_info.is_spec,
     }
 }
 
@@ -1349,5 +1432,63 @@ Extra context.
         assert_eq!(view.entries[0].number, 22);
         assert_eq!(view.entries[0].match_score, Some(100));
         assert_eq!(view.selected_number, Some(22));
+    }
+
+    #[test]
+    fn extract_phase_recognizes_canonical_phase_labels() {
+        let cases = [
+            ("phase/draft", "draft"),
+            ("phase/planning", "planning"),
+            ("phase/implementation", "implementation"),
+            ("phase/review", "review"),
+            ("phase/done", "done"),
+        ];
+        for (label, expected) in cases {
+            let extracted = extract_phase(&[label.to_string()]);
+            assert_eq!(
+                extracted.phase.as_deref(),
+                Some(expected),
+                "label={}",
+                label
+            );
+            assert!(!extracted.has_unknown_phase, "label={}", label);
+            assert!(!extracted.is_spec, "label={}", label);
+        }
+    }
+
+    #[test]
+    fn extract_phase_returns_none_when_no_phase_labels() {
+        let extracted = extract_phase(&["bug".to_string(), "documentation".to_string()]);
+        assert!(extracted.phase.is_none());
+        assert!(!extracted.has_unknown_phase);
+        assert!(!extracted.is_spec);
+    }
+
+    #[test]
+    fn extract_phase_flags_unknown_phase_label_as_warning() {
+        let extracted = extract_phase(&["phase/legacy".to_string()]);
+        assert!(extracted.phase.is_none());
+        assert!(extracted.has_unknown_phase);
+        assert!(!extracted.is_spec);
+    }
+
+    #[test]
+    fn extract_phase_detects_gwt_spec_label() {
+        let extracted = extract_phase(&["gwt-spec".to_string(), "phase/planning".to_string()]);
+        assert_eq!(extracted.phase.as_deref(), Some("planning"));
+        assert!(!extracted.has_unknown_phase);
+        assert!(extracted.is_spec);
+    }
+
+    #[test]
+    fn extract_phase_keeps_first_canonical_when_multiple_phase_labels() {
+        let extracted = extract_phase(&[
+            "phase/draft".to_string(),
+            "phase/implementation".to_string(),
+        ]);
+        // first canonical wins; second triggers unknown flag because two
+        // canonical labels at once is malformed input
+        assert_eq!(extracted.phase.as_deref(), Some("draft"));
+        assert!(extracted.has_unknown_phase);
     }
 }
