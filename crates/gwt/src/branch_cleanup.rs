@@ -70,6 +70,14 @@ pub fn cleanup_selected_branches(
                     ),
                 };
             }
+            if !is_gwt_workspace_branch(&target_branch) {
+                return BranchCleanupResultEntry {
+                    branch: entry.name.clone(),
+                    execution_branch: Some(target_branch),
+                    status: BranchCleanupResultStatus::Failed,
+                    message: blocked_reason_message(BranchCleanupBlockedReason::NonWorkspaceBranch),
+                };
+            }
 
             match manager.cleanup_branch(&target_branch) {
                 Ok(()) => {
@@ -122,6 +130,10 @@ pub fn cleanup_selected_branches(
         .collect()
 }
 
+fn is_gwt_workspace_branch(branch_name: &str) -> bool {
+    branch_name.starts_with("work/")
+}
+
 fn blocked_reason_message(reason: BranchCleanupBlockedReason) -> String {
     match reason {
         BranchCleanupBlockedReason::ProtectedBranch => {
@@ -135,6 +147,9 @@ fn blocked_reason_message(reason: BranchCleanupBlockedReason) -> String {
         }
         BranchCleanupBlockedReason::RemoteTrackingWithoutLocal => {
             "Cannot clean up a remote-tracking branch without a local counterpart".to_string()
+        }
+        BranchCleanupBlockedReason::NonWorkspaceBranch => {
+            "Only gwt-managed workspaces can be cleaned up".to_string()
         }
         BranchCleanupBlockedReason::Unknown => "Cannot clean up this branch".to_string(),
     }
@@ -215,6 +230,10 @@ mod tests {
             "Cannot clean up a remote-tracking branch without a local counterpart"
         );
         assert_eq!(
+            blocked_reason_message(BranchCleanupBlockedReason::NonWorkspaceBranch),
+            "Only gwt-managed workspaces can be cleaned up"
+        );
+        assert_eq!(
             blocked_reason_message(BranchCleanupBlockedReason::Unknown),
             "Cannot clean up this branch"
         );
@@ -239,5 +258,28 @@ mod tests {
         assert_eq!(results[0].execution_branch.as_deref(), Some("feature/demo"));
         assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
         assert_eq!(results[0].message, "Cannot clean up a protected branch");
+    }
+
+    #[test]
+    fn cleanup_selected_branches_preserves_non_workspace_branch() {
+        let repo = tempdir().expect("tempdir");
+        let mut entry = sample_entry("feature/demo");
+        entry.cleanup.availability = BranchCleanupAvailability::Safe;
+        entry.cleanup.execution_branch = Some("feature/demo".to_string());
+
+        let results = cleanup_selected_branches(
+            repo.path(),
+            &[entry],
+            &[String::from("feature/demo")],
+            false,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].execution_branch.as_deref(), Some("feature/demo"));
+        assert_eq!(results[0].status, BranchCleanupResultStatus::Failed);
+        assert_eq!(
+            results[0].message,
+            "Only gwt-managed workspaces can be cleaned up"
+        );
     }
 }

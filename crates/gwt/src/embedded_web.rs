@@ -1328,6 +1328,23 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_active_work_hides_internal_git_identity_from_user_summary() {
+        let html = frontend_bundle_source();
+        let active_work_block = html
+            .split("function renderActiveWorkOverview()")
+            .nth(1)
+            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
+            .expect("active work render block");
+
+        assert!(
+            !active_work_block.contains("appendMeta(meta, activeWorkProjection.branch)")
+                && !active_work_block.contains("compactPathLabel(agent.worktree_path)")
+                && !active_work_block.contains("appendMeta(agentMeta, agent.branch)"),
+            "Active Work must not expose branch names or worktree paths in the normal user summary",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_messages_put_user_on_right_and_agent_on_left() {
         let html = frontend_bundle_source();
         fn css_block<'a>(html: &'a str, selector: &str) -> &'a str {

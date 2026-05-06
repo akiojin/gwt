@@ -7,7 +7,7 @@ use std::{
 
 pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 3] =
     ["origin/develop", "origin/main", "origin/master"];
-
+pub const START_WORK_REMOTE_HEAD_REF: &str = "origin/HEAD";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartWorkError {
     MissingBaseBranch,
@@ -18,7 +18,7 @@ impl std::fmt::Display for StartWorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingBaseBranch => f.write_str(
-                "No default base branch found (origin/develop, origin/main, origin/master)",
+                "No default base branch found (origin/HEAD, origin/develop, origin/main, origin/master)",
             ),
             Self::ReservationIo(error) => {
                 write!(f, "Failed to reserve Start Work branch name: {error}")
@@ -32,6 +32,9 @@ impl std::error::Error for StartWorkError {}
 pub fn resolve_start_work_base_branch_with(
     mut remote_branch_exists: impl FnMut(&str) -> bool,
 ) -> Result<String, StartWorkError> {
+    if remote_branch_exists(START_WORK_REMOTE_HEAD_REF) {
+        return Ok(START_WORK_REMOTE_HEAD_REF.to_string());
+    }
     START_WORK_BASE_BRANCH_CANDIDATES
         .iter()
         .copied()
@@ -41,8 +44,10 @@ pub fn resolve_start_work_base_branch_with(
 }
 
 pub fn resolve_start_work_base_branch(repo_path: &Path) -> Result<String, StartWorkError> {
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
     resolve_start_work_base_branch_with(|candidate| {
-        git_ref_exists(repo_path, &format!("refs/remotes/{candidate}"))
+        git_ref_exists(&git_root, &remote_tracking_ref(candidate))
     })
 }
 
@@ -139,6 +144,14 @@ fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+fn remote_tracking_ref(remote_ref: &str) -> String {
+    if remote_ref.starts_with("refs/remotes/") {
+        remote_ref.to_string()
+    } else {
+        format!("refs/remotes/{remote_ref}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -146,12 +159,27 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        reserve_start_work_branch_name_with, reserve_start_work_branch_name_with_reservations,
-        resolve_start_work_base_branch_with, StartWorkError,
+        remote_tracking_ref, reserve_start_work_branch_name_with,
+        reserve_start_work_branch_name_with_reservations, resolve_start_work_base_branch_with,
+        StartWorkError,
     };
 
     #[test]
-    fn start_work_base_branch_uses_develop_main_master_order() {
+    fn start_work_base_branch_prefers_remote_head_before_named_fallbacks() {
+        let existing = HashSet::from([
+            "origin/HEAD".to_string(),
+            "origin/develop".to_string(),
+            "origin/main".to_string(),
+        ]);
+        let resolved =
+            resolve_start_work_base_branch_with(|candidate| existing.contains(candidate))
+                .expect("resolve base branch");
+
+        assert_eq!(resolved, "origin/HEAD");
+    }
+
+    #[test]
+    fn start_work_base_branch_falls_back_to_develop_main_master_order() {
         let existing = HashSet::from(["origin/main".to_string(), "origin/master".to_string()]);
         let resolved =
             resolve_start_work_base_branch_with(|candidate| existing.contains(candidate))
@@ -165,6 +193,18 @@ mod tests {
         let error = resolve_start_work_base_branch_with(|_| false).expect_err("missing base");
 
         assert_eq!(error, StartWorkError::MissingBaseBranch);
+    }
+
+    #[test]
+    fn start_work_remote_tracking_ref_does_not_double_origin_prefix() {
+        assert_eq!(
+            remote_tracking_ref("origin/HEAD"),
+            "refs/remotes/origin/HEAD"
+        );
+        assert_eq!(
+            remote_tracking_ref("origin/develop"),
+            "refs/remotes/origin/develop"
+        );
     }
 
     #[test]

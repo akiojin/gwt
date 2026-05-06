@@ -24,6 +24,7 @@ pub enum BranchCleanupBlockedReason {
     CurrentHead,
     ActiveSession,
     RemoteTrackingWithoutLocal,
+    NonWorkspaceBranch,
     Unknown,
 }
 
@@ -83,7 +84,8 @@ pub fn list_branch_entries(repo_path: &Path) -> std::io::Result<Vec<BranchListEn
 }
 
 pub fn list_branch_inventory(repo_path: &Path) -> std::io::Result<Vec<BranchListEntry>> {
-    let branches = gwt_git::branch::list_branches(repo_path)
+    let git_root = git_command_root(repo_path)?;
+    let branches = gwt_git::branch::list_branches(&git_root)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(adapt_branch_inventory(branches))
 }
@@ -93,9 +95,10 @@ pub fn hydrate_branch_entries_with_active_sessions(
     entries: Vec<BranchListEntry>,
     active_session_branches: &HashSet<String>,
 ) -> std::io::Result<Vec<BranchListEntry>> {
-    let gone_branches = gwt_git::list_gone_branches(repo_path)
+    let git_root = git_command_root(repo_path)?;
+    let gone_branches = gwt_git::list_gone_branches(&git_root)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let cleanup_targets = build_cleanup_targets(repo_path, &entries, &gone_branches)?;
+    let cleanup_targets = build_cleanup_targets(&git_root, &entries, &gone_branches)?;
     Ok(hydrate_branch_entries(
         entries,
         active_session_branches,
@@ -133,6 +136,11 @@ fn build_cleanup_targets(
         cleanup_targets.insert(branch.name.clone(), target);
     }
     Ok(cleanup_targets)
+}
+
+fn git_command_root(repo_path: &Path) -> std::io::Result<std::path::PathBuf> {
+    gwt_git::worktree::main_worktree_root(repo_path)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry> {
@@ -243,7 +251,6 @@ fn build_cleanup_info(
             BranchCleanupBlockedReason::ActiveSession,
         );
     }
-
     let merge_target = cleanup_targets
         .get(execution_branch_name)
         .cloned()

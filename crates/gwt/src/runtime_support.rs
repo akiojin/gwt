@@ -174,7 +174,7 @@ pub fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> 
         ),
         gwt_git::RepoType::Bare {
             develop_worktree: None,
-        } => (canonical.clone(), gwt::ProjectKind::Bare, false),
+        } => (canonical.clone(), gwt::ProjectKind::Git, false),
         gwt_git::RepoType::NonRepo => (canonical.clone(), gwt::ProjectKind::NonRepo, false),
     };
 
@@ -710,6 +710,11 @@ mod tests {
             .expect("git init bare");
 
         let target = super::resolve_project_target(tmp.path()).expect("bare target");
+        assert_eq!(
+            target.kind,
+            gwt::ProjectKind::Git,
+            "Bare repo containers without a default worktree must open as Git projects with Workspace Home"
+        );
         assert!(
             !target.needs_migration,
             "Bare layout must not request migration"
