@@ -5,8 +5,11 @@
 
 import { createThemeManager, createBrowserEnv } from "/theme-manager.js";
 import { createHotkeyManager } from "/hotkey.js";
+import { wireThemeToggle as wireSegmentedThemeToggle } from "/theme-toggle.js";
 
 const SIDEBAR_KEY = "gwt:ui:sidebar";
+const SIDEBAR_COLLAPSED_KEY = "gwt:ui:sidebar-collapsed";
+const WINDOW_CONTROLS_KEY = "gwt:ui:window-controls";
 const BRIEFING_KEY = "gwt:ui:briefing";
 
 export function initOperatorShell(deps = {}) {
@@ -17,46 +20,86 @@ export function initOperatorShell(deps = {}) {
   const hotkey = deps.hotkey ?? createHotkeyManager();
 
   wireThemeToggle({ doc, themeManager });
+  const chromeVisibility = wireChromeVisibility({ doc, win });
   wireSidebarLayers({ doc, win });
   wireStatusStripClock({ doc });
   wireMissionBriefing({ doc, win });
   wireHotkeyOverlay({ doc, hotkey });
   const palette = wireCommandPalette({ doc, hotkey });
-  wireGlobalHotkeys({ doc, hotkey, palette });
+  wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility });
 
   return { themeManager, hotkey, palette };
 }
 
 // ------------------------------------------------------------
-// Theme toggle (Project Bar)
+// Chrome visibility — persist full sidebar and window controls
 // ------------------------------------------------------------
 
-function wireThemeToggle({ doc, themeManager }) {
-  const btn = doc.getElementById("op-theme-toggle");
-  const value = doc.getElementById("op-theme-toggle-value");
-  if (!btn || !value) return;
+function wireChromeVisibility({ doc, win }) {
+  const sidebarButton = doc.getElementById("op-sidebar-toggle");
+  const windowControlsButton = doc.getElementById("op-window-controls-toggle");
+  const root = doc.documentElement;
 
-  const renderLabel = () => {
-    const pref = themeManager.getPreference();
-    const eff = themeManager.getEffective();
-    btn.dataset.themeState = pref;
-    value.textContent = pref === "auto"
-      ? `AUTO ${eff === "dark" ? "▮" : "▯"}`
-      : pref.toUpperCase();
-    // SPEC-2356 — expose the live preference to assistive tech.
-    btn.setAttribute(
+  let sidebarVisible = readBoolean(win, SIDEBAR_COLLAPSED_KEY, false) !== true;
+  let windowControlsVisible = readString(win, WINDOW_CONTROLS_KEY, "visible") !== "hidden";
+
+  const renderSidebar = () => {
+    if (sidebarVisible) delete root.dataset.opSidebar;
+    else root.dataset.opSidebar = "collapsed";
+    if (!sidebarButton) return;
+    sidebarButton.setAttribute("aria-pressed", sidebarVisible ? "true" : "false");
+    sidebarButton.setAttribute("aria-label", sidebarVisible ? "Hide sidebar" : "Show sidebar");
+  };
+
+  const renderWindowControls = () => {
+    if (windowControlsVisible) delete root.dataset.opWindowControls;
+    else root.dataset.opWindowControls = "hidden";
+    if (!windowControlsButton) return;
+    windowControlsButton.setAttribute("aria-pressed", windowControlsVisible ? "true" : "false");
+    windowControlsButton.setAttribute(
       "aria-label",
-      `Theme: ${pref === "auto" ? `auto (currently ${eff})` : pref}. Click to cycle.`,
+      windowControlsVisible ? "Hide window controls" : "Show window controls",
     );
   };
 
-  renderLabel();
-  themeManager.subscribe(renderLabel);
+  const setSidebarVisible = (next) => {
+    sidebarVisible = Boolean(next);
+    writeString(win, SIDEBAR_COLLAPSED_KEY, sidebarVisible ? "false" : "true");
+    renderSidebar();
+    doc.dispatchEvent(new CustomEvent("op:chrome-visibility-changed", {
+      detail: { sidebarVisible, windowControlsVisible },
+    }));
+  };
 
-  btn.addEventListener("click", () => {
-    const cycle = { auto: "dark", dark: "light", light: "auto" };
-    themeManager.setTheme(cycle[themeManager.getPreference()] ?? "auto");
-  });
+  const setWindowControlsVisible = (next) => {
+    windowControlsVisible = Boolean(next);
+    writeString(win, WINDOW_CONTROLS_KEY, windowControlsVisible ? "visible" : "hidden");
+    renderWindowControls();
+    doc.dispatchEvent(new CustomEvent("op:window-controls-changed", {
+      detail: { visible: windowControlsVisible },
+    }));
+  };
+
+  sidebarButton?.addEventListener("click", () => setSidebarVisible(!sidebarVisible));
+  windowControlsButton?.addEventListener("click", () => setWindowControlsVisible(!windowControlsVisible));
+  renderSidebar();
+  renderWindowControls();
+
+  return {
+    toggleSidebar: () => setSidebarVisible(!sidebarVisible),
+    toggleWindowControls: () => setWindowControlsVisible(!windowControlsVisible),
+  };
+}
+
+// ------------------------------------------------------------
+// Theme toggle (Project Bar) — segmented radiogroup
+// ------------------------------------------------------------
+// SPEC-2356 FR-024: AUTO / DARK / LIGHT are exposed as a parallel radiogroup
+// so AUTO is reachable from any state in a single click. Implementation lives
+// in `/theme-toggle.js` so it is unit-testable under Node.
+
+function wireThemeToggle(opts) {
+  wireSegmentedThemeToggle(opts);
 }
 
 // ------------------------------------------------------------
@@ -494,7 +537,7 @@ function createActionRegistry(doc) {
 // Global hotkeys (delegate to operator command bus)
 // ------------------------------------------------------------
 
-function wireGlobalHotkeys({ doc, hotkey, palette }) {
+function wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility }) {
   const send = (id) => () => {
     doc.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
     return true;
@@ -506,10 +549,7 @@ function wireGlobalHotkeys({ doc, hotkey, palette }) {
   // SPEC-2356 — Cmd+\ collapses/expands the Sidebar Layers, freeing canvas
   // real estate when the user wants more room for floating windows.
   hotkey.register("cmd+\\", () => {
-    const root = doc.documentElement;
-    const next = root.dataset.opSidebar === "collapsed" ? "" : "collapsed";
-    if (next) root.dataset.opSidebar = next;
-    else delete root.dataset.opSidebar;
+    chromeVisibility?.toggleSidebar?.();
     return true;
   });
 
@@ -539,6 +579,26 @@ function readJson(win, key, fallback) {
 
 function writeJson(win, key, value) {
   try { win.localStorage.setItem(key, JSON.stringify(value)); } catch { /* no-op */ }
+}
+
+function readString(win, key, fallback) {
+  try {
+    const raw = win.localStorage.getItem(key);
+    return typeof raw === "string" && raw.length > 0 ? raw : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeString(win, key, value) {
+  try { win.localStorage.setItem(key, value); } catch { /* no-op */ }
+}
+
+function readBoolean(win, key, fallback) {
+  const raw = readString(win, key, fallback ? "true" : "false");
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return fallback;
 }
 
 function matchReduced(doc) {

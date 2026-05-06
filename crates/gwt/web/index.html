@@ -442,8 +442,8 @@
       }
 
       .workspace-window.surface-terminal {
-        /* Terminal panes follow the canvas colour so the xterm theme
-           adapter renders flush against the chrome. */
+        /* Terminal chrome follows the app theme; xterm content stays on the
+           Dark Operator palette for terminal readability. */
         background: var(--color-canvas);
       }
 
@@ -507,6 +507,26 @@
         font-size: var(--type-sm);
         font-weight: 600;
         white-space: nowrap;
+      }
+
+      .window-role-badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 20px;
+        padding: 2px 7px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-pill);
+        background: color-mix(in oklab, var(--color-surface-elevated) 86%, transparent);
+        color: var(--color-text-muted);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .window-list-role {
+        min-height: 18px;
+        padding-inline: 6px;
       }
 
       .status-chip {
@@ -596,6 +616,74 @@
         right: 0;
         top: 38px;
         bottom: 0;
+      }
+
+      .workspace-window.tabbed .window-body {
+        top: 70px;
+      }
+
+      .window-tab-strip {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        height: 32px;
+        padding: 0 10px;
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-surface);
+        overflow-x: auto;
+      }
+
+      .workspace-window.tabbed .window-tab-strip {
+        display: flex;
+      }
+
+      .window-tab-item {
+        display: inline-flex;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .window-tab {
+        display: inline-flex;
+        align-items: center;
+        max-width: 180px;
+        height: 24px;
+        padding: 0 9px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        font-size: var(--type-xs);
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        overflow: hidden;
+        cursor: grab;
+      }
+
+      .window-tab-close {
+        width: 22px;
+        height: 24px;
+        margin-left: -2px;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-text-muted);
+        cursor: pointer;
+      }
+
+      .window-tab.active {
+        border-color: var(--color-border-strong);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+      }
+
+      .window-tab:active {
+        cursor: grabbing;
+      }
+
+      .window-tab-close:hover {
+        background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
+        color: var(--color-text);
       }
 
       .workspace-window.minimized .window-body,
@@ -2909,6 +2997,44 @@
       .update-toast:hover {
         background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
       }
+
+      /* SPEC-2041 FR-036: persistent "Update available" button. Stays at
+         the bottom-right after the initial 8s toast fades, until the user
+         applies the update or restarts. The textContent is rewritten when
+         a strictly newer `latest` arrives via the 5min poll loop. */
+      .update-button {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        padding: 10px 16px;
+        background: var(--color-surface-elevated);
+        border: 1px solid var(--color-focus-ring);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-2);
+        backdrop-filter: blur(8px);
+        font-family: var(--font-mono);
+        font-size: var(--type-sm);
+        letter-spacing: var(--tracking-mono);
+        color: var(--color-state-active);
+        cursor: pointer;
+        z-index: 9998;
+        transition: bottom 0.3s, background 0.2s;
+      }
+
+      .update-button.has-toast {
+        /* While the toast is still visible (initial 8s window), float the
+           button above it so the two surfaces do not overlap. */
+        bottom: 76px;
+      }
+
+      .update-button:hover {
+        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
+      }
+
+      .update-button:focus-visible {
+        outline: 2px solid var(--color-focus-ring);
+        outline-offset: 2px;
+      }
     </style>
   </head>
   <body>
@@ -2923,15 +3049,61 @@
               Open Project
             </button>
             <button
+              class="op-chrome-toggle"
+              id="op-sidebar-toggle"
+              type="button"
+              aria-label="Hide sidebar"
+              aria-pressed="true"
+            >
+              Sidebar
+            </button>
+            <button
+              class="op-chrome-toggle"
+              id="op-window-controls-toggle"
+              type="button"
+              aria-label="Hide window controls"
+              aria-pressed="true"
+            >
+              Windows
+            </button>
+            <div
               class="op-theme-toggle"
               id="op-theme-toggle"
-              type="button"
-              aria-label="Toggle theme"
-              data-theme-state="auto"
+              role="radiogroup"
+              aria-label="Theme: auto"
             >
-              <span class="op-theme-toggle__label">Theme</span>
-              <span id="op-theme-toggle-value">AUTO</span>
-            </button>
+              <button
+                class="op-theme-toggle__option"
+                type="button"
+                role="radio"
+                data-theme-value="auto"
+                aria-checked="true"
+                tabindex="0"
+              >
+                <span class="op-theme-toggle__label">AUTO</span>
+                <span
+                  class="op-theme-toggle__indicator"
+                  id="op-theme-effective-indicator"
+                  aria-hidden="true"
+                >▯</span>
+              </button>
+              <button
+                class="op-theme-toggle__option"
+                type="button"
+                role="radio"
+                data-theme-value="dark"
+                aria-checked="false"
+                tabindex="-1"
+              >DARK</button>
+              <button
+                class="op-theme-toggle__option"
+                type="button"
+                role="radio"
+                data-theme-value="light"
+                aria-checked="false"
+                tabindex="-1"
+              >LIGHT</button>
+            </div>
           </div>
         </div>
         <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar layers">
@@ -2955,16 +3127,6 @@
               <span class="op-layer__label">Hooks</span>
               <span class="op-layer__count" id="op-layer-count-hooks">0</span>
             </button>
-          </div>
-          <div class="op-sidebar__section op-active-work" id="op-active-work" aria-live="polite">
-            <h3 class="op-sidebar__heading">
-              <span>Active Work</span>
-              <span class="op-sidebar__count" id="op-active-work-count">0</span>
-            </h3>
-            <div class="op-work-summary" id="op-active-work-summary">
-              <div class="op-work-empty">No active work</div>
-            </div>
-            <div class="op-agent-list" id="op-active-work-agents"></div>
           </div>
           <div class="op-sidebar__section">
             <h3 class="op-sidebar__heading">
@@ -2990,6 +3152,16 @@
               <span class="op-layer__label">Logs</span>
               <kbd class="op-layer__kbd">⌘ L</kbd>
             </button>
+          </div>
+          <div class="op-sidebar__section op-active-work" id="op-active-work" aria-live="polite">
+            <h3 class="op-sidebar__heading">
+              <span>Active Work</span>
+              <span class="op-sidebar__count" id="op-active-work-count">0</span>
+            </h3>
+            <div class="op-work-summary" id="op-active-work-summary">
+              <div class="op-work-empty">No active work</div>
+            </div>
+            <div class="op-agent-list" id="op-active-work-agents"></div>
           </div>
         </aside>
         <div class="canvas-area">
@@ -3037,14 +3209,16 @@
               <span class="op-palette-trigger__label">⌘K</span>
               <span class="op-palette-trigger__hint">Palette</span>
             </button>
-            <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
-            <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
-            <div class="window-list-shell">
+            <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
+            <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
+            <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
+            <div class="window-list-shell" data-window-control="true">
               <button
                 class="arrange-button"
                 id="window-list-button"
                 aria-label="List windows"
                 aria-expanded="false"
+                data-window-control="true"
               >
                 Windows
               </button>
@@ -3053,7 +3227,7 @@
             <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-            <button class="add-button" id="add-button" aria-label="Add window">+</button>
+            <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
           </div>
         </div>
         <footer

@@ -67,6 +67,32 @@ impl WorkspaceState {
         true
     }
 
+    pub fn set_purpose_title(&mut self, id: &str, title: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.purpose_title = title.and_then(normalize_title);
+        true
+    }
+
+    pub fn set_dynamic_title(&mut self, id: &str, title: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.dynamic_title = title.and_then(normalize_title);
+        true
+    }
+
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
     }
@@ -90,6 +116,7 @@ impl WorkspaceState {
         match mode {
             ArrangeMode::Tile => self.arrange_tile(bounds, &open_indices),
             ArrangeMode::Stack => self.arrange_stack(bounds, &open_indices),
+            ArrangeMode::Align => self.arrange_align(bounds, &open_indices),
         }
         self.reassign_z_indexes();
         true
@@ -209,8 +236,12 @@ impl WorkspaceState {
             maximized: false,
             pre_maximize_geometry: None,
             persist,
+            purpose_title: None,
+            dynamic_title: None,
             agent_id: None,
             agent_color: None,
+            tab_group_id: None,
+            tab_group_active: false,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -298,8 +329,92 @@ impl WorkspaceState {
 
     pub fn close_window(&mut self, id: &str) -> bool {
         let initial_len = self.persisted.windows.len();
+        let group_id = self
+            .window(id)
+            .and_then(|window| window.tab_group_id.clone());
         self.persisted.windows.retain(|window| window.id != id);
-        self.persisted.windows.len() != initial_len
+        let changed = self.persisted.windows.len() != initial_len;
+        if changed {
+            if let Some(group_id) = group_id {
+                self.normalize_group(&group_id);
+            }
+        }
+        changed
+    }
+
+    pub fn dock_window_tab(&mut self, id: &str, target_id: &str) -> bool {
+        if id == target_id {
+            return false;
+        }
+        if self.window_index(id).is_none() {
+            return false;
+        }
+        let Some(target_index) = self.window_index(target_id) else {
+            return false;
+        };
+        let group_id = self.persisted.windows[target_index]
+            .tab_group_id
+            .clone()
+            .unwrap_or_else(|| format!("group-{}", self.persisted.windows[target_index].id));
+        let group_geometry = self.persisted.windows[target_index].geometry.clone();
+        let next_z_index = self.persisted.next_z_index;
+        self.persisted.next_z_index += 1;
+
+        for window in &mut self.persisted.windows {
+            if window.id == id
+                || window.id == target_id
+                || window.tab_group_id.as_deref() == Some(&group_id)
+            {
+                window.tab_group_id = Some(group_id.clone());
+                window.tab_group_active = window.id == id;
+                window.geometry = group_geometry.clone();
+                window.minimized = false;
+                window.maximized = false;
+                window.pre_maximize_geometry = None;
+                window.z_index = next_z_index;
+            }
+        }
+        true
+    }
+
+    pub fn activate_window_tab(&mut self, id: &str) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
+            return self.focus_window(id, None);
+        };
+        let group_geometry = self.persisted.windows[index].geometry.clone();
+        let next_z_index = self.persisted.next_z_index;
+        self.persisted.next_z_index += 1;
+        for window in &mut self.persisted.windows {
+            if window.tab_group_id.as_deref() == Some(&group_id) {
+                window.tab_group_active = window.id == id;
+                window.geometry = group_geometry.clone();
+                window.z_index = next_z_index;
+            }
+        }
+        true
+    }
+
+    pub fn detach_window_tab(&mut self, id: &str, geometry: WindowGeometry) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
+            self.persisted.windows[index].geometry = geometry;
+            self.bring_to_front(index);
+            return true;
+        };
+        self.persisted.windows[index].tab_group_id = None;
+        self.persisted.windows[index].tab_group_active = false;
+        self.persisted.windows[index].geometry = geometry;
+        self.persisted.windows[index].minimized = false;
+        self.persisted.windows[index].maximized = false;
+        self.persisted.windows[index].pre_maximize_geometry = None;
+        self.bring_to_front(index);
+        self.normalize_group(&group_id);
+        true
     }
 
     fn arrange_tile(&mut self, bounds: WindowGeometry, open_indices: &[usize]) {
@@ -357,6 +472,37 @@ impl WorkspaceState {
         }
     }
 
+    fn arrange_align(&mut self, bounds: WindowGeometry, open_indices: &[usize]) {
+        let count = open_indices.len();
+        let columns = (count as f64).sqrt().ceil() as usize;
+        let rows = count.div_ceil(columns);
+        let cell_width = ((bounds.width
+            - ARRANGE_PADDING * 2.0
+            - ARRANGE_PADDING * (columns.saturating_sub(1)) as f64)
+            / columns as f64)
+            .max(MIN_WINDOW_WIDTH);
+        let cell_height = ((bounds.height
+            - ARRANGE_PADDING * 2.0
+            - ARRANGE_PADDING * (rows.saturating_sub(1)) as f64)
+            / rows as f64)
+            .max(MIN_WINDOW_HEIGHT);
+
+        for (index, window_index) in open_indices.iter().enumerate() {
+            let window = &mut self.persisted.windows[*window_index];
+            let column = index % columns;
+            let row = index / columns;
+            if let Some(geometry) = window.pre_maximize_geometry.take() {
+                window.geometry.width = geometry.width;
+                window.geometry.height = geometry.height;
+            }
+            window.geometry.x =
+                bounds.x + ARRANGE_PADDING + column as f64 * (cell_width + ARRANGE_PADDING);
+            window.geometry.y =
+                bounds.y + ARRANGE_PADDING + row as f64 * (cell_height + ARRANGE_PADDING);
+            window.maximized = false;
+        }
+    }
+
     fn reassign_z_indexes(&mut self) {
         for (index, window) in self.persisted.windows.iter_mut().enumerate() {
             window.z_index = (index as u32) + 1;
@@ -410,6 +556,40 @@ impl WorkspaceState {
             self.persisted.next_z_index += 1;
         }
     }
+
+    fn normalize_group(&mut self, group_id: &str) {
+        let group_indices = self
+            .persisted
+            .windows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (window.tab_group_id.as_deref() == Some(group_id)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if group_indices.len() <= 1 {
+            for index in group_indices {
+                let window = &mut self.persisted.windows[index];
+                window.tab_group_id = None;
+                window.tab_group_active = false;
+            }
+            return;
+        }
+        if group_indices
+            .iter()
+            .any(|index| self.persisted.windows[*index].tab_group_active)
+        {
+            return;
+        }
+        if let Some(index) = group_indices.first() {
+            self.persisted.windows[*index].tab_group_active = true;
+        }
+    }
+}
+
+fn normalize_title(title: String) -> Option<String> {
+    let trimmed = title.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -581,8 +761,12 @@ mod tests {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: false,
+                purpose_title: None,
+                dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
+                tab_group_id: None,
+                tab_group_active: false,
             }],
             next_z_index: 2,
         });
@@ -693,6 +877,71 @@ mod tests {
         assert!(codex.geometry.x < claude.geometry.x + claude.geometry.width);
         assert!(codex.geometry.y < claude.geometry.y + claude.geometry.height);
         assert_eq!(workspace.persisted().next_z_index, 4);
+    }
+
+    #[test]
+    fn align_arrangement_places_windows_on_grid_without_resizing() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+
+        let original = workspace
+            .persisted()
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.id.clone(),
+                    window.geometry.width,
+                    window.geometry.height,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
+
+        for (id, width, height) in original {
+            let window = workspace.window(&id).expect("window");
+            assert_eq!(
+                window.geometry.width, width,
+                "{id} width should be preserved"
+            );
+            assert_eq!(
+                window.geometry.height, height,
+                "{id} height should be preserved"
+            );
+        }
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+
+        assert_eq!(claude.geometry.x, 124.0);
+        assert_eq!(claude.geometry.y, 64.0);
+        assert_eq!(codex.geometry.x, 612.0);
+        assert_eq!(codex.geometry.y, 64.0);
+        assert_eq!(file_tree.geometry.x, 124.0);
+        assert_eq!(file_tree.geometry.y, 432.0);
+    }
+
+    #[test]
+    fn align_arrangement_restores_maximized_window_size_before_positioning() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let original = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        assert!(!claude.maximized);
+        assert_eq!(claude.pre_maximize_geometry, None);
+        assert_eq!(claude.geometry.width, original.width);
+        assert_eq!(claude.geometry.height, original.height);
+        assert_eq!(claude.geometry.x, 612.0);
+        assert_eq!(claude.geometry.y, 64.0);
     }
 
     #[test]
@@ -897,5 +1146,76 @@ mod tests {
         assert_eq!(shell.geometry.y, 64.0);
         assert!(codex.minimized);
         assert_eq!(codex.geometry, minimized_geometry);
+    }
+
+    #[test]
+    fn docking_window_tabs_groups_windows_and_activates_dragged_tab() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let codex_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
+
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        assert!(claude.tab_group_id.is_some());
+        assert_eq!(claude.tab_group_id, codex.tab_group_id);
+        assert!(!claude.tab_group_active);
+        assert!(codex.tab_group_active);
+        assert_eq!(
+            codex.geometry,
+            workspace.window("claude-1").expect("claude").geometry,
+            "docked tab should adopt the host group geometry"
+        );
+        assert_ne!(codex.geometry, codex_geometry);
+    }
+
+    #[test]
+    fn activating_window_tab_switches_active_marker_within_group() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        assert!(workspace.activate_window_tab("claude-1"));
+
+        assert!(
+            workspace
+                .window("claude-1")
+                .expect("claude")
+                .tab_group_active
+        );
+        assert!(!workspace.window("codex-1").expect("codex").tab_group_active);
+    }
+
+    #[test]
+    fn detaching_window_tab_restores_independent_floating_window() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        let detached_geometry = WindowGeometry {
+            x: 240.0,
+            y: 180.0,
+            width: 640.0,
+            height: 360.0,
+        };
+
+        assert!(workspace.detach_window_tab("codex-1", detached_geometry.clone()));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        assert!(claude.tab_group_id.is_none());
+        assert!(!claude.tab_group_active);
+        assert!(codex.tab_group_id.is_none());
+        assert!(!codex.tab_group_active);
+        assert_eq!(codex.geometry, detached_geometry);
+    }
+
+    #[test]
+    fn closing_active_group_tab_promotes_another_tab() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        assert!(workspace.close_window("codex-1"));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        assert!(claude.tab_group_id.is_none());
+        assert!(!claude.tab_group_active);
     }
 }

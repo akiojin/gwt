@@ -133,8 +133,8 @@ body::after {
   font-weight: 500;
 }
 
-/* Theme toggle button (Project Bar trailing) */
-.op-theme-toggle {
+/* Project Bar trailing chrome buttons */
+.op-chrome-toggle {
   appearance: none;
   background: transparent;
   border: 1px solid var(--color-border-strong);
@@ -153,16 +153,76 @@ body::after {
               background var(--motion-fast) var(--motion-curve);
 }
 
-.op-theme-toggle:hover,
-.op-theme-toggle:focus-visible {
+.op-chrome-toggle:hover,
+.op-chrome-toggle:focus-visible {
   outline: none;
   border-color: var(--color-focus-ring);
   color: var(--color-focus-ring);
 }
 
-.op-theme-toggle__label {
-  margin-right: var(--space-2);
+.op-chrome-toggle[aria-pressed="false"] {
   color: var(--color-text-muted);
+  border-color: var(--color-border);
+  background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
+}
+
+/* SPEC-2356 FR-024 — segmented theme toggle (AUTO / DARK / LIGHT). Replaces
+   the prior single-cycle button so AUTO is reachable in one interaction. */
+.op-theme-toggle {
+  display: inline-flex;
+  align-items: stretch;
+  height: 26px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border-strong);
+  background: color-mix(in oklab, var(--color-text-muted) 8%, transparent);
+  gap: 2px;
+}
+
+.op-theme-toggle__option {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  transition: color var(--motion-fast) var(--motion-curve),
+              background var(--motion-fast) var(--motion-curve);
+}
+
+.op-theme-toggle__option:hover {
+  color: var(--color-text);
+}
+
+.op-theme-toggle__option[aria-checked="true"] {
+  background: var(--color-button-bg);
+  color: var(--color-button-fg);
+  font-weight: 700;
+}
+
+.op-theme-toggle__option:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.op-theme-toggle__indicator {
+  font-size: 0.85em;
+  color: var(--color-state-active);
+}
+
+.op-theme-toggle__option[aria-checked="true"] .op-theme-toggle__indicator {
+  /* On the active AUTO chip the foreground is already button-fg; keep the
+     indicator visible by inheriting that high-contrast color. */
+  color: inherit;
 }
 
 /* ============================================================
@@ -1140,6 +1200,11 @@ kbd.op-kbd {
   font-size: var(--type-xs);
   color: var(--color-display-fg);
 }
+:root[data-theme] .window-role-badge {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
 :root[data-theme] .status-chip {
   background: var(--color-surface-elevated);
   color: var(--color-text-muted);
@@ -1338,10 +1403,7 @@ kbd.op-kbd {
   outline-offset: 2px;
 }
 
-:root[data-theme] .op-theme-toggle:focus-visible {
-  /* override the existing `border-color` focus state with the unified
-     ring, but keep the border-color animation so the toggle still
-     reads like an operator chrome button. */
+:root[data-theme] .op-theme-toggle__option:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
@@ -1688,6 +1750,10 @@ kbd.op-kbd {
   display: none;
 }
 
+:root[data-theme][data-op-window-controls="hidden"] .floating-actions [data-window-control="true"] {
+  display: none;
+}
+
 /* SPEC-2356 — smooth Sidebar collapse transition.
    When user toggles ⌘\, the grid template columns animate from
    240px ↔ 0 instead of snapping. reduced-motion env keeps the
@@ -1775,15 +1841,6 @@ kbd.op-kbd {
   :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
     box-shadow: inset 3px 0 0 Highlight;
   }
-}
-
-/* SPEC-2356 — Theme toggle value + label distinct typography.
-   The "AUTO ▮" / "DARK" / "LIGHT" value is mono cyan to match
-   Operator-state semantics; the leading "Theme" label stays muted.
-   This makes the toggle read like a rotary switch indicator. */
-:root[data-theme] #op-theme-toggle-value {
-  color: var(--color-state-active);
-  font-weight: 700;
 }
 
 /* SPEC-2356 — Project Tab active-state subtle accent strip on the bottom
@@ -2143,5 +2200,3 @@ kbd.op-kbd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-
-

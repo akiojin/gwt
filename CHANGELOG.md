@@ -1,6 +1,31 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.19.0] - 2026-05-06
+
+### Bug Fixes
+
+- Keep sidebar quick actions above active work
+
+### Documentation
+
+- **skills:** Require PR update summary reports
+
+### Features
+
+- Add operator chrome visibility toggles
+- ターミナル本文を常時ダーク表示にする
+- **update:** 5分間隔ポーリング + 永続更新ボタンを追加 (SPEC-2041 Phase 13)
+- **gui:** Add window role badges
+- Add dynamic agent window purpose titles
+- **gui:** Add size-preserving align arrange
+- **theme:** Segmented AUTO/DARK/LIGHT toggle replaces cycle button
+- ウィンドウのタブ化とドッキングを追加
+
+### Miscellaneous Tasks
+
+- Origin/developを取り込む
+
 ## [9.18.0] - 2026-05-06
 
 ### Features

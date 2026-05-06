@@ -239,6 +239,7 @@ confirmation modal with three actions:
 - Pan the canvas by dragging the background
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
+- Use `Align` to arrange windows on a grid without changing their size
 - Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
   focused window is recentered
 
@@ -258,7 +259,8 @@ single token system that ships in two flagship themes:
 The active theme follows your OS `prefers-color-scheme`, but the **Theme**
 toggle in the Project Bar lets you cycle `auto → dark → light → auto`. The
 choice is persisted in browser storage and survives restarts. xterm terminal
-panes follow the overall theme automatically. `prefers-reduced-motion: reduce`
+content stays on the Dark Operator palette for readability, while the terminal
+window chrome follows the overall theme. `prefers-reduced-motion: reduce`
 disables the Living Telemetry pulse rim, status strip ticking, and Mission
 Briefing intro reveal so the UI stays usable in motion-sensitive environments.
 `forced-colors: active` (Windows High Contrast / macOS Increase Contrast)

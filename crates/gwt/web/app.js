@@ -10,21 +10,10 @@
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
       const __op = initOperatorShell();
-      const xtermThemeAdapters = new Set();
-      __op.themeManager.subscribe((effective) => {
-        for (const adapter of xtermThemeAdapters) {
-          try { adapter(effective); } catch (e) { console.error("xterm theme adapter threw", e); }
-        }
-      });
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
         palette: __op.palette,
-        registerXtermThemeAdapter: (fn) => {
-          xtermThemeAdapters.add(fn);
-          try { fn(__op.themeManager.getEffective()); } catch (_e) { /* ignore */ }
-          return () => xtermThemeAdapters.delete(fn);
-        },
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
       };
 
@@ -49,6 +38,7 @@
       const addButton = document.getElementById("add-button");
       const tileButton = document.getElementById("tile-button");
       const stackButton = document.getElementById("stack-button");
+      const alignButton = document.getElementById("align-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const activeWorkCount = document.getElementById("op-active-work-count");
@@ -230,6 +220,7 @@
       let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
+      let windowTabDragState = null;
       let panState = null;
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
@@ -479,6 +470,39 @@
         return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
       }
 
+      function windowGroupId(windowData) {
+        return windowData?.tab_group_id || windowData?.id || "";
+      }
+
+      function windowTabsFor(windowData) {
+        const groupId = windowGroupId(windowData);
+        return (activeWorkspace().windows || []).filter(
+          (candidate) => windowGroupId(candidate) === groupId,
+        );
+      }
+
+      function visibleWindowData(windowData) {
+        if (!windowData?.tab_group_id) {
+          return true;
+        }
+        return Boolean(windowData.tab_group_active);
+      }
+
+      function detachGeometryFromPointer(event, windowData) {
+        const bounds = visibleBounds();
+        const width = windowData?.geometry?.width || 720;
+        const height = windowData?.geometry?.height || 420;
+        const canvasRect = canvas.getBoundingClientRect();
+        const worldX = bounds.x + (event.clientX - canvasRect.left) / viewport.zoom;
+        const worldY = bounds.y + (event.clientY - canvasRect.top) / viewport.zoom;
+        return {
+          x: worldX - 32,
+          y: worldY - 19,
+          width,
+          height,
+        };
+      }
+
       function sendOpenProjectDialog() {
         send({ kind: "open_project_dialog" });
       }
@@ -501,6 +525,30 @@
           .split("_")
           .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
           .join(" ");
+      }
+
+      function presetRoleLabel(preset) {
+        const labels = {
+          shell: "Shell",
+          claude: "Claude",
+          codex: "Codex",
+          agent: "Agent",
+          file_tree: "File Tree",
+          branches: "Branches",
+          settings: "Settings",
+          memo: "Memo",
+          profile: "Profile",
+          logs: "Logs",
+          issue: "Issue",
+          spec: "SPEC",
+          board: "Board",
+          pr: "PR",
+        };
+        return labels[preset] || presetLabel(preset);
+      }
+
+      function shouldShowRuntimeStatus(windowData) {
+        return presetSurface(windowData?.preset) === "terminal";
       }
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
@@ -544,6 +592,29 @@
 
       function windowRuntimeLabel(status) {
         return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
+      }
+
+      function windowDisplayTitle(windowData) {
+        const candidates = [
+          windowData?.dynamic_title,
+          windowData?.purpose_title,
+          windowData?.title,
+          windowData?.agent_id,
+        ];
+        for (const value of candidates) {
+          const title = String(value || "").trim();
+          if (title) return title;
+        }
+        return "Window";
+      }
+
+      function escapeHtml(value) {
+        return String(value || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
       }
 
       function runtimeStateForWindow(windowData) {
@@ -595,18 +666,21 @@
           const geometryLabel = windowGeometryLabel(entry);
           const runtimeState = runtimeStateForWindow(entry);
           const runtimeLabel = windowRuntimeLabel(runtimeState);
+          const runtimeChip = shouldShowRuntimeStatus(entry)
+            ? `<span class="status-chip ${runtimeState}">
+                <span class="status-dot"></span>
+                <span class="status-label">${runtimeLabel}</span>
+              </span>`
+            : "";
           row.innerHTML = `
             <div class="window-list-copy">
-              <div class="window-list-title">${entry.title}</div>
+              <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
               <div class="window-list-meta">
-                <span class="window-list-preset">${presetLabel(entry.preset)}</span>
+                <span class="window-role-badge window-list-role">${presetRoleLabel(entry.preset)}</span>
                 <span class="window-list-geometry">${geometryLabel}</span>
               </div>
             </div>
-            <span class="status-chip ${runtimeState}">
-              <span class="status-dot"></span>
-              <span class="status-label">${runtimeLabel}</span>
-            </span>
+            ${runtimeChip}
           `;
           row.addEventListener("click", () => {
             windowListOpen = false;
@@ -1002,10 +1076,11 @@
       }
 
       function topmostWindowId(workspace) {
-        if (!workspace.windows || workspace.windows.length === 0) {
+        const visibleWindows = (workspace.windows || []).filter(visibleWindowData);
+        if (visibleWindows.length === 0) {
           return null;
         }
-        return workspace.windows.reduce((topmost, candidate) => {
+        return visibleWindows.reduce((topmost, candidate) => {
           if (!topmost || candidate.z_index > topmost.z_index) {
             return candidate;
           }
@@ -1384,6 +1459,8 @@
         const chip = element.querySelector(".status-chip");
         const label = element.querySelector(".status-label");
         const overlay = element.querySelector(".terminal-overlay");
+        const runtimeChip = chip;
+        runtimeChip.hidden = !shouldShowRuntimeStatus(windowData);
         chip.classList.remove(
           "starting",
           "running",
@@ -1498,6 +1575,63 @@
           id: windowId,
           bounds: visibleBounds(),
         });
+      }
+
+      function renderWindowTabs(windowData, element) {
+        const strip = element.querySelector(".window-tab-strip");
+        if (!strip) return;
+        const tabs = windowTabsFor(windowData);
+        strip.innerHTML = "";
+        for (const tab of tabs) {
+          const tabItem = document.createElement("div");
+          tabItem.className = "window-tab-item";
+          const tabButton = document.createElement("button");
+          tabButton.type = "button";
+          tabButton.className = "window-tab";
+          tabButton.draggable = true;
+          tabButton.dataset.windowTabId = tab.id;
+          tabButton.setAttribute("aria-label", `Activate ${tab.title}`);
+          if (tab.id === windowData.id || tab.tab_group_active) {
+            tabButton.classList.add("active");
+            tabButton.setAttribute("aria-current", "page");
+          }
+          tabButton.textContent = tab.title;
+          tabButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "activate_window_tab", id: tab.id });
+          });
+          tabButton.addEventListener("dragstart", (event) => {
+            windowTabDragState = { id: tab.id, docked: false };
+            event.dataTransfer?.setData("text/plain", tab.id);
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = "move";
+            }
+          });
+          tabButton.addEventListener("dragend", (event) => {
+            const drag = windowTabDragState;
+            windowTabDragState = null;
+            if (!drag || drag.docked) return;
+            const draggedWindow = workspaceWindowById(drag.id);
+            if (!draggedWindow?.tab_group_id) return;
+            send({
+              kind: "detach_window_tab",
+              id: drag.id,
+              geometry: detachGeometryFromPointer(event, draggedWindow),
+            });
+          });
+          const closeButton = document.createElement("button");
+          closeButton.type = "button";
+          closeButton.className = "window-tab-close";
+          closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+          closeButton.textContent = "×";
+          closeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_window", id: tab.id });
+          });
+          tabItem.appendChild(tabButton);
+          tabItem.appendChild(closeButton);
+          strip.appendChild(tabItem);
+        }
       }
 
       function handleTitlebarClick(windowId) {
@@ -1712,9 +1846,9 @@
         };
       }
 
-      // SPEC-2356 — xterm theme palettes follow the Operator overall theme.
-      // Each palette satisfies WCAG AA against its own canvas in DevTools spot
-      // checks; the dark variant is unchanged from the historical default.
+      // SPEC-2356 — xterm content stays on the Dark Operator palette even when
+      // surrounding window chrome follows the app's light theme. High-contrast
+      // forced-colors mode is still delegated to system colors by CSS.
       const XTERM_THEME_DARK = {
         background: "#0a0d12",
         foreground: "#e8eaed",
@@ -1737,48 +1871,20 @@
         brightCyan: "#22d3ee",
         brightWhite: "#f8fafc",
       };
-      const XTERM_THEME_LIGHT = {
-        background: "#f5f3ee",
-        foreground: "#1a1d24",
-        cursor: "#1a1d24",
-        selectionBackground: "#dcd9d2",
-        black: "#1f2937",
-        red: "#b91c1c",
-        green: "#15803d",
-        yellow: "#a16207",
-        blue: "#1d4ed8",
-        magenta: "#86198f",
-        cyan: "#0e7490",
-        white: "#4b5563",
-        brightBlack: "#374151",
-        brightRed: "#dc2626",
-        brightGreen: "#166534",
-        brightYellow: "#b45309",
-        brightBlue: "#1e40af",
-        brightMagenta: "#a21caf",
-        brightCyan: "#155e75",
-        brightWhite: "#1f2937",
-      };
-      const xtermThemeFor = (mode) =>
-        mode === "light" ? XTERM_THEME_LIGHT : XTERM_THEME_DARK;
 
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
         }
-        const initialMode = window.__operatorShell?.themeManager?.getEffective() ?? "dark";
         const terminal = new Terminal({
           cursorBlink: true,
           convertEol: true,
-          theme: xtermThemeFor(initialMode),
+          theme: XTERM_THEME_DARK,
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 13,
           lineHeight: 1.2,
           scrollback: 5000,
-        });
-        const themeUnsubscribe = window.__operatorShell?.registerXtermThemeAdapter?.((mode) => {
-          try { terminal.options.theme = xtermThemeFor(mode); } catch (e) { console.warn("xterm theme update failed", e); }
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -1788,7 +1894,6 @@
         const cleanup = () => {
           copyCleanup();
           viewportRefreshCleanup();
-          themeUnsubscribe?.();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;
@@ -6441,6 +6546,7 @@
             <div class="titlebar">
               <div class="title">
                 <span class="title-text"></span>
+                <span class="window-role-badge"></span>
                 <span class="status-chip running">
                   <span class="status-dot"></span>
                   <span class="status-label">Running</span>
@@ -6452,6 +6558,7 @@
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
+            <div class="window-tab-strip" aria-label="Window tabs"></div>
             <div class="window-body"></div>
             <div class="resize-handle"></div>
           `;
@@ -6497,6 +6604,27 @@
             };
             titlebar.setPointerCapture(event.pointerId);
           });
+          titlebar.addEventListener("dragover", (event) => {
+            if (!windowTabDragState || windowTabDragState.id === windowData.id) {
+              return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) {
+              event.dataTransfer.dropEffect = "move";
+            }
+          });
+          titlebar.addEventListener("drop", (event) => {
+            if (!windowTabDragState || windowTabDragState.id === windowData.id) {
+              return;
+            }
+            event.preventDefault();
+            windowTabDragState.docked = true;
+            send({
+              kind: "dock_window_tab",
+              id: windowTabDragState.id,
+              target_id: windowData.id,
+            });
+          });
 
           resizeHandle.addEventListener("pointerdown", (event) => {
             focusWindowRemotely(windowData.id);
@@ -6517,7 +6645,9 @@
           mountWindowBody(windowData, element);
         }
 
-        element.querySelector(".title-text").textContent = windowData.title;
+        element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
+        element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
+        renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
         } else {
@@ -6527,6 +6657,7 @@
         const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
+        element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
         element.style.left = `${windowData.geometry.x}px`;
         element.style.top = `${windowData.geometry.y}px`;
         element.style.width = `${windowData.geometry.width}px`;
@@ -6587,6 +6718,10 @@
 
         for (const windowData of workspace.windows) {
           ensureWindow(windowData);
+          const element = windowMap.get(windowData.id);
+          if (element) {
+            element.hidden = !visibleWindowData(windowData);
+          }
         }
 
         requestAnimationFrame(syncMaximizedWindowsToViewport);
@@ -6622,6 +6757,7 @@
         sendOpenProjectDialog,
         requestWindowList,
         renderWindowList,
+        windowDisplayTitle,
         toggleWindowList,
         renderProjectTabs,
         renderRecentProjects,
@@ -7255,7 +7391,15 @@
           case "update_state":
             if (event.state === "available") {
               setVersionState(event.current, event.latest);
-              showUpdateToast(event.latest);
+              // FR-036: surface the toast only on the first detection of a
+              // given `latest`, or when the polling loop reports a strictly
+              // newer version. Duplicate detections from the 5min poll just
+              // re-render the persistent button.
+              if (firstSeenUpdateVersion !== event.latest) {
+                showUpdateToast(event.latest);
+                firstSeenUpdateVersion = event.latest;
+              }
+              showUpdateButton(event.latest);
             }
             break;
           case "custom_agent_list":
@@ -7366,6 +7510,9 @@
       }
 
       let updateToastTimer = null;
+      // FR-036: remember the last `latest` rendered on the persistent button
+      // so the 5min poll loop does not re-toast on every duplicate detection.
+      let firstSeenUpdateVersion = null;
 
       function showUpdateToast(version) {
         let toast = document.getElementById("update-toast");
@@ -7382,12 +7529,49 @@
             send({ kind: "apply_update" });
           }
         };
+        // While the toast is up, lift the persistent button so the two do
+        // not overlap; the .has-toast class is dropped once the toast fades.
+        const buttonEl = document.getElementById("update-button");
+        if (buttonEl) {
+          buttonEl.classList.add("has-toast");
+        }
         clearTimeout(updateToastTimer);
         updateToastTimer = setTimeout(() => {
           toast.style.opacity = "0";
           setTimeout(() => toast.remove(), 300);
           updateToastTimer = null;
+          const after = document.getElementById("update-button");
+          if (after) {
+            after.classList.remove("has-toast");
+          }
         }, 8000);
+      }
+
+      function showUpdateButton(version) {
+        // FR-036: persistent "Update available" button that stays after the
+        // initial 8s toast fades. Re-rendering on a new `latest` simply
+        // updates the textContent / click target, so this is cheap to call
+        // on every poll detection.
+        let button = document.getElementById("update-button");
+        if (!button) {
+          button = document.createElement("button");
+          button.id = "update-button";
+          button.type = "button";
+          button.className = "update-button";
+          // Offset the button while the initial 8s toast is still visible.
+          if (document.getElementById("update-toast")) {
+            button.classList.add("has-toast");
+          }
+          document.body.appendChild(button);
+        }
+        button.textContent = `\u{1F4E6} Update available: v${version}`;
+        button.title = `Apply update to v${version}`;
+        button.setAttribute("aria-label", `Update available: v${version}, click to apply`);
+        button.onclick = () => {
+          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
+            send({ kind: "apply_update" });
+          }
+        };
       }
 
       window.addEventListener("pointermove", (event) => {
@@ -7611,6 +7795,7 @@
       });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
+      alignButton.addEventListener("click", () => arrangeWindows("align"));
       windowListButton.addEventListener(
         "click",
         frontendUnits.projectWorkspaceShell.toggleWindowList,

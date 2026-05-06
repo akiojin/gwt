@@ -120,6 +120,46 @@ test("Workspace sidebar exposes active work and per-agent overview", () => {
   );
 });
 
+test("Workspace sidebar keeps Quick before the expanding active work list", () => {
+  const sections = Array.from(document.querySelectorAll(".op-sidebar > .op-sidebar__section"));
+  const headings = sections.map((section) =>
+    section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
+  );
+  assert.deepEqual(
+    headings.slice(0, 3),
+    ["Layers", "Quick", "Active Work"],
+    "Quick must stay above Active Work so agent cards do not push it off-screen",
+  );
+});
+
+test("workspace windows expose role badges and hide panel runtime chips", () => {
+  assert.match(
+    appSource,
+    /function\s+presetRoleLabel\(preset\)/,
+    "expected a shared preset role label helper",
+  );
+  assert.match(
+    appSource,
+    /class="window-role-badge"/,
+    "expected titlebar template to include a role badge surface",
+  );
+  assert.match(
+    appSource,
+    /function\s+shouldShowRuntimeStatus\(windowData\)/,
+    "expected runtime chip visibility to be centralized",
+  );
+  assert.match(
+    appSource,
+    /runtimeChip\.hidden\s*=\s*!shouldShowRuntimeStatus\(windowData\)/,
+    "expected non-terminal panels to hide the runtime status chip",
+  );
+  assert.match(
+    appSource,
+    /window-list-role/,
+    "expected window list rows to include a role badge",
+  );
+});
+
 test("Workspace active work overview behaves like a command center", () => {
   assert.match(
     appSource,
@@ -145,6 +185,24 @@ test("Workspace active work overview behaves like a command center", () => {
     appSource,
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
+  );
+});
+
+test("Agent window chrome resolves dynamic purpose titles before legacy titles", () => {
+  assert.match(
+    appSource,
+    /function\s+windowDisplayTitle\(windowData\)[\s\S]+dynamic_title[\s\S]+purpose_title[\s\S]+title/,
+    "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
+  );
+  assert.match(
+    appSource,
+    /window-list-title">\$\{escapeHtml\(windowDisplayTitle\(entry\)\)\}/,
+    "expected the Windows dropdown to escape the shared display-title helper output",
+  );
+  assert.match(
+    appSource,
+    /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
+    "expected window titlebars to use the shared display-title helper",
   );
 });
 
@@ -254,6 +312,53 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
+test("Project Bar exposes persistent chrome visibility toggles", () => {
+  const sidebarToggle = document.getElementById("op-sidebar-toggle");
+  const windowControlsToggle = document.getElementById("op-window-controls-toggle");
+  assert.ok(sidebarToggle, "expected Project Bar sidebar visibility toggle");
+  assert.ok(windowControlsToggle, "expected Project Bar window controls visibility toggle");
+  assert.equal(sidebarToggle.getAttribute("aria-pressed"), "true");
+  assert.equal(windowControlsToggle.getAttribute("aria-pressed"), "true");
+  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /sidebar/i);
+  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /window controls/i);
+});
+
+test("floating window controls mark only window operations as hideable", () => {
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
+    const button = document.getElementById(id);
+    assert.ok(button, `expected ${id}`);
+    assert.equal(button.dataset.windowControl, "true", `${id} should be hidden by the window controls toggle`);
+  }
+  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const button = document.getElementById(id);
+    assert.ok(button, `expected ${id}`);
+    assert.notEqual(button.dataset.windowControl, "true", `${id} should remain visible when window controls are hidden`);
+  }
+});
+
+test("workspace windows expose draggable tab docking affordances", () => {
+  assert.match(
+    appSource,
+    /class="window-tab-strip"|className\s*=\s*"window-tab-strip"/,
+    "expected grouped windows to render a tab strip",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"dock_window_tab"/,
+    "expected tab drop to send dock_window_tab",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"detach_window_tab"/,
+    "expected tab drag outside a group to send detach_window_tab",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"activate_window_tab"/,
+    "expected tab click to activate a grouped window tab",
+  );
+});
+
 test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The pseudo-element content lives only in CSS, not in the DOM, so we
@@ -271,19 +376,38 @@ test("Mission Briefing splash has dismissible affordance (pointer-events + curso
   assert.match(briefing[0], /cursor:\s*pointer/);
 });
 
-test("operator-shell wires theme toggle aria-label updates on every render", () => {
-  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  // wireThemeToggle.renderLabel must update aria-label every render so
-  // screen readers know the live preference + effective theme.
+test("theme-toggle wires aria-label updates on every render", () => {
+  // SPEC-2356 FR-024 — segmented toggle exposes the live preference + effective
+  // theme via the radiogroup container's aria-label so screen readers always
+  // announce the current state.
+  const themeToggle = readFileSync(resolve(here, "../theme-toggle.js"), "utf8");
   assert.match(
-    operatorShell,
-    /btn\.setAttribute\(\s*"aria-label"/,
-    "expected wireThemeToggle to update aria-label on every render",
+    themeToggle,
+    /root\.setAttribute\(\s*"aria-label"/,
+    "expected segmented theme toggle to update aria-label on every render",
   );
   assert.match(
-    operatorShell,
+    themeToggle,
     /Theme: \$\{pref === "auto" \? `auto/,
     "expected aria-label format to disclose preference + effective theme",
+  );
+});
+
+test("xterm content stays on the dark Operator palette across app theme changes", () => {
+  assert.match(
+    appSource,
+    /theme:\s*XTERM_THEME_DARK/,
+    "expected Terminal initialization to use the dark xterm palette directly",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /XTERM_THEME_LIGHT/,
+    "xterm content must not define a light palette; only the terminal chrome follows app theme",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /registerXtermThemeAdapter/,
+    "theme toggles must not swap xterm content away from the dark palette",
   );
 });
 
@@ -296,14 +420,41 @@ test("operator-shell wires sidebar collapse hotkey and Mission Briefing early di
   );
   assert.match(
     operatorShell,
-    /opSidebar\s*===\s*"collapsed"/,
-    "expected collapsed state toggle on documentElement.dataset.opSidebar",
+    /toggleSidebar/,
+    "expected Cmd+backslash to route through the persistent sidebar visibility controller",
   );
+  assert.match(operatorShell, /root\.dataset\.opSidebar\s*=\s*"collapsed"/);
   assert.match(
     operatorShell,
     /earlyDismiss/,
     "expected Mission Briefing earlyDismiss helper",
   );
+});
+
+test("components.css hides only marked floating window controls", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
+});
+
+test("floating actions expose Align without resizing windows", () => {
+  const button = document.getElementById("align-button");
+  assert.ok(button, "expected Align button");
+  assert.equal(button.textContent.trim(), "Align");
+  assert.match(
+    appSource,
+    /alignButton\.addEventListener\("click",\s*\(\)\s*=>\s*arrangeWindows\("align"\)\)/,
+    "expected Align to reuse arrange_windows with the align mode",
+  );
+});
+
+test("operator-shell persists sidebar and window controls visibility independently", () => {
+  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
+  assert.match(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
+  assert.match(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
+  assert.match(operatorShell, /opWindowControls/);
+  assert.match(operatorShell, /window-controls-changed/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
