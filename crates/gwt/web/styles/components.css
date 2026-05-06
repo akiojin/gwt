@@ -133,39 +133,6 @@ body::after {
   font-weight: 500;
 }
 
-/* Project Bar trailing chrome buttons */
-.op-chrome-toggle {
-  appearance: none;
-  background: transparent;
-  border: 1px solid var(--color-border-strong);
-  color: var(--color-text);
-  height: 26px;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-pill);
-  font: inherit;
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: border-color var(--motion-fast) var(--motion-curve),
-              color var(--motion-fast) var(--motion-curve),
-              background var(--motion-fast) var(--motion-curve);
-}
-
-.op-chrome-toggle:hover,
-.op-chrome-toggle:focus-visible {
-  outline: none;
-  border-color: var(--color-focus-ring);
-  color: var(--color-focus-ring);
-}
-
-.op-chrome-toggle[aria-pressed="false"] {
-  color: var(--color-text-muted);
-  border-color: var(--color-border);
-  background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
-}
-
 /* SPEC-2356 FR-024 — segmented theme toggle (AUTO / DARK / LIGHT). Replaces
    the prior single-cycle button so AUTO is reachable in one interaction. */
 .op-theme-toggle {
@@ -591,6 +558,45 @@ body::after {
 
 .canvas {
   background: var(--color-canvas);
+}
+
+.op-edge-handle {
+  appearance: none;
+  width: 34px;
+  min-width: 34px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  z-index: 35;
+}
+
+.op-edge-handle:hover {
+  background: var(--color-button-bg-hover);
+  border-color: var(--color-focus-ring);
+  color: var(--color-focus-ring);
+}
+
+.op-edge-handle--sidebar {
+  position: absolute;
+  top: 50%;
+  left: -17px;
+  transform: translateY(-50%);
+}
+
+.op-edge-handle--windows {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
 }
 
 .canvas-world-grid {
@@ -1409,6 +1415,7 @@ kbd.op-kbd {
 :root[data-theme] .recent-project-row:focus-visible,
 :root[data-theme] .live-session-button:focus-visible,
 :root[data-theme] .launch-choice-button:focus-visible,
+:root[data-theme] .op-edge-handle:focus-visible,
 /* SPEC-2356 — keyboard-navigable row patterns added in PRs #2464/#2465.
    Without these focus-visible rules, keyboard users couldn't see which
    row currently has focus when Tab'ing through the file tree or
@@ -1768,8 +1775,17 @@ kbd.op-kbd {
   display: none;
 }
 
+:root[data-theme][data-op-sidebar="collapsed"] .op-edge-handle--sidebar {
+  left: 8px;
+}
+
 :root[data-theme][data-op-window-controls="hidden"] .floating-actions [data-window-control="true"] {
   display: none;
+}
+
+:root[data-theme][data-op-window-controls="hidden"] .op-edge-handle--windows {
+  border-color: var(--color-state-active);
+  color: var(--color-state-active);
 }
 
 /* SPEC-2356 — smooth Sidebar collapse transition.
@@ -1795,6 +1811,7 @@ kbd.op-kbd {
 :root[data-theme] .launch-choice-button,
 :root[data-theme] .arrange-button,
 :root[data-theme] .add-button,
+:root[data-theme] .op-edge-handle,
 :root[data-theme] .wizard-button {
   transition: background var(--motion-fast) var(--motion-curve),
               border-color var(--motion-fast) var(--motion-curve),
@@ -1808,6 +1825,7 @@ kbd.op-kbd {
   :root[data-theme] .launch-choice-button,
   :root[data-theme] .arrange-button,
   :root[data-theme] .add-button,
+  :root[data-theme] .op-edge-handle,
   :root[data-theme] .wizard-button {
     transition: none;
   }

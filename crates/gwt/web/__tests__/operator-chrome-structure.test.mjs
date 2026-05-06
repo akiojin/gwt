@@ -367,15 +367,30 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("Project Bar exposes persistent chrome visibility toggles", () => {
-  const sidebarToggle = document.getElementById("op-sidebar-toggle");
-  const windowControlsToggle = document.getElementById("op-window-controls-toggle");
-  assert.ok(sidebarToggle, "expected Project Bar sidebar visibility toggle");
-  assert.ok(windowControlsToggle, "expected Project Bar window controls visibility toggle");
-  assert.equal(sidebarToggle.getAttribute("aria-pressed"), "true");
-  assert.equal(windowControlsToggle.getAttribute("aria-pressed"), "true");
-  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /sidebar/i);
-  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /window controls/i);
+test("chrome visibility uses edge handles instead of Project Bar text toggles", () => {
+  assert.equal(
+    document.getElementById("op-sidebar-toggle"),
+    null,
+    "Project Bar must not expose a SIDEBAR text toggle",
+  );
+  assert.equal(
+    document.getElementById("op-window-controls-toggle"),
+    null,
+    "Project Bar must not expose a WINDOWS text toggle",
+  );
+
+  const sidebarToggle = document.getElementById("op-sidebar-edge-toggle");
+  const windowControlsToggle = document.getElementById("op-window-controls-edge-toggle");
+  assert.ok(sidebarToggle, "expected sidebar edge visibility handle");
+  assert.ok(windowControlsToggle, "expected bottom window controls edge visibility handle");
+  assert.equal(sidebarToggle.textContent.trim(), "<<");
+  assert.equal(windowControlsToggle.textContent.trim(), "vv");
+  assert.equal(sidebarToggle.getAttribute("aria-controls"), "op-sidebar");
+  assert.equal(windowControlsToggle.getAttribute("aria-controls"), "floating-window-controls");
+  assert.equal(sidebarToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(windowControlsToggle.getAttribute("aria-expanded"), "true");
+  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /hide sidebar/i);
+  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /hide window controls/i);
 });
 
 test("floating window controls mark only window operations as hideable", () => {
@@ -523,6 +538,10 @@ test("operator-shell persists sidebar and window controls visibility independent
   assert.match(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
   assert.match(operatorShell, /opWindowControls/);
   assert.match(operatorShell, /window-controls-changed/);
+  assert.match(operatorShell, /op-sidebar-edge-toggle/);
+  assert.match(operatorShell, /op-window-controls-edge-toggle/);
+  assert.doesNotMatch(operatorShell, /op-sidebar-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-toggle/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
