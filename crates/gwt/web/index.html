@@ -1691,14 +1691,59 @@
         box-shadow: 0 0 0 1px var(--color-focus-ring), var(--shadow-2);
       }
 
+      .board-message.for-you {
+        border-color: color-mix(in oklab, var(--color-state-active) 62%, var(--color-border));
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-state-active) 42%, transparent), var(--shadow-2);
+      }
+
       .board-message-meta {
         display: inline-flex;
         align-items: center;
         gap: 6px;
+        flex-wrap: wrap;
         font-family: var(--font-mono);
         font-size: var(--type-xs);
         letter-spacing: var(--tracking-mono);
         color: var(--color-text-muted);
+      }
+
+      .board-audience-badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 18px;
+        padding: 2px 6px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-surface);
+        color: var(--color-text-muted);
+        font-family: var(--font-mono);
+        font-size: var(--type-2xs);
+        letter-spacing: var(--tracking-mono);
+      }
+
+      .board-audience-badge.for-you {
+        border-color: color-mix(in oklab, var(--color-state-active) 56%, var(--color-border));
+        color: var(--color-text);
+        background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface-elevated));
+      }
+
+      .board-reply-quote {
+        width: 100%;
+        border: 1px solid var(--color-border);
+        border-left: 3px solid var(--color-state-active);
+        border-radius: var(--radius-sm);
+        padding: 7px 9px;
+        text-align: left;
+        color: var(--color-text-muted);
+        background: color-mix(in oklab, var(--color-surface) 82%, transparent);
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        cursor: pointer;
+      }
+
+      .board-reply-quote:hover {
+        color: var(--color-text);
+        border-color: var(--color-focus-ring);
       }
 
       .board-message-body {
@@ -1708,6 +1753,51 @@
         color: var(--color-text);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+      }
+
+      .board-message-actions {
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .board-reply-button {
+        min-height: 26px;
+        padding: 4px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+        background: var(--color-surface);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        cursor: pointer;
+      }
+
+      .board-reply-button:hover {
+        color: var(--color-text);
+        border-color: var(--color-focus-ring);
+      }
+
+      .board-reply-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--color-border);
+        border-left: 3px solid var(--color-state-active);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+      }
+
+      .board-reply-banner-text {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--color-text-muted);
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
       }
 
       .board-textarea {
@@ -1736,6 +1826,31 @@
         justify-content: flex-end;
         gap: 8px;
         margin-top: 8px;
+      }
+
+      .board-for-you-filter.active {
+        border-color: var(--color-focus-ring);
+        color: var(--color-text);
+        background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface));
+      }
+
+      .board-mention-toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 1000;
+        max-width: min(420px, calc(100vw - 36px));
+        min-height: 38px;
+        padding: 10px 12px;
+        border: 1px solid var(--color-focus-ring);
+        border-radius: var(--radius-md);
+        color: var(--color-text);
+        background: var(--color-surface-elevated);
+        box-shadow: var(--shadow-3);
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        text-align: left;
+        cursor: pointer;
       }
 
       .logs-filter-bar {

@@ -1334,6 +1334,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_surface_exposes_audience_reply_and_notification_ui() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("board-for-you-filter")
+                && html.contains("board-audience-badge")
+                && html.contains("board-reply-button")
+                && html.contains("board-reply-banner")
+                && html.contains("board-reply-quote")
+                && html.contains("showBoardMentionNotification")
+                && html.contains("Jump to original"),
+            "expected Board UI to expose mention audience, reply, quote, and notification affordances",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_does_not_render_workspace_or_planning_cards() {
         let html = frontend_bundle_source();
         let board_block = html

@@ -30,6 +30,11 @@ pub(super) const USER_PROMPT_REMINDER: &str = "# Board Post Reminder\n\
 Post to the shared Board when you cross a reasoning milestone OR a coordination boundary, \
 so other agents and the user can collaborate without collision.\n\
 \n\
+Choose the audience before posting: use broadcast only when no specific response is expected. \
+Use `--mention user:<id>` for the human user, `--mention agent:<id>` for an agent type, \
+`--mention session:<id>` for one running session, or `--mention branch:<name>` for a workspace. \
+Questions, blockers, handoffs, next-step requests, and replies that expect a response should be addressed with a mention.\n\
+\n\
 **Reasoning axes** (the *why* behind your work):\n\
 - Work phase transitions (e.g., implementation -> build check -> PR handoff). Use `--kind status`.\n\
 - Choices between alternatives with the reasoning behind them (e.g., \"A vs B, chose B because ...\"). Use `--kind decision` or `--kind status`.\n\
@@ -44,7 +49,8 @@ so other agents and the user can collaborate without collision.\n\
 \n\
 Add `--target <session-id|branch|agent-id>` (repeatable) when the post is meant for specific agents. \
 Targeted posts are prefixed with a structured marker (currently the `>>` token) at the start of each entry \
-line in the recipient's reminder injection. Omit `--target` for broadcast.\n\
+line in the recipient's reminder injection. Prefer typed `--mention ...` for new posts; keep `--target` \
+for compatibility with older agents. Omit both for broadcast.\n\
 \n\
 **Workspace / Git environment guidance**:\n\
 - AGENTS.md is project-local: follow the target repository's AGENTS.md when present, \
@@ -60,14 +66,19 @@ Anything already visible in the diff or log does not need a Board entry.\n\
 \n\
 Examples:\n\
   gwtd board post --kind status --body '<your reasoning>'\n\
-  gwtd board post --kind claim --target feature/foo --body 'taking the migration on feature/foo'\n\
-  gwtd board post --kind handoff --body 'phase 1 done, please pick up phase 2'\n";
+  gwtd board post --kind question --mention user:akiojin --body 'Need a product decision on X'\n\
+  gwtd board post --kind claim --mention branch:feature/foo --body 'taking the migration on feature/foo'\n\
+  gwtd board post --kind handoff --mention agent:codex --body 'phase 1 done, please pick up phase 2'\n";
 
 pub(super) const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
 (phase change, alternative chosen, concern raised) or a coordination boundary \
 (claim, next, handoff, blocked, decision) has emerged.\n\
+\n\
+When a response is expected, address the post with `--mention user:<id>`, \
+`--mention agent:<id>`, `--mention session:<id>`, or `--mention branch:<name>`; \
+omit mentions only for broadcast updates.\n\
 \n\
 AGENTS.md is project-local. Do NOT create, switch, or delete branches/worktrees \
 manually; gwt Start Work / Launch materialization owns Git environment creation.\n\
