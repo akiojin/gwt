@@ -586,7 +586,21 @@ body::after {
 }
 
 .canvas {
-  background: transparent;
+  background: var(--color-canvas);
+}
+
+.canvas-world-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px),
+    linear-gradient(to right, var(--color-border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
+  background-size: 32px 32px, 32px 32px, 128px 128px, 128px 128px;
+  background-position: 0 0;
+  opacity: 0.9;
 }
 
 /* Existing floating actions become Operator-styled */

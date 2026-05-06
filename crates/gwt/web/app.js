@@ -52,6 +52,7 @@
       const alignButton = document.getElementById("align-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
+      const worldGrid = document.getElementById("canvas-world-grid");
       const activeWorkCount = document.getElementById("op-active-work-count");
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
@@ -1038,8 +1039,30 @@
         return Number.parseFloat(value || "0");
       }
 
+      function applyWorldGridViewport() {
+        if (!worldGrid) {
+          return;
+        }
+        const gridSize = 32 * viewport.zoom;
+        const majorGridSize = gridSize * 4;
+        const gridPosition = `${viewport.x}px ${viewport.y}px`;
+        worldGrid.style.backgroundSize = [
+          `${gridSize}px ${gridSize}px`,
+          `${gridSize}px ${gridSize}px`,
+          `${majorGridSize}px ${majorGridSize}px`,
+          `${majorGridSize}px ${majorGridSize}px`,
+        ].join(", ");
+        worldGrid.style.backgroundPosition = [
+          gridPosition,
+          gridPosition,
+          gridPosition,
+          gridPosition,
+        ].join(", ");
+      }
+
       function applyViewport() {
         stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+        applyWorldGridViewport();
         stage.style.willChange = "transform";
         if (viewportRasterTimer !== null) {
           clearTimeout(viewportRasterTimer);
