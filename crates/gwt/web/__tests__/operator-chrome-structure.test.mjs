@@ -311,6 +311,24 @@ test("operator-shell wires theme toggle aria-label updates on every render", () 
   );
 });
 
+test("xterm content stays on the dark Operator palette across app theme changes", () => {
+  assert.match(
+    appSource,
+    /theme:\s*XTERM_THEME_DARK/,
+    "expected Terminal initialization to use the dark xterm palette directly",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /XTERM_THEME_LIGHT/,
+    "xterm content must not define a light palette; only the terminal chrome follows app theme",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /registerXtermThemeAdapter/,
+    "theme toggles must not swap xterm content away from the dark palette",
+  );
+});
+
 test("operator-shell wires sidebar collapse hotkey and Mission Briefing early dismiss", () => {
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
   // The source contains `cmd+\\\\` (escaped backslash in JS source).
