@@ -1,6 +1,14 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.18.0] - 2026-05-06
+
+### Features
+
+- **kanban:** Knowledge Bridge を 6 カラム Kanban に置換 (SPEC-2017 Phase 1)
+- **kanban:** D&D で phase ラベル書き戻しとロールバックを実装 (SPEC-2017 Phase 2)
+- **kanban:** Drawer 詳細ビューと forced-colors fallback を追加 (SPEC-2017 Phase 3)
+
 ## [9.17.0] - 2026-05-06
 
 ### Bug Fixes

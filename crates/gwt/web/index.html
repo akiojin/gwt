@@ -3309,6 +3309,43 @@
           tabindex="-1"
         ></div>
       </div>
+
+      <!-- SPEC-2017 US-9: Knowledge Bridge Drawer. Re-uses the
+           SPEC-2356 .op-drawer / .op-drawer-backdrop pattern (slide-
+           over + backdrop + reduced-motion fallback). Body content
+           (KnowledgeDetailView) is rendered dynamically by app.js
+           when a Kanban card is clicked. -->
+      <div
+        class="op-drawer-backdrop"
+        id="kanban-drawer-backdrop"
+        data-open="false"
+        hidden
+      ></div>
+      <aside
+        class="op-drawer kanban-drawer"
+        id="kanban-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="kanban-drawer-title"
+        data-open="false"
+        hidden
+        tabindex="-1"
+      >
+        <header class="op-drawer__header">
+          <h2
+            class="op-drawer__title"
+            id="kanban-drawer-title"
+          >Detail</h2>
+          <button
+            type="button"
+            class="op-drawer__close"
+            id="kanban-drawer-close"
+            aria-label="Close detail drawer"
+          >×</button>
+        </header>
+        <div class="op-drawer__body" id="kanban-drawer-body"></div>
+        <footer class="op-drawer__footer" id="kanban-drawer-footer"></footer>
+      </aside>
     </div>
 
     <script type="module" src="/app.js"></script>

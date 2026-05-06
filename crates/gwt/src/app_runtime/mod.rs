@@ -323,6 +323,22 @@ fn knowledge_error_event(
     }
 }
 
+fn knowledge_phase_update_error_event(
+    id: impl Into<String>,
+    request_id: u64,
+    issue_number: u64,
+    message: impl Into<String>,
+) -> BackendEvent {
+    BackendEvent::KnowledgeBridgePhaseUpdated {
+        id: id.into(),
+        request_id,
+        issue_number,
+        result: gwt::protocol::KnowledgePhaseUpdateResult::Error {
+            message: message.into(),
+        },
+    }
+}
+
 fn knowledge_view_events(
     client_id: String,
     id: String,
@@ -1005,6 +1021,18 @@ impl AppRuntime {
                     refresh: false,
                     list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
+            ),
+            FrontendEvent::UpdateKnowledgeBridgePhase {
+                id,
+                request_id,
+                issue_number,
+                target_phase,
+            } => self.update_knowledge_bridge_phase_events(
+                &client_id,
+                &id,
+                request_id,
+                issue_number,
+                target_phase.as_deref(),
             ),
             FrontendEvent::RunBranchCleanup {
                 id,
@@ -2111,6 +2139,96 @@ impl AppRuntime {
                 client_id, event,
             )]));
         });
+    }
+
+    /// SPEC-2017 US-8 — Apply a Kanban phase change to the owning
+    /// GitHub Issue. Validates that the target window is a knowledge
+    /// bridge surface and dispatches a blocking task that calls
+    /// `gwt::update_knowledge_phase`. The result is delivered as
+    /// [`BackendEvent::KnowledgeBridgePhaseUpdated`] so the optimistic
+    /// frontend UI can either confirm or rollback.
+    pub(crate) fn update_knowledge_bridge_phase_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        request_id: u64,
+        issue_number: u64,
+        target_phase: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_phase_update_error_event(
+                    id,
+                    request_id,
+                    issue_number,
+                    "Window not found",
+                ),
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_phase_update_error_event(
+                    id,
+                    request_id,
+                    issue_number,
+                    "Project tab not found",
+                ),
+            )];
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_phase_update_error_event(
+                    id,
+                    request_id,
+                    issue_number,
+                    "Window not found",
+                ),
+            )];
+        };
+        if knowledge_kind_for_preset(window.preset).is_none() {
+            return vec![OutboundEvent::reply(
+                client_id,
+                knowledge_phase_update_error_event(
+                    id,
+                    request_id,
+                    issue_number,
+                    "Window is not a knowledge bridge",
+                ),
+            )];
+        }
+
+        let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
+        let id_owned = id.to_string();
+        let project_root = tab.project_root.clone();
+        let target_phase = target_phase.map(str::to_string);
+        self.blocking_tasks.spawn(move || {
+            let event = match gwt::update_knowledge_phase(
+                &project_root,
+                issue_number,
+                target_phase.as_deref(),
+            ) {
+                Ok(fresh_entry) => BackendEvent::KnowledgeBridgePhaseUpdated {
+                    id: id_owned,
+                    request_id,
+                    issue_number,
+                    result: gwt::protocol::KnowledgePhaseUpdateResult::Ok { fresh_entry },
+                },
+                Err(error) => BackendEvent::KnowledgeBridgePhaseUpdated {
+                    id: id_owned,
+                    request_id,
+                    issue_number,
+                    result: gwt::protocol::KnowledgePhaseUpdateResult::Error { message: error },
+                },
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                &client_id, event,
+            )]));
+        });
+        Vec::new()
     }
 
     pub(crate) fn run_branch_cleanup_events(

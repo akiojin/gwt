@@ -52,8 +52,8 @@ pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
 pub use index_worker::{ProjectIndexStatusState, ProjectIndexStatusView};
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
-    KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView, KnowledgeKind,
-    KnowledgeListItem, KnowledgeListScope,
+    update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
+    KnowledgeKind, KnowledgeListItem, KnowledgeListScope,
 };
 pub use launch_wizard::{
     build_agent_options, build_builtin_agent_options, default_wizard_version_cache_path,

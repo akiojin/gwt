@@ -147,6 +147,19 @@ pub enum FrontendEvent {
         number: u64,
         list_scope: Option<KnowledgeListScope>,
     },
+    /// SPEC-2017 US-8 — Kanban D&D writes a phase change back to the
+    /// owning GitHub Issue. `target_phase=None` means Backlog (every
+    /// `phase/*` label is removed); `Some("draft" | "planning" |
+    /// "implementation" | "review" | "done")` means assign exactly that
+    /// canonical phase. The frontend includes `request_id` so the
+    /// matching [`BackendEvent::KnowledgeBridgePhaseUpdated`] response
+    /// can clear the pending optimistic-UI entry.
+    UpdateKnowledgeBridgePhase {
+        id: String,
+        request_id: u64,
+        issue_number: u64,
+        target_phase: Option<String>,
+    },
     RunBranchCleanup {
         id: String,
         branches: Vec<String>,
@@ -464,6 +477,21 @@ pub enum BackendEvent {
         list_scope: Option<KnowledgeListScope>,
         detail: KnowledgeDetailView,
     },
+    /// SPEC-2017 US-8 — Result of an
+    /// [`FrontendEvent::UpdateKnowledgeBridgePhase`] request. On
+    /// success the backend returns the freshly-rebuilt cache entry so
+    /// the optimistic Kanban card can be replaced with authoritative
+    /// labels and counters; on failure it returns a human-readable
+    /// `message` so the frontend can roll back from `dndSnapshot` and
+    /// surface a toast. `request_id` mirrors the originating frame so
+    /// the `pendingPhaseUpdates` map can be reconciled even when
+    /// multiple drops are in flight.
+    KnowledgeBridgePhaseUpdated {
+        id: String,
+        request_id: u64,
+        issue_number: u64,
+        result: KnowledgePhaseUpdateResult,
+    },
     BranchCleanupResult {
         id: String,
         results: Vec<BranchCleanupResultEntry>,
@@ -587,6 +615,24 @@ pub enum CustomAgentErrorCode {
     InvalidInput,
     NotFound,
     Probe,
+}
+
+/// SPEC-2017 US-8 — Outcome of an
+/// [`FrontendEvent::UpdateKnowledgeBridgePhase`] request, embedded in
+/// [`BackendEvent::KnowledgeBridgePhaseUpdated`]. Tagged so the
+/// frontend can branch on `result.kind === "ok" | "error"` without
+/// pattern-matching on optional fields.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KnowledgePhaseUpdateResult {
+    /// Phase write-back succeeded. `fresh_entry` is the rebuilt cache
+    /// entry (with the new labels / state / phase) so the optimistic
+    /// Kanban card can be overwritten with authoritative data.
+    Ok { fresh_entry: KnowledgeListItem },
+    /// Phase write-back failed. `message` is human-readable so the
+    /// toast / log can show it directly; the frontend rolls back the
+    /// optimistic UI from `state.dndSnapshot`.
+    Error { message: String },
 }
 
 #[cfg(test)]

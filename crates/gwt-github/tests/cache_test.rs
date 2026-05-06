@@ -335,3 +335,72 @@ fn write_snapshot_prunes_stale_comment_files() {
 fn _ensure_comment_is_used(c: Comment) -> Comment {
     c
 }
+
+// SPEC-2017 T-008: apply_phase_change rewrites the labels array on the cached
+// meta.json atomically and leaves the rest of the entry intact. The next
+// load_entry must reflect the new labels without a remote refresh.
+#[test]
+fn apply_phase_change_overwrites_labels_and_persists_to_meta() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let body = mk_body_with_spec_and_tasks_in_body("spec", "tasks");
+    cache.write_snapshot(&mk_snapshot(7, body)).unwrap();
+
+    cache
+        .apply_phase_change(
+            IssueNumber(7),
+            vec!["gwt-spec".to_string(), "phase/implementation".to_string()],
+        )
+        .unwrap();
+
+    let reloaded = cache.load_entry(IssueNumber(7)).unwrap();
+    assert_eq!(
+        reloaded.snapshot.labels,
+        vec!["gwt-spec".to_string(), "phase/implementation".to_string()],
+    );
+    // meta.json is the persisted source of truth; verify the file itself.
+    let meta_bytes = fs::read(tmp.path().join("7/meta.json")).unwrap();
+    let meta_json: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
+    let labels = meta_json
+        .get("labels")
+        .and_then(|v| v.as_array())
+        .expect("meta.json should preserve the labels array");
+    let label_strings: Vec<&str> = labels.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(label_strings, vec!["gwt-spec", "phase/implementation"]);
+}
+
+#[test]
+fn apply_phase_change_returns_error_when_entry_is_missing() {
+    // No prior write_snapshot for #404 — apply_phase_change must surface
+    // a typed error so the caller can map it to a user-friendly message
+    // instead of silently succeeding.
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let result = cache.apply_phase_change(IssueNumber(404), vec!["phase/draft".to_string()]);
+    assert!(
+        result.is_err(),
+        "apply_phase_change on a missing entry must error",
+    );
+}
+
+#[test]
+fn apply_phase_change_does_not_disturb_body_or_sections() {
+    // The cache also stores body.md and sections/*.md. A phase change
+    // must not touch those — otherwise local edits in flight could be
+    // clobbered by a phase write-back.
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let body = mk_body_with_spec_and_tasks_in_body("immutable spec", "immutable tasks");
+    cache
+        .write_snapshot(&mk_snapshot(11, body.clone()))
+        .unwrap();
+
+    cache
+        .apply_phase_change(IssueNumber(11), vec!["phase/done".to_string()])
+        .unwrap();
+
+    let body_on_disk = fs::read_to_string(tmp.path().join("11/body.md")).unwrap();
+    assert_eq!(body_on_disk, body, "body.md must remain byte-identical");
+    let spec_section = fs::read_to_string(tmp.path().join("11/sections/spec.md")).unwrap();
+    assert_eq!(spec_section, "immutable spec");
+}
