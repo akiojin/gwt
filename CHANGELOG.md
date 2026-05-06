@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.19.2] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Serve theme toggle asset
+
 ## [9.19.1] - 2026-05-06
 
 ### Bug Fixes

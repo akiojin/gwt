@@ -139,6 +139,10 @@ impl EmbeddedServer {
                 "/theme-manager.js",
                 get(embedded_web::theme_manager_js_handler),
             )
+            .route(
+                "/theme-toggle.js",
+                get(embedded_web::theme_toggle_js_handler),
+            )
             .route("/hotkey.js", get(embedded_web::hotkey_js_handler))
             .route(
                 "/operator-shell.js",
@@ -656,6 +660,26 @@ mod tests {
         assert!(
             xterm_css.text().expect("xterm css body").contains(".xterm"),
             "expected embedded server to serve pinned xterm stylesheet asset",
+        );
+
+        let theme_toggle_js = client
+            .get(format!("{}theme-toggle.js", server.url()))
+            .send()
+            .expect("theme toggle module request");
+        assert_eq!(theme_toggle_js.status(), HttpStatusCode::OK);
+        assert_eq!(
+            theme_toggle_js
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/javascript; charset=utf-8")
+        );
+        assert!(
+            theme_toggle_js
+                .text()
+                .expect("theme toggle module body")
+                .contains("wireThemeToggle"),
+            "expected embedded server to serve the segmented theme toggle module",
         );
 
         let event = RuntimeHookEvent {

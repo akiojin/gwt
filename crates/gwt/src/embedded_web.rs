@@ -36,6 +36,10 @@ pub fn theme_manager_js() -> &'static str {
     include_str!("../web/theme-manager.js")
 }
 
+pub fn theme_toggle_js() -> &'static str {
+    include_str!("../web/theme-toggle.js")
+}
+
 pub fn hotkey_js() -> &'static str {
     include_str!("../web/hotkey.js")
 }
@@ -135,6 +139,13 @@ pub async fn theme_manager_js_handler() -> impl IntoResponse {
     )
 }
 
+pub async fn theme_toggle_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        theme_toggle_js(),
+    )
+}
+
 pub async fn hotkey_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -215,10 +226,10 @@ mod tests {
         xterm_js_handler,
     };
     // SPEC-2356 — Operator Design System modules.
-    use super::{focus_trap_js, hotkey_js, operator_shell_js, theme_manager_js};
+    use super::{focus_trap_js, hotkey_js, operator_shell_js, theme_manager_js, theme_toggle_js};
     use super::{
         focus_trap_js_handler, hotkey_js_handler, operator_shell_js_handler,
-        theme_manager_js_handler,
+        theme_manager_js_handler, theme_toggle_js_handler,
     };
 
     fn frontend_bundle_source() -> &'static str {
@@ -442,10 +453,12 @@ mod tests {
         // the binary so a missing include_str! macro fails CI rather than
         // silently 404ing in production.
         assert!(!theme_manager_js().is_empty());
+        assert!(!theme_toggle_js().is_empty());
         assert!(!hotkey_js().is_empty());
         assert!(!operator_shell_js().is_empty());
         assert!(!focus_trap_js().is_empty());
         assert!(theme_manager_js().contains("createThemeManager"));
+        assert!(theme_toggle_js().contains("wireThemeToggle"));
         assert!(hotkey_js().contains("createHotkeyManager"));
         assert!(operator_shell_js().contains("initOperatorShell"));
         assert!(focus_trap_js().contains("createFocusTrap"));
@@ -501,11 +514,12 @@ mod tests {
                 .unwrap(),
             "text/css; charset=utf-8",
         );
-        // SPEC-2356 — Operator Design System module handlers. All four
+        // SPEC-2356 — Operator Design System module handlers. Each module
         // serve JavaScript with the same charset; the assertion catches
         // regressions if a handler ever changes its content-type.
         for handler_response in [
             theme_manager_js_handler().await.into_response(),
+            theme_toggle_js_handler().await.into_response(),
             hotkey_js_handler().await.into_response(),
             operator_shell_js_handler().await.into_response(),
             focus_trap_js_handler().await.into_response(),
