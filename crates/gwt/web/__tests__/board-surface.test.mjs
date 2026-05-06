@@ -13,6 +13,7 @@ test("Board surface requests older history with cursor-based paging", () => {
   assert.match(appSource, /case\s+"board_history_page"/);
   assert.match(appSource, /function\s+mergeBoardEntries/);
   assert.match(appSource, /hasMoreBefore/);
+  assert.match(appSource, /state\.focusEntryId[\s\S]+requestOlderBoardEntries\(event\.id\)/);
 });
 
 test("Board surface scrolls to bottom after the user's own post succeeds", () => {
@@ -24,4 +25,15 @@ test("Board surface follows external posts only when already near bottom", () =>
   assert.match(appSource, /shouldFollowBoardBottom/);
   assert.match(appSource, /preserveBoardScrollPosition/);
   assert.match(appSource, /newEntriesAvailable/);
+});
+
+test("Board surface exposes clear audience and reply affordances", () => {
+  assert.match(appSource, /board-for-you-filter/);
+  assert.match(appSource, /board-audience-badge/);
+  assert.match(appSource, /board-reply-button/);
+  assert.match(appSource, /board-reply-banner/);
+  assert.match(appSource, /board-reply-quote/);
+  assert.match(appSource, /showBoardMentionNotification/);
+  assert.match(appSource, /Jump to original/);
+  assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
 });

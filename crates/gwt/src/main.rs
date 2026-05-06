@@ -601,6 +601,7 @@ mod tests {
                 topics: Vec::new(),
                 owners: Vec::new(),
                 targets: Vec::new(),
+                mentions: Vec::new(),
             }
         ));
     }

@@ -262,6 +262,9 @@ mod tests {
         assert!(text.contains("--kind claim"));
         assert!(text.contains("--kind handoff"));
         assert!(text.contains("--target"));
+        assert!(text.contains("Choose the audience before posting"));
+        assert!(text.contains("--mention user:"));
+        assert!(text.contains("--mention agent:"));
     }
 
     #[test]

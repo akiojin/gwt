@@ -278,7 +278,7 @@ pub enum ActionsCommand {
 pub enum BoardCommand {
     /// `gwtd board show [--json]`.
     Show { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>]`.
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>] [--mention <kind:id>]`.
     Post {
         kind: String,
         body: Option<String>,
@@ -287,6 +287,7 @@ pub enum BoardCommand {
         topics: Vec<String>,
         owners: Vec<String>,
         targets: Vec<String>,
+        mentions: Vec<String>,
     },
 }
 
@@ -372,7 +373,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
