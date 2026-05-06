@@ -81,6 +81,13 @@ pub struct PersistedWindowState {
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub agent_color: Option<AgentColor>,
+    /// Canvas-local tab group id. Windows with the same group id render as
+    /// tabs in one floating chrome; ungrouped windows keep legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_group_id: Option<String>,
+    /// Marks the visible tab inside a tab group. Ignored for ungrouped windows.
+    #[serde(default)]
+    pub tab_group_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,6 +180,8 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
+                tab_group_id: None,
+                tab_group_active: false,
             },
             PersistedWindowState {
                 id: "codex-1".to_string(),
@@ -194,6 +203,8 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
+                tab_group_id: None,
+                tab_group_active: false,
             },
         ],
         next_z_index: 3,
@@ -486,6 +497,8 @@ mod tests {
                     dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
+                    tab_group_id: None,
+                    tab_group_active: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -507,6 +520,8 @@ mod tests {
                     dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
+                    tab_group_id: None,
+                    tab_group_active: false,
                 },
             ],
             next_z_index: 6,
@@ -550,6 +565,29 @@ mod tests {
         // serde `default` は無い値を None に初期化する。
         assert!(loaded.windows[0].agent_id.is_none());
         assert!(loaded.windows[0].agent_color.is_none());
+        assert!(loaded.windows[0].tab_group_id.is_none());
+        assert!(!loaded.windows[0].tab_group_active);
+    }
+
+    #[test]
+    fn persisted_window_state_round_trips_tab_group_fields() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.tab_group_id = Some("group-claude-1".to_string());
+        window.tab_group_active = true;
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"tab_group_id\""),
+            "tab group id must persist for workspace restore"
+        );
+        assert!(
+            json.contains("\"tab_group_active\""),
+            "active tab marker must persist for workspace restore"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed.tab_group_id.as_deref(), Some("group-claude-1"));
+        assert!(parsed.tab_group_active);
     }
 
     #[test]
@@ -606,6 +644,8 @@ mod tests {
             dynamic_title: None,
             agent_id: Some("claude".into()),
             agent_color: Some(AgentColor::Yellow),
+            tab_group_id: None,
+            tab_group_active: false,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         assert!(
@@ -673,6 +713,8 @@ mod tests {
                     dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
+                    tab_group_id: None,
+                    tab_group_active: false,
                 },
                 PersistedWindowState {
                     id: "file-tree-1".to_string(),
@@ -694,6 +736,8 @@ mod tests {
                     dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
+                    tab_group_id: None,
+                    tab_group_active: false,
                 },
             ],
             next_z_index: 3,
@@ -900,6 +944,8 @@ mod tests {
                     dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
+                    tab_group_id: None,
+                    tab_group_active: false,
                 },
                 PersistedWindowState {
                     id: "branches-1".to_string(),
@@ -921,6 +967,8 @@ mod tests {
                     dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
+                    tab_group_id: None,
+                    tab_group_active: false,
                 },
             ],
             next_z_index: 3,

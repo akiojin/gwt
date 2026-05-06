@@ -336,6 +336,29 @@ test("floating window controls mark only window operations as hideable", () => {
   }
 });
 
+test("workspace windows expose draggable tab docking affordances", () => {
+  assert.match(
+    appSource,
+    /class="window-tab-strip"|className\s*=\s*"window-tab-strip"/,
+    "expected grouped windows to render a tab strip",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"dock_window_tab"/,
+    "expected tab drop to send dock_window_tab",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"detach_window_tab"/,
+    "expected tab drag outside a group to send detach_window_tab",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"activate_window_tab"/,
+    "expected tab click to activate a grouped window tab",
+  );
+});
+
 test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The pseudo-element content lives only in CSS, not in the DOM, so we
