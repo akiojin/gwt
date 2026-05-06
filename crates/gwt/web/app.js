@@ -4,6 +4,15 @@
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import {
+        applyBoardMentionNotificationFocus,
+        boardEntryAudienceLabels,
+        boardEntryMentionsSelf,
+        boardEntryPreview,
+        findBoardEntry,
+        mentionsForBoardSubmit,
+        visibleBoardEntries,
+      } from "/board-surface.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -3740,73 +3749,6 @@
         });
       }
 
-      function boardMentionKind(mention) {
-        return String(mention?.target_kind || mention?.targetKind || "").toLowerCase();
-      }
-
-      function boardMentionLabel(mention) {
-        const label = String(mention?.label || "").trim();
-        if (label) return label;
-        const target = String(mention?.target || "").trim();
-        if (!target) return "Unknown";
-        return target;
-      }
-
-      function boardEntryMentionsUser(entry) {
-        return (entry.mentions || []).some((mention) => boardMentionKind(mention) === "user");
-      }
-
-      function boardEntryAudienceLabels(entry) {
-        const mentions = entry.mentions || [];
-        if (mentions.length > 0) {
-          return mentions.map((mention) => {
-            const kind = boardMentionKind(mention);
-            const label = boardMentionLabel(mention);
-            if (kind === "user") return "For you";
-            if (kind === "agent") return `To: ${label}`;
-            if (kind === "session") return `Session: ${label}`;
-            if (kind === "branch") return `Branch: ${label}`;
-            return `To: ${label}`;
-          });
-        }
-        const targets = entry.target_owners || [];
-        if (targets.length > 0) {
-          return targets.map((target) => `To: ${target}`);
-        }
-        return ["Broadcast"];
-      }
-
-      function boardEntryPreview(entry) {
-        const body = String(entry?.body || "").replace(/\s+/g, " ").trim();
-        if (!body) return "Empty entry";
-        return body.length > 96 ? `${body.slice(0, 96)}...` : body;
-      }
-
-      function findBoardEntry(state, entryId) {
-        return (state.entries || []).find((entry) => entry.id === entryId) || null;
-      }
-
-      function mentionForReplyParent(parentEntry) {
-        if (!parentEntry) return null;
-        const authorKind = String(parentEntry.author_kind || "").toLowerCase();
-        if (authorKind === "user") {
-          return { target_kind: "user", target: "you", label: parentEntry.author || "You" };
-        }
-        if (authorKind === "agent") {
-          const target = parentEntry.origin_agent_id || parentEntry.author;
-          if (target) {
-            return { target_kind: "agent", target, label: parentEntry.author || target };
-          }
-        }
-        return null;
-      }
-
-      function mentionsForBoardSubmit(state) {
-        const parent = findBoardEntry(state, state.replyParentId);
-        const mention = mentionForReplyParent(parent);
-        return mention ? [mention] : [];
-      }
-
       function showBoardMentionNotification(entry, windowId) {
         if (!entry?.id) return;
         let toast = document.getElementById("board-mention-toast");
@@ -3820,8 +3762,7 @@
         toast.textContent = `Board reply for you - ${boardEntryPreview(entry)}`;
         toast.onclick = () => {
           const state = ensureBoardState(windowId);
-          state.audienceFilter = "all";
-          state.forYouUnread = 0;
+          applyBoardMentionNotificationFocus(state, entry.id);
           focusBoardEntry(entry.id);
           toast.remove();
         };
@@ -3938,9 +3879,7 @@
           });
         }
 
-        const visibleEntries = state.audienceFilter === "for_you"
-          ? state.entries.filter(boardEntryMentionsUser)
-          : state.entries;
+        const visibleEntries = visibleBoardEntries(state);
 
         timeline.innerHTML = "";
         if (state.hasMoreBefore) {
@@ -3987,7 +3926,7 @@
             card.tabIndex = -1;
             focusTarget = card;
           }
-          if (boardEntryMentionsUser(entry)) {
+          if (boardEntryMentionsSelf(entry)) {
             card.classList.add("for-you");
             card.setAttribute("aria-label", "Board post addressed to you");
           }
@@ -7278,7 +7217,7 @@
               (entry) =>
                 Boolean(entry.id) &&
                 !existingEntryIds.has(entry.id) &&
-                boardEntryMentionsUser(entry),
+                boardEntryMentionsSelf(entry),
             );
             const pendingSubmit = state.pendingSubmit;
             const completedSubmit = Boolean(pendingSubmit)

@@ -2,7 +2,9 @@ use std::io;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
-    coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry, BoardMention},
+    coordination::{
+        load_snapshot, normalize_board_mentions, post_entry, AuthorKind, BoardEntry, BoardMention,
+    },
     paths::gwt_sessions_dir,
 };
 use gwt_github::SpecOpsError;
@@ -237,13 +239,9 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
 fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
     let mut mentions = Vec::new();
     for value in values {
-        let mention = value.parse::<BoardMention>()?;
-        if mentions.iter().any(|existing| existing == &mention) {
-            continue;
-        }
-        mentions.push(mention);
+        mentions.push(value.parse::<BoardMention>()?);
     }
-    Ok(mentions)
+    Ok(normalize_board_mentions(&mentions))
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {

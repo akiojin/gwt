@@ -123,6 +123,10 @@ impl EmbeddedServer {
                 get(embedded_web::migration_modal_js_handler),
             )
             .route(
+                "/board-surface.js",
+                get(embedded_web::board_surface_js_handler),
+            )
+            .route(
                 "/assets/xterm/xterm.mjs",
                 get(embedded_web::xterm_js_handler),
             )
