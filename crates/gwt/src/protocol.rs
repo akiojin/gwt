@@ -24,6 +24,7 @@ use crate::{
 pub enum ArrangeMode {
     Tile,
     Stack,
+    Align,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

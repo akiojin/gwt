@@ -37,7 +37,7 @@ pub struct BoardPostRequest {
 
 impl AppRuntime {
     pub(crate) fn post_board_entry_events(
-        &self,
+        &mut self,
         client_id: &str,
         request: BoardPostRequest,
     ) -> Vec<OutboundEvent> {
@@ -69,6 +69,8 @@ impl AppRuntime {
                 },
             )];
         };
+        let tab_id = tab.id.clone();
+        let project_root = tab.project_root.clone();
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
@@ -159,11 +161,9 @@ impl AppRuntime {
                     },
                 )];
                 if let Some(entry) = latest_entry.as_ref() {
-                    if let Some(event) = self.record_workspace_board_milestone_event(
-                        &tab.id,
-                        &tab.project_root,
-                        entry,
-                    ) {
+                    if let Some(event) =
+                        self.record_workspace_board_milestone_event(&tab_id, &project_root, entry)
+                    {
                         events.push(event);
                     }
                 }
@@ -180,7 +180,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn record_workspace_board_milestone_event(
-        &self,
+        &mut self,
         tab_id: &str,
         project_root: &Path,
         entry: &coordination::BoardEntry,
@@ -198,6 +198,7 @@ impl AppRuntime {
                 }
             };
         projection.record_board_milestone(entry);
+        self.update_agent_window_dynamic_title_for_board_entry(entry);
         if let Err(error) =
             workspace_projection::save_workspace_projection(project_root, &projection)
         {
@@ -217,6 +218,41 @@ impl AppRuntime {
         Some(OutboundEvent::broadcast(
             BackendEvent::ActiveWorkProjection { projection },
         ))
+    }
+
+    fn update_agent_window_dynamic_title_for_board_entry(
+        &mut self,
+        entry: &coordination::BoardEntry,
+    ) -> bool {
+        if !matches!(
+            entry.kind,
+            BoardEntryKind::Claim
+                | BoardEntryKind::Status
+                | BoardEntryKind::Blocked
+                | BoardEntryKind::Handoff
+                | BoardEntryKind::Decision
+                | BoardEntryKind::Next
+        ) {
+            return false;
+        }
+        let Some(origin_session_id) = entry.origin_session_id.as_deref() else {
+            return false;
+        };
+        let Some((window_id, _)) = self
+            .active_agent_sessions
+            .iter()
+            .find(|(_, session)| session.session_id == origin_session_id)
+        else {
+            return false;
+        };
+        let Some(address) = self.window_lookup.get(window_id).cloned() else {
+            return false;
+        };
+        let Some(tab) = self.tab_mut(&address.tab_id) else {
+            return false;
+        };
+        tab.workspace
+            .set_dynamic_title(&address.raw_id, Some(entry.body.clone()))
     }
 }
 

@@ -54,6 +54,10 @@ impl WindowState {
 pub struct PersistedWindowState {
     pub id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_title: Option<String>,
     pub preset: WindowPreset,
     pub geometry: WindowGeometry,
     pub z_index: u32,
@@ -172,6 +176,8 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: true,
+                purpose_title: None,
+                dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
                 tab_group_id: None,
@@ -193,6 +199,8 @@ pub fn default_workspace_state() -> PersistedWorkspaceState {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: true,
+                purpose_title: None,
+                dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
                 tab_group_id: None,
@@ -485,6 +493,8 @@ mod tests {
                         height: 480.0,
                     }),
                     persist: true,
+                    purpose_title: None,
+                    dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
                     tab_group_id: None,
@@ -506,6 +516,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    purpose_title: None,
+                    dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
                     tab_group_id: None,
@@ -628,6 +640,8 @@ mod tests {
             maximized: false,
             pre_maximize_geometry: None,
             persist: true,
+            purpose_title: Some("Review launch flow".into()),
+            dynamic_title: None,
             agent_id: Some("claude".into()),
             agent_color: Some(AgentColor::Yellow),
             tab_group_id: None,
@@ -642,9 +656,15 @@ mod tests {
             json.contains("\"agent_color\":\"yellow\""),
             "agent_color should be serialized as snake_case: {json}"
         );
+        assert!(
+            json.contains("\"purpose_title\":\"Review launch flow\""),
+            "purpose_title should be serialized when present: {json}"
+        );
 
         let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed.agent_id.as_deref(), Some("claude"));
+        assert_eq!(parsed.purpose_title.as_deref(), Some("Review launch flow"));
+        assert_eq!(parsed.dynamic_title, None);
         assert!(
             parsed.agent_color.is_none(),
             "agent_color must be wire-only: skip_deserializing drops it"
@@ -689,6 +709,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    purpose_title: None,
+                    dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
                     tab_group_id: None,
@@ -710,6 +732,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    purpose_title: None,
+                    dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
                     tab_group_id: None,
@@ -916,6 +940,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    purpose_title: None,
+                    dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
                     tab_group_id: None,
@@ -937,6 +963,8 @@ mod tests {
                     maximized: false,
                     pre_maximize_geometry: None,
                     persist: true,
+                    purpose_title: None,
+                    dynamic_title: None,
                     agent_id: None,
                     agent_color: None,
                     tab_group_id: None,

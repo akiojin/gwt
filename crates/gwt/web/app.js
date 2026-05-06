@@ -38,6 +38,7 @@
       const addButton = document.getElementById("add-button");
       const tileButton = document.getElementById("tile-button");
       const stackButton = document.getElementById("stack-button");
+      const alignButton = document.getElementById("align-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const activeWorkCount = document.getElementById("op-active-work-count");
@@ -569,6 +570,29 @@
         return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
       }
 
+      function windowDisplayTitle(windowData) {
+        const candidates = [
+          windowData?.dynamic_title,
+          windowData?.purpose_title,
+          windowData?.title,
+          windowData?.agent_id,
+        ];
+        for (const value of candidates) {
+          const title = String(value || "").trim();
+          if (title) return title;
+        }
+        return "Window";
+      }
+
+      function escapeHtml(value) {
+        return String(value || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
       function runtimeStateForWindow(windowData) {
         const cachedState = windowRuntimeStateMap.get(windowData.id);
         if (cachedState) {
@@ -620,7 +644,7 @@
           const runtimeLabel = windowRuntimeLabel(runtimeState);
           row.innerHTML = `
             <div class="window-list-copy">
-              <div class="window-list-title">${entry.title}</div>
+              <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
               <div class="window-list-meta">
                 <span class="window-list-preset">${presetLabel(entry.preset)}</span>
                 <span class="window-list-geometry">${geometryLabel}</span>
@@ -6591,7 +6615,7 @@
           mountWindowBody(windowData, element);
         }
 
-        element.querySelector(".title-text").textContent = windowData.title;
+        element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
@@ -6702,6 +6726,7 @@
         sendOpenProjectDialog,
         requestWindowList,
         renderWindowList,
+        windowDisplayTitle,
         toggleWindowList,
         renderProjectTabs,
         renderRecentProjects,
@@ -7739,6 +7764,7 @@
       });
       tileButton.addEventListener("click", () => arrangeWindows("tile"));
       stackButton.addEventListener("click", () => arrangeWindows("stack"));
+      alignButton.addEventListener("click", () => arrangeWindows("align"));
       windowListButton.addEventListener(
         "click",
         frontendUnits.projectWorkspaceShell.toggleWindowList,

@@ -239,6 +239,7 @@ confirmation modal with three actions:
 - Pan the canvas by dragging the background
 - Use `Tile` to arrange windows on a grid
 - Use `Stack` to cascade windows with overlap
+- Use `Align` to arrange windows on a grid without changing their size
 - Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to cycle focus; the
   focused window is recentered
 
