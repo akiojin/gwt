@@ -574,8 +574,19 @@ fn active_agent_summary_from_session(
 fn agent_launch_purpose_title(
     project_root: &Path,
     linked_issue_number: Option<u64>,
+    branch_name: Option<&str>,
+    issue_link_cache_dir: &Path,
 ) -> Option<String> {
-    let issue_number = linked_issue_number?;
+    linked_issue_number
+        .and_then(|issue_number| issue_title_from_cache(project_root, issue_number))
+        .or_else(|| {
+            linked_issue_number_for_branch(project_root, branch_name, issue_link_cache_dir)
+                .and_then(|issue_number| issue_title_from_cache(project_root, issue_number))
+        })
+        .or_else(|| workspace_projection_owner_title(project_root))
+}
+
+fn issue_title_from_cache(project_root: &Path, issue_number: u64) -> Option<String> {
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(project_root)?;
     let cache_root = gwt_core::paths::gwt_cache_dir()
         .join("issues")
@@ -584,6 +595,32 @@ fn agent_launch_purpose_title(
         gwt_github::Cache::new(cache_root).load_entry(gwt_github::IssueNumber(issue_number))?;
     let title = entry.snapshot.title.trim();
     (!title.is_empty()).then(|| title.to_string())
+}
+
+fn linked_issue_number_for_branch(
+    project_root: &Path,
+    branch_name: Option<&str>,
+    issue_link_cache_dir: &Path,
+) -> Option<u64> {
+    let branch_name = branch_name?.trim();
+    if branch_name.is_empty() {
+        return None;
+    }
+    let repo_hash = gwt::index_worker::detect_repo_hash(project_root)?;
+    let path = issue_link_cache_dir
+        .join("issue-links")
+        .join(format!("{}.json", repo_hash.as_str()));
+    let bytes = std::fs::read(path).ok()?;
+    let store = serde_json::from_slice::<IssueBranchLinkStore>(&bytes).ok()?;
+    store.branches.get(branch_name).copied()
+}
+
+fn workspace_projection_owner_title(project_root: &Path) -> Option<String> {
+    let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
+        .ok()
+        .flatten()?;
+    let owner = projection.owner?.trim().to_string();
+    (!owner.is_empty()).then_some(owner)
 }
 
 fn upsert_workspace_agent(
@@ -2851,14 +2888,19 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         bounds: WindowGeometry,
     ) -> Result<Vec<OutboundEvent>, String> {
+        let issue_link_cache_dir = self.issue_link_cache_dir.clone();
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let project_root_path = tab.project_root.clone();
         let project_root = project_root_path.display().to_string();
         let title = config.display_name.clone();
-        let purpose_title =
-            agent_launch_purpose_title(&project_root_path, config.linked_issue_number);
+        let purpose_title = agent_launch_purpose_title(
+            &project_root_path,
+            config.linked_issue_number,
+            config.branch.as_deref(),
+            &issue_link_cache_dir,
+        );
         let window = tab
             .workspace
             .add_window_with_title(WindowPreset::Agent, title, false, bounds);
@@ -7300,6 +7342,93 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_agent_window_initial_title_uses_branch_issue_link_title() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        Cache::new(issue_cache_root(&repo))
+            .write_snapshot(&sample_issue_snapshot(
+                2468,
+                "SPEC: Branch linked purpose",
+                &["gwt-spec"],
+                "Spec body",
+                "2026-05-06T00:00:00Z",
+            ))
+            .expect("write issue cache");
+        write_issue_link_store(
+            &repo,
+            HashMap::from([("work/20260506-1257".to_string(), 2468)]),
+        );
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/20260506-1257")
+            .build();
+
+        runtime
+            .spawn_agent_window("tab-1", config, canvas_bounds())
+            .expect("spawn agent window");
+
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| window.preset == WindowPreset::Agent)
+            .expect("agent window");
+        assert_eq!(
+            agent_window.purpose_title.as_deref(),
+            Some("SPEC: Branch linked purpose")
+        );
+        assert_eq!(agent_window.title, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.owner = Some("SPEC-2008".to_string());
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/20260506-1257")
+            .build();
+
+        runtime
+            .spawn_agent_window("tab-1", config, canvas_bounds())
+            .expect("spawn agent window");
+
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| window.preset == WindowPreset::Agent)
+            .expect("agent window");
+        assert_eq!(agent_window.purpose_title.as_deref(), Some("SPEC-2008"));
+        assert_eq!(agent_window.title, "Codex");
+    }
+
+    #[test]
     fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_only() {
         let _env_lock = env_test_lock()
             .lock()
@@ -7398,6 +7527,40 @@ exit 0
                 .dynamic_title
                 .as_deref(),
             None
+        );
+    }
+
+    #[test]
+    fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
+        let temp = tempdir().expect("tempdir");
+        let mut tab = sample_project_tab_with_window(
+            "tab-1",
+            "codex-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        tab.workspace
+            .set_dynamic_title("codex-1", Some("Board milestone focus".to_string()));
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "codex-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            sample_active_agent_session("tab-1", &window_id),
+        );
+
+        let events = runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
+        let tab = runtime.tab("tab-1").expect("tab");
+        assert_eq!(
+            tab.workspace
+                .window("codex-1")
+                .expect("codex window")
+                .dynamic_title
+                .as_deref(),
+            Some("Board milestone focus")
         );
     }
 
