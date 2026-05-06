@@ -5,6 +5,7 @@
 
 import { createThemeManager, createBrowserEnv } from "/theme-manager.js";
 import { createHotkeyManager } from "/hotkey.js";
+import { wireThemeToggle as wireSegmentedThemeToggle } from "/theme-toggle.js";
 
 const SIDEBAR_KEY = "gwt:ui:sidebar";
 const SIDEBAR_COLLAPSED_KEY = "gwt:ui:sidebar-collapsed";
@@ -91,35 +92,14 @@ function wireChromeVisibility({ doc, win }) {
 }
 
 // ------------------------------------------------------------
-// Theme toggle (Project Bar)
+// Theme toggle (Project Bar) — segmented radiogroup
 // ------------------------------------------------------------
+// SPEC-2356 FR-024: AUTO / DARK / LIGHT are exposed as a parallel radiogroup
+// so AUTO is reachable from any state in a single click. Implementation lives
+// in `/theme-toggle.js` so it is unit-testable under Node.
 
-function wireThemeToggle({ doc, themeManager }) {
-  const btn = doc.getElementById("op-theme-toggle");
-  const value = doc.getElementById("op-theme-toggle-value");
-  if (!btn || !value) return;
-
-  const renderLabel = () => {
-    const pref = themeManager.getPreference();
-    const eff = themeManager.getEffective();
-    btn.dataset.themeState = pref;
-    value.textContent = pref === "auto"
-      ? `AUTO ${eff === "dark" ? "▮" : "▯"}`
-      : pref.toUpperCase();
-    // SPEC-2356 — expose the live preference to assistive tech.
-    btn.setAttribute(
-      "aria-label",
-      `Theme: ${pref === "auto" ? `auto (currently ${eff})` : pref}. Click to cycle.`,
-    );
-  };
-
-  renderLabel();
-  themeManager.subscribe(renderLabel);
-
-  btn.addEventListener("click", () => {
-    const cycle = { auto: "dark", dark: "light", light: "auto" };
-    themeManager.setTheme(cycle[themeManager.getPreference()] ?? "auto");
-  });
+function wireThemeToggle(opts) {
+  wireSegmentedThemeToggle(opts);
 }
 
 // ------------------------------------------------------------

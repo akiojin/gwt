@@ -2978,16 +2978,44 @@
             >
               Windows
             </button>
-            <button
+            <div
               class="op-theme-toggle"
               id="op-theme-toggle"
-              type="button"
-              aria-label="Toggle theme"
-              data-theme-state="auto"
+              role="radiogroup"
+              aria-label="Theme: auto"
             >
-              <span class="op-theme-toggle__label">Theme</span>
-              <span id="op-theme-toggle-value">AUTO</span>
-            </button>
+              <button
+                class="op-theme-toggle__option"
+                type="button"
+                role="radio"
+                data-theme-value="auto"
+                aria-checked="true"
+                tabindex="0"
+              >
+                <span class="op-theme-toggle__label">AUTO</span>
+                <span
+                  class="op-theme-toggle__indicator"
+                  id="op-theme-effective-indicator"
+                  aria-hidden="true"
+                >▯</span>
+              </button>
+              <button
+                class="op-theme-toggle__option"
+                type="button"
+                role="radio"
+                data-theme-value="dark"
+                aria-checked="false"
+                tabindex="-1"
+              >DARK</button>
+              <button
+                class="op-theme-toggle__option"
+                type="button"
+                role="radio"
+                data-theme-value="light"
+                aria-checked="false"
+                tabindex="-1"
+              >LIGHT</button>
+            </div>
           </div>
         </div>
         <aside class="op-sidebar" id="op-sidebar" aria-label="Operator sidebar layers">
