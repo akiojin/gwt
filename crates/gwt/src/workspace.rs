@@ -346,12 +346,13 @@ impl WorkspaceState {
         if id == target_id {
             return false;
         }
-        if self.window_index(id).is_none() {
+        let Some(source_index) = self.window_index(id) else {
             return false;
-        }
+        };
         let Some(target_index) = self.window_index(target_id) else {
             return false;
         };
+        let source_group_id = self.persisted.windows[source_index].tab_group_id.clone();
         let group_id = self.persisted.windows[target_index]
             .tab_group_id
             .clone()
@@ -372,6 +373,11 @@ impl WorkspaceState {
                 window.maximized = false;
                 window.pre_maximize_geometry = None;
                 window.z_index = next_z_index;
+            }
+        }
+        if let Some(source_group_id) = source_group_id {
+            if source_group_id != group_id {
+                self.normalize_group(&source_group_id);
             }
         }
         true
@@ -1217,5 +1223,30 @@ mod tests {
         let claude = workspace.window("claude-1").expect("claude");
         assert!(claude.tab_group_id.is_none());
         assert!(!claude.tab_group_active);
+    }
+
+    #[test]
+    fn docking_active_tab_to_another_group_normalizes_source_group() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let shell = workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        let file_tree = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        assert!(workspace.dock_window_tab(&shell.id, "codex-1"));
+        assert!(workspace.window(&shell.id).expect("shell").tab_group_active);
+
+        assert!(workspace.dock_window_tab(&shell.id, &file_tree.id));
+
+        let remaining_source_group = ["claude-1", "codex-1"]
+            .iter()
+            .filter_map(|id| workspace.window(id))
+            .collect::<Vec<_>>();
+        assert_eq!(remaining_source_group.len(), 2);
+        assert!(
+            remaining_source_group
+                .iter()
+                .any(|window| window.tab_group_active),
+            "source group must keep one visible active tab after active tab moves out"
+        );
     }
 }
