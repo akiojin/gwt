@@ -1,5 +1,201 @@
 # Lessons Learned
 
+## 2026-05-04 — Audit-driven a11y coverage finds gaps that audit-by-checklist misses
+
+### 事象
+
+SPEC-2356 polish iteration で modal accessibility を完成させた後、当初は
+「全 modal に WAI-ARIA dialog convention 適用」「focus trap 実装」で
+work が完了したと判断していた。しかし Ralph Loop で iteration を
+続ける中で audit-driven approach (各 surface の form fields / status
+indicators / error regions / progress bars 等を 1 surface ずつ網羅
+チェックする) を採用したところ、以下のような「checklist では拾えな
+い」accessibility gap が次々と検出された:
+
+- 動的に生成される input / textarea / select に `aria-label` がない
+  (memo / profile / wizard の form fields。`<label>` で wrap されて
+  いない 8 fields)
+- 動的に生成される `<progress>` element に `aria-labelledby` がない
+  (migration の phase progress)
+- preset (Add Window) modal が Esc-close handler 配列から漏れていた
+  (他の 5 modal は全部 covered だったが 1 つだけ漏れ)
+- live-dot pulse が `forced-colors: active` ブロックには入って
+  いたが `prefers-reduced-motion: reduce` には入っていなかった
+  (PR #2456 で structural assertion が catch)
+
+これらは「modal a11y チェックリストを埋める」感覚では発見できず、
+実際に `grep "createElement\\|createNode" | filter` で全 fields を
+列挙して 1 つずつ aria-label の有無を audit する作業で初めて捕捉
+できた。
+
+### 原因
+
+Accessibility は HTML / ARIA の組み合わせ問題で、cross-cutting concern
+として全 surface に均等にかかるが、開発時は surface 単位で feature を
+追加する。1 surface 完了時点では他の surface の同類 element の有無
+は意識されず、結果として「ある場所では aria-label が wired、ある場所
+では wired していない」という不均一さが生まれる。Code review 時にも
+「この surface だけ見ているとそれ単体で OK に見える」ため検出されない。
+
+### 再発防止策
+
+1. **Surface 横断 audit を accessibility 追加時の standard practice
+   にする。** 新しい aria-* / role / 役割属性を追加した PR では、
+   その属性が他の surface でも必要になる可能性を query で確認:
+   - `grep -nE 'createElement\\("input"\\)' src/**/*.js` で input 全箇所
+   - `grep -nE 'createNode\\("button"' src/**/*.js` で button 全箇所
+   - `grep -n 'role="dialog"' src/**/*.html` で dialog 全箇所
+2. **Meta-assertion を chrome-structure tests に置く。** 「全
+   `[role="dialog"]` element に accessible name があること」のような
+   meta-assertion は新しい dialog が追加されただけで自動的に検証
+   範囲に含まれるため、surface 横断の網羅を test layer に固定できる。
+   `operator-chrome-structure.test.mjs` の `Every role="dialog" has
+   programmatic accessible name` test がこの pattern。
+3. **Audit list は test file に書く、document に書かない。** Document
+   は drift しやすいが test は CI で実行される。「全 form field の
+   aria-label coverage」のような expected 一覧は assertion の expected
+   array にまとめておく。
+
+### 適用範囲
+
+- 新しい WAI-ARIA pattern (combobox / tablist / tree 等) を追加する PR
+- 新しい role / aria-* attribute を 1 surface に wired した PR
+- Lessons-driven feedback loop の継続的な audit cycle
+
+## 2026-05-04 — `[\s\S]*?` regex undercapture masks bugs in nested CSS blocks
+
+### 事象
+
+SPEC-2356 polish iteration で `@media (prefers-reduced-motion: reduce)`
+ブロックを検証する chrome-structure assertion を書いたとき、最初は
+naive な regex `/@media\s*\([^)]*\)\s*\{[\s\S]*?\n\}/g` を使った。これだと
+ネストしたルール (`.selector { animation: none; }`) の最初の `}` で
+マッチが終了するため、ブロック全体ではなく最初のルールしか拾えない。
+その結果、`op-live-pulse` を使っている `.op-status-strip__live-dot`
+が reduced-motion で無効化されていない (実際は `forced-colors: active`
+にしか入っていなかった) 既存バグを assertion がスルーしてしまった。
+
+depth-tracked extraction (`{` `}` を数えて対応する閉じを探す) に
+書き直したところ、即座に live-dot が reduced-motion でカバーされて
+いないことが捕捉された。
+
+### 原因
+
+CSS の `@media` ブロックは内部に複数のルールを持ち、それぞれが `{}` を
+使う。regex の `[^}]*` や `[\s\S]*?\n\}` で「最初の `}` まで」を
+切ると、ブロックの先頭の少数ルールしか captured されない。assertion
+は cover されたか否かしか見ないので、cover 漏れが「該当ルールが存在
+しない」と誤判定され、本来検出すべきバグを GREEN で見逃してしまう。
+
+### 再発防止策
+
+1. **CSS の `@media` / 入れ子ブロックを regex で切るときは brace-depth
+   tracking を使う。** ヘルパ関数 `extractMediaBlocks(css, condition)`
+   を新設し、`{` と `}` を数えて対応する閉じを探す。テスト時は単純な
+   regex に逃げず、ヘルパを再利用する。
+2. **新しい coverage assertion を書いたら、その assertion が確実に
+   gap を捕捉できる「false case」を意識的に作って verify する。**
+   今回の assertion は最初から GREEN で通ってしまっていたが、もし
+   live-dot のような実バグが既に存在していれば即座に RED になるべき
+   だった。assertion 設計時は「バグがあれば落ちる」を必ず確認する。
+
+### 適用範囲
+
+- すべての CSS 構造解析 assertion (`@media` / `@supports` / `@keyframes` /
+  `@layer` 等のネストブロック)。
+- 同種のパターンを抱える HTML / source 解析 assertion も同じ落とし穴
+  を避けるため、構文認識の必要があるものは regex に逃げず depth /
+  parser を使う。
+
+## 2026-05-04 — Chrome-structure assertions alone don't catch contrast regressions
+
+### 事象
+
+SPEC-2356 polish iteration の PR #2439 で、Status Strip の ACTIVE / IDLE
+セルに state-color tinting を追加した。chrome-structure assertions で
+「`color: var(--color-state-*)` が定義されていること」を機械的に検証して
+GREEN になったため merge した。しかし light-theme で実際に rendering を
+確認すると、IDLE = 3.49:1 / ACTIVE = 3.15:1 / BLOCKED = 2.61:1 と
+すべて WCAG AA (4.5:1) を下回っていた。BLOCKED の 2.61:1 は PR #2439 で
+新規導入した訳ではなく、それ以前から存在した既存バグだったが、PR #2439
+が assertion で「現状維持」をロックインしてしまった。
+
+### 原因
+
+Status Strip の bg は dark/light 両テーマで dark (`#050709` / `#1a1d24`)
+である一方、`--color-state-*` トークンは theme 別に「その theme の bg
+に合う色」として tuned されていた。light-theme の state-* は light bg
+向けの暗い saturated 色で、dark な strip bg に重ねると contrast が
+急落する。chrome-structure tests は「セレクタとプロパティが存在するか」
+しか検証していなかったため、実際の color 値と bg の組み合わせは見逃し
+た。
+
+### 再発防止策
+
+1. **テキストを表示する chrome surface には必ず contrast assertion を
+   追加する** ―― selector 存在チェック (chrome-structure tests) だけでは
+   AA 違反を検出できない。`contrast.test.mjs` に theme × state ×
+   surface_bg の組み合わせを必ず assert する (PR #2441 で active / idle /
+   blocked × dark / light の 6 件 + structure 1 件を追加)。
+2. **theme-agnostic な surface (両テーマで bg が同じ系統の chrome) は、
+   token を local に scope-override して固定値にする** ―― theme tokens
+   をそのまま使うと、片方のテーマで AA を満たしても他方で破綻する。
+   `.op-status-strip { --color-state-*: #...; }` のように surface 単位で
+   scoped custom property override を入れて、「両テーマで同じ on-bg
+   palette」を強制する。
+
+### 適用範囲
+
+- `--color-state-*` を直接 chrome surface に流しているすべての箇所
+  (現在は Status Strip のみ; 将来 Header chrome / Floating overlay 等に
+  同パターンが現れたら必ず scoped override + contrast test を併設)。
+- chrome-structure assertions を新設するときは、検証対象が「テキスト
+  色」を含むなら **必ず併せて contrast assertion を追加** する。
+
+## 2026-05-04 — Cache restore failures must not block the release pipeline
+
+### 事象
+
+v9.16.0 の release workflow (run 25321263396) で `Build MSI installer (Windows)`
+ジョブが失敗し、後続の `Upload to GitHub Release` と `Publish to npm` が
+skip されてリリース全体がブロックした。失敗ステップは
+`Swatinem/rust-cache@v2` の Restore Cache。Restoring cache → Post job
+cleanup までわずか 1.5 秒で終了しており、他のキャッシュ復元成功
+ジョブと同条件のため、cache provider 側の一過性失敗 (flaky) と判断。
+
+### 原因
+
+`Swatinem/rust-cache@v2` は GitHub Actions cache provider の応答失敗時
+にステップ自体を fail させる。すべての rust-cache 使用箇所に
+`continue-on-error` を付けていなかったため、cache infra の一過性
+障害がそのままジョブ失敗→release 全体失敗へ伝播した。Cache は
+ビルドの最適化であり correctness 要件ではないので、cache restore
+失敗時はキャッシュなしで build を続行すべきだった。
+
+### 再発防止策
+
+すべての workflow (`release.yml` / `build.yml` / `test.yml` / `lint.yml`
+/ `coverage.yml`) の `Swatinem/rust-cache@v2` ステップに
+`continue-on-error: true` を付与。cache provider の一過性失敗で job
+が落ちず、cache miss としてビルドが続行する。
+
+### 適用範囲
+
+- `.github/workflows/release.yml` (build-gwt, build-msi, build-dmg)
+- `.github/workflows/build.yml` (build, check-windows)
+- `.github/workflows/test.yml` (test, test-index-e2e, test-windows-rust)
+- `.github/workflows/lint.yml` (lint)
+- `.github/workflows/coverage.yml` (coverage)
+
+### 補足: 同種パターンへの一般化
+
+外部 GitHub Action のうち「ビルド/テスト correctness の前提ではない
+最適化系の action (cache, telemetry, artifact mirror など)」は、
+`continue-on-error: true` を default にして infra 由来の一過性失敗で
+リリース pipeline が止まらないようにする。Correctness 要件のステップ
+(toolchain install / build / test / sign / publish) は今まで通り
+default fail-fast を維持する。
+
 ## 2026-05-04 — Board projection guards must distinguish append order from chronology
 
 ### 事象

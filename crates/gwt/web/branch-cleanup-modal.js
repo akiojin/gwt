@@ -4,6 +4,17 @@
 // pure function over the dependency bag; app.js wires the DOM refs, state
 // lookup, helpers, and callbacks.
 
+import { createFocusTrap } from "./focus-trap.js";
+
+// SPEC-2356 — remember the element focused when the modal opens so we can
+// restore focus to it on close. WeakMap keyed on the modal element survives
+// across renderer calls without leaking when the element is detached.
+const focusReturnMap = new WeakMap();
+// SPEC-2356 — track the active focus trap release so we can detach the
+// listener when the modal closes. Keyed on the modal element to mirror
+// the focus-return pattern.
+const focusTrapMap = new WeakMap();
+
 export function renderBranchCleanupModal({
   modalEl,
   dialogEl,
@@ -19,9 +30,30 @@ export function renderBranchCleanupModal({
   onDeleteRemoteToggle,
 }) {
   if (!windowId || !state || !state.cleanupModal.open) {
+    const wasOpenBeforeClose = modalEl.classList.contains("open");
     modalEl.classList.remove("open");
+    // SPEC-2356 — flip aria-hidden alongside the .open class so screen
+    // readers stop announcing the dialog when it slides closed.
+    modalEl.setAttribute("aria-hidden", "true");
     while (dialogEl.firstChild) {
       dialogEl.removeChild(dialogEl.firstChild);
+    }
+    // SPEC-2356 — restore focus to whatever was focused when the modal
+    // opened (typically the Cleanup button that triggered it). Without
+    // this, focus would land on document.body and keyboard users would
+    // lose their place.
+    if (wasOpenBeforeClose) {
+      // Release the focus trap before restoring focus so the trap doesn't
+      // intercept the focus move and pull it back into the (closed) modal.
+      const releaseTrap = focusTrapMap.get(modalEl);
+      focusTrapMap.delete(modalEl);
+      if (typeof releaseTrap === "function") releaseTrap();
+
+      const returnTo = focusReturnMap.get(modalEl);
+      focusReturnMap.delete(modalEl);
+      if (returnTo && typeof returnTo.focus === "function") {
+        try { returnTo.focus({ preventScroll: true }); } catch { returnTo.focus(); }
+      }
     }
     return;
   }
@@ -29,7 +61,31 @@ export function renderBranchCleanupModal({
   const supportsRemoteDelete = selectedEntries.some((entry) =>
     Boolean(entry.cleanup.upstream),
   );
+  // SPEC-2356 — capture whether this is a fresh open (transition from
+  // closed) so we can move focus into the dialog. Re-renders during the
+  // running / result stages skip the focus move so users keep their place.
+  const wasOpen = modalEl.classList.contains("open");
+  if (!wasOpen) {
+    // Save the trigger so close() can restore focus there.
+    const ownerDoc = modalEl.ownerDocument || (typeof document !== "undefined" ? document : null);
+    if (ownerDoc) {
+      focusReturnMap.set(modalEl, ownerDoc.activeElement);
+      // Activate the focus trap so Tab cycles within the modal instead
+      // of escaping to background content. The trap is detached on close.
+      const release = createFocusTrap(dialogEl, { document: ownerDoc });
+      focusTrapMap.set(modalEl, release);
+    }
+  }
   modalEl.classList.add("open");
+  modalEl.removeAttribute("aria-hidden");
+  // SPEC-2356 — aria-busy signals to screen readers that the dialog is
+  // in a loading state. Set true during the async "running" stage and
+  // clear (set false) once we move into confirm or result.
+  if (state.cleanupModal.stage === "running") {
+    dialogEl.setAttribute("aria-busy", "true");
+  } else {
+    dialogEl.setAttribute("aria-busy", "false");
+  }
   while (dialogEl.firstChild) {
     dialogEl.removeChild(dialogEl.firstChild);
   }
@@ -172,4 +228,10 @@ export function renderBranchCleanupModal({
   submit.addEventListener("click", onSubmit);
   footer.appendChild(submit);
   dialogEl.appendChild(footer);
+  // SPEC-2356 — on a fresh open (transition from closed → open), move focus
+  // to the dialog so screen readers announce it and keyboard users land
+  // inside the modal instead of staying on the trigger button.
+  if (!wasOpen && typeof dialogEl.focus === "function") {
+    try { dialogEl.focus({ preventScroll: true }); } catch { dialogEl.focus(); }
+  }
 }

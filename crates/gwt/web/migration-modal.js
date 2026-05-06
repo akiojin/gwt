@@ -3,6 +3,16 @@
 // the dependency bag so app.js can wire DOM refs, state, and callbacks while
 // the renderer stays unit-testable.
 
+import { createFocusTrap } from "./focus-trap.js";
+
+// SPEC-2356 — remember the trigger that opened the modal so close can
+// restore focus there. WeakMap keyed on modal element matches the
+// branch-cleanup-modal pattern.
+const focusReturnMap = new WeakMap();
+// SPEC-2356 — track the active focus trap release so Tab cycles within
+// the modal and detach the listener on close.
+const focusTrapMap = new WeakMap();
+
 const PHASE_LABELS = {
   confirm: "Preparing",
   validate: "Validating workspace",
@@ -45,19 +55,61 @@ export function renderMigrationModal({
   onQuit,
 }) {
   if (!state || !state.migrationModal || !state.migrationModal.open) {
+    const wasOpenBeforeClose = modalEl.classList.contains("open");
     modalEl.classList.remove("open");
+    // SPEC-2356 — flip aria-hidden alongside the .open class so screen
+    // readers stop announcing the dialog when it slides closed.
+    modalEl.setAttribute("aria-hidden", "true");
     while (dialogEl.firstChild) {
       dialogEl.removeChild(dialogEl.firstChild);
+    }
+    // SPEC-2356 — restore focus to whatever was focused when the modal
+    // opened so keyboard users don't lose their place.
+    if (wasOpenBeforeClose) {
+      // Release the focus trap before restoring focus.
+      const releaseTrap = focusTrapMap.get(modalEl);
+      focusTrapMap.delete(modalEl);
+      if (typeof releaseTrap === "function") releaseTrap();
+
+      const returnTo = focusReturnMap.get(modalEl);
+      focusReturnMap.delete(modalEl);
+      if (returnTo && typeof returnTo.focus === "function") {
+        try { returnTo.focus({ preventScroll: true }); } catch { returnTo.focus(); }
+      }
     }
     return;
   }
 
+  // SPEC-2356 — capture fresh-open transition so we can move focus into
+  // the dialog only on the initial render (subsequent re-renders during
+  // running / done stages keep focus where the user already navigated).
+  const wasOpen = modalEl.classList.contains("open");
+  if (!wasOpen) {
+    const ownerDoc = modalEl.ownerDocument || (typeof document !== "undefined" ? document : null);
+    if (ownerDoc) {
+      focusReturnMap.set(modalEl, ownerDoc.activeElement);
+      // Activate focus trap so Tab cycles within the modal.
+      const release = createFocusTrap(dialogEl, { document: ownerDoc });
+      focusTrapMap.set(modalEl, release);
+    }
+  }
   modalEl.classList.add("open");
+  modalEl.removeAttribute("aria-hidden");
+
+  const m = state.migrationModal;
+
+  // SPEC-2356 — aria-busy signals to screen readers that the dialog is in
+  // a loading state during the async migration. Set true during running,
+  // false otherwise.
+  if (m.stage === "running") {
+    dialogEl.setAttribute("aria-busy", "true");
+  } else {
+    dialogEl.setAttribute("aria-busy", "false");
+  }
+
   while (dialogEl.firstChild) {
     dialogEl.removeChild(dialogEl.firstChild);
   }
-
-  const m = state.migrationModal;
 
   if (m.stage === "running") {
     dialogEl.appendChild(createNode("h2", "", "Migrating repository"));
@@ -69,6 +121,11 @@ export function renderMigrationModal({
       "migration-modal-phase-label",
       describePhase(m.phase),
     );
+    // SPEC-2356 — give the phase label a stable id so the <progress>
+    // element can reference it via aria-labelledby. Without this, screen
+    // readers announce just "progressbar 50%" with no context about
+    // which phase is running.
+    phaseLabel.id = "migration-modal-phase-label";
     dialogEl.appendChild(phaseLabel);
     const progress = createNode("progress", "migration-modal-progress");
     progress.setAttribute("max", "100");
@@ -76,6 +133,7 @@ export function renderMigrationModal({
       "value",
       String(Number.isFinite(m.percent) ? m.percent : 0),
     );
+    progress.setAttribute("aria-labelledby", "migration-modal-phase-label");
     dialogEl.appendChild(progress);
     dialogEl.appendChild(
       createNode(
@@ -192,4 +250,9 @@ export function renderMigrationModal({
   footer.appendChild(migrate);
 
   dialogEl.appendChild(footer);
+  // SPEC-2356 — on a fresh open, move focus to the dialog so screen readers
+  // announce "Worktree migration dialog" and keyboard users land inside.
+  if (!wasOpen && typeof dialogEl.focus === "function") {
+    try { dialogEl.focus({ preventScroll: true }); } catch { dialogEl.focus(); }
+  }
 }

@@ -2970,33 +2970,33 @@
             <h3 class="op-sidebar__heading">
               <span>Quick</span>
             </h3>
-            <button class="op-layer" type="button" data-cmd="start-work">
+            <button class="op-layer" type="button" data-cmd="start-work" aria-label="Start Work">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Start Work</span>
-              <span class="op-layer__count">GO</span>
+              <kbd class="op-layer__kbd">GO</kbd>
             </button>
-            <button class="op-layer" type="button" data-cmd="open-board">
+            <button class="op-layer" type="button" data-cmd="open-board" aria-label="Open Board (Cmd+B)" aria-keyshortcuts="Meta+B">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Board</span>
-              <span class="op-layer__count">⌘B</span>
+              <kbd class="op-layer__kbd">⌘ B</kbd>
             </button>
-            <button class="op-layer" type="button" data-cmd="open-git">
+            <button class="op-layer" type="button" data-cmd="open-git" aria-label="Open Git (Cmd+G)" aria-keyshortcuts="Meta+G">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Git</span>
-              <span class="op-layer__count">⌘G</span>
+              <kbd class="op-layer__kbd">⌘ G</kbd>
             </button>
-            <button class="op-layer" type="button" data-cmd="open-logs">
+            <button class="op-layer" type="button" data-cmd="open-logs" aria-label="Open Logs (Cmd+L)" aria-keyshortcuts="Meta+L">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Logs</span>
-              <span class="op-layer__count">⌘L</span>
+              <kbd class="op-layer__kbd">⌘ L</kbd>
             </button>
           </div>
         </aside>
         <div class="canvas-area">
-          <div class="hint">
-            <span class="connection-dot" id="connection-dot"></span>
-            <span id="connection-label">Connecting</span>
-            <span>Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
+          <div class="hint" role="status" aria-live="polite">
+            <span class="connection-dot" id="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label" aria-label="Connection state">Connecting</span>
+            <span class="hint__copy">Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
           </div>
           <div class="canvas" id="canvas">
             <div class="canvas-stage" id="canvas-stage"></div>
@@ -3007,7 +3007,7 @@
               <p class="project-picker-copy">
                 Restore previous workspaces or choose a new folder.
               </p>
-              <div class="project-picker-error" id="project-picker-error" hidden></div>
+              <div class="project-picker-error" id="project-picker-error" role="alert" hidden></div>
               <button class="wizard-button primary" id="picker-open-project">
                 Open Project...
               </button>
@@ -3028,12 +3028,14 @@
           </div>
           <div class="floating-actions">
             <button
-              class="arrange-button"
+              class="arrange-button op-palette-trigger"
               id="op-palette-button"
               aria-label="Command palette"
               title="Command palette (⌘K / ⌘P)"
+              aria-keyshortcuts="Meta+K Meta+P"
             >
-              ⌘K
+              <span class="op-palette-trigger__label">⌘K</span>
+              <span class="op-palette-trigger__hint">Palette</span>
             </button>
             <button class="arrange-button" id="tile-button" aria-label="Tile windows">Tile</button>
             <button class="arrange-button" id="stack-button" aria-label="Stack windows">Stack</button>
@@ -3054,34 +3056,47 @@
             <button class="add-button" id="add-button" aria-label="Add window">+</button>
           </div>
         </div>
-        <footer class="op-status-strip" id="op-status-strip" aria-label="Operator status strip">
+        <footer
+          class="op-status-strip"
+          id="op-status-strip"
+          role="status"
+          aria-live="polite"
+          aria-label="Operator status strip"
+        >
           <div class="op-status-strip__cell">
             <span class="op-status-strip__live-dot" aria-hidden="true"></span>
             <span class="op-status-strip__label">LIVE</span>
           </div>
-          <div class="op-status-strip__cell">
+          <div class="op-status-strip__cell op-status-strip__cell--active">
             <span class="op-status-strip__label">ACTIVE</span>
-            <span class="op-status-strip__value" id="op-strip-active">0</span>
+            <span class="op-status-strip__value" id="op-strip-active" aria-label="Active agents">0</span>
           </div>
-          <div class="op-status-strip__cell">
+          <div class="op-status-strip__cell op-status-strip__cell--idle">
             <span class="op-status-strip__label">IDLE</span>
-            <span class="op-status-strip__value" id="op-strip-idle">0</span>
+            <span class="op-status-strip__value" id="op-strip-idle" aria-label="Idle agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--blocked">
             <span class="op-status-strip__label">BLOCKED</span>
-            <span class="op-status-strip__value" id="op-strip-blocked">0</span>
+            <span class="op-status-strip__value" id="op-strip-blocked" aria-label="Blocked agents">0</span>
           </div>
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">BR</span>
-            <span class="op-status-strip__value" id="op-strip-branches">—</span>
+            <span class="op-status-strip__value" id="op-strip-branches" aria-label="Branches">—</span>
           </div>
-          <div class="op-status-strip__cell">
+          <div class="op-status-strip__cell" aria-hidden="true">
             <span class="op-status-strip__label">T</span>
             <span class="op-status-strip__value" id="op-strip-clock">--:--:--</span>
           </div>
         </footer>
       </div>
-      <div class="op-briefing" id="op-briefing" aria-hidden="true">
+      <div
+        class="op-briefing"
+        id="op-briefing"
+        role="status"
+        aria-live="polite"
+        aria-label="Operator boot sequence"
+        aria-hidden="true"
+      >
         <h1 class="op-briefing__title">gwt://operator</h1>
         <div class="op-briefing__stamp" id="op-briefing-stamp"></div>
         <div class="op-briefing__lines" id="op-briefing-lines">
@@ -3115,6 +3130,11 @@
             placeholder="Run a command…"
             autocomplete="off"
             data-hotkey-override="true"
+            role="combobox"
+            aria-controls="op-palette-list"
+            aria-autocomplete="list"
+            aria-expanded="false"
+            aria-label="Search commands"
           />
           <ul class="op-palette__list" id="op-palette-list" role="listbox"></ul>
         </div>
@@ -3125,6 +3145,7 @@
           role="dialog"
           aria-modal="true"
           aria-label="Hotkey reference"
+          tabindex="-1"
         >
           <h2 class="op-hotkey-card__title">Operator Hotkeys</h2>
           <div class="op-hotkey-card__group">
@@ -3151,6 +3172,13 @@
             </div>
           </div>
           <div class="op-hotkey-card__group">
+            <h3 class="op-hotkey-card__group-title">Layout</h3>
+            <div class="op-hotkey-card__row">
+              <span>Toggle sidebar</span>
+              <kbd class="op-kbd">⌘ \</kbd>
+            </div>
+          </div>
+          <div class="op-hotkey-card__group">
             <h3 class="op-hotkey-card__group-title">Help</h3>
             <div class="op-hotkey-card__row">
               <span>This card</span>
@@ -3163,9 +3191,15 @@
           </div>
         </div>
       </div>
-      <div class="modal-backdrop" id="preset-modal">
-        <div class="modal-shell">
-          <h2>Add window</h2>
+      <div class="modal-backdrop" id="preset-modal" aria-hidden="true">
+        <div
+          class="modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="preset-modal-title"
+          tabindex="-1"
+        >
+          <h2 id="preset-modal-title">Add window</h2>
           <div class="preset-section">
             <div class="preset-section-label">Workspace</div>
             <div class="preset-list">
@@ -3216,8 +3250,14 @@
           </div>
         </div>
       </div>
-      <div class="modal-backdrop" id="wizard-modal">
-        <div class="modal-shell is-wizard">
+      <div class="modal-backdrop" id="wizard-modal" aria-hidden="true">
+        <div
+          class="modal-shell is-wizard"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="wizard-title"
+          tabindex="-1"
+        >
           <div class="modal-header wizard-header">
             <div>
               <h2 class="wizard-title" id="wizard-title">Launch Agent</h2>
@@ -3225,7 +3265,7 @@
             </div>
             <button class="wizard-button" id="wizard-close-button">Close</button>
           </div>
-          <div class="wizard-error" id="wizard-error" hidden></div>
+          <div class="wizard-error" id="wizard-error" role="alert" hidden></div>
           <div class="wizard-summary" id="wizard-summary"></div>
           <div class="modal-body" id="wizard-body"></div>
           <div class="modal-footer wizard-footer">
@@ -3236,8 +3276,18 @@
           </div>
         </div>
       </div>
-      <div class="modal-backdrop is-drawer" id="branch-cleanup-modal">
-        <div class="modal-shell is-drawer-shell"></div>
+      <div
+        class="modal-backdrop is-drawer"
+        id="branch-cleanup-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell is-drawer-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Branch cleanup"
+          tabindex="-1"
+        ></div>
       </div>
       <!-- SPEC-1934 US-6: confirmation modal shown when a Normal Git layout
            is detected at startup. Renderer lives in /migration-modal.js. -->
@@ -3246,8 +3296,18 @@
            `.modal-backdrop` / `.modal-shell` classes so existing renderers
            and smoke tests stay unchanged. The `is-drawer` opt-in class flips
            layout in components.css. -->
-      <div class="modal-backdrop is-drawer" id="migration-modal">
-        <div class="modal-shell is-drawer-shell"></div>
+      <div
+        class="modal-backdrop is-drawer"
+        id="migration-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell is-drawer-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Worktree migration"
+          tabindex="-1"
+        ></div>
       </div>
     </div>
 

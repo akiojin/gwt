@@ -43,6 +43,11 @@ function wireThemeToggle({ doc, themeManager }) {
     value.textContent = pref === "auto"
       ? `AUTO ${eff === "dark" ? "▮" : "▯"}`
       : pref.toUpperCase();
+    // SPEC-2356 — expose the live preference to assistive tech.
+    btn.setAttribute(
+      "aria-label",
+      `Theme: ${pref === "auto" ? `auto (currently ${eff})` : pref}. Click to cycle.`,
+    );
   };
 
   renderLabel();
@@ -150,6 +155,15 @@ export function applyTelemetryCounts(doc, counts = {}) {
   };
   if ("active" in counts) markLive("agents", (counts.active ?? 0) > 0);
   if ("branches" in counts) markLive("git", (counts.branches ?? 0) > 0);
+  // SPEC-2356 — toggle the blocked alert state so the BLOCKED cell pulses when
+  // anything actually needs attention, and stays still otherwise.
+  if ("blocked" in counts) {
+    const blockedCell = doc.querySelector(".op-status-strip__cell--blocked");
+    if (blockedCell) {
+      if ((counts.blocked ?? 0) > 0) blockedCell.classList.add("op-status-strip__cell--alert");
+      else blockedCell.classList.remove("op-status-strip__cell--alert");
+    }
+  }
   setText("op-strip-active", counts.active ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
   setText("op-strip-blocked", counts.blocked ?? 0);
@@ -175,14 +189,24 @@ function wireMissionBriefing({ doc, win }) {
     return;
   }
 
-  // SPEC-2356 — stamp the briefing with the current session timestamp so the
-  // splash reads like a mission-control boot log, not just a static splash.
+  // SPEC-2356 — stamp the briefing with the current session timestamp + a
+  // 6-char session-id-style hash so the splash reads like a mission-control
+  // boot log, not just a static splash. The hash is mathematically derived
+  // from the boot timestamp so two simultaneous sessions render distinct
+  // strings without spinning up any randomness source.
   const stamp = doc.getElementById("op-briefing-stamp");
   if (stamp) {
     const now = new Date();
     const datePart = `${now.getFullYear()}.${pad2(now.getMonth() + 1)}.${pad2(now.getDate())}`;
     const timePart = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
-    stamp.textContent = `T+0 · ${datePart} ${timePart}`;
+    let hashSrc = now.getTime();
+    let hash = "";
+    while (hash.length < 6) {
+      hashSrc = (hashSrc * 9301 + 49297) % 0xfffff;
+      hash += hashSrc.toString(16).padStart(5, "0").slice(-2);
+    }
+    const sessionId = hash.slice(0, 6).toUpperCase();
+    stamp.textContent = `T+0 · ${datePart} ${timePart} · SESSION ${sessionId}`;
   }
 
   const reduced = matchReduced(doc);
@@ -191,13 +215,31 @@ function wireMissionBriefing({ doc, win }) {
   overlay.removeAttribute("aria-hidden");
   overlay.hidden = false;
 
-  setTimeout(() => {
+  // SPEC-2356 — let the user dismiss the splash early by pressing any
+  // key or clicking through it. The splash is purely decorative and
+  // shouldn't block users who want to get into the canvas immediately.
+  let exited = false;
+  const exitNow = () => {
+    if (exited) return;
+    exited = true;
     overlay.dataset.state = "exiting";
     setTimeout(() => {
       overlay.hidden = true;
       try { win.sessionStorage.setItem(BRIEFING_KEY, "1"); } catch { /* no-op */ }
     }, reduced.matches ? 0 : 360);
-  }, totalDelay);
+  };
+
+  const earlyDismiss = (event) => {
+    if (overlay.hidden) return;
+    // Only fast-forward once, after the staged lines have started rendering
+    // so the user actually sees that something happened.
+    if (event && event.type === "keydown" && event.key === "Tab") return;
+    exitNow();
+  };
+  doc.addEventListener("keydown", earlyDismiss, { once: true });
+  overlay.addEventListener("click", earlyDismiss, { once: true });
+
+  setTimeout(exitNow, totalDelay);
 }
 
 // ------------------------------------------------------------
@@ -207,14 +249,29 @@ function wireMissionBriefing({ doc, win }) {
 function wireHotkeyOverlay({ doc, hotkey }) {
   const overlay = doc.getElementById("op-hotkey-overlay");
   if (!overlay) return;
+  const card = overlay.querySelector(".op-hotkey-card");
+
+  // SPEC-2356 — modal-dialog focus management: remember the trigger so we can
+  // restore focus on close, and move focus into the dialog on open so screen
+  // readers announce "Hotkey reference dialog" instead of staying on whatever
+  // surface invoked ⌘?.
+  let returnFocusTo = null;
 
   const open = () => {
+    returnFocusTo = doc.activeElement instanceof Element ? doc.activeElement : null;
     overlay.dataset.open = "true";
     overlay.removeAttribute("aria-hidden");
+    if (card) {
+      try { card.focus({ preventScroll: true }); } catch { card.focus(); }
+    }
   };
   const close = () => {
     delete overlay.dataset.open;
     overlay.setAttribute("aria-hidden", "true");
+    if (returnFocusTo && typeof returnFocusTo.focus === "function") {
+      try { returnFocusTo.focus({ preventScroll: true }); } catch { returnFocusTo.focus(); }
+    }
+    returnFocusTo = null;
   };
 
   overlay.addEventListener("click", (e) => {
@@ -253,6 +310,9 @@ function wireCommandPalette({ doc, hotkey }) {
   function open() {
     overlay.dataset.open = "true";
     overlay.removeAttribute("aria-hidden");
+    // SPEC-2356 — combobox accessibility: announce that the popup is now open
+    // so screen readers attach the listbox to the input.
+    input.setAttribute("aria-expanded", "true");
     input.value = "";
     selectedIndex = 0;
     render();
@@ -262,6 +322,8 @@ function wireCommandPalette({ doc, hotkey }) {
   function close() {
     delete overlay.dataset.open;
     overlay.setAttribute("aria-hidden", "true");
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
     if (doc.activeElement === input) input.blur();
   }
 
@@ -296,6 +358,11 @@ function wireCommandPalette({ doc, hotkey }) {
         li.className = "op-palette__row";
         li.dataset.index = String(idx);
         li.dataset.selected = idx === selectedIndex ? "true" : "false";
+        // SPEC-2356 — combobox/listbox a11y: each row is an option with a
+        // stable id so the input can target it via aria-activedescendant.
+        li.id = `op-palette-row-${idx}`;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", idx === selectedIndex ? "true" : "false");
         li.innerHTML = `<span></span><span class="op-palette__hint"></span>`;
         li.firstChild.textContent = a.label;
         li.lastChild.textContent = a.hint ?? "";
@@ -318,9 +385,17 @@ function wireCommandPalette({ doc, hotkey }) {
   function updateSelection() {
     const rows = list.querySelectorAll(".op-palette__row");
     rows.forEach((row, i) => {
-      row.dataset.selected = i === selectedIndex ? "true" : "false";
-      if (i === selectedIndex) row.scrollIntoView({ block: "nearest" });
+      const isSelected = i === selectedIndex;
+      row.dataset.selected = isSelected ? "true" : "false";
+      row.setAttribute("aria-selected", isSelected ? "true" : "false");
+      if (isSelected) {
+        row.scrollIntoView({ block: "nearest" });
+        // SPEC-2356 — point the combobox input at the active option so screen
+        // readers announce the highlighted command without moving DOM focus.
+        input.setAttribute("aria-activedescendant", row.id);
+      }
     });
+    if (rows.length === 0) input.removeAttribute("aria-activedescendant");
   }
 
   function execute(action) {
@@ -428,6 +503,15 @@ function wireGlobalHotkeys({ doc, hotkey, palette }) {
   hotkey.register("cmd+b", send("open-board"));
   hotkey.register("cmd+g", send("open-git"));
   hotkey.register("cmd+l", send("open-logs"));
+  // SPEC-2356 — Cmd+\ collapses/expands the Sidebar Layers, freeing canvas
+  // real estate when the user wants more room for floating windows.
+  hotkey.register("cmd+\\", () => {
+    const root = doc.documentElement;
+    const next = root.dataset.opSidebar === "collapsed" ? "" : "collapsed";
+    if (next) root.dataset.opSidebar = next;
+    else delete root.dataset.opSidebar;
+    return true;
+  });
 
   if (typeof palette?.close === "function") {
     doc.addEventListener("keydown", (e) => {

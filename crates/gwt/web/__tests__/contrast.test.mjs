@@ -17,17 +17,39 @@ const LARGE_AA = 3.0;
 const REQUIRED_PAIRS = [
   ["--color-text", "--color-canvas", NORMAL_AA, "body text on canvas"],
   ["--color-text", "--color-surface", NORMAL_AA, "body text on surface"],
+  ["--color-text", "--color-surface-elevated", NORMAL_AA, "body text on surface-elevated"],
   ["--color-text-muted", "--color-canvas", NORMAL_AA, "muted text on canvas"],
+  ["--color-text-muted", "--color-surface", NORMAL_AA, "muted text on surface"],
+  ["--color-text-muted", "--color-surface-elevated", NORMAL_AA, "muted text on surface-elevated (palette placeholder etc)"],
   ["--color-text-strong", "--color-canvas", NORMAL_AA, "strong text on canvas"],
+  ["--color-text-strong", "--color-surface", NORMAL_AA, "strong text on surface"],
+  ["--color-text-strong", "--color-surface-elevated", NORMAL_AA, "strong text on surface-elevated"],
   ["--color-display-fg", "--color-canvas", LARGE_AA, "display text on canvas"],
+  ["--color-display-fg", "--color-surface", LARGE_AA, "display text on surface"],
+  ["--color-display-fg", "--color-surface-elevated", LARGE_AA, "display text on surface-elevated (drawer / palette / hotkey card titles)"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
   ["--color-button-fg", "--color-button-bg", NORMAL_AA, "primary button label"],
+  ["--color-button-fg", "--color-button-bg-hover", NORMAL_AA, "primary button label on hover"],
   ["--color-link", "--color-canvas", NORMAL_AA, "link on canvas"],
+  ["--color-link", "--color-surface", NORMAL_AA, "link on surface"],
+  ["--color-link", "--color-surface-elevated", NORMAL_AA, "link on surface-elevated"],
+  ["--color-link-hover", "--color-canvas", NORMAL_AA, "link on canvas (hover)"],
+  ["--color-link-hover", "--color-surface", NORMAL_AA, "link on surface (hover)"],
+  ["--color-link-hover", "--color-surface-elevated", NORMAL_AA, "link on surface-elevated (hover)"],
   ["--agent-claude", "--color-canvas", LARGE_AA, "agent claude indicator"],
   ["--agent-codex", "--color-canvas", LARGE_AA, "agent codex indicator"],
   ["--agent-gemini", "--color-canvas", LARGE_AA, "agent gemini indicator"],
   ["--agent-opencode", "--color-canvas", LARGE_AA, "agent opencode indicator"],
   ["--agent-copilot", "--color-canvas", LARGE_AA, "agent copilot indicator"],
+  // Agent colors are also used as TEXT (e.g. .op-agent-kind chip foreground
+  // for codex). Lock in NORMAL_AA on surface bg for every agent so future
+  // surfaces that route agent colors to text don't introduce contrast
+  // regressions.
+  ["--agent-claude", "--color-surface", NORMAL_AA, "agent claude as text on surface"],
+  ["--agent-codex", "--color-surface", NORMAL_AA, "agent codex as text on surface"],
+  ["--agent-gemini", "--color-surface", NORMAL_AA, "agent gemini as text on surface"],
+  ["--agent-opencode", "--color-surface", NORMAL_AA, "agent opencode as text on surface"],
+  ["--agent-copilot", "--color-surface", NORMAL_AA, "agent copilot as text on surface"],
 ];
 
 for (const themeName of ["dark", "light"]) {
@@ -47,6 +69,103 @@ for (const themeName of ["dark", "light"]) {
   }
 }
 
+// SPEC-2356 — Status Strip is a permanent dark chrome band. Its scoped state
+// palette in components.css must clear WCAG AA against both themes' strip bg.
+const STRIP_PALETTE = {
+  active: "#22d3ee",
+  idle: "#94a3b8",
+  blocked: "#f87171",
+};
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const [stateName, color] of Object.entries(STRIP_PALETTE)) {
+    test(`[${themeName}] WCAG AA: status strip ${stateName} (${color}) on strip bg`, () => {
+      const bg = theme["--color-status-strip-bg"];
+      assert.ok(bg, `--color-status-strip-bg missing in ${themeName}`);
+      const ratio = contrastRatio(color, bg);
+      assert.ok(
+        ratio >= NORMAL_AA,
+        `strip ${stateName}: ratio ${ratio.toFixed(2)} < ${NORMAL_AA} (${color} on ${bg})`,
+      );
+    });
+  }
+}
+
+// SPEC-2356 — State colors render as TEXT inside agent cards (chip foreground)
+// and status chips (.ready / .error etc), so each state token must clear
+// WCAG AA against --color-surface AND --color-surface-elevated in both
+// themes. Lesson #2026-05-04: missed this for idle in dark theme — fixed.
+const STATE_TEXT_TOKENS = [
+  "--color-state-active",
+  "--color-state-idle",
+  "--color-state-blocked",
+  "--color-state-done",
+];
+// State colors are used as TEXT inside cards / status chips that sit on
+// surface bg. They are NOT used directly on canvas as text — canvas text
+// uses --color-text. So canvas is excluded from the surface set.
+const SURFACE_BACKGROUNDS = [
+  "--color-surface",
+  "--color-surface-elevated",
+];
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const stateToken of STATE_TEXT_TOKENS) {
+    for (const bgToken of SURFACE_BACKGROUNDS) {
+      test(`[${themeName}] WCAG AA: ${stateToken} text on ${bgToken}`, () => {
+        const fg = theme[stateToken];
+        const bg = theme[bgToken];
+        assert.ok(fg, `${stateToken} missing in ${themeName}`);
+        assert.ok(bg, `${bgToken} missing in ${themeName}`);
+        const ratio = contrastRatio(fg, bg);
+        assert.ok(
+          ratio >= NORMAL_AA,
+          `${stateToken} on ${bgToken}: ${ratio.toFixed(2)} < ${NORMAL_AA} (fg=${fg}, bg=${bg})`,
+        );
+      });
+    }
+  }
+}
+
+test("components.css scopes the on-strip state palette to bright on-dark variants", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const stripBlock = css.match(/\.op-status-strip\s*\{([\s\S]*?)\n\}/);
+  assert.ok(stripBlock, "expected .op-status-strip block");
+  // The block must override --color-state-active/-idle/-blocked locally so
+  // the strip cell values render with AA-clearing colors regardless of theme.
+  assert.match(stripBlock[1], /--color-state-active:\s*#22d3ee/i);
+  assert.match(stripBlock[1], /--color-state-idle:\s*#94a3b8/i);
+  assert.match(stripBlock[1], /--color-state-blocked:\s*#f87171/i);
+});
+
+// SPEC-2356 — Focus ring is a UI component, so WCAG 2.2 SC 1.4.11
+// applies (non-text contrast minimum 3:1). The focus ring must stand
+// out against canvas, surface, and surface-elevated.
+const FOCUS_RING_BACKGROUNDS = [
+  "--color-canvas",
+  "--color-surface",
+  "--color-surface-elevated",
+];
+
+for (const themeName of ["dark", "light"]) {
+  const theme = themeName === "dark" ? dark : light;
+  for (const bgToken of FOCUS_RING_BACKGROUNDS) {
+    test(`[${themeName}] WCAG 2.2 SC 1.4.11 (3:1): focus ring on ${bgToken}`, () => {
+      const fg = theme["--color-focus-ring"];
+      const bg = theme[bgToken];
+      assert.ok(fg, `--color-focus-ring missing in ${themeName}`);
+      assert.ok(bg, `${bgToken} missing in ${themeName}`);
+      const ratio = contrastRatio(fg, bg);
+      assert.ok(
+        ratio >= LARGE_AA,
+        `focus ring on ${bgToken}: ${ratio.toFixed(2)} < ${LARGE_AA} (fg=${fg}, bg=${bg})`,
+      );
+    });
+  }
+}
+
 test("dark and light token sets define identical semantic keys", () => {
   const darkKeys = Object.keys(dark).sort();
   const lightKeys = Object.keys(light).sort();
@@ -56,6 +175,63 @@ test("dark and light token sets define identical semantic keys", () => {
     "dark and light token sets must define the same semantic keys",
   );
 });
+
+test("every color token has a forced-colors fallback for high-contrast mode", () => {
+  // forced-colors: active mode requires every --color-* token used by the
+  // chrome to fall back to a system color (Canvas / CanvasText / Highlight
+  // / GrayText / etc) so Windows High Contrast and macOS Increase Contrast
+  // render correctly. Without this, custom tokens leak through and the
+  // user sees the design system colors instead of system colors.
+  //
+  // Lesson 2 (tasks/lessons.md 2026-05-04): naive regex `[\s\S]*?\n\}`
+  // undercaptures @media bodies because nested rules have their own
+  // closing braces. Use brace-depth tracking instead.
+  const forcedColorsBody = extractMediaBlock(tokensCss, "forced-colors: active");
+  assert.ok(forcedColorsBody, "tokens.css must contain a forced-colors media query");
+  const fallbackKeys = new Set();
+  for (const line of forcedColorsBody.split("\n")) {
+    const m = line.match(/^\s*(--[a-z][a-z0-9-]*)\s*:/);
+    if (m) fallbackKeys.add(m[1]);
+  }
+  // Every --color-* token defined in the base dark theme must have a
+  // forced-colors fallback (other token families like --space-*, --type-*
+  // are layout/typography and don't need system-color overrides).
+  for (const key of Object.keys(dark)) {
+    if (!key.startsWith("--color-")) continue;
+    assert.ok(
+      fallbackKeys.has(key),
+      `${key} has no forced-colors fallback — high-contrast mode will leak the design token`,
+    );
+  }
+});
+
+// SPEC-2356 Lesson 2 — extract a single @media block body using brace-
+// depth tracking instead of a naive regex. The naive
+// /@media\s*\(...\)\s*\{[\s\S]*?\n\}/ truncates at the first nested `}`
+// when the @media body contains rules with their own closing braces,
+// which causes coverage assertions to silently miss bugs.
+function extractMediaBlock(css, condition) {
+  const marker = "@media";
+  let cursor = 0;
+  while (true) {
+    const at = css.indexOf(marker, cursor);
+    if (at < 0) return null;
+    const headerEnd = css.indexOf("{", at);
+    if (headerEnd < 0) return null;
+    if (!css.slice(at, headerEnd).includes(condition)) {
+      cursor = headerEnd + 1;
+      continue;
+    }
+    let depth = 1;
+    let i = headerEnd + 1;
+    while (i < css.length && depth > 0) {
+      if (css[i] === "{") depth += 1;
+      else if (css[i] === "}") depth -= 1;
+      i += 1;
+    }
+    return css.slice(headerEnd + 1, i - 1);
+  }
+}
 
 test("token names are kebab-case CSS custom properties", () => {
   const all = new Set([...Object.keys(dark), ...Object.keys(light)]);

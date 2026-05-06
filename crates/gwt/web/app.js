@@ -3,6 +3,7 @@
       import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
+      import { createFocusTrap } from "/focus-trap.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -387,6 +388,13 @@
       function setConnectionState(connected) {
         connectionDot.classList.toggle("connected", connected);
         connectionLabel.textContent = connected ? "Connected" : "Reconnecting";
+        // SPEC-2356 — propagate connection state to the Operator Status Strip
+        // so the LIVE cell visibly reflects whether the WebSocket bridge is
+        // up. The class is set on the strip element and consumed via CSS.
+        const strip = document.getElementById("op-status-strip");
+        if (strip) {
+          strip.classList.toggle("op-status-strip--offline", !connected);
+        }
         if (!connected) {
           for (const [windowId] of branchListStateMap.entries()) {
             if (
@@ -668,8 +676,15 @@
           button.title = tab.project_root;
           button.setAttribute("role", "button");
           button.tabIndex = 0;
+          // SPEC-2356 — aria-current="page" announces the active tab to
+          // screen readers without changing the role semantics. Inactive
+          // tabs explicitly clear the attribute so the previously-active
+          // tab doesn't keep the marker after a switch.
           if (tab.id === appState.active_tab_id) {
             button.classList.add("active");
+            button.setAttribute("aria-current", "page");
+          } else {
+            button.removeAttribute("aria-current");
           }
           button.innerHTML = `
             <span class="project-tab-label">${tab.title}</span>
@@ -760,12 +775,42 @@
         renderWindowList();
       }
 
+      let presetModalFocusReturn = null;
+      let presetModalFocusTrapRelease = null;
       function openModal() {
+        // SPEC-2356 — capture trigger BEFORE adding .open so we can
+        // restore focus on close. The preset modal is invoked via the
+        // "+" Add Window button; without restore, focus falls to body.
+        presetModalFocusReturn = document.activeElement;
         modal.classList.add("open");
+        modal.removeAttribute("aria-hidden");
+        const presetShell = modal.querySelector(".modal-shell");
+        if (presetShell && typeof presetShell.focus === "function") {
+          try { presetShell.focus({ preventScroll: true }); }
+          catch { presetShell.focus(); }
+        }
+        // SPEC-2356 — trap Tab inside the modal so keyboard users can't
+        // escape into background content while the modal is open.
+        if (presetShell) {
+          presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
+        }
       }
 
       function closeModal() {
+        const wasOpenPreset = modal.classList.contains("open");
         modal.classList.remove("open");
+        modal.setAttribute("aria-hidden", "true");
+        if (wasOpenPreset) {
+          if (typeof presetModalFocusTrapRelease === "function") {
+            presetModalFocusTrapRelease();
+            presetModalFocusTrapRelease = null;
+          }
+          if (presetModalFocusReturn && typeof presetModalFocusReturn.focus === "function") {
+            try { presetModalFocusReturn.focus({ preventScroll: true }); }
+            catch { presetModalFocusReturn.focus(); }
+          }
+          presetModalFocusReturn = null;
+        }
       }
 
       function clamp(value, min) {
@@ -2378,6 +2423,9 @@
           row.type = "button";
           if (selectedEntry && selectedEntry.id === entry.id) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => {
             state.selectedEntryId = entry.id;
@@ -2663,6 +2711,9 @@
           row.type = "button";
           if (note.id === state.selectedNoteId) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => selectMemoNote(windowId, note.id));
 
@@ -2747,6 +2798,10 @@
         titleInput.className = "memo-title-input";
         titleInput.type = "text";
         titleInput.placeholder = "Untitled note";
+        // SPEC-2356 — memo title input has no surrounding <label>; set
+        // aria-label so screen readers announce the purpose instead of
+        // just "edit text".
+        titleInput.setAttribute("aria-label", "Note title");
         titleInput.value = state.draftTitle;
         titleInput.addEventListener("input", () => {
           state.draftTitle = titleInput.value;
@@ -2758,6 +2813,7 @@
         const bodyInput = document.createElement("textarea");
         bodyInput.className = "memo-body-input";
         bodyInput.placeholder = "Capture context, next steps, or review notes";
+        bodyInput.setAttribute("aria-label", "Note body");
         bodyInput.value = state.draftBody;
         bodyInput.addEventListener("input", () => {
           state.draftBody = bodyInput.value;
@@ -3031,6 +3087,9 @@
           row.type = "button";
           if (profile.name === state.selectedProfile) {
             row.classList.add("selected");
+            row.setAttribute("aria-current", "true");
+          } else {
+            row.removeAttribute("aria-current");
           }
           row.addEventListener("click", () => selectProfile(windowId, profile.name));
           const header = createNode("div", "profile-row-header");
@@ -3148,6 +3207,10 @@
           const keyInput = document.createElement("input");
           keyInput.type = "text";
           keyInput.placeholder = "KEY";
+          // SPEC-2356 — env var rows have no surrounding <label>; use
+          // aria-label so screen readers announce purpose. The row index
+          // disambiguates rows within the same list.
+          keyInput.setAttribute("aria-label", `Env var key, row ${index + 1}`);
           keyInput.value = entry.key;
           keyInput.addEventListener("input", () => {
             state.draft.envVars[index].key = keyInput.value;
@@ -3159,6 +3222,7 @@
           const valueInput = document.createElement("input");
           valueInput.type = "text";
           valueInput.placeholder = "Value";
+          valueInput.setAttribute("aria-label", `Env var value, row ${index + 1}`);
           valueInput.value = entry.value;
           valueInput.addEventListener("input", () => {
             state.draft.envVars[index].value = valueInput.value;
@@ -3203,6 +3267,7 @@
           const keyInput = document.createElement("input");
           keyInput.type = "text";
           keyInput.placeholder = "SECRET_KEY";
+          keyInput.setAttribute("aria-label", `Disabled env key, row ${index + 1}`);
           keyInput.value = entry;
           keyInput.addEventListener("input", () => {
             state.draft.disabledEnv[index] = keyInput.value;
@@ -3542,6 +3607,12 @@
       function createChoiceButton(option, selected, onSelect) {
         const button = createNode("button", "launch-choice-button");
         button.type = "button";
+        // SPEC-2356 — choice buttons toggle between mutually-exclusive
+        // options (which agent to launch / which preset). aria-pressed
+        // exposes the toggled state so screen readers announce which
+        // option is currently selected without relying on the visual
+        // .selected class alone.
+        button.setAttribute("aria-pressed", selected ? "true" : "false");
         if (selected) {
           button.classList.add("selected");
         }
@@ -3594,6 +3665,10 @@
       ) {
         const field = createLaunchField(label, wide);
         const select = createNode("select", "launch-select");
+        // SPEC-2356 — launch-field labels are non-<label> divs, so set
+        // aria-label directly. Reuses the visible label text so screen
+        // readers and visual users see the same name.
+        select.setAttribute("aria-label", label);
         if (options.length === 0) {
           select.disabled = true;
           const option = document.createElement("option");
@@ -3707,9 +3782,29 @@
         }
       }
 
+      let wizardFocusReturn = null;
+      let wizardFocusTrapRelease = null;
+
       function renderLaunchWizard() {
         if (!launchWizard) {
+          const wasOpenBeforeClose = wizardModal.classList.contains("open");
           wizardModal.classList.remove("open");
+          // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
+          // readers stop announcing the wizard when it slides closed.
+          wizardModal.setAttribute("aria-hidden", "true");
+          // SPEC-2356 — release the focus trap before restoring focus so
+          // the trap doesn't intercept the focus move and pull it back in.
+          if (wasOpenBeforeClose && typeof wizardFocusTrapRelease === "function") {
+            wizardFocusTrapRelease();
+            wizardFocusTrapRelease = null;
+          }
+          // SPEC-2356 — restore focus to the trigger that opened the wizard
+          // so keyboard users land back on Start Work / Launch Agent / etc.
+          if (wasOpenBeforeClose && wizardFocusReturn && typeof wizardFocusReturn.focus === "function") {
+            try { wizardFocusReturn.focus({ preventScroll: true }); }
+            catch { wizardFocusReturn.focus(); }
+            wizardFocusReturn = null;
+          }
           wizardModal.classList.remove("is-drawer");
           wizardDialog?.classList.remove("is-drawer-shell");
           wizardSummary.innerHTML = "";
@@ -3728,7 +3823,25 @@
         const isStartWorkMode = launchWizard.show_branch_controls === false;
         wizardModal.classList.toggle("is-drawer", isStartWorkMode);
         wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
+        const wasOpenWizard = wizardModal.classList.contains("open");
+        if (!wasOpenWizard) {
+          // Capture trigger BEFORE flipping .open so render-driven focus
+          // moves don't overwrite our save.
+          wizardFocusReturn = document.activeElement;
+        }
         wizardModal.classList.add("open");
+        wizardModal.removeAttribute("aria-hidden");
+        if (!wasOpenWizard && wizardDialog && typeof wizardDialog.focus === "function") {
+          // SPEC-2356 — move focus into the dialog so screen readers
+          // announce "Launch Agent dialog" and keyboard users land inside.
+          try { wizardDialog.focus({ preventScroll: true }); }
+          catch { wizardDialog.focus(); }
+        }
+        if (!wasOpenWizard && wizardDialog) {
+          // SPEC-2356 — trap Tab inside the wizard while it's open so
+          // keyboard users can't escape into background content.
+          wizardFocusTrapRelease = createFocusTrap(wizardDialog, { document });
+        }
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Workspace launch"
@@ -3920,6 +4033,11 @@
             const field = createLaunchField("Branch name", true);
             const input = createNode("input", "launch-input");
             input.type = "text";
+            // SPEC-2356 — launch-field labels are <div>s (not <label>s)
+            // so screen readers can't programmatically associate them
+            // with the input. Set aria-label directly so the input
+            // announces with its purpose ("Branch name, edit text").
+            input.setAttribute("aria-label", "Branch name");
             input.value = wizardBranchDraft;
             input.placeholder = "feature/my-task";
             input.addEventListener("input", () => {
@@ -4059,6 +4177,9 @@
           const input = createNode("input", "launch-input");
           input.type = "number";
           input.min = "1";
+          // SPEC-2356 — see createLaunchField comment: aria-label is the
+          // programmatic name since launch-field labels are non-<label> divs.
+          input.setAttribute("aria-label", "Issue number");
           input.value = launchWizard.linked_issue_number
             ? launchWizard.linked_issue_number.toString()
             : "";
@@ -4237,19 +4358,41 @@
           for (const entry of entries) {
             const row = document.createElement("div");
             row.className = "file-tree-row";
+            // SPEC-2356 — make the row keyboard-navigable. tabindex=0
+            // puts the row in the natural Tab order; role="button"
+            // tells assistive tech the row is activatable. The keydown
+            // handler below mirrors the click handler for Enter/Space.
+            row.tabIndex = 0;
+            row.setAttribute("role", "button");
+            // SPEC-2356 — file tree rows have a selected state but are
+            // <div>s, not buttons. aria-current="true" works on any
+            // element and announces "current item" to screen readers.
             if (state.selectedPath === entry.path) {
               row.classList.add("selected");
+              row.setAttribute("aria-current", "true");
+            } else {
+              row.removeAttribute("aria-current");
             }
             row.style.paddingLeft = `${12 + depth * 18}px`;
 
             const expanded = state.expanded.has(entry.path);
             const isDirectory = entry.kind === "directory";
+            // SPEC-2356 — directory rows expose collapse state via
+            // aria-expanded so screen readers announce "expanded" or
+            // "collapsed" alongside the visual ▾/▸ caret. File rows
+            // (non-directories) should not expose aria-expanded —
+            // that would falsely signal the element is collapsible.
+            if (isDirectory) {
+              row.setAttribute("aria-expanded", expanded ? "true" : "false");
+            } else {
+              row.removeAttribute("aria-expanded");
+            }
             row.innerHTML = `
               <span class="tree-caret">${isDirectory ? (expanded ? "▾" : "▸") : ""}</span>
               <span class="tree-icon ${isDirectory ? "dir" : "file"}">${isDirectory ? "▣" : "•"}</span>
               <span class="tree-name">${entry.name}</span>
             `;
-            row.addEventListener("click", () => {
+            const activate = () => {
               state.selectedPath = entry.path;
               if (isDirectory) {
                 if (state.expanded.has(entry.path)) {
@@ -4262,6 +4405,16 @@
                 }
               }
               renderFileTree(windowId);
+            };
+            row.addEventListener("click", activate);
+            // SPEC-2356 — keyboard activation: Enter and Space invoke the
+            // same handler as click so keyboard users can navigate and
+            // activate rows without a pointing device.
+            row.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                activate();
+              }
             });
             list.appendChild(row);
 
@@ -4293,6 +4446,13 @@
         const row = document.createElement("div");
         row.className = "branch-row";
         row.dataset.branchName = branchName;
+        // SPEC-2356 — make the row keyboard-navigable. tabindex=0 puts
+        // the row in the natural Tab order; role="button" tells assistive
+        // tech the row is activatable. The keydown handler below mirrors
+        // the click handler for Enter/Space (matches the file tree
+        // pattern from PR #2464).
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
 
         const toggle = document.createElement("button");
         toggle.type = "button";
@@ -4350,22 +4510,36 @@
           summary,
         };
 
-        row.addEventListener("click", () => {
+        const select = () => {
           const state = ensureBranchListState(windowId);
           state.selectedBranchName = branchName;
           state.notice = "";
           renderBranches(windowId);
-        });
-        row.addEventListener("dblclick", () => {
-          const state = ensureBranchListState(windowId);
-          state.selectedBranchName = branchName;
-          state.notice = "";
-          renderBranches(windowId);
+        };
+        const activate = () => {
+          select();
           send({
             kind: "open_launch_wizard",
             id: windowId,
             branch_name: branchName,
           });
+        };
+        row.addEventListener("click", select);
+        row.addEventListener("dblclick", activate);
+        // SPEC-2356 — keyboard activation parity:
+        //   Enter/Space → select (same as click)
+        //   Cmd/Ctrl+Enter → activate (same as dblclick — open wizard)
+        // Without this, keyboard-only users could Tab to a branch row
+        // (after the tabindex/role wiring above) but couldn't select
+        // or open the launch wizard from it.
+        row.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            activate();
+          } else {
+            select();
+          }
         });
 
         return row;
@@ -4671,6 +4845,12 @@
             row.type = "button";
             if (state.selectedNumber === entry.number) {
               row.classList.add("selected");
+              // SPEC-2356 — selected knowledge entry gets aria-current
+              // so screen readers announce which row is currently
+              // displayed in the detail pane (parallel to project tabs).
+              row.setAttribute("aria-current", "true");
+            } else {
+              row.removeAttribute("aria-current");
             }
             const main = createNode("div", "knowledge-row-main");
             const titleWrap = createNode("div", "");
@@ -6971,6 +7151,64 @@
       branchCleanupModal.addEventListener("click", (event) => {
         if (event.target === branchCleanupModal) {
           frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
+        }
+      });
+      // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
+      // Without this, Esc only worked for the Hotkey overlay and Command
+      // Palette; users were trapped in branch-cleanup / migration / wizard
+      // with pointer escape only. The window list dropdown also gets Esc
+      // close so the operator chrome offers consistent keyboard escape.
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        if (branchCleanupModal.classList.contains("open")) {
+          // Reuse the same close path as backdrop click and explicit
+          // Cancel button so all three pathways behave identically.
+          frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
+          event.preventDefault();
+          return;
+        }
+        if (wizardModal.classList.contains("open")) {
+          // Wizard cancel is the explicit cancellation path; map Esc to
+          // the same action so the modal isn't a keyboard trap.
+          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          event.preventDefault();
+          return;
+        }
+        if (modal.classList.contains("open")) {
+          // SPEC-2356 — preset (Add Window) modal also needs Esc-close.
+          // closeModal() handles both the .open class flip and the focus
+          // restore via the WeakMap-style closure variables.
+          closeModal();
+          event.preventDefault();
+          return;
+        }
+        if (migrationModal && migrationModal.classList.contains("open")) {
+          // Migration "skip" is the cancellation path; map Esc to the
+          // same intent so the modal isn't a keyboard trap. Must use
+          // tab_id (not id) to match the backend protocol.
+          const tabId = migrationModalState.tabId;
+          migrationModalState.open = false;
+          migrationModalState.stage = "confirm";
+          migrationModalState.message = "";
+          migrationModalState.recovery = "";
+          renderMigrationModal();
+          if (tabId) {
+            send({ kind: "skip_migration", tab_id: tabId });
+          }
+          event.preventDefault();
+          return;
+        }
+        if (windowListOpen) {
+          // Close the Windows dropdown and return focus to its trigger
+          // button (matches the modal pattern of restoring focus to the
+          // element that opened the dropdown).
+          windowListOpen = false;
+          frontendUnits.projectWorkspaceShell.renderWindowList();
+          if (windowListButton && typeof windowListButton.focus === "function") {
+            try { windowListButton.focus({ preventScroll: true }); }
+            catch { windowListButton.focus(); }
+          }
+          event.preventDefault();
         }
       });
       window.addEventListener("resize", () => {

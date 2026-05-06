@@ -1076,8 +1076,10 @@ mod tests {
             );
         }
 
-        {
-            let relative = ".claude/skills/gwt-manage-pr/references/fix-flow.md";
+        for relative in [
+            ".claude/skills/gwt-manage-pr/references/fix-flow.md",
+            ".codex/skills/gwt-manage-pr/references/fix-flow.md",
+        ] {
             let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
@@ -1091,6 +1093,20 @@ mod tests {
             assert!(
                 !fix_flow.contains("--required-only"),
                 "unexpected nonexistent gwtd pr checks --required-only guidance in {relative}"
+            );
+            assert!(
+                !fix_flow.contains("No iteration limit"),
+                "unexpected unbounded PR fix loop guidance in {relative}"
+            );
+            assert!(
+                !fix_flow.contains("poll at 30-second intervals until ALL checks complete"),
+                "unexpected CI polling-until-complete guidance in {relative}"
+            );
+            assert!(
+                fix_flow.contains("CI pending/queued --> check at most 3 times")
+                    && fix_flow.contains("gwtd board post --kind blocked")
+                    && fix_flow.contains("stop instead of sleeping indefinitely"),
+                "expected bounded CI wait handoff guidance in {relative}"
             );
             assert!(
                 !fix_flow.contains("Fallback: `gh pr comment`."),
@@ -1296,10 +1312,38 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Auto-detect the operation mode from arguments")
-                    && content.contains("broadcast"),
-                "expected agent auto-detect contract in {relative}"
+                    && content.contains("gwtd board post")
+                    && content.contains("--target")
+                    && content.contains("handoff")
+                    && content.contains("request"),
+                "expected agent Board coordination contract in {relative}"
+            );
+            assert!(
+                !content.contains("pane send")
+                    && !content.contains("pane broadcast")
+                    && !content.contains("<pane-id> <message>")
+                    && !content.contains("broadcast <message>"),
+                "unexpected direct pane communication contract in {relative}"
             );
         }
+
+        let command = std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-agent.md"))
+            .unwrap_or_else(|err| panic!("failed to read gwt-agent command: {err}"));
+        assert!(
+            command.contains("Board")
+                && command.contains("gwtd board post")
+                && !command.contains("[message]")
+                && !command.contains("sending"),
+            "expected gwt-agent command to route communication through Board"
+        );
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        assert!(
+            agents.contains("Use Board for agent-to-agent communication")
+                && !agents.contains("pane ID + message"),
+            "expected AGENTS.md to document the Board-first gwt-agent contract"
+        );
     }
 
     #[test]

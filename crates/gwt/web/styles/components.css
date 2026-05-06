@@ -95,9 +95,15 @@ body::after {
 }
 
 .project-bar::before {
-  content: "GWT · OPERATOR";
+  /* SPEC-2356 — Operator brand prefix.
+     A bracket-flanked GWT mark, painted with the Hubot Sans Condensed
+     display family inherited from .project-bar. The bracket characters
+     pick up the focus-ring colour so the brand reads as an indicator
+     light, not just plain text. */
+  content: "⌜ GWT · OPERATOR ⌟";
   margin-right: var(--space-4);
   color: var(--color-display-fg);
+  text-shadow: 0 0 6px color-mix(in oklab, var(--agent-codex) 40%, transparent);
 }
 
 .project-tabs {
@@ -344,6 +350,15 @@ body::after {
   border-color: var(--color-state-active);
 }
 
+.op-agent-card[data-state="idle"] {
+  border-color: color-mix(in oklab, var(--color-state-idle) 55%, var(--color-border));
+}
+
+.op-agent-card[data-state="done"] {
+  border-color: color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  opacity: 0.82;
+}
+
 .op-agent-card[data-kind="handoff"] {
   border-color: var(--agent-codex);
   box-shadow: inset 3px 0 0 var(--agent-codex);
@@ -400,6 +415,14 @@ body::after {
   color: var(--color-state-active);
 }
 
+.op-agent-card[data-state="idle"] .op-agent-state {
+  color: var(--color-state-idle);
+}
+
+.op-agent-card[data-state="done"] .op-agent-state {
+  color: var(--color-state-done);
+}
+
 .op-agent-scope {
   color: var(--color-text-muted);
   font-family: var(--font-mono);
@@ -432,6 +455,14 @@ body::after {
   border-top: 1px solid var(--color-border);
   z-index: 10;
   gap: var(--space-3);
+  /* SPEC-2356 — the strip bg is dark in BOTH themes (it is a permanent dark
+     chrome band). Scope the state-color tokens locally to bright on-dark
+     variants so cell value contrast clears WCAG AA in light theme too —
+     light theme's default state colors are tuned for light bg and would
+     otherwise fail (e.g. dark red blocked on dark strip bg = 2.6:1). */
+  --color-state-active: #22d3ee;
+  --color-state-idle: #94a3b8;
+  --color-state-blocked: #f87171;
 }
 
 .op-status-strip__cell {
@@ -470,6 +501,14 @@ body::after {
 @keyframes op-live-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.op-status-strip__cell--active .op-status-strip__value {
+  color: var(--color-state-active);
+}
+
+.op-status-strip__cell--idle .op-status-strip__value {
+  color: var(--color-state-idle);
 }
 
 .op-status-strip__cell--blocked .op-status-strip__value {
@@ -567,6 +606,12 @@ body::after {
   [data-agent-state="blocked"] {
     animation: none;
   }
+  /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
+     Motion-sensitive users get a static dot that still indicates online
+     state via colour, just without the scale+opacity pulse. */
+  .op-status-strip__live-dot {
+    animation: none;
+  }
 }
 
 /* ============================================================
@@ -639,6 +684,13 @@ body::after {
 
 .op-drawer[data-open="true"] {
   transform: translateX(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-drawer-backdrop,
+  .op-drawer {
+    transition: none;
+  }
 }
 
 .op-drawer__header {
@@ -886,7 +938,12 @@ kbd.op-kbd {
   font-family: var(--font-mono);
   color: var(--color-text-muted);
   font-size: var(--type-sm);
-  pointer-events: none;
+  /* SPEC-2356 — splash should accept click-to-dismiss (`pointer-events`
+     auto) but the cursor hints at the affordance. The hidden state still
+     uses `display: none` from the [hidden] attr, so events stop firing
+     once the splash is exited. */
+  pointer-events: auto;
+  cursor: pointer;
   opacity: 1;
   transition: opacity var(--motion-slow) var(--motion-curve);
 }
@@ -937,6 +994,9 @@ kbd.op-kbd {
   font-size: var(--type-md);
   text-transform: uppercase;
   opacity: 0;
+  /* SPEC-2356 — soft cyan glow on the OPERATOR ONLINE marker so it reads
+     as the boot complete signal. */
+  text-shadow: 0 0 12px color-mix(in oklab, var(--color-state-active) 60%, transparent);
   animation: op-briefing-online-in var(--motion-slow) ease-out forwards;
   animation-delay: calc(var(--motion-slow) * 4);
 }
@@ -1245,7 +1305,15 @@ kbd.op-kbd {
 :root[data-theme] .text-button:focus-visible,
 :root[data-theme] .recent-project-row:focus-visible,
 :root[data-theme] .live-session-button:focus-visible,
-:root[data-theme] .launch-choice-button:focus-visible {
+:root[data-theme] .launch-choice-button:focus-visible,
+/* SPEC-2356 — keyboard-navigable row patterns added in PRs #2464/#2465.
+   Without these focus-visible rules, keyboard users couldn't see which
+   row currently has focus when Tab'ing through the file tree or
+   Branches surface. .project-tab is the same pattern (div + role=
+   button + tabindex=0) and was overlooked in the original group. */
+:root[data-theme] .project-tab:focus-visible,
+:root[data-theme] .file-tree-row:focus-visible,
+:root[data-theme] .branch-row:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
@@ -1471,4 +1539,306 @@ kbd.op-kbd {
   :root[data-theme] .op-layer[data-live="true"] .op-layer__label::before {
     color: Highlight;
   }
+}
+
+/* Command Palette trigger button — emphasises the ⌘K hotkey */
+:root[data-theme] .op-palette-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .op-palette-trigger__label {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-state-active);
+}
+
+:root[data-theme] .op-palette-trigger__hint {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Sidebar Layer kbd badge — small kbd-styled chip on Quick rows */
+:root[data-theme] .op-layer__kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text);
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--space-1);
+}
+
+:root[data-theme] .op-layer:hover .op-layer__kbd {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  color: var(--color-state-active);
+  border-color: var(--color-state-active);
+}
+
+/* SPEC-2356 — universal focus ring on input/select/textarea elements
+   without their own dedicated focus rule. Token-driven, never overrides
+   surface-specific input rules that already use border-color. */
+:root[data-theme] input:focus-visible,
+:root[data-theme] select:focus-visible,
+:root[data-theme] textarea:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] input:focus-visible,
+  :root[data-theme] select:focus-visible,
+  :root[data-theme] textarea:focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
+
+/* SPEC-2356 — when blocked count > 0 the BLOCKED cell pulses subtly so
+   the user notices something needs attention. The animation is keyframed
+   on opacity (no shadow / repaint cost) and disabled by reduced-motion
+   and forced-colors. */
+@keyframes op-status-strip-blocked-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+:root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+  animation: op-status-strip-blocked-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+    animation: none;
+  }
+}
+
+/* SPEC-2356 — Status Strip "offline" state when WebSocket bridge is down.
+   The LIVE indicator dot shifts from active to blocked colour, the entire
+   strip dim slightly, and counter values slide back to muted because they
+   are no longer fresh. */
+:root[data-theme] .op-status-strip--offline .op-status-strip__live-dot {
+  background: var(--color-state-blocked);
+  animation: none;
+}
+
+:root[data-theme] .op-status-strip--offline {
+  opacity: 0.85;
+}
+
+:root[data-theme] .op-status-strip--offline .op-status-strip__value {
+  color: var(--color-text-muted);
+}
+
+/* SPEC-2356 — small kbd hint chips inside Command Palette + Hotkey Overlay
+   for keyboard shortcuts that the user can press while inside the overlay.
+   Uses Mona Sans body for consistency with the surrounding text and
+   inverts to muted on hover. */
+:root[data-theme] .op-palette__input::placeholder {
+  color: var(--color-text-muted);
+}
+
+:root[data-theme] .op-palette__list {
+  scroll-padding-top: var(--space-2);
+}
+
+:root[data-theme] .op-palette__row[data-selected="true"] .op-palette__hint {
+  color: var(--color-state-active);
+}
+
+/* SPEC-2356 — Cmd+\ collapses Sidebar Layers; the grid template tightens
+   to push canvas-area against the project bar's left edge. */
+:root[data-theme][data-op-sidebar="collapsed"] #app {
+  grid-template-columns: 0 1fr;
+}
+
+:root[data-theme][data-op-sidebar="collapsed"] .op-sidebar {
+  display: none;
+}
+
+/* SPEC-2356 — smooth Sidebar collapse transition.
+   When user toggles ⌘\, the grid template columns animate from
+   240px ↔ 0 instead of snapping. reduced-motion env keeps the
+   instant snap behaviour. */
+:root[data-theme] #app {
+  transition: grid-template-columns var(--motion-medium) var(--motion-curve);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] #app {
+    transition: none;
+  }
+}
+
+/* SPEC-2356 — micro motion on hover for the few row-style buttons that
+   take a click action. Smooth enough not to be distracting but clearly
+   responsive. reduced-motion env keeps the original snap. */
+:root[data-theme] .recent-project-row,
+:root[data-theme] .preset-button,
+:root[data-theme] .live-session-button,
+:root[data-theme] .launch-choice-button,
+:root[data-theme] .arrange-button,
+:root[data-theme] .add-button,
+:root[data-theme] .wizard-button {
+  transition: background var(--motion-fast) var(--motion-curve),
+              border-color var(--motion-fast) var(--motion-curve),
+              color var(--motion-fast) var(--motion-curve);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] .recent-project-row,
+  :root[data-theme] .preset-button,
+  :root[data-theme] .live-session-button,
+  :root[data-theme] .launch-choice-button,
+  :root[data-theme] .arrange-button,
+  :root[data-theme] .add-button,
+  :root[data-theme] .wizard-button {
+    transition: none;
+  }
+}
+
+/* SPEC-2356 — soften theme-switch by transitioning core surface tokens.
+   When the user flips dark↔light through the toggle or ⌘ command, the
+   chrome doesn't snap; surface backgrounds + text colours fade through
+   the change in 200ms. reduced-motion / forced-colors keep the snap. */
+:root[data-theme] body,
+:root[data-theme] .op-sidebar,
+:root[data-theme] .op-status-strip,
+:root[data-theme] .project-bar,
+:root[data-theme] .modal-shell,
+:root[data-theme] .workspace-window,
+:root[data-theme] .titlebar {
+  transition: background var(--motion-medium) var(--motion-curve),
+              color var(--motion-medium) var(--motion-curve),
+              border-color var(--motion-medium) var(--motion-curve);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme] body,
+  :root[data-theme] .op-sidebar,
+  :root[data-theme] .op-status-strip,
+  :root[data-theme] .project-bar,
+  :root[data-theme] .modal-shell,
+  :root[data-theme] .workspace-window,
+  :root[data-theme] .titlebar {
+    transition: none;
+  }
+}
+
+/* SPEC-2356 — when sidebar is collapsed, the chrome should hint the
+   "expand" affordance via a small accent strip on the left edge of the
+   project bar, so users with no kbd shortcut memory still notice the
+   sidebar can come back. */
+:root[data-theme][data-op-sidebar="collapsed"] .project-bar {
+  box-shadow: inset 3px 0 0 var(--color-state-active);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
+    box-shadow: inset 3px 0 0 var(--color-state-active);
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
+    box-shadow: inset 3px 0 0 Highlight;
+  }
+}
+
+/* SPEC-2356 — Theme toggle value + label distinct typography.
+   The "AUTO ▮" / "DARK" / "LIGHT" value is mono cyan to match
+   Operator-state semantics; the leading "Theme" label stays muted.
+   This makes the toggle read like a rotary switch indicator. */
+:root[data-theme] #op-theme-toggle-value {
+  color: var(--color-state-active);
+  font-weight: 700;
+}
+
+/* SPEC-2356 — Project Tab active-state subtle accent strip on the bottom
+   so the active project reads as "currently selected" with the same
+   visual vocabulary as the Project Bar accent line. */
+:root[data-theme] .project-tab.active {
+  position: relative;
+}
+
+:root[data-theme] .project-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    var(--color-state-active) 25%,
+    var(--color-state-active) 75%,
+    transparent 100%
+  );
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+@media (forced-colors: active) {
+  :root[data-theme] .project-tab.active::after {
+    background: Highlight;
+  }
+}
+
+/* SPEC-2356 — Project Tab hover bottom indicator
+   active tab gets a strong accent strip already; hovered (non-active)
+   tabs get a soft hint so the user knows tab switching is possible.
+   Keeps Mission Control visual vocabulary consistent. */
+:root[data-theme] .project-tab:hover:not(.active)::after {
+  content: "";
+  position: absolute;
+  left: 25%;
+  right: 25%;
+  bottom: -1px;
+  height: 1px;
+  background: color-mix(in oklab, var(--color-state-active) 50%, transparent);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+:root[data-theme] .project-tab {
+  position: relative;
+}
+
+/* SPEC-2356 — Operator divider utility class.
+   `.op-divider` renders a 1px horizontal line that picks up the
+   `--color-border` token. Use it in dialogs / drawers / panels to
+   carve sections apart while staying token-driven. The vertical
+   variant `.op-divider--vertical` is 1px wide for inline use. */
+:root[data-theme] .op-divider {
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: var(--color-border);
+  border: 0;
+  margin: var(--space-2) 0;
+}
+
+:root[data-theme] .op-divider--strong {
+  background: var(--color-border-strong);
+}
+
+:root[data-theme] .op-divider--vertical {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  margin: 0 var(--space-2);
+  vertical-align: middle;
 }

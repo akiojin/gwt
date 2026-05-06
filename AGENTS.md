@@ -285,7 +285,7 @@ Commands can be invoked as `/gwt:<command-name>`.
 | Skill | Command | Description |
 |-------|---------|-------------|
 | gwt-search | `/gwt:gwt-search` | Unified semantic search over local SPECs, GitHub Issues, and project source files using ChromaDB. Supports `--specs`, `--issues`, `--files` filters. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
-| gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; pane ID + message → send input; stop/close + pane ID → stop pane. |
+| gwt-agent | `/gwt:gwt-agent` | Unified agent pane management. Auto-detects mode: no args → list panes; pane ID → read output; stop/close + pane ID → stop pane. Use Board for agent-to-agent communication. |
 
 ### Recommended Workflow
 

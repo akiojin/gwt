@@ -15,6 +15,7 @@ pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<Hook
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_git_dir_override::evaluate_bash_command(command))
+        .or_else(|| evaluate_long_pr_ci_polling_sleep(command))
         .or_else(|| evaluate_github_workflow_cli(command))
 }
 
@@ -74,6 +75,99 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
     None
 }
 
+fn evaluate_long_pr_ci_polling_sleep(command: &str) -> Option<HookOutput> {
+    let segments = super::segments::split_command_segments(command);
+    let has_pr_ci_polling = segments
+        .iter()
+        .any(|segment| is_pr_ci_polling_segment(segment));
+    if !has_pr_ci_polling {
+        return None;
+    }
+
+    for segment in &segments {
+        let tokens = command_tokens(segment);
+        if is_long_sleep_segment(&tokens) {
+            return Some(long_pr_ci_polling_sleep_block_decision(command));
+        }
+    }
+    None
+}
+
+fn is_long_sleep_segment(tokens: &[&str]) -> bool {
+    let Some(command_name) = tokens.first().copied() else {
+        return false;
+    };
+    if normalize_command_name(command_name) != "sleep" {
+        return false;
+    }
+
+    parse_sleep_args_seconds(&tokens[1..]).is_some_and(|seconds| seconds >= 120.0)
+}
+
+fn parse_sleep_args_seconds(args: &[&str]) -> Option<f64> {
+    let mut total = 0.0;
+    let mut parsed_any = false;
+    for arg in args {
+        let seconds = parse_sleep_duration_seconds(arg)?;
+        total += seconds;
+        parsed_any = true;
+    }
+    parsed_any.then_some(total)
+}
+
+fn parse_sleep_duration_seconds(duration: &str) -> Option<f64> {
+    let duration = duration.trim_matches(|ch| ch == '\'' || ch == '"');
+    let (numeric, multiplier) = match duration.chars().last() {
+        Some('s') => (&duration[..duration.len() - 1], 1.0),
+        Some('m') => (&duration[..duration.len() - 1], 60.0),
+        Some('h') => (&duration[..duration.len() - 1], 60.0 * 60.0),
+        Some('d') => (&duration[..duration.len() - 1], 24.0 * 60.0 * 60.0),
+        _ => (duration, 1.0),
+    };
+    let value: f64 = numeric.parse().ok()?;
+    if value.is_sign_negative() {
+        return None;
+    }
+    Some(value * multiplier)
+}
+
+fn is_pr_ci_polling_segment(segment: &str) -> bool {
+    let tokens = command_tokens(segment);
+    let Some(command_name) = tokens.first().copied().map(normalize_command_name) else {
+        return false;
+    };
+
+    match command_name.as_str() {
+        "gwtd" => matches!(tokens.get(1).copied(), Some("pr" | "actions")),
+        "gh" => tokens
+            .get(1)
+            .copied()
+            .is_some_and(|subcommand| matches!(subcommand, "pr" | "run" | "api")),
+        _ => false,
+    }
+}
+
+fn normalize_command_name(token: &str) -> String {
+    let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
+    Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(token)
+        .to_string()
+}
+
+fn long_pr_ci_polling_sleep_block_decision(command: &str) -> HookOutput {
+    HookOutput::pre_tool_use_permission(
+        "Long PR/CI polling sleeps are not allowed",
+        format!(
+            "Do not keep Claude Code idle while waiting for PR or CI state changes.\n\n\
+Run `gwtd pr checks <number>` once. If checks are still pending or queued, post the wait state with \
+`gwtd board post --kind blocked --body '<what is pending and how to resume>'`, then hand off instead of sleeping indefinitely.\n\n\
+Blocked command: {command}"
+        ),
+    )
+}
+
 fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
     matches!(subcommand, Some("view" | "create" | "comment"))
 }
@@ -109,6 +203,13 @@ Blocked command: {command}"
 fn command_tokens(segment: &str) -> Vec<&str> {
     let raw: Vec<&str> = segment.split_whitespace().collect();
     let mut start = 0;
+
+    while raw
+        .get(start)
+        .is_some_and(|token| matches!(*token, "do" | "then"))
+    {
+        start += 1;
+    }
 
     if raw.get(start) == Some(&"env") {
         start += 1;
@@ -190,4 +291,46 @@ fn gh_api_target<'a>(tokens: &'a [&'a str]) -> Option<&'a str> {
         i += if consumes_value { 2 } else { 1 };
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocks_long_sleep_before_gwtd_pr_polling() {
+        let decision = evaluate_bash_command(
+            "sleep 280 && /Applications/GWT.app/Contents/MacOS/gwtd pr view 123",
+            Path::new("/worktree"),
+        )
+        .expect("expected long PR polling sleep to be blocked");
+
+        assert_eq!(
+            decision.summary(),
+            "Long PR/CI polling sleeps are not allowed"
+        );
+        assert!(decision.detail().contains("gwtd pr checks <number>"));
+    }
+
+    #[test]
+    fn blocks_long_sleep_before_gh_run_polling() {
+        let decision = evaluate_bash_command(
+            "sleep 280 && gh run view 123456 --log",
+            Path::new("/worktree"),
+        )
+        .expect("expected long GitHub Actions polling sleep to be blocked");
+
+        assert_eq!(
+            decision.summary(),
+            "Long PR/CI polling sleeps are not allowed"
+        );
+    }
+
+    #[test]
+    fn allows_short_sleep_before_gwtd_pr_check() {
+        let decision =
+            evaluate_bash_command("sleep 30 && gwtd pr checks 123", Path::new("/worktree"));
+
+        assert!(decision.is_none());
+    }
 }
