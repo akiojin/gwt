@@ -47,6 +47,19 @@ test("app.js update-button click handler runs window.confirm then apply_update",
   );
 });
 
+test("app.js update toast click handler uses the same apply_update path", () => {
+  // トーストと永続ボタンで backend の適用入口を分岐させない。
+  const toastBlock = appSource.match(
+    /function showUpdateToast[\s\S]{0,1600}?apply_update/,
+  );
+  assert.ok(toastBlock, "expected update toast click path to reach apply_update");
+  assert.match(
+    toastBlock[0],
+    /window\.confirm|confirm\s*\(/,
+    "update toast click must guard apply_update with window.confirm",
+  );
+});
+
 test("update_state handler delegates to showUpdateButton for persistence", () => {
   // case "update_state" が新しいボタン renderer を呼ぶことで FR-036 の永続表示
   // が成立する。トースト呼び出しは初回のみ条件分岐される必要がある。
@@ -58,6 +71,18 @@ test("update_state handler delegates to showUpdateButton for persistence", () =>
     handlerSlice[0],
     /showUpdateButton/,
     "update_state handler must call showUpdateButton",
+  );
+});
+
+test("app.js surfaces backend update apply failures", () => {
+  const handlerSlice = appSource.match(
+    /case "update_apply_error"[\s\S]{0,500}/,
+  );
+  assert.ok(handlerSlice, "expected update_apply_error handler in app.js");
+  assert.match(
+    handlerSlice[0],
+    /alert\s*\(/,
+    "update apply failures must be visible to the user",
   );
 });
 

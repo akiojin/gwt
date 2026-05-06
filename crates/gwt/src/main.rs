@@ -92,7 +92,7 @@ pub(crate) use runtime_support::{
 pub(crate) use runtime_support::{
     parse_github_remote_url, spawn_env, suffixed_worktree_path, worktree_path_is_occupied,
 };
-pub(crate) use update_front_door::{apply_update_and_exit, spawn_startup_update_check};
+pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
 pub(crate) use update_front_door::{classify_startup_update_state, StartupUpdateAction};
 
@@ -151,6 +151,14 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
             status,
         });
     }));
+}
+
+fn record_update_available(
+    app: &mut AppRuntime,
+    state: gwt_core::update::UpdateState,
+) -> Vec<OutboundEvent> {
+    app.pending_update = Some(state.clone());
+    vec![OutboundEvent::broadcast(BackendEvent::UpdateState(state))]
 }
 
 fn board_projection_watch_key(project_root: &Path) -> PathBuf {
@@ -482,6 +490,7 @@ enum UserEvent {
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
+    ApplyUpdate(gwt_core::update::UpdateState),
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
     /// [`gwt::BackendEvent::MigrationProgress`].
@@ -1312,6 +1321,48 @@ mod tests {
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
+    }
+
+    #[test]
+    fn update_available_event_records_pending_update_before_broadcast() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::Git,
+            &[WindowPreset::Shell],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let state = gwt_core::update::UpdateState::Available {
+            current: "9.20.1".to_string(),
+            latest: "9.20.2".to_string(),
+            release_url: "https://example.invalid/releases/v9.20.2".to_string(),
+            asset_url: Some("https://example.invalid/gwt-macos-universal.dmg".to_string()),
+            checked_at: Utc::now(),
+        };
+
+        let events = super::record_update_available(&mut runtime, state);
+
+        assert!(matches!(
+            runtime.pending_update,
+            Some(gwt_core::update::UpdateState::Available {
+                ref latest,
+                asset_url: Some(_),
+                ..
+            }) if latest == "9.20.2"
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::UpdateState(gwt_core::update::UpdateState::Available {
+                    latest,
+                    asset_url: Some(_),
+                    ..
+                }),
+            }] if latest == "9.20.2"
+        ));
     }
 
     #[test]
@@ -4641,7 +4692,10 @@ fn main() -> wry::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
-                app.pending_update = Some(state);
+                clients.dispatch(record_update_available(&mut app, state));
+            }
+            Event::UserEvent(UserEvent::ApplyUpdate(state)) => {
+                std::thread::spawn(move || apply_update_state_and_exit(state));
             }
             Event::UserEvent(UserEvent::MigrationProgress {
                 tab_id,

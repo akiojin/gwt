@@ -95,7 +95,7 @@ pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> S
 
 pub fn spawn_startup_update_check(
     runtime: &Runtime,
-    clients: ClientHub,
+    _clients: ClientHub,
     update_proxy: EventLoopProxy<UserEvent>,
 ) {
     if gwt_core::update::is_ci() {
@@ -127,7 +127,7 @@ pub fn spawn_startup_update_check(
             match classify_startup_update_state(&update_state) {
                 StartupUpdateAction::Retry => continue,
                 _ => {
-                    handle_poll_outcome(&mut state, update_state, &clients, &update_proxy);
+                    handle_poll_outcome(&mut state, update_state, &update_proxy);
                     initial_resolved = true;
                     break;
                 }
@@ -148,7 +148,7 @@ pub fn spawn_startup_update_check(
             .await;
             match outcome {
                 Ok(update_state) => {
-                    handle_poll_outcome(&mut state, update_state, &clients, &update_proxy);
+                    handle_poll_outcome(&mut state, update_state, &update_proxy);
                 }
                 Err(_) => {
                     state.on_failure();
@@ -161,7 +161,6 @@ pub fn spawn_startup_update_check(
 fn handle_poll_outcome(
     state: &mut PollState,
     outcome: gwt_core::update::UpdateState,
-    clients: &ClientHub,
     update_proxy: &EventLoopProxy<UserEvent>,
 ) -> Duration {
     match classify_startup_update_state(&outcome) {
@@ -172,10 +171,7 @@ fn handle_poll_outcome(
             };
             let (should_publish, next) = state.on_success_available(&latest);
             if should_publish {
-                let _ = update_proxy.send_event(UserEvent::UpdateAvailable(outcome.clone()));
-                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateState(
-                    outcome,
-                ))]);
+                let _ = update_proxy.send_event(UserEvent::UpdateAvailable(outcome));
             }
             next
         }
@@ -184,18 +180,23 @@ fn handle_poll_outcome(
     }
 }
 
-/// Download and apply a pending update, then exit.
+/// Apply an already-detected update state from the GUI notification path.
 ///
-/// Called from a background thread so the GUI remains responsive during download.
-/// On success, this function calls `std::process::exit(0)` and never returns.
-/// On any failure, it returns silently.
-pub fn apply_update_and_exit() {
+/// The startup poll has already selected the platform-specific asset. Reusing
+/// that state avoids a second network/cache check that can make a clicked toast
+/// appear to do nothing when the re-check does not return `Available`.
+pub fn apply_update_state_and_exit(state: gwt_core::update::UpdateState) {
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
     };
-    let mgr = gwt_core::update::UpdateManager::new();
-    let state = mgr.check_for_executable(false, Some(&current_exe));
+    apply_update_state_with_current_exe_and_exit(state, current_exe);
+}
+
+fn apply_update_state_with_current_exe_and_exit(
+    state: gwt_core::update::UpdateState,
+    current_exe: std::path::PathBuf,
+) {
     let (latest, asset_url) = match state {
         gwt_core::update::UpdateState::Available {
             latest,
@@ -204,7 +205,12 @@ pub fn apply_update_and_exit() {
         } => (latest, asset_url),
         _ => return,
     };
-    let payload = match mgr.prepare_update(&latest, &asset_url) {
+    apply_update_payload_and_exit(&latest, &asset_url, current_exe);
+}
+
+fn apply_update_payload_and_exit(latest: &str, asset_url: &str, current_exe: std::path::PathBuf) {
+    let mgr = gwt_core::update::UpdateManager::new();
+    let payload = match mgr.prepare_update(latest, asset_url) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -225,7 +231,7 @@ pub fn apply_update_and_exit() {
         return;
     }
     let helper_exe = if cfg!(windows) {
-        match mgr.make_helper_copy(&current_exe, &latest) {
+        match mgr.make_helper_copy(&current_exe, latest) {
             Ok(path) => path,
             Err(_) => return,
         }

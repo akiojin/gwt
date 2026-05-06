@@ -7489,6 +7489,9 @@
               showUpdateButton(event.latest);
             }
             break;
+          case "update_apply_error":
+            window.alert(event.message || "Failed to start the update.");
+            break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
             customAgentsState.loading = false;
