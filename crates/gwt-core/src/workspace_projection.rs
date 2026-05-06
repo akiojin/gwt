@@ -488,7 +488,7 @@ pub fn load_recent_workspace_journal_entries_from_path(
                 .map_err(|error| GwtError::Other(format!("workspace journal json: {error}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
     entries.truncate(limit);
     Ok(entries)
 }
