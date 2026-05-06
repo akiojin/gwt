@@ -11,7 +11,9 @@ use uuid::Uuid;
 use crate::{
     coordination::{BoardEntry, BoardEntryKind},
     error::{GwtError, Result},
-    paths::gwt_workspace_projection_path_for_repo_path,
+    paths::{
+        gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +63,8 @@ pub struct WorkspaceProjection {
     pub title: String,
     pub status_category: WorkspaceStatusCategory,
     pub status_text: String,
+    #[serde(default)]
+    pub summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub agents: Vec<WorkspaceAgentSummary>,
@@ -77,6 +81,7 @@ impl WorkspaceProjection {
             title: "Workspace".to_string(),
             status_category: WorkspaceStatusCategory::Unknown,
             status_text: "No active work".to_string(),
+            summary: None,
             owner: None,
             next_action: None,
             agents: Vec::new(),
@@ -165,6 +170,141 @@ impl WorkspaceProjection {
 
         self.updated_at = entry.updated_at;
     }
+
+    pub fn apply_update(
+        &mut self,
+        update: WorkspaceProjectionUpdate,
+        updated_at: DateTime<Utc>,
+    ) -> WorkspaceJournalEntry {
+        if let Some(title) = update
+            .title
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            self.title = title.clone();
+        }
+        if let Some(category) = update.status_category {
+            self.status_category = category;
+        }
+        if let Some(status_text) = update
+            .status_text
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            self.status_text = status_text.clone();
+        }
+        if let Some(summary) = update
+            .summary
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            self.summary = Some(summary.clone());
+            if update.status_text.is_none() {
+                self.status_text = summary.clone();
+            }
+        }
+        if let Some(owner) = update
+            .owner
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            self.owner = Some(owner.clone());
+        }
+        if let Some(next_action) = update.next_action.as_ref() {
+            self.next_action = (!next_action.trim().is_empty()).then_some(next_action.clone());
+        }
+        if let Some(session_id) = update.agent_session_id.as_deref() {
+            if let Some(agent) = self
+                .agents
+                .iter_mut()
+                .find(|agent| agent.session_id == session_id)
+            {
+                if let Some(focus) = update
+                    .agent_current_focus
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    agent.current_focus = Some(focus.clone());
+                    agent.updated_at = updated_at;
+                }
+            }
+        }
+        self.updated_at = updated_at;
+
+        WorkspaceJournalEntry {
+            id: Uuid::new_v4().to_string(),
+            project_root: self.project_root.clone(),
+            title: update.title,
+            status_category: update.status_category,
+            status_text: update.status_text,
+            owner: update.owner,
+            next_action: update.next_action,
+            summary: update.summary,
+            agent_session_id: update.agent_session_id,
+            agent_current_focus: update.agent_current_focus,
+            updated_at,
+        }
+    }
+
+    pub fn remove_agent_session(
+        &mut self,
+        session_id: &str,
+        window_id: Option<&str>,
+        updated_at: DateTime<Utc>,
+    ) -> bool {
+        let before = self.agents.len();
+        self.agents.retain(|agent| {
+            if agent.session_id == session_id {
+                return false;
+            }
+            if let (Some(expected), Some(actual)) = (window_id, agent.window_id.as_deref()) {
+                return actual != expected;
+            }
+            true
+        });
+        let removed = self.agents.len() != before;
+        if removed {
+            self.updated_at = updated_at;
+            if !self.agents.iter().any(|agent| {
+                matches!(
+                    agent.status_category,
+                    WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
+                )
+            }) {
+                self.status_category = WorkspaceStatusCategory::Idle;
+                self.status_text = "No active work".to_string();
+                self.next_action = None;
+            }
+        }
+        removed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceProjectionUpdate {
+    pub title: Option<String>,
+    pub status_category: Option<WorkspaceStatusCategory>,
+    pub status_text: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub summary: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub agent_current_focus: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceJournalEntry {
+    pub id: String,
+    pub project_root: PathBuf,
+    pub title: Option<String>,
+    pub status_category: Option<WorkspaceStatusCategory>,
+    pub status_text: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub summary: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub agent_current_focus: Option<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 fn coordination_scope_for_entry(entry: &BoardEntry) -> Option<String> {
@@ -202,6 +342,32 @@ pub fn save_workspace_projection(repo_path: &Path, projection: &WorkspaceProject
     )
 }
 
+pub fn update_workspace_projection_with_journal(
+    repo_path: &Path,
+    update: WorkspaceProjectionUpdate,
+) -> Result<WorkspaceJournalEntry> {
+    update_workspace_projection_with_journal_paths(
+        &gwt_workspace_projection_path_for_repo_path(repo_path),
+        &gwt_workspace_journal_path_for_repo_path(repo_path),
+        repo_path,
+        update,
+    )
+}
+
+pub fn mark_workspace_agent_stopped(
+    repo_path: &Path,
+    session_id: &str,
+    window_id: Option<&str>,
+) -> Result<bool> {
+    mark_workspace_agent_stopped_at(
+        &gwt_workspace_projection_path_for_repo_path(repo_path),
+        repo_path,
+        session_id,
+        window_id,
+        Utc::now(),
+    )
+}
+
 pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -227,6 +393,57 @@ pub fn save_workspace_projection_to_path(
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
     write_atomic(path, &bytes)
+}
+
+pub fn update_workspace_projection_with_journal_paths(
+    current_path: &Path,
+    journal_path: &Path,
+    project_root: &Path,
+    update: WorkspaceProjectionUpdate,
+) -> Result<WorkspaceJournalEntry> {
+    let mut projection =
+        load_or_default_workspace_projection_from_path(current_path, project_root)?;
+    projection.project_root = project_root.to_path_buf();
+    let entry = projection.apply_update(update, Utc::now());
+    save_workspace_projection_to_path(current_path, &projection)?;
+    append_workspace_journal_entry_to_path(journal_path, &entry)?;
+    Ok(entry)
+}
+
+pub fn mark_workspace_agent_stopped_at(
+    current_path: &Path,
+    project_root: &Path,
+    session_id: &str,
+    window_id: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    let Some(mut projection) = load_workspace_projection_from_path(current_path)? else {
+        return Ok(false);
+    };
+    projection.project_root = project_root.to_path_buf();
+    let changed = projection.remove_agent_session(session_id, window_id, updated_at);
+    if changed {
+        save_workspace_projection_to_path(current_path, &projection)?;
+    }
+    Ok(changed)
+}
+
+pub fn append_workspace_journal_entry_to_path(
+    path: &Path,
+    entry: &WorkspaceJournalEntry,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, entry)
+        .map_err(|error| GwtError::Other(format!("workspace journal json: {error}")))?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -563,6 +780,98 @@ mod tests {
         assert_eq!(
             projection.agents[0].current_focus.as_deref(),
             Some("Implementation complete; reviewer should check visual states")
+        );
+    }
+
+    #[test]
+    fn workspace_update_persists_current_summary_and_journal_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let current_path = temp.path().join("workspace/current.json");
+        let journal_path = temp.path().join("workspace/journal.jsonl");
+
+        let entry = update_workspace_projection_with_journal_paths(
+            &current_path,
+            &journal_path,
+            &project_root,
+            WorkspaceProjectionUpdate {
+                title: Some("Fix Active Work lifecycle".to_string()),
+                status_category: Some(WorkspaceStatusCategory::Active),
+                status_text: Some("Implementing lifecycle cleanup".to_string()),
+                owner: Some("SPEC-2359".to_string()),
+                next_action: Some("Run focused regression tests".to_string()),
+                summary: Some("Workspace state is now the source for Active Work.".to_string()),
+                agent_session_id: Some("session-1".to_string()),
+                agent_current_focus: Some("Writing RED tests".to_string()),
+            },
+        )
+        .expect("update workspace projection");
+
+        let projection = load_workspace_projection_from_path(&current_path)
+            .expect("load projection")
+            .expect("projection");
+        assert_eq!(projection.title, "Fix Active Work lifecycle");
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(projection.status_text, "Implementing lifecycle cleanup");
+        assert_eq!(
+            projection.summary.as_deref(),
+            Some("Workspace state is now the source for Active Work.")
+        );
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Run focused regression tests")
+        );
+
+        let lines = std::fs::read_to_string(&journal_path).expect("journal");
+        let entries = lines.lines().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        let journal: WorkspaceJournalEntry =
+            serde_json::from_str(entries[0]).expect("journal entry");
+        assert_eq!(journal.id, entry.id);
+        assert_eq!(journal.owner.as_deref(), Some("SPEC-2359"));
+        assert_eq!(
+            journal.summary.as_deref(),
+            Some("Workspace state is now the source for Active Work.")
+        );
+        assert_eq!(journal.agent_session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            journal.agent_current_focus.as_deref(),
+            Some("Writing RED tests")
+        );
+    }
+
+    #[test]
+    fn stopped_agent_is_removed_from_current_projection_without_losing_summary() {
+        let now = Utc::now();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection.status_text = "Codex is running".to_string();
+        projection.next_action = Some("Review output".to_string());
+        projection.summary = Some("Keep this user-facing work summary.".to_string());
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-1".to_string(),
+            window_id: Some("tab-1::agent-1".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Investigating".to_string()),
+            worktree_path: None,
+            branch: Some("work/20260506-1652".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: now,
+        });
+
+        assert!(projection.remove_agent_session("session-1", Some("tab-1::agent-1"), now));
+
+        assert!(projection.agents.is_empty());
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Idle);
+        assert_eq!(projection.status_text, "No active work");
+        assert_eq!(projection.next_action, None);
+        assert_eq!(
+            projection.summary.as_deref(),
+            Some("Keep this user-facing work summary.")
         );
     }
 }

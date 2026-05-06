@@ -67,6 +67,7 @@ fn print_help() {
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
+    println!("  workspace   Update Workspace current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
 }
@@ -84,10 +85,32 @@ fn family_help(family: &str) -> Option<String> {
         "discuss" => Some(format_discuss_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
+        "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
         _ => None,
     }
+}
+
+fn format_workspace_help() -> String {
+    [
+        "gwtd workspace — Update Workspace current projection and summary journal.",
+        "",
+        "Usage: gwtd workspace update [fields]",
+        "",
+        "Fields:",
+        "  --title <text>                         Current work title",
+        "  --status <active|idle|blocked|done|unknown>",
+        "                                          Stable Workspace status category",
+        "  --status-text <text>                   User-facing current status",
+        "  --summary <text>                       LLM-authored work summary",
+        "  --next-action <text>                   Next visible action or handoff",
+        "  --owner <text>                         Linked owner such as SPEC-2359",
+        "  --agent-session <id> --current-focus <text>",
+        "                                          Update one Agent focus summary",
+        "",
+    ]
+    .join("\n")
 }
 
 fn format_daemon_help() -> String {

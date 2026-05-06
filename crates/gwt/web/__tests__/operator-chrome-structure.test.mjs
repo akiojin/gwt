@@ -225,7 +225,7 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
-test("Active Work sidebar only focuses live Agent windows and falls back to Quick Start", () => {
+test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
     /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
@@ -233,8 +233,18 @@ test("Active Work sidebar only focuses live Agent windows and falls back to Quic
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkQuickStart\(\)[\s\S]+Quick Start[\s\S]+kind:\s*"open_start_work"/,
-    "expected no-Agent Active Work state to offer Quick Start through Start Work",
+    /const\s+activeWorkSection\s*=\s*document\.getElementById\("op-active-work"\)/,
+    "expected Active Work visibility to be controlled at the section level",
+  );
+  assert.match(
+    appSource,
+    /function\s+setActiveWorkSectionVisible\(visible\)[\s\S]+activeWorkSection\.hidden\s*=\s*!visible/,
+    "expected no-Agent Active Work state to hide the entire section instead of leaving stale work UI",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(agentCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
+    "expected no focusable Agent windows to remove the Active Work sidebar section",
   );
   assert.match(
     appSource,
