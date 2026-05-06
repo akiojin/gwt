@@ -1825,7 +1825,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 3);
+        assert_eq!(error_events.len(), 4);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
         assert_eq!(
             runtime
@@ -1836,11 +1836,16 @@ mod tests {
         );
         assert!(matches!(
             error_events[1].event,
+            BackendEvent::ActiveWorkProjection { ref projection }
+                if projection.active_agents == 1 && projection.agents.len() == 1
+        ));
+        assert!(matches!(
+            error_events[2].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_one_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            error_events[2].event,
+            error_events[3].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
