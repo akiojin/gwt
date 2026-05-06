@@ -431,6 +431,19 @@ test("operator-shell wires sidebar collapse hotkey and Mission Briefing early di
   );
 });
 
+test("app state rendering dismisses Mission Briefing so startup cannot stay on splash", () => {
+  assert.match(
+    appSource,
+    /function\s+dismissOperatorBriefing\(\)[\s\S]+op-briefing[\s\S]+hidden\s*=\s*true/,
+    "expected app.js to expose a fail-open Mission Briefing dismiss helper",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderAppState\(nextState\)\s*\{\s*dismissOperatorBriefing\(\)/,
+    "expected first app state render to unblock Welcome/Workspace surfaces",
+  );
+});
+
 test("components.css hides only marked floating window controls", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
