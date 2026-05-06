@@ -476,29 +476,40 @@ impl WorkspaceState {
         let count = open_indices.len();
         let columns = (count as f64).sqrt().ceil() as usize;
         let rows = count.div_ceil(columns);
-        let cell_width = ((bounds.width
-            - ARRANGE_PADDING * 2.0
-            - ARRANGE_PADDING * (columns.saturating_sub(1)) as f64)
-            / columns as f64)
-            .max(MIN_WINDOW_WIDTH);
-        let cell_height = ((bounds.height
-            - ARRANGE_PADDING * 2.0
-            - ARRANGE_PADDING * (rows.saturating_sub(1)) as f64)
-            / rows as f64)
-            .max(MIN_WINDOW_HEIGHT);
 
-        for (index, window_index) in open_indices.iter().enumerate() {
-            let window = &mut self.persisted.windows[*window_index];
-            let column = index % columns;
-            let row = index / columns;
+        for &window_index in open_indices {
+            let window = &mut self.persisted.windows[window_index];
             if let Some(geometry) = window.pre_maximize_geometry.take() {
                 window.geometry.width = geometry.width;
                 window.geometry.height = geometry.height;
             }
-            window.geometry.x =
-                bounds.x + ARRANGE_PADDING + column as f64 * (cell_width + ARRANGE_PADDING);
-            window.geometry.y =
-                bounds.y + ARRANGE_PADDING + row as f64 * (cell_height + ARRANGE_PADDING);
+        }
+
+        let mut column_widths = vec![0.0_f64; columns];
+        let mut row_heights = vec![0.0_f64; rows];
+        for (index, &window_index) in open_indices.iter().enumerate() {
+            let column = index % columns;
+            let row = index / columns;
+            let window = &self.persisted.windows[window_index];
+            column_widths[column] = column_widths[column].max(window.geometry.width);
+            row_heights[row] = row_heights[row].max(window.geometry.height);
+        }
+
+        let mut column_offsets = vec![bounds.x + ARRANGE_PADDING; columns];
+        for c in 1..columns {
+            column_offsets[c] = column_offsets[c - 1] + column_widths[c - 1] + ARRANGE_PADDING;
+        }
+        let mut row_offsets = vec![bounds.y + ARRANGE_PADDING; rows];
+        for r in 1..rows {
+            row_offsets[r] = row_offsets[r - 1] + row_heights[r - 1] + ARRANGE_PADDING;
+        }
+
+        for (index, &window_index) in open_indices.iter().enumerate() {
+            let column = index % columns;
+            let row = index / columns;
+            let window = &mut self.persisted.windows[window_index];
+            window.geometry.x = column_offsets[column];
+            window.geometry.y = row_offsets[row];
             window.maximized = false;
         }
     }
@@ -915,12 +926,72 @@ mod tests {
         let codex = workspace.window("codex-1").expect("codex");
         let file_tree = workspace.window("file-tree-1").expect("file tree");
 
+        // bounds: x=100, y=40, width=1000, height=760, padding=24
+        // columns=2, rows=2; column 0 max width = max(claude=720, file-tree=420) = 720
+        // column 1 max width = codex=720; row 0 max height = 420; row 1 max height = 520.
         assert_eq!(claude.geometry.x, 124.0);
         assert_eq!(claude.geometry.y, 64.0);
-        assert_eq!(codex.geometry.x, 612.0);
+        assert_eq!(codex.geometry.x, 868.0);
         assert_eq!(codex.geometry.y, 64.0);
         assert_eq!(file_tree.geometry.x, 124.0);
-        assert_eq!(file_tree.geometry.y, 432.0);
+        assert_eq!(file_tree.geometry.y, 508.0);
+    }
+
+    #[test]
+    fn align_arrangement_does_not_overlap_windows_with_varying_sizes() {
+        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let preset_sizes = [
+            (800.0, 360.0),
+            (420.0, 540.0),
+            (600.0, 380.0),
+            (500.0, 470.0),
+        ];
+        let mut ids = Vec::new();
+        for (width, height) in preset_sizes {
+            let window = workspace.add_window(WindowPreset::Settings, arrange_bounds());
+            ids.push(window.id.clone());
+            assert!(workspace.update_geometry(
+                &window.id,
+                WindowGeometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height,
+                },
+            ));
+        }
+
+        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
+
+        let snapshot: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let window = workspace.window(id).expect("added window");
+                (id.clone(), window.geometry.clone())
+            })
+            .collect();
+
+        for (i, (id_a, a)) in snapshot.iter().enumerate() {
+            for (id_b, b) in snapshot.iter().skip(i + 1) {
+                let separated = a.x + a.width <= b.x
+                    || b.x + b.width <= a.x
+                    || a.y + a.height <= b.y
+                    || b.y + b.height <= a.y;
+                assert!(
+                    separated,
+                    "{id_a} and {id_b} overlap after Align: {:?} vs {:?}",
+                    a, b
+                );
+            }
+        }
+
+        // Width/height of every window must remain untouched (FR-004 / SC-017).
+        for ((id, geometry), (expected_width, expected_height)) in
+            snapshot.iter().zip(preset_sizes.iter())
+        {
+            assert_eq!(geometry.width, *expected_width, "{id} width preserved");
+            assert_eq!(geometry.height, *expected_height, "{id} height preserved");
+        }
     }
 
     #[test]
@@ -940,7 +1011,9 @@ mod tests {
         assert_eq!(claude.pre_maximize_geometry, None);
         assert_eq!(claude.geometry.width, original.width);
         assert_eq!(claude.geometry.height, original.height);
-        assert_eq!(claude.geometry.x, 612.0);
+        // After maximize, claude.z=3 sorts after codex.z=2 -> open_indices = [codex, claude].
+        // column 0 width = codex.width = 720, column 1 width = claude.width = 720.
+        assert_eq!(claude.geometry.x, 868.0);
         assert_eq!(claude.geometry.y, 64.0);
     }
 
