@@ -16,19 +16,77 @@ export function initOperatorShell(deps = {}) {
   const doc = deps.document ?? document;
   const win = deps.window ?? window;
 
-  const themeManager = deps.themeManager ?? createThemeManager(createBrowserEnv(doc, win));
+  let shellDegraded = false;
+  const markDegraded = (label, error) => {
+    shellDegraded = true;
+    hideMissionBriefingImmediately(doc);
+    try { console.warn(`operator shell ${label} failed`, error); } catch { /* no-op */ }
+  };
+
+  const themeManager = deps.themeManager ?? createThemeManagerSafe(doc, win, markDegraded);
   const hotkey = deps.hotkey ?? createHotkeyManager();
 
-  wireThemeToggle({ doc, themeManager });
-  const chromeVisibility = wireChromeVisibility({ doc, win });
-  wireSidebarLayers({ doc, win });
-  wireStatusStripClock({ doc });
-  wireMissionBriefing({ doc, win });
-  wireHotkeyOverlay({ doc, hotkey });
-  const palette = wireCommandPalette({ doc, hotkey });
-  wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility });
+  safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
+  const chromeVisibility = safeWire(
+    "chrome visibility",
+    () => wireChromeVisibility({ doc, win }),
+    markDegraded,
+    null,
+  );
+  safeWire("sidebar layers", () => wireSidebarLayers({ doc, win }), markDegraded);
+  safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
+  if (shellDegraded) hideMissionBriefingImmediately(doc);
+  else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
+  safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
+  const palette = safeWire(
+    "command palette",
+    () => wireCommandPalette({ doc, hotkey }),
+    markDegraded,
+    null,
+  );
+  safeWire(
+    "global hotkeys",
+    () => wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility }),
+    markDegraded,
+  );
 
   return { themeManager, hotkey, palette };
+}
+
+function safeWire(label, fn, onError, fallback = undefined) {
+  try {
+    return fn();
+  } catch (error) {
+    onError(label, error);
+    return fallback;
+  }
+}
+
+function createThemeManagerSafe(doc, win, onError) {
+  try {
+    return createThemeManager(createBrowserEnv(doc, win));
+  } catch (error) {
+    onError("theme manager", error);
+    doc.documentElement?.setAttribute?.("data-theme", "dark");
+    return createFallbackThemeManager();
+  }
+}
+
+function createFallbackThemeManager() {
+  return {
+    getPreference() { return "auto"; },
+    getEffective() { return "dark"; },
+    setTheme() {},
+    subscribe() { return () => {}; },
+  };
+}
+
+function hideMissionBriefingImmediately(doc) {
+  const overlay = doc.getElementById("op-briefing");
+  if (!overlay) return;
+  overlay.dataset.state = "exiting";
+  overlay.hidden = true;
+  overlay.setAttribute("aria-hidden", "true");
 }
 
 // ------------------------------------------------------------
