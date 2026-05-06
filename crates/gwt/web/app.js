@@ -1953,8 +1953,8 @@
           theme: XTERM_THEME_DARK,
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          fontSize: 13,
-          lineHeight: 1.2,
+          fontSize: 14,
+          lineHeight: 1.28,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();
