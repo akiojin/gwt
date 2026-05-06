@@ -1029,6 +1029,26 @@ kbd.op-kbd {
   body::before, body::after { display: none; }
   [data-agent-state] { animation: none; }
   .op-status-strip__live-dot { animation: none; }
+  /* SPEC-2017 US-9 — Kanban surface in forced-colors mode. Drop our
+     token-derived backgrounds so system colors paint the columns,
+     cards, and chips. Borders fall back to ButtonText so the column
+     boundaries remain visible against the system canvas. */
+  .kanban-board,
+  .kanban-column,
+  .kanban-card,
+  .kanban-card-chip {
+    background: Canvas;
+    color: CanvasText;
+    border-color: ButtonText;
+  }
+  .kanban-column.is-drop-target {
+    outline-color: Highlight;
+    background: Canvas;
+  }
+  .kanban-card.is-selected {
+    outline: 2px solid Highlight;
+    box-shadow: none;
+  }
 }
 
 /* ============================================================
@@ -1842,3 +1862,286 @@ kbd.op-kbd {
   margin: 0 var(--space-2);
   vertical-align: middle;
 }
+
+/* ============================================================
+   SPEC-2017 Kanban View — Knowledge Bridge phase board
+   ============================================================
+   6-column board (Backlog / Draft / Planning / Implementation /
+   Review / Done) that replaces the legacy flat list. Tokens come
+   from tokens.css so dark/light/forced-colors swap automatically.
+   .kanban-board uses CSS grid with a fluid 220px minimum so cards
+   stay readable, and overflow-x: auto allows horizontal scroll on
+   narrow viewports rather than collapsing columns. */
+
+.kanban-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.kanban-toolbar-spacer {
+  flex: 1;
+}
+
+.kanban-hide-done-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.kanban-hide-done-toggle input {
+  accent-color: var(--color-state-active);
+}
+
+.kanban-board {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(220px, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-3);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.kanban-board[data-hide-done="true"] .kanban-column[data-phase="done"] {
+  display: none;
+}
+
+.kanban-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.kanban-column-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-display-fg);
+}
+
+.kanban-column-count {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.kanban-column-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.kanban-column.is-drop-target {
+  outline: 2px dashed var(--color-state-active);
+  outline-offset: -4px;
+  background: color-mix(in oklab, var(--color-state-active) 6%, var(--color-surface));
+}
+
+.kanban-column-empty {
+  padding: var(--space-3);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.kanban-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.kanban-card:hover {
+  background: color-mix(in oklab, var(--color-state-active) 8%, var(--color-surface-elevated));
+}
+
+.kanban-card.is-selected {
+  border-color: var(--color-state-active);
+  box-shadow: 0 0 0 1px var(--color-state-active);
+}
+
+.kanban-card[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+.kanban-card[draggable="false"] {
+  cursor: default;
+  opacity: 0.85;
+}
+
+.kanban-card.is-dragging {
+  opacity: 0.5;
+}
+
+.kanban-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.kanban-card-number {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.kanban-card-title {
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text-strong);
+  overflow-wrap: anywhere;
+}
+
+.kanban-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.kanban-card-chip {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  background: color-mix(in oklab, var(--agent-codex) 18%, transparent);
+  color: var(--agent-codex);
+}
+
+.kanban-card-chip--plain {
+  background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
+  color: var(--color-text-muted);
+}
+
+.kanban-card-chip--warning {
+  background: color-mix(in oklab, var(--color-state-blocked) 22%, transparent);
+  color: var(--color-state-blocked);
+}
+
+.kanban-card-chip--state-open {
+  background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
+  color: var(--color-state-active);
+}
+
+.kanban-card-chip--state-closed {
+  background: color-mix(in oklab, var(--color-text-muted) 18%, transparent);
+  color: var(--color-text-muted);
+}
+
+.kanban-card-pending {
+  display: inline-block;
+  width: 0.75em;
+  height: 0.75em;
+  border-radius: 50%;
+  border: 2px solid var(--color-state-active);
+  border-top-color: transparent;
+  animation: kanban-card-spin 0.9s linear infinite;
+}
+
+@keyframes kanban-card-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kanban-card-pending {
+    animation: none;
+    border-top-color: var(--color-state-active);
+  }
+}
+
+/* SPEC-2017 US-9 — Kanban Drawer modifier on the SPEC-2356 Drawer.
+   The base `.op-drawer` already provides slide / focus / reduced-
+   motion behavior. The modifier just adds Kanban-specific spacing
+   and gives the body element a wider scroll area so SPEC sections
+   (spec/plan/tasks/notes/comments) stay readable. */
+.kanban-drawer .op-drawer__body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.kanban-drawer .op-drawer__footer {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.kanban-drawer-section {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+}
+
+.kanban-drawer-section-title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  color: var(--color-text-strong);
+  text-transform: uppercase;
+}
+
+.kanban-drawer-section-body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.5;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+
