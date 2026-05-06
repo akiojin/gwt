@@ -67,6 +67,32 @@ impl WorkspaceState {
         true
     }
 
+    pub fn set_purpose_title(&mut self, id: &str, title: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.purpose_title = title.and_then(normalize_title);
+        true
+    }
+
+    pub fn set_dynamic_title(&mut self, id: &str, title: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.dynamic_title = title.and_then(normalize_title);
+        true
+    }
+
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
     }
@@ -209,6 +235,8 @@ impl WorkspaceState {
             maximized: false,
             pre_maximize_geometry: None,
             persist,
+            purpose_title: None,
+            dynamic_title: None,
             agent_id: None,
             agent_color: None,
         };
@@ -412,6 +440,11 @@ impl WorkspaceState {
     }
 }
 
+fn normalize_title(title: String) -> Option<String> {
+    let trimmed = title.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +614,8 @@ mod tests {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: false,
+                purpose_title: None,
+                dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
             }],

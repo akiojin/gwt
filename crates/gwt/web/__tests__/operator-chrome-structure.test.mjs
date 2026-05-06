@@ -148,6 +148,24 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
+test("Agent window chrome resolves dynamic purpose titles before legacy titles", () => {
+  assert.match(
+    appSource,
+    /function\s+windowDisplayTitle\(windowData\)[\s\S]+dynamic_title[\s\S]+purpose_title[\s\S]+title/,
+    "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
+  );
+  assert.match(
+    appSource,
+    /window-list-title">\$\{escapeHtml\(windowDisplayTitle\(entry\)\)\}/,
+    "expected the Windows dropdown to escape the shared display-title helper output",
+  );
+  assert.match(
+    appSource,
+    /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
+    "expected window titlebars to use the shared display-title helper",
+  );
+});
+
 test("Branches remains a branch browser, not a planning workspace", () => {
   const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
   assert.ok(branchPreset, "expected Branches preset to remain available");
