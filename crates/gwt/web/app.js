@@ -190,7 +190,6 @@
           state: Object.freeze([
             "launchWizard",
             "wizardWasOpen",
-            "wizardAdvancedOpen",
             "wizardBranchDraft",
             "wizardBranchBackendValue",
           ]),
@@ -249,7 +248,6 @@
       let activeWorkProjection = null;
       let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
-      let wizardAdvancedOpen = false;
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
       let branchCleanupWindowId = null;
@@ -4096,7 +4094,6 @@
       function syncWizardDraftState() {
         if (!launchWizard) {
           wizardWasOpen = false;
-          wizardAdvancedOpen = false;
           wizardBranchDraft = "";
           wizardBranchBackendValue = "";
           return;
@@ -4104,9 +4101,6 @@
 
         if (!wizardWasOpen) {
           wizardWasOpen = true;
-          wizardAdvancedOpen =
-            launchWizard.selected_runtime_target === "docker" ||
-            Boolean(launchWizard.selected_docker_service);
           wizardBranchDraft = launchWizard.branch_name || "";
           wizardBranchBackendValue = wizardBranchDraft;
           return;
@@ -4527,6 +4521,59 @@
           panel.appendChild(section);
         }
 
+        if (
+          launchWizard.show_version ||
+          launchWizard.show_skip_permissions ||
+          launchWizard.show_codex_fast_mode
+        ) {
+          const section = createLaunchSection(
+            "Launch settings",
+            "Version, permissions, and tool-specific launch behavior.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          if (launchWizard.show_version) {
+            appendSelectField(
+              grid,
+              "Version",
+              launchWizard.version_options || [],
+              launchWizard.selected_version,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_version",
+                  version: value,
+                }),
+            );
+          }
+          if (launchWizard.show_skip_permissions) {
+            appendCheckboxField(
+              grid,
+              "Permissions",
+              "Skip permission prompts",
+              launchWizard.skip_permissions,
+              (enabled) =>
+                sendWizardAction({
+                  kind: "set_skip_permissions",
+                  enabled,
+                }),
+            );
+          }
+          if (launchWizard.show_codex_fast_mode) {
+            appendCheckboxField(
+              grid,
+              "Codex fast mode",
+              "Use the fast service tier",
+              launchWizard.codex_fast_mode,
+              (enabled) =>
+                sendWizardAction({
+                  kind: "set_codex_fast_mode",
+                  enabled,
+                }),
+            );
+          }
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
         if (launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
@@ -4561,122 +4608,64 @@
           panel.appendChild(section);
         }
 
-        {
+        if (
+          launchWizard.show_runtime_target ||
+          (launchWizard.show_docker_service &&
+            (launchWizard.docker_service_options || []).length > 0) ||
+          (launchWizard.show_docker_lifecycle &&
+            (launchWizard.docker_lifecycle_options || []).length > 0)
+        ) {
           const section = createLaunchSection(
-            "Advanced",
-            "Runtime target, versions, and launch flags.",
+            "Runtime",
+            "Choose where the session runs and how Docker services are used.",
           );
-          const toggleRow = createNode("div", "launch-toggle-row");
-          toggleRow.appendChild(
-            createNode(
-              "div",
-              "launch-note",
-              wizardAdvancedOpen
-                ? "Docker, version, permissions, and tool-specific flags."
-                : "Show runtime and launch flags.",
-            ),
-          );
-          const toggleButton = createNode(
-            "button",
-            "wizard-button",
-            wizardAdvancedOpen ? "Hide advanced" : "Show advanced",
-          );
-          toggleButton.type = "button";
-          toggleButton.addEventListener("click", () => {
-            wizardAdvancedOpen = !wizardAdvancedOpen;
-            renderLaunchWizard();
-          });
-          toggleRow.appendChild(toggleButton);
-          section.appendChild(toggleRow);
-
-          if (wizardAdvancedOpen) {
-            const grid = createNode("div", "launch-form-grid");
-            if (launchWizard.show_runtime_target) {
-              appendSelectField(
-                grid,
-                "Runtime target",
-                launchWizard.runtime_target_options || [],
-                launchWizard.selected_runtime_target,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_runtime_target",
-                    target: runtimeTargetPayload(value),
-                  }),
-              );
-            }
-            if (
-              launchWizard.show_docker_service &&
-              (launchWizard.docker_service_options || []).length > 0
-            ) {
-              appendSelectField(
-                grid,
-                "Docker service",
-                launchWizard.docker_service_options || [],
-                launchWizard.selected_docker_service,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_docker_service",
-                    service: value,
-                  }),
-              );
-            }
-            if (
-              launchWizard.show_docker_lifecycle &&
-              (launchWizard.docker_lifecycle_options || []).length > 0
-            ) {
-              appendSelectField(
-                grid,
-                "Docker lifecycle",
-                launchWizard.docker_lifecycle_options || [],
-                launchWizard.selected_docker_lifecycle,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_docker_lifecycle",
-                    intent: dockerLifecyclePayload(value),
-                  }),
-              );
-            }
-            if (launchWizard.show_version) {
-              appendSelectField(
-                grid,
-                "Version",
-                launchWizard.version_options || [],
-                launchWizard.selected_version,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_version",
-                    version: value,
-                  }),
-              );
-            }
-            if (launchWizard.show_skip_permissions) {
-              appendCheckboxField(
-                grid,
-                "Permissions",
-                "Skip permission prompts",
-                launchWizard.skip_permissions,
-                (enabled) =>
-                  sendWizardAction({
-                    kind: "set_skip_permissions",
-                    enabled,
-                  }),
-              );
-            }
-            if (launchWizard.show_codex_fast_mode) {
-              appendCheckboxField(
-                grid,
-                "Codex fast mode",
-                "Use the fast service tier",
-                launchWizard.codex_fast_mode,
-                (enabled) =>
-                  sendWizardAction({
-                    kind: "set_codex_fast_mode",
-                    enabled,
-                  }),
-              );
-            }
-            section.appendChild(grid);
+          const grid = createNode("div", "launch-form-grid");
+          if (launchWizard.show_runtime_target) {
+            appendSelectField(
+              grid,
+              "Runtime target",
+              launchWizard.runtime_target_options || [],
+              launchWizard.selected_runtime_target,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_runtime_target",
+                  target: runtimeTargetPayload(value),
+                }),
+            );
           }
+          if (
+            launchWizard.show_docker_service &&
+            (launchWizard.docker_service_options || []).length > 0
+          ) {
+            appendSelectField(
+              grid,
+              "Docker service",
+              launchWizard.docker_service_options || [],
+              launchWizard.selected_docker_service,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_docker_service",
+                  service: value,
+                }),
+            );
+          }
+          if (
+            launchWizard.show_docker_lifecycle &&
+            (launchWizard.docker_lifecycle_options || []).length > 0
+          ) {
+            appendSelectField(
+              grid,
+              "Docker lifecycle",
+              launchWizard.docker_lifecycle_options || [],
+              launchWizard.selected_docker_lifecycle,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_docker_lifecycle",
+                  intent: dockerLifecyclePayload(value),
+                }),
+            );
+          }
+          section.appendChild(grid);
 
           panel.appendChild(section);
         }
