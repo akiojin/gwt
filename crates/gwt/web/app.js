@@ -10,21 +10,10 @@
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
       const __op = initOperatorShell();
-      const xtermThemeAdapters = new Set();
-      __op.themeManager.subscribe((effective) => {
-        for (const adapter of xtermThemeAdapters) {
-          try { adapter(effective); } catch (e) { console.error("xterm theme adapter threw", e); }
-        }
-      });
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
         palette: __op.palette,
-        registerXtermThemeAdapter: (fn) => {
-          xtermThemeAdapters.add(fn);
-          try { fn(__op.themeManager.getEffective()); } catch (_e) { /* ignore */ }
-          return () => xtermThemeAdapters.delete(fn);
-        },
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
       };
 
@@ -1712,9 +1701,9 @@
         };
       }
 
-      // SPEC-2356 — xterm theme palettes follow the Operator overall theme.
-      // Each palette satisfies WCAG AA against its own canvas in DevTools spot
-      // checks; the dark variant is unchanged from the historical default.
+      // SPEC-2356 — xterm content stays on the Dark Operator palette even when
+      // surrounding window chrome follows the app's light theme. High-contrast
+      // forced-colors mode is still delegated to system colors by CSS.
       const XTERM_THEME_DARK = {
         background: "#0a0d12",
         foreground: "#e8eaed",
@@ -1737,48 +1726,20 @@
         brightCyan: "#22d3ee",
         brightWhite: "#f8fafc",
       };
-      const XTERM_THEME_LIGHT = {
-        background: "#f5f3ee",
-        foreground: "#1a1d24",
-        cursor: "#1a1d24",
-        selectionBackground: "#dcd9d2",
-        black: "#1f2937",
-        red: "#b91c1c",
-        green: "#15803d",
-        yellow: "#a16207",
-        blue: "#1d4ed8",
-        magenta: "#86198f",
-        cyan: "#0e7490",
-        white: "#4b5563",
-        brightBlack: "#374151",
-        brightRed: "#dc2626",
-        brightGreen: "#166534",
-        brightYellow: "#b45309",
-        brightBlue: "#1e40af",
-        brightMagenta: "#a21caf",
-        brightCyan: "#155e75",
-        brightWhite: "#1f2937",
-      };
-      const xtermThemeFor = (mode) =>
-        mode === "light" ? XTERM_THEME_LIGHT : XTERM_THEME_DARK;
 
       function createTerminalRuntime(windowId, terminalContainer) {
         if (terminalMap.has(windowId)) {
           return terminalMap.get(windowId);
         }
-        const initialMode = window.__operatorShell?.themeManager?.getEffective() ?? "dark";
         const terminal = new Terminal({
           cursorBlink: true,
           convertEol: true,
-          theme: xtermThemeFor(initialMode),
+          theme: XTERM_THEME_DARK,
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
           fontSize: 13,
           lineHeight: 1.2,
           scrollback: 5000,
-        });
-        const themeUnsubscribe = window.__operatorShell?.registerXtermThemeAdapter?.((mode) => {
-          try { terminal.options.theme = xtermThemeFor(mode); } catch (e) { console.warn("xterm theme update failed", e); }
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
@@ -1788,7 +1749,6 @@
         const cleanup = () => {
           copyCleanup();
           viewportRefreshCleanup();
-          themeUnsubscribe?.();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;
