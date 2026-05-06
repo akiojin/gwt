@@ -401,10 +401,26 @@ pub fn update_workspace_projection_with_journal_paths(
     project_root: &Path,
     update: WorkspaceProjectionUpdate,
 ) -> Result<WorkspaceJournalEntry> {
+    update_workspace_projection_with_journal_paths_at(
+        current_path,
+        journal_path,
+        project_root,
+        update,
+        Utc::now(),
+    )
+}
+
+pub fn update_workspace_projection_with_journal_paths_at(
+    current_path: &Path,
+    journal_path: &Path,
+    project_root: &Path,
+    update: WorkspaceProjectionUpdate,
+    updated_at: DateTime<Utc>,
+) -> Result<WorkspaceJournalEntry> {
     let mut projection =
         load_or_default_workspace_projection_from_path(current_path, project_root)?;
     projection.project_root = project_root.to_path_buf();
-    let entry = projection.apply_update(update, Utc::now());
+    let entry = projection.apply_update(update, updated_at);
     save_workspace_projection_to_path(current_path, &projection)?;
     append_workspace_journal_entry_to_path(journal_path, &entry)?;
     Ok(entry)
@@ -446,6 +462,37 @@ pub fn append_workspace_journal_entry_to_path(
     Ok(())
 }
 
+pub fn load_recent_workspace_journal_entries(
+    repo_path: &Path,
+    limit: usize,
+) -> Result<Vec<WorkspaceJournalEntry>> {
+    load_recent_workspace_journal_entries_from_path(
+        &gwt_workspace_journal_path_for_repo_path(repo_path),
+        limit,
+    )
+}
+
+pub fn load_recent_workspace_journal_entries_from_path(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<WorkspaceJournalEntry>> {
+    if limit == 0 || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)?;
+    let mut entries = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str::<WorkspaceJournalEntry>(line)
+                .map_err(|error| GwtError::Other(format!("workspace journal json: {error}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
+    entries.truncate(limit);
+    Ok(entries)
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -470,6 +517,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
     use super::*;
 
     #[test]
@@ -873,5 +922,57 @@ mod tests {
             projection.summary.as_deref(),
             Some("Keep this user-facing work summary.")
         );
+    }
+
+    #[test]
+    fn recent_workspace_journal_entries_load_newest_first_with_limit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let current_path = temp.path().join("workspace/current.json");
+        let journal_path = temp.path().join("workspace/journal.jsonl");
+        let first_at = Utc.with_ymd_and_hms(2026, 5, 7, 1, 0, 0).unwrap();
+        let second_at = Utc.with_ymd_and_hms(2026, 5, 7, 1, 5, 0).unwrap();
+
+        update_workspace_projection_with_journal_paths_at(
+            &current_path,
+            &journal_path,
+            &project_root,
+            WorkspaceProjectionUpdate {
+                title: Some("Workspace Overview".to_string()),
+                status_category: Some(WorkspaceStatusCategory::Active),
+                status_text: Some("Drafting overview".to_string()),
+                owner: Some("SPEC-2359".to_string()),
+                next_action: None,
+                summary: Some("First summary".to_string()),
+                agent_session_id: None,
+                agent_current_focus: None,
+            },
+            first_at,
+        )
+        .expect("first update");
+        update_workspace_projection_with_journal_paths_at(
+            &current_path,
+            &journal_path,
+            &project_root,
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: Some(WorkspaceStatusCategory::Idle),
+                status_text: Some("Ready for review".to_string()),
+                owner: Some("SPEC-2359".to_string()),
+                next_action: Some("Review Workspace Overview".to_string()),
+                summary: Some("Second summary".to_string()),
+                agent_session_id: None,
+                agent_current_focus: None,
+            },
+            second_at,
+        )
+        .expect("second update");
+
+        let recent = load_recent_workspace_journal_entries_from_path(&journal_path, 1)
+            .expect("recent journal entries");
+
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].summary.as_deref(), Some("Second summary"));
+        assert_eq!(recent[0].updated_at, second_at);
     }
 }
