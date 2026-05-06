@@ -188,6 +188,24 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
+test("Agent window chrome resolves dynamic purpose titles before legacy titles", () => {
+  assert.match(
+    appSource,
+    /function\s+windowDisplayTitle\(windowData\)[\s\S]+dynamic_title[\s\S]+purpose_title[\s\S]+title/,
+    "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
+  );
+  assert.match(
+    appSource,
+    /window-list-title">\$\{escapeHtml\(windowDisplayTitle\(entry\)\)\}/,
+    "expected the Windows dropdown to escape the shared display-title helper output",
+  );
+  assert.match(
+    appSource,
+    /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
+    "expected window titlebars to use the shared display-title helper",
+  );
+});
+
 test("Branches remains a branch browser, not a planning workspace", () => {
   const branchPreset = document.querySelector('.preset-button[data-preset="branches"]');
   assert.ok(branchPreset, "expected Branches preset to remain available");
@@ -306,7 +324,7 @@ test("Project Bar exposes persistent chrome visibility toggles", () => {
 });
 
 test("floating window controls mark only window operations as hideable", () => {
-  for (const id of ["tile-button", "stack-button", "window-list-button", "add-button"]) {
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button", "add-button"]) {
     const button = document.getElementById(id);
     assert.ok(button, `expected ${id}`);
     assert.equal(button.dataset.windowControl, "true", `${id} should be hidden by the window controls toggle`);
@@ -394,6 +412,17 @@ test("components.css hides only marked floating window controls", () => {
   assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
   assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
   assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
+});
+
+test("floating actions expose Align without resizing windows", () => {
+  const button = document.getElementById("align-button");
+  assert.ok(button, "expected Align button");
+  assert.equal(button.textContent.trim(), "Align");
+  assert.match(
+    appSource,
+    /alignButton\.addEventListener\("click",\s*\(\)\s*=>\s*arrangeWindows\("align"\)\)/,
+    "expected Align to reuse arrange_windows with the align mode",
+  );
 });
 
 test("operator-shell persists sidebar and window controls visibility independently", () => {

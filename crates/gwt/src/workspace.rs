@@ -67,6 +67,32 @@ impl WorkspaceState {
         true
     }
 
+    pub fn set_purpose_title(&mut self, id: &str, title: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.purpose_title = title.and_then(normalize_title);
+        true
+    }
+
+    pub fn set_dynamic_title(&mut self, id: &str, title: Option<String>) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.dynamic_title = title.and_then(normalize_title);
+        true
+    }
+
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
     }
@@ -90,6 +116,7 @@ impl WorkspaceState {
         match mode {
             ArrangeMode::Tile => self.arrange_tile(bounds, &open_indices),
             ArrangeMode::Stack => self.arrange_stack(bounds, &open_indices),
+            ArrangeMode::Align => self.arrange_align(bounds, &open_indices),
         }
         self.reassign_z_indexes();
         true
@@ -209,6 +236,8 @@ impl WorkspaceState {
             maximized: false,
             pre_maximize_geometry: None,
             persist,
+            purpose_title: None,
+            dynamic_title: None,
             agent_id: None,
             agent_color: None,
         };
@@ -357,6 +386,37 @@ impl WorkspaceState {
         }
     }
 
+    fn arrange_align(&mut self, bounds: WindowGeometry, open_indices: &[usize]) {
+        let count = open_indices.len();
+        let columns = (count as f64).sqrt().ceil() as usize;
+        let rows = count.div_ceil(columns);
+        let cell_width = ((bounds.width
+            - ARRANGE_PADDING * 2.0
+            - ARRANGE_PADDING * (columns.saturating_sub(1)) as f64)
+            / columns as f64)
+            .max(MIN_WINDOW_WIDTH);
+        let cell_height = ((bounds.height
+            - ARRANGE_PADDING * 2.0
+            - ARRANGE_PADDING * (rows.saturating_sub(1)) as f64)
+            / rows as f64)
+            .max(MIN_WINDOW_HEIGHT);
+
+        for (index, window_index) in open_indices.iter().enumerate() {
+            let window = &mut self.persisted.windows[*window_index];
+            let column = index % columns;
+            let row = index / columns;
+            if let Some(geometry) = window.pre_maximize_geometry.take() {
+                window.geometry.width = geometry.width;
+                window.geometry.height = geometry.height;
+            }
+            window.geometry.x =
+                bounds.x + ARRANGE_PADDING + column as f64 * (cell_width + ARRANGE_PADDING);
+            window.geometry.y =
+                bounds.y + ARRANGE_PADDING + row as f64 * (cell_height + ARRANGE_PADDING);
+            window.maximized = false;
+        }
+    }
+
     fn reassign_z_indexes(&mut self) {
         for (index, window) in self.persisted.windows.iter_mut().enumerate() {
             window.z_index = (index as u32) + 1;
@@ -410,6 +470,11 @@ impl WorkspaceState {
             self.persisted.next_z_index += 1;
         }
     }
+}
+
+fn normalize_title(title: String) -> Option<String> {
+    let trimmed = title.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -581,6 +646,8 @@ mod tests {
                 maximized: false,
                 pre_maximize_geometry: None,
                 persist: false,
+                purpose_title: None,
+                dynamic_title: None,
                 agent_id: None,
                 agent_color: None,
             }],
@@ -693,6 +760,71 @@ mod tests {
         assert!(codex.geometry.x < claude.geometry.x + claude.geometry.width);
         assert!(codex.geometry.y < claude.geometry.y + claude.geometry.height);
         assert_eq!(workspace.persisted().next_z_index, 4);
+    }
+
+    #[test]
+    fn align_arrangement_places_windows_on_grid_without_resizing() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        workspace.add_window(WindowPreset::FileTree, arrange_bounds());
+
+        let original = workspace
+            .persisted()
+            .windows
+            .iter()
+            .map(|window| {
+                (
+                    window.id.clone(),
+                    window.geometry.width,
+                    window.geometry.height,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
+
+        for (id, width, height) in original {
+            let window = workspace.window(&id).expect("window");
+            assert_eq!(
+                window.geometry.width, width,
+                "{id} width should be preserved"
+            );
+            assert_eq!(
+                window.geometry.height, height,
+                "{id} height should be preserved"
+            );
+        }
+
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        let file_tree = workspace.window("file-tree-1").expect("file tree");
+
+        assert_eq!(claude.geometry.x, 124.0);
+        assert_eq!(claude.geometry.y, 64.0);
+        assert_eq!(codex.geometry.x, 612.0);
+        assert_eq!(codex.geometry.y, 64.0);
+        assert_eq!(file_tree.geometry.x, 124.0);
+        assert_eq!(file_tree.geometry.y, 432.0);
+    }
+
+    #[test]
+    fn align_arrangement_restores_maximized_window_size_before_positioning() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let original = workspace
+            .window("claude-1")
+            .expect("claude")
+            .geometry
+            .clone();
+
+        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
+        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
+
+        let claude = workspace.window("claude-1").expect("claude");
+        assert!(!claude.maximized);
+        assert_eq!(claude.pre_maximize_geometry, None);
+        assert_eq!(claude.geometry.width, original.width);
+        assert_eq!(claude.geometry.height, original.height);
+        assert_eq!(claude.geometry.x, 612.0);
+        assert_eq!(claude.geometry.y, 64.0);
     }
 
     #[test]
