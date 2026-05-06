@@ -353,17 +353,18 @@ test("Mission Briefing splash has dismissible affordance (pointer-events + curso
   assert.match(briefing[0], /cursor:\s*pointer/);
 });
 
-test("operator-shell wires theme toggle aria-label updates on every render", () => {
-  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  // wireThemeToggle.renderLabel must update aria-label every render so
-  // screen readers know the live preference + effective theme.
+test("theme-toggle wires aria-label updates on every render", () => {
+  // SPEC-2356 FR-024 — segmented toggle exposes the live preference + effective
+  // theme via the radiogroup container's aria-label so screen readers always
+  // announce the current state.
+  const themeToggle = readFileSync(resolve(here, "../theme-toggle.js"), "utf8");
   assert.match(
-    operatorShell,
-    /btn\.setAttribute\(\s*"aria-label"/,
-    "expected wireThemeToggle to update aria-label on every render",
+    themeToggle,
+    /root\.setAttribute\(\s*"aria-label"/,
+    "expected segmented theme toggle to update aria-label on every render",
   );
   assert.match(
-    operatorShell,
+    themeToggle,
     /Theme: \$\{pref === "auto" \? `auto/,
     "expected aria-label format to disclose preference + effective theme",
   );
