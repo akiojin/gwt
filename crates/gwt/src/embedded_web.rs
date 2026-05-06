@@ -570,7 +570,7 @@ mod tests {
     fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
         let js = app_js();
         let apply_viewport = regex::Regex::new(
-            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
+            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
         )
         .expect("valid regex");
 
@@ -581,6 +581,33 @@ mod tests {
         assert!(
             apply_viewport.is_match(js),
             "expected viewport application to opt into the transform layer only during motion and reset it after 300ms",
+        );
+    }
+
+    #[test]
+    fn embedded_web_canvas_grid_tracks_viewport_as_world_space_cue() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains("id=\"canvas-world-grid\""),
+            "expected canvas to expose a dedicated world-space grid layer",
+        );
+        assert!(
+            html.contains(".canvas-world-grid"),
+            "expected embedded html to define the world-space grid CSS",
+        );
+        assert!(
+            js.contains("const worldGrid = document.getElementById(\"canvas-world-grid\")"),
+            "expected frontend to bind the world-space grid element",
+        );
+        assert!(
+            js.contains("function applyWorldGridViewport()"),
+            "expected grid viewport sync to live behind a named helper",
+        );
+        assert!(
+            js.contains("applyWorldGridViewport();"),
+            "expected applyViewport to update the grid whenever viewport state changes",
         );
     }
 
@@ -1324,6 +1351,23 @@ mod tests {
                 && !board_block.contains("workspace-card")
                 && !board_block.contains("active_work_projection"),
             "expected Board surface not to render Workspace or Planning Session cards",
+        );
+    }
+
+    #[test]
+    fn embedded_web_active_work_hides_internal_git_identity_from_user_summary() {
+        let html = frontend_bundle_source();
+        let active_work_block = html
+            .split("function renderActiveWorkOverview()")
+            .nth(1)
+            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
+            .expect("active work render block");
+
+        assert!(
+            !active_work_block.contains("appendMeta(meta, activeWorkProjection.branch)")
+                && !active_work_block.contains("compactPathLabel(agent.worktree_path)")
+                && !active_work_block.contains("appendMeta(agentMeta, agent.branch)"),
+            "Active Work must not expose branch names or worktree paths in the normal user summary",
         );
     }
 

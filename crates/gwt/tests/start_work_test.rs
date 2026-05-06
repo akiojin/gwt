@@ -91,6 +91,6 @@ fn start_work_launch_confirmation_materializes_reserved_work_branch_and_worktree
         git_output(&worktree, &["branch", "--show-current"]),
         reserved_branch
     );
-    assert_eq!(base_branch, "origin/develop");
+    assert_eq!(base_branch, "origin/HEAD");
     assert!(git_output(&repo, &["for-each-ref", "refs/heads/work"]).contains(&reserved_branch));
 }

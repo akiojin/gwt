@@ -52,6 +52,7 @@
       const alignButton = document.getElementById("align-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
+      const worldGrid = document.getElementById("canvas-world-grid");
       const activeWorkCount = document.getElementById("op-active-work-count");
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
@@ -1038,8 +1039,30 @@
         return Number.parseFloat(value || "0");
       }
 
+      function applyWorldGridViewport() {
+        if (!worldGrid) {
+          return;
+        }
+        const gridSize = 32 * viewport.zoom;
+        const majorGridSize = gridSize * 4;
+        const gridPosition = `${viewport.x}px ${viewport.y}px`;
+        worldGrid.style.backgroundSize = [
+          `${gridSize}px ${gridSize}px`,
+          `${gridSize}px ${gridSize}px`,
+          `${majorGridSize}px ${majorGridSize}px`,
+          `${majorGridSize}px ${majorGridSize}px`,
+        ].join(", ");
+        worldGrid.style.backgroundPosition = [
+          gridPosition,
+          gridPosition,
+          gridPosition,
+          gridPosition,
+        ].join(", ");
+      }
+
       function applyViewport() {
         stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+        applyWorldGridViewport();
         stage.style.willChange = "transform";
         if (viewportRasterTimer !== null) {
           clearTimeout(viewportRasterTimer);
@@ -1239,7 +1262,6 @@
           if (category === "done") counts.done = Math.max(counts.done, 1);
           counts.blocked = Math.max(counts.blocked, blockedAgents);
           counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
-          counts.branches = activeWorkProjection.branch ? 1 : "—";
         }
         try {
           window.__operatorShell.applyTelemetryCounts(counts);
@@ -1334,7 +1356,6 @@
         );
         const meta = createNode("div", "op-work-meta");
         appendMeta(meta, activeWorkProjection.owner);
-        appendMeta(meta, activeWorkProjection.branch);
         appendMeta(meta, activeWorkProjection.pr_number ? `PR #${activeWorkProjection.pr_number}` : "");
         activeWorkSummary.appendChild(meta);
         activeWorkSummary.appendChild(
@@ -1401,8 +1422,6 @@
           card.appendChild(head);
 
           const agentMeta = createNode("div", "op-agent-meta");
-          appendMeta(agentMeta, agent.branch);
-          appendMeta(agentMeta, compactPathLabel(agent.worktree_path));
           appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
           card.appendChild(agentMeta);
 
@@ -5567,6 +5586,8 @@
             return "A running agent session is using this branch";
           case "remote_tracking_without_local":
             return "Remote-tracking branch without a local counterpart";
+          case "non_workspace_branch":
+            return "Only gwt-managed workspaces can be cleaned up";
           default:
             return "This branch cannot be cleaned up";
         }
