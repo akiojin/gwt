@@ -770,6 +770,73 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
   );
 });
 
+test("Launch wizard separates launch settings from runtime controls", () => {
+  assert.equal(
+    appSource.includes("wizardAdvancedOpen"),
+    false,
+    "Launch wizard should not keep an Advanced disclosure state",
+  );
+  for (const retiredCopy of ["Advanced", "Show advanced", "Hide advanced"]) {
+    assert.equal(
+      appSource.includes(`"${retiredCopy}"`),
+      false,
+      `Launch wizard should not render ${retiredCopy}`,
+    );
+  }
+
+  const launchSettingsStart = appSource.indexOf(
+    'createLaunchSection(\n            "Launch settings"',
+  );
+  const linkedIssueStart = appSource.indexOf(
+    'createLaunchSection(\n            "Linked issue"',
+  );
+  const runtimeStart = appSource.indexOf(
+    'createLaunchSection(\n            "Runtime"',
+  );
+
+  assert.notEqual(launchSettingsStart, -1, "expected Launch settings section");
+  assert.notEqual(linkedIssueStart, -1, "expected Linked issue section");
+  assert.notEqual(runtimeStart, -1, "expected Runtime section");
+  assert.ok(
+    launchSettingsStart < linkedIssueStart && linkedIssueStart < runtimeStart,
+    "expected Launch settings before Linked issue and Runtime after Linked issue",
+  );
+
+  const launchSettingsBlock = appSource.slice(
+    launchSettingsStart,
+    linkedIssueStart,
+  );
+  for (const copy of ["Version", "Skip permission prompts", "Codex fast mode"]) {
+    assert.ok(
+      launchSettingsBlock.includes(`"${copy}"`),
+      `expected Launch settings to include ${copy}`,
+    );
+  }
+  assert.equal(
+    launchSettingsBlock.includes('"Runtime target"'),
+    false,
+    "Launch settings should not contain runtime target controls",
+  );
+
+  const runtimeBlock = appSource.slice(
+    runtimeStart,
+    appSource.indexOf("wizardBody.appendChild(panel);"),
+  );
+  for (const copy of ["Runtime target", "Docker service", "Docker lifecycle"]) {
+    assert.ok(
+      runtimeBlock.includes(`"${copy}"`),
+      `expected Runtime to include ${copy}`,
+    );
+  }
+  for (const copy of ["Version", "Skip permission prompts", "Codex fast mode"]) {
+    assert.equal(
+      runtimeBlock.includes(`"${copy}"`),
+      false,
+      `Runtime should not contain ${copy}`,
+    );
+  }
+});
+
 test("Selected list rows mark active item with aria-current", () => {
   // Same pattern as project tabs (PR #2455): list-style buttons with a
   // selected state need aria-current to announce which row is active.

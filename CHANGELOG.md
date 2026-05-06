@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.20.3] - 2026-05-06
+
+### Bug Fixes
+
+- **ui:** Improve light theme readability
+- **gui:** Apply pending update from toast
+- **gui:** Regroup launch agent settings
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into work branch
+- Merge develop into work branch
+
 ## [9.20.2] - 2026-05-06
 
 ### Bug Fixes

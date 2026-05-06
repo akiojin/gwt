@@ -1180,10 +1180,7 @@ impl AppRuntime {
             FrontendEvent::LaunchWizardAction { action, bounds } => {
                 self.handle_launch_wizard_action(action, bounds)
             }
-            FrontendEvent::ApplyUpdate => {
-                std::thread::spawn(apply_update_and_exit);
-                vec![]
-            }
+            FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -1252,6 +1249,46 @@ impl AppRuntime {
                 client_id, event,
             )]));
         });
+    }
+
+    fn apply_pending_update_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+        match self.pending_update.clone() {
+            Some(
+                state @ gwt_core::update::UpdateState::Available {
+                    asset_url: Some(_), ..
+                },
+            ) => {
+                self.proxy.send(UserEvent::ApplyUpdate(state));
+                vec![]
+            }
+            Some(gwt_core::update::UpdateState::Available { .. }) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateApplyError {
+                    message: "No applicable update asset is available for this platform."
+                        .to_string(),
+                },
+            )],
+            Some(gwt_core::update::UpdateState::UpToDate { .. }) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateApplyError {
+                    message: "No pending update is available.".to_string(),
+                },
+            )],
+            Some(gwt_core::update::UpdateState::Failed { message, .. }) => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::UpdateApplyError {
+                        message: format!("Update check failed: {message}"),
+                    },
+                )]
+            }
+            None => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateApplyError {
+                    message: "No pending update is available.".to_string(),
+                },
+            )],
+        }
     }
 
     pub(crate) fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
@@ -4642,6 +4679,76 @@ exit 0
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
+    }
+
+    #[test]
+    fn app_runtime_apply_update_uses_pending_available_update_state() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::Git,
+            &[WindowPreset::Shell],
+        );
+        let (mut runtime, events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        runtime.pending_update = Some(gwt_core::update::UpdateState::Available {
+            current: "9.20.1".to_string(),
+            latest: "9.20.2".to_string(),
+            release_url: "https://example.invalid/releases/v9.20.2".to_string(),
+            asset_url: Some("https://example.invalid/gwt-macos-universal.dmg".to_string()),
+            checked_at: chrono::Utc::now(),
+        });
+
+        let outbound =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ApplyUpdate);
+
+        assert!(outbound.is_empty(), "apply worker dispatch is internal");
+        wait_for_recorded_event("pending update apply", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::ApplyUpdate(gwt_core::update::UpdateState::Available {
+                        latest,
+                        asset_url: Some(asset_url),
+                        ..
+                    }) if latest == "9.20.2"
+                        && asset_url == "https://example.invalid/gwt-macos-universal.dmg"
+                )
+            })
+        });
+    }
+
+    #[test]
+    fn app_runtime_apply_update_without_applicable_pending_update_reports_error() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::Git,
+            &[WindowPreset::Shell],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.pending_update = Some(gwt_core::update::UpdateState::Available {
+            current: "9.20.1".to_string(),
+            latest: "9.20.2".to_string(),
+            release_url: "https://example.invalid/releases/v9.20.2".to_string(),
+            asset_url: None,
+            checked_at: chrono::Utc::now(),
+        });
+
+        let outbound =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ApplyUpdate);
+
+        assert!(outbound.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::UpdateApplyError { message }
+                    if message.contains("No applicable update asset")
+            )
+        }));
     }
 
     #[test]
