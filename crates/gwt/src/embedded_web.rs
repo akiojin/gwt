@@ -716,6 +716,47 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_window_role_badges_identify_every_window_surface() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains(".window-role-badge") && html.contains(".window-list-role"),
+            "expected role badge styling for titlebars and the window list",
+        );
+        assert!(
+            js.contains("function presetRoleLabel(preset)"),
+            "expected a shared presetRoleLabel helper",
+        );
+        for label in [
+            "Shell",
+            "Claude",
+            "Codex",
+            "Agent",
+            "File Tree",
+            "Branches",
+            "Settings",
+            "Memo",
+            "Profile",
+            "Logs",
+            "Issue",
+            "SPEC",
+            "Board",
+            "PR",
+        ] {
+            assert!(
+                js.contains(label),
+                "expected presetRoleLabel to cover {label}",
+            );
+        }
+        assert!(
+            js.contains("function shouldShowRuntimeStatus(windowData)")
+                && js.contains("runtimeChip.hidden = !shouldShowRuntimeStatus(windowData)"),
+            "expected non-terminal panels to hide runtime status chips",
+        );
+    }
+
+    #[test]
     fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
         let js = app_js();
         let apply_status = regex::Regex::new(
