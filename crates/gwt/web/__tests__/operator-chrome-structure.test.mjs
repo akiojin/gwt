@@ -132,6 +132,34 @@ test("Workspace sidebar keeps Quick before the expanding active work list", () =
   );
 });
 
+test("workspace windows expose role badges and hide panel runtime chips", () => {
+  assert.match(
+    appSource,
+    /function\s+presetRoleLabel\(preset\)/,
+    "expected a shared preset role label helper",
+  );
+  assert.match(
+    appSource,
+    /class="window-role-badge"/,
+    "expected titlebar template to include a role badge surface",
+  );
+  assert.match(
+    appSource,
+    /function\s+shouldShowRuntimeStatus\(windowData\)/,
+    "expected runtime chip visibility to be centralized",
+  );
+  assert.match(
+    appSource,
+    /runtimeChip\.hidden\s*=\s*!shouldShowRuntimeStatus\(windowData\)/,
+    "expected non-terminal panels to hide the runtime status chip",
+  );
+  assert.match(
+    appSource,
+    /window-list-role/,
+    "expected window list rows to include a role badge",
+  );
+});
+
 test("Workspace active work overview behaves like a command center", () => {
   assert.match(
     appSource,

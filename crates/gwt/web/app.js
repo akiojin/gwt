@@ -527,6 +527,30 @@
           .join(" ");
       }
 
+      function presetRoleLabel(preset) {
+        const labels = {
+          shell: "Shell",
+          claude: "Claude",
+          codex: "Codex",
+          agent: "Agent",
+          file_tree: "File Tree",
+          branches: "Branches",
+          settings: "Settings",
+          memo: "Memo",
+          profile: "Profile",
+          logs: "Logs",
+          issue: "Issue",
+          spec: "SPEC",
+          board: "Board",
+          pr: "PR",
+        };
+        return labels[preset] || presetLabel(preset);
+      }
+
+      function shouldShowRuntimeStatus(windowData) {
+        return presetSurface(windowData?.preset) === "terminal";
+      }
+
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
         running: "Running",
         waiting: "Waiting",
@@ -642,18 +666,21 @@
           const geometryLabel = windowGeometryLabel(entry);
           const runtimeState = runtimeStateForWindow(entry);
           const runtimeLabel = windowRuntimeLabel(runtimeState);
+          const runtimeChip = shouldShowRuntimeStatus(entry)
+            ? `<span class="status-chip ${runtimeState}">
+                <span class="status-dot"></span>
+                <span class="status-label">${runtimeLabel}</span>
+              </span>`
+            : "";
           row.innerHTML = `
             <div class="window-list-copy">
               <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
               <div class="window-list-meta">
-                <span class="window-list-preset">${presetLabel(entry.preset)}</span>
+                <span class="window-role-badge window-list-role">${presetRoleLabel(entry.preset)}</span>
                 <span class="window-list-geometry">${geometryLabel}</span>
               </div>
             </div>
-            <span class="status-chip ${runtimeState}">
-              <span class="status-dot"></span>
-              <span class="status-label">${runtimeLabel}</span>
-            </span>
+            ${runtimeChip}
           `;
           row.addEventListener("click", () => {
             windowListOpen = false;
@@ -1432,6 +1459,8 @@
         const chip = element.querySelector(".status-chip");
         const label = element.querySelector(".status-label");
         const overlay = element.querySelector(".terminal-overlay");
+        const runtimeChip = chip;
+        runtimeChip.hidden = !shouldShowRuntimeStatus(windowData);
         chip.classList.remove(
           "starting",
           "running",
@@ -6517,6 +6546,7 @@
             <div class="titlebar">
               <div class="title">
                 <span class="title-text"></span>
+                <span class="window-role-badge"></span>
                 <span class="status-chip running">
                   <span class="status-dot"></span>
                   <span class="status-label">Running</span>
@@ -6616,6 +6646,7 @@
         }
 
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
+        element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;

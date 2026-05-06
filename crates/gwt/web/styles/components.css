@@ -1200,6 +1200,11 @@ kbd.op-kbd {
   font-size: var(--type-xs);
   color: var(--color-display-fg);
 }
+:root[data-theme] .window-role-badge {
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
 :root[data-theme] .status-chip {
   background: var(--color-surface-elevated);
   color: var(--color-text-muted);
@@ -2195,4 +2200,3 @@ kbd.op-kbd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-
