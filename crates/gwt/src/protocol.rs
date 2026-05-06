@@ -554,6 +554,9 @@ pub enum BackendEvent {
         event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
+    UpdateApplyError {
+        message: String,
+    },
     /// Response to [`FrontendEvent::ListCustomAgents`].
     CustomAgentList {
         agents: Vec<CustomCodingAgent>,
