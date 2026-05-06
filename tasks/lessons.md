@@ -4720,3 +4720,61 @@ Playwright が必須。
 
 - 新しいフロントテストは「ロジック単体は `node --test`、 描画 / インタラクションは Playwright」に二分する。 ブラウザ起動が必要かをロジックレベルで判定する。
 - `package.json` には `test:frontend-unit` (Node native) と `test:visual` (Playwright) を分離して定義する。 CI も別ジョブで実行し、 失敗箇所が一目で分かるようにする。
+
+## 2026-05-06 — 楽観的 UI の rollback は pre-mutation snapshot で即時に行う
+
+### 事象
+
+SPEC-2017 Phase 2 で Kanban D&D を実装した際、最初の design では
+drop 時にサーバー応答を待ってから DOM 更新する pessimistic UI を
+検討していたが、レビューで「drop した瞬間にカードがビジュアルで動か
+ないと操作が成立したか不明」と指摘されて楽観的 UI に転換した。
+最初の楽観的 UI 実装では「失敗時は再度 load_knowledge_bridge を呼ぶ」
+という rollback 戦略を取ったが、これだと再取得の非同期応答が来るまで
+楽観的に動かしたカードが target column に留まり続け、矛盾した
+状態が続いてしまう。
+
+### 原因
+
+楽観的 UI における rollback は、サーバー応答待ちの非同期性ではなく、
+クライアント側の「pre-mutation snapshot」で即時に行うべきだった。
+最初の設計は「rollback = サーバーから再ダウンロード」という
+pessimistic fallback に引きずられていた。
+
+### 再発防止策
+
+- 楽観的 UI を実装するときは、drop / submit 時に必ず pre-mutation
+  snapshot を取り、エラー応答時はそのスナップショットから即時
+  rollback する。サーバー再取得は最後の手段。
+- `dndSnapshot` のような state スロットを設計初期に確保し、UI 操作と
+  非同期通信の境界を明確にする。
+- WebSocket protocol の error response には、UI rollback に必要な情報
+  （request_id / target / error message）を必ず含め、フロントが
+  サーバー再取得に依存しなくて済むようにする。
+
+## 2026-05-06 — Drawer 化のときは右ペインを残置せず Drawer に詳細を寄せる
+
+### 事象
+
+SPEC-2017 Phase 1 では Knowledge Bridge を Kanban に置換しつつ、
+既存の右ペイン (`.knowledge-detail-pane`) は残したまま着地させた。
+Phase 3 で Drawer を導入する際、最初は右ペインも Drawer も両方
+表示する案を検討したが、レイアウト的に Kanban Board の横幅を著しく
+圧迫し、6 カラムが画面に収まらなくなる問題が出た。
+
+### 原因
+
+「既存 UI を残置すれば破壊的変更を最小化できる」という保守的な
+考えに引きずられたが、Kanban のような横幅を要求する surface では
+右ペインの占有を完全に取り除いた方が UX 的にも実装的にも素直
+だった。SPEC-2356 で確立済の Drawer pattern (`.op-drawer`) は
+右からスライドする一時的な surface なので、Kanban の横幅を奪わない。
+
+### 再発防止策
+
+- 横幅制約のある surface (Kanban / Timeline / Wide Table 等) で詳細
+  ペインを併存させる場合、必ず Drawer / Slide-over パターンを採用
+  する。永続ペインは縦長 surface (List / Tree / Form) でのみ正当化
+  される。
+- 既存 UI を残置するか Drawer に寄せるかの判断は、機能の差分よりも
+  「surface の横幅要件」を起点に行う。

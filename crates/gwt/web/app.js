@@ -813,6 +813,125 @@
         }
       }
 
+      // SPEC-2017 US-9 — Kanban Drawer (slide-over detail). Reuses the
+      // SPEC-2356 .op-drawer pattern; backdrop click and Esc both
+      // dismiss it; createFocusTrap keeps Tab within the dialog while
+      // open. State is module-scoped because only one Drawer is open
+      // at a time even when multiple Kanban windows exist.
+      let kanbanDrawerFocusReturn = null;
+      let kanbanDrawerFocusTrapRelease = null;
+      let kanbanDrawerActiveContext = null;
+      function openKanbanDrawer(context) {
+        const drawer = document.getElementById("kanban-drawer");
+        const backdrop = document.getElementById("kanban-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        kanbanDrawerActiveContext = context || null;
+        kanbanDrawerFocusReturn = document.activeElement;
+        backdrop.hidden = false;
+        backdrop.dataset.open = "true";
+        drawer.hidden = false;
+        drawer.dataset.open = "true";
+        renderKanbanDrawerBody();
+        try { drawer.focus({ preventScroll: true }); }
+        catch { drawer.focus(); }
+        if (typeof kanbanDrawerFocusTrapRelease === "function") {
+          kanbanDrawerFocusTrapRelease();
+        }
+        kanbanDrawerFocusTrapRelease = createFocusTrap(drawer, { document });
+      }
+
+      function closeKanbanDrawer() {
+        const drawer = document.getElementById("kanban-drawer");
+        const backdrop = document.getElementById("kanban-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        if (drawer.dataset.open !== "true") return;
+        drawer.dataset.open = "false";
+        backdrop.dataset.open = "false";
+        // Hide after the transition so prefers-reduced-motion users
+        // still see the focus trap dismantle cleanly.
+        backdrop.hidden = true;
+        drawer.hidden = true;
+        if (typeof kanbanDrawerFocusTrapRelease === "function") {
+          kanbanDrawerFocusTrapRelease();
+          kanbanDrawerFocusTrapRelease = null;
+        }
+        if (
+          kanbanDrawerFocusReturn &&
+          typeof kanbanDrawerFocusReturn.focus === "function"
+        ) {
+          try { kanbanDrawerFocusReturn.focus({ preventScroll: true }); }
+          catch { kanbanDrawerFocusReturn.focus(); }
+        }
+        kanbanDrawerFocusReturn = null;
+        kanbanDrawerActiveContext = null;
+      }
+
+      function renderKanbanDrawerBody() {
+        const body = document.getElementById("kanban-drawer-body");
+        const titleEl = document.getElementById("kanban-drawer-title");
+        const footer = document.getElementById("kanban-drawer-footer");
+        if (!body || !titleEl || !footer) return;
+        const context = kanbanDrawerActiveContext;
+        if (!context) {
+          body.innerHTML = "";
+          footer.innerHTML = "";
+          titleEl.textContent = "Detail";
+          return;
+        }
+        const state = ensureKnowledgeBridgeState(context.windowId, context.kind);
+        const detail = state.detail;
+        body.innerHTML = "";
+        footer.innerHTML = "";
+        titleEl.textContent = detail?.title || "Loading detail";
+        if (state.detailLoading || !detail) {
+          body.appendChild(
+            createNode(
+              "div",
+              "kanban-drawer-section-body",
+              state.detailLoading ? "Loading detail" : "No cached detail available",
+            ),
+          );
+          return;
+        }
+        if (detail.subtitle) {
+          body.appendChild(
+            createNode("div", "knowledge-detail-subtitle", detail.subtitle),
+          );
+        }
+        if ((detail.labels || []).length > 0) {
+          const labelRow = createNode("div", "knowledge-label-row");
+          for (const label of detail.labels) {
+            labelRow.appendChild(createNode("span", "kanban-card-chip", label));
+          }
+          body.appendChild(labelRow);
+        }
+        for (const section of detail.sections || []) {
+          const card = createNode("section", "kanban-drawer-section");
+          card.appendChild(
+            createNode("div", "kanban-drawer-section-title", section.title),
+          );
+          card.appendChild(
+            createNode("pre", "kanban-drawer-section-body", section.body),
+          );
+          body.appendChild(card);
+        }
+        if (
+          detail.launch_issue_number !== null &&
+          detail.launch_issue_number !== undefined
+        ) {
+          const launchButton = createNode(
+            "button",
+            "wizard-button primary",
+            "Launch Agent",
+          );
+          launchButton.type = "button";
+          launchButton.addEventListener("click", () => {
+            openIssueLaunchWizard(context.windowId, detail.launch_issue_number);
+          });
+          footer.appendChild(launchButton);
+        }
+      }
+
       function clamp(value, min) {
         return Math.max(min, value);
       }
@@ -4988,11 +5107,14 @@
         }
 
         card.addEventListener("click", () => {
-          if (state.selectedNumber === entry.number && !state.detailLoading) {
-            return;
-          }
+          // SPEC-2017 US-9 — clicking a card opens the Drawer with the
+          // freshest detail. We always request detail (cheap; cache-
+          // backed) so reopening on the same card still pulls live
+          // comment / linked-branch updates, and we always (re)open
+          // the Drawer so a previously dismissed Drawer reappears.
           requestKnowledgeDetail(windowId, state.kind, entry.number);
           renderKnowledgeBridge(windowId);
+          openKanbanDrawer({ windowId, kind: state.kind, number: entry.number });
         });
 
         // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
@@ -6936,6 +7058,25 @@
             }
             state.detailLoading = false;
             frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
+            // SPEC-2017 US-9 — refresh the Drawer body when the detail
+            // is for the entry the Drawer is currently showing. This
+            // also handles the swap-on-different-card case (T-034):
+            // requestKnowledgeDetail was just dispatched for the new
+            // number, so the new detail will arrive here and overwrite
+            // the body without re-mounting the Drawer.
+            const drawer = document.getElementById("kanban-drawer");
+            if (
+              drawer &&
+              drawer.dataset.open === "true" &&
+              kanbanDrawerActiveContext &&
+              kanbanDrawerActiveContext.windowId === event.id
+            ) {
+              kanbanDrawerActiveContext = {
+                ...kanbanDrawerActiveContext,
+                number: event.detail?.number ?? kanbanDrawerActiveContext.number,
+              };
+              renderKanbanDrawerBody();
+            }
             break;
           }
           case "branch_cleanup_result": {
@@ -7503,6 +7644,22 @@
           frontendUnits.branchesFileTreeSurface.closeBranchCleanupModal();
         }
       });
+      // SPEC-2017 US-9 — wire the Kanban Drawer close affordances:
+      // the explicit × button and the backdrop click both close the
+      // modal. The Esc handler is registered globally a few blocks
+      // below.
+      const kanbanDrawerCloseButton = document.getElementById(
+        "kanban-drawer-close",
+      );
+      if (kanbanDrawerCloseButton) {
+        kanbanDrawerCloseButton.addEventListener("click", closeKanbanDrawer);
+      }
+      const kanbanDrawerBackdrop = document.getElementById(
+        "kanban-drawer-backdrop",
+      );
+      if (kanbanDrawerBackdrop) {
+        kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
+      }
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -7545,6 +7702,15 @@
           if (tabId) {
             send({ kind: "skip_migration", tab_id: tabId });
           }
+          event.preventDefault();
+          return;
+        }
+        // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
+        // before the windowList dropdown because the Drawer is a
+        // modal surface and outranks the dropdown affordance.
+        const kanbanDrawer = document.getElementById("kanban-drawer");
+        if (kanbanDrawer && kanbanDrawer.dataset.open === "true") {
+          closeKanbanDrawer();
           event.preventDefault();
           return;
         }

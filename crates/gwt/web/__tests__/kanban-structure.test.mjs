@@ -147,3 +147,42 @@ test("Kanban cards declare warning indicator hook for unknown phase", () => {
     "expected app.js to honor entry.has_unknown_phase",
   );
 });
+
+// SPEC-2017 US-10: plain Issue cards must surface a (plain) chip and
+// stay non-draggable. The renderer derives both off entry.is_spec ===
+// false and never lets a plain Issue acquire phase metadata.
+test("Plain Issue cards declare draggable=!isPlain and a (plain) chip", () => {
+  // is_spec=false → isPlain=true → draggable=false. The negation
+  // pattern (`!isPlain`) is the canonical form in renderKanbanCard.
+  assert.match(
+    appSource,
+    /const isPlain = entry\.is_spec === false/,
+    "expected renderKanbanCard to derive isPlain from is_spec",
+  );
+  assert.match(
+    appSource,
+    /card\.draggable\s*=\s*!isPlain/,
+    "expected card.draggable to flip on isPlain",
+  );
+  assert.match(
+    appSource,
+    /kanban-card-chip--plain[\s\S]{0,200}?\(plain\)/,
+    "expected the (plain) chip to use the kanban-card-chip--plain class",
+  );
+});
+
+// SPEC-2017 US-11: closed Issue routing into the Done column. The
+// renderer overrides entry.phase with "done" whenever entry.state is
+// "closed", and the state chip uses kanban-card-chip--state-closed.
+test("Closed Issue cards land in Done with the closed state chip class", () => {
+  assert.match(
+    appSource,
+    /entry\.state === "closed" \? "done"/,
+    "expected closed entries to be routed to the done column",
+  );
+  assert.match(
+    appSource,
+    /kanban-card-chip--state-\$\{entry\.state\}|kanban-card-chip--state-closed/,
+    "expected the state chip class to be derived from entry.state",
+  );
+});

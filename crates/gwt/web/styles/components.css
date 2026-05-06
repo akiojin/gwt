@@ -1029,6 +1029,26 @@ kbd.op-kbd {
   body::before, body::after { display: none; }
   [data-agent-state] { animation: none; }
   .op-status-strip__live-dot { animation: none; }
+  /* SPEC-2017 US-9 — Kanban surface in forced-colors mode. Drop our
+     token-derived backgrounds so system colors paint the columns,
+     cards, and chips. Borders fall back to ButtonText so the column
+     boundaries remain visible against the system canvas. */
+  .kanban-board,
+  .kanban-column,
+  .kanban-card,
+  .kanban-card-chip {
+    background: Canvas;
+    color: CanvasText;
+    border-color: ButtonText;
+  }
+  .kanban-column.is-drop-target {
+    outline-color: Highlight;
+    background: Canvas;
+  }
+  .kanban-card.is-selected {
+    outline: 2px solid Highlight;
+    box-shadow: none;
+  }
 }
 
 /* ============================================================
@@ -2075,4 +2095,53 @@ kbd.op-kbd {
     border-top-color: var(--color-state-active);
   }
 }
+
+/* SPEC-2017 US-9 — Kanban Drawer modifier on the SPEC-2356 Drawer.
+   The base `.op-drawer` already provides slide / focus / reduced-
+   motion behavior. The modifier just adds Kanban-specific spacing
+   and gives the body element a wider scroll area so SPEC sections
+   (spec/plan/tasks/notes/comments) stay readable. */
+.kanban-drawer .op-drawer__body {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.kanban-drawer .op-drawer__footer {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: flex-end;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.kanban-drawer-section {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+}
+
+.kanban-drawer-section-title {
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-weight: 700;
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-display);
+  color: var(--color-text-strong);
+  text-transform: uppercase;
+}
+
+.kanban-drawer-section-body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  line-height: 1.5;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 
