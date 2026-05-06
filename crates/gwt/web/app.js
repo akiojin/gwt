@@ -220,6 +220,7 @@
       let reconnectTimer = null;
       let focusedId = null;
       let dragState = null;
+      let windowTabDragState = null;
       let panState = null;
       let resizeState = null;
       let viewport = { x: 0, y: 0, zoom: 1 };
@@ -467,6 +468,39 @@
 
       function workspaceWindowById(windowId) {
         return activeWorkspace().windows.find((windowData) => windowData.id === windowId) || null;
+      }
+
+      function windowGroupId(windowData) {
+        return windowData?.tab_group_id || windowData?.id || "";
+      }
+
+      function windowTabsFor(windowData) {
+        const groupId = windowGroupId(windowData);
+        return (activeWorkspace().windows || []).filter(
+          (candidate) => windowGroupId(candidate) === groupId,
+        );
+      }
+
+      function visibleWindowData(windowData) {
+        if (!windowData?.tab_group_id) {
+          return true;
+        }
+        return Boolean(windowData.tab_group_active);
+      }
+
+      function detachGeometryFromPointer(event, windowData) {
+        const bounds = visibleBounds();
+        const width = windowData?.geometry?.width || 720;
+        const height = windowData?.geometry?.height || 420;
+        const canvasRect = canvas.getBoundingClientRect();
+        const worldX = bounds.x + (event.clientX - canvasRect.left) / viewport.zoom;
+        const worldY = bounds.y + (event.clientY - canvasRect.top) / viewport.zoom;
+        return {
+          x: worldX - 32,
+          y: worldY - 19,
+          width,
+          height,
+        };
       }
 
       function sendOpenProjectDialog() {
@@ -1015,10 +1049,11 @@
       }
 
       function topmostWindowId(workspace) {
-        if (!workspace.windows || workspace.windows.length === 0) {
+        const visibleWindows = (workspace.windows || []).filter(visibleWindowData);
+        if (visibleWindows.length === 0) {
           return null;
         }
-        return workspace.windows.reduce((topmost, candidate) => {
+        return visibleWindows.reduce((topmost, candidate) => {
           if (!topmost || candidate.z_index > topmost.z_index) {
             return candidate;
           }
@@ -1511,6 +1546,63 @@
           id: windowId,
           bounds: visibleBounds(),
         });
+      }
+
+      function renderWindowTabs(windowData, element) {
+        const strip = element.querySelector(".window-tab-strip");
+        if (!strip) return;
+        const tabs = windowTabsFor(windowData);
+        strip.innerHTML = "";
+        for (const tab of tabs) {
+          const tabItem = document.createElement("div");
+          tabItem.className = "window-tab-item";
+          const tabButton = document.createElement("button");
+          tabButton.type = "button";
+          tabButton.className = "window-tab";
+          tabButton.draggable = true;
+          tabButton.dataset.windowTabId = tab.id;
+          tabButton.setAttribute("aria-label", `Activate ${tab.title}`);
+          if (tab.id === windowData.id || tab.tab_group_active) {
+            tabButton.classList.add("active");
+            tabButton.setAttribute("aria-current", "page");
+          }
+          tabButton.textContent = tab.title;
+          tabButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "activate_window_tab", id: tab.id });
+          });
+          tabButton.addEventListener("dragstart", (event) => {
+            windowTabDragState = { id: tab.id, docked: false };
+            event.dataTransfer?.setData("text/plain", tab.id);
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = "move";
+            }
+          });
+          tabButton.addEventListener("dragend", (event) => {
+            const drag = windowTabDragState;
+            windowTabDragState = null;
+            if (!drag || drag.docked) return;
+            const draggedWindow = workspaceWindowById(drag.id);
+            if (!draggedWindow?.tab_group_id) return;
+            send({
+              kind: "detach_window_tab",
+              id: drag.id,
+              geometry: detachGeometryFromPointer(event, draggedWindow),
+            });
+          });
+          const closeButton = document.createElement("button");
+          closeButton.type = "button";
+          closeButton.className = "window-tab-close";
+          closeButton.setAttribute("aria-label", `Close ${tab.title}`);
+          closeButton.textContent = "×";
+          closeButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_window", id: tab.id });
+          });
+          tabItem.appendChild(tabButton);
+          tabItem.appendChild(closeButton);
+          strip.appendChild(tabItem);
+        }
       }
 
       function handleTitlebarClick(windowId) {
@@ -6436,6 +6528,7 @@
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
+            <div class="window-tab-strip" aria-label="Window tabs"></div>
             <div class="window-body"></div>
             <div class="resize-handle"></div>
           `;
@@ -6481,6 +6574,27 @@
             };
             titlebar.setPointerCapture(event.pointerId);
           });
+          titlebar.addEventListener("dragover", (event) => {
+            if (!windowTabDragState || windowTabDragState.id === windowData.id) {
+              return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) {
+              event.dataTransfer.dropEffect = "move";
+            }
+          });
+          titlebar.addEventListener("drop", (event) => {
+            if (!windowTabDragState || windowTabDragState.id === windowData.id) {
+              return;
+            }
+            event.preventDefault();
+            windowTabDragState.docked = true;
+            send({
+              kind: "dock_window_tab",
+              id: windowTabDragState.id,
+              target_id: windowData.id,
+            });
+          });
 
           resizeHandle.addEventListener("pointerdown", (event) => {
             focusWindowRemotely(windowData.id);
@@ -6502,6 +6616,7 @@
         }
 
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
+        renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
         } else {
@@ -6511,6 +6626,7 @@
         const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
+        element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
         element.style.left = `${windowData.geometry.x}px`;
         element.style.top = `${windowData.geometry.y}px`;
         element.style.width = `${windowData.geometry.width}px`;
@@ -6571,6 +6687,10 @@
 
         for (const windowData of workspace.windows) {
           ensureWindow(windowData);
+          const element = windowMap.get(windowData.id);
+          if (element) {
+            element.hidden = !visibleWindowData(windowData);
+          }
         }
 
         requestAnimationFrame(syncMaximizedWindowsToViewport);

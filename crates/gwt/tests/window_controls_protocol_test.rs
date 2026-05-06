@@ -58,6 +58,54 @@ fn frontend_event_deserializes_window_state_commands() {
         other => panic!("unexpected event: {other:?}"),
     }
 
+    let dock = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "dock_window_tab",
+        "id": "project-1::board-1",
+        "target_id": "project-1::agent-1"
+    }))
+    .expect("dock_window_tab should deserialize");
+    match dock {
+        FrontendEvent::DockWindowTab { id, target_id } => {
+            assert_eq!(id, "project-1::board-1");
+            assert_eq!(target_id, "project-1::agent-1");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let activate = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "activate_window_tab",
+        "id": "project-1::board-1"
+    }))
+    .expect("activate_window_tab should deserialize");
+    match activate {
+        FrontendEvent::ActivateWindowTab { id } => {
+            assert_eq!(id, "project-1::board-1");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let detach = serde_json::from_value::<FrontendEvent>(json!({
+        "kind": "detach_window_tab",
+        "id": "project-1::board-1",
+        "geometry": {
+            "x": 64.0,
+            "y": 80.0,
+            "width": 720.0,
+            "height": 420.0
+        }
+    }))
+    .expect("detach_window_tab should deserialize");
+    match detach {
+        FrontendEvent::DetachWindowTab { id, geometry } => {
+            assert_eq!(id, "project-1::board-1");
+            assert_eq!(geometry.x, 64.0);
+            assert_eq!(geometry.y, 80.0);
+            assert_eq!(geometry.width, 720.0);
+            assert_eq!(geometry.height, 420.0);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
     let knowledge = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "load_knowledge_bridge",
         "id": "project-1::issue-1",

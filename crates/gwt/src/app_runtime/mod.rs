@@ -956,6 +956,13 @@ impl AppRuntime {
             }
             FrontendEvent::MinimizeWindow { id } => self.minimize_window_events(&id),
             FrontendEvent::RestoreWindow { id } => self.restore_window_events(&id),
+            FrontendEvent::DockWindowTab { id, target_id } => {
+                self.dock_window_tab_events(&id, &target_id)
+            }
+            FrontendEvent::ActivateWindowTab { id } => self.activate_window_tab_events(&id),
+            FrontendEvent::DetachWindowTab { id, geometry } => {
+                self.detach_window_tab_events(&id, geometry)
+            }
             FrontendEvent::ListWindows => {
                 vec![OutboundEvent::reply(client_id, self.list_windows_event())]
             }
@@ -4177,6 +4184,8 @@ exit 0
             dynamic_title: None,
             agent_id: None,
             agent_color: None,
+            tab_group_id: None,
+            tab_group_active: false,
         }
     }
 
