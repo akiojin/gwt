@@ -248,7 +248,10 @@ confirmation modal with three actions:
 Starting with the Operator Design System update, gwt is themed as a single
 mission-control surface with editorial-industrial typography (`Mona Sans` for
 body, `Hubot Sans` condensed for display, `JetBrains Mono` for terminal /
-counters). Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
+counters). The default type scale is tuned for developer readability, so
+terminal text, IDs, paths, counters, and dense work surfaces stay legible during
+long sessions while display typography remains reserved for headings and chrome
+labels. Every chrome surface — Project Bar, Sidebar Layers, Status Strip,
 Command Palette, Hotkey Overlay, Drawer modals, floating windows — shares a
 single token system that ships in two flagship themes:
 
@@ -257,10 +260,11 @@ single token system that ships in two flagship themes:
 - **Light Operator** (Drafting Table / bone + ink) — for bright environments
 
 The active theme follows your OS `prefers-color-scheme`, but the **Theme**
-toggle in the Project Bar lets you cycle `auto → dark → light → auto`. The
+control in the Project Bar lets you choose `auto`, `dark`, or `light`. The
 choice is persisted in browser storage and survives restarts. xterm terminal
-content stays on the Dark Operator palette for readability, while the terminal
-window chrome follows the overall theme. `prefers-reduced-motion: reduce`
+content stays on the Dark Operator palette with larger developer-readable font
+metrics, while the terminal window chrome follows the overall theme.
+`prefers-reduced-motion: reduce`
 disables the Living Telemetry pulse rim, status strip ticking, and Mission
 Briefing intro reveal so the UI stays usable in motion-sensitive environments.
 `forced-colors: active` (Windows High Contrast / macOS Increase Contrast)

@@ -186,6 +186,8 @@ pub enum FrontendEvent {
         owners: Vec<String>,
         #[serde(default)]
         targets: Vec<String>,
+        #[serde(default)]
+        mentions: Vec<gwt_core::coordination::BoardMention>,
     },
     CreateMemoNote {
         id: String,
@@ -379,6 +381,7 @@ pub struct ActiveWorkProjectionView {
     pub title: String,
     pub status_category: String,
     pub status_text: String,
+    pub summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub active_agents: usize,
@@ -653,7 +656,9 @@ pub enum KnowledgePhaseUpdateResult {
 #[cfg(test)]
 mod tests {
     use gwt_core::{
-        coordination::{AuthorKind, BoardEntry, BoardEntryKind},
+        coordination::{
+            AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
+        },
         logging::{LogEvent, LogLevel},
         notes::MemoNote,
     };
@@ -763,6 +768,7 @@ mod tests {
                 title: "Implement Start Work".to_string(),
                 status_category: "active".to_string(),
                 status_text: "Launching from Project Bar".to_string(),
+                summary: Some("Launching from Project Bar".to_string()),
                 owner: Some("SPEC-2359".to_string()),
                 next_action: Some("Run launch tests".to_string()),
                 active_agents: 1,
@@ -887,6 +893,62 @@ mod tests {
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
         );
+    }
+
+    #[test]
+    fn board_entries_serializes_typed_mentions_contract() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Question,
+            "Can you verify this?",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_mention(
+            BoardMention::new(BoardMentionTargetKind::User, "akiojin").with_label("Akio"),
+        );
+        let event = BackendEvent::BoardEntries {
+            id: "board-1".to_string(),
+            entries: vec![entry],
+            has_more_before: false,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize board entries");
+
+        assert_eq!(value["entries"][0]["mentions"][0]["target_kind"], "user");
+        assert_eq!(value["entries"][0]["mentions"][0]["target"], "akiojin");
+        assert_eq!(value["entries"][0]["mentions"][0]["label"], "Akio");
+    }
+
+    #[test]
+    fn post_board_entry_deserializes_typed_mentions() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "post_board_entry",
+            "id": "board-1",
+            "entry_kind": "question",
+            "body": "Can you verify this?",
+            "parent_id": null,
+            "topics": [],
+            "owners": [],
+            "mentions": [
+                {"target_kind": "user", "target": "akiojin", "label": "Akio"},
+                {"target_kind": "agent", "target": "codex"}
+            ]
+        }))
+        .expect("deserialize post board entry");
+
+        assert!(matches!(
+            frontend,
+            FrontendEvent::PostBoardEntry { mentions, .. }
+                if mentions.len() == 2
+                    && mentions[0].target_kind == BoardMentionTargetKind::User
+                    && mentions[0].target == "akiojin"
+                    && mentions[1].target_kind == BoardMentionTargetKind::Agent
+                    && mentions[1].target == "codex"
+        ));
     }
 
     #[test]

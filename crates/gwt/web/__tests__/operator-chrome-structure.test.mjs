@@ -12,6 +12,21 @@ const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
+const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+
+function cssRemVar(source, name) {
+  const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
+  assert.ok(match, `missing typography token: ${name}`);
+  return Number(match[1]);
+}
+
+function terminalOptionNumber(name) {
+  const runtime = appSource.match(/new\s+Terminal\(\{\s*([\s\S]*?)\s*\}\);/);
+  assert.ok(runtime, "expected xterm Terminal constructor options");
+  const match = runtime[1].match(new RegExp(`${name}:\\s*([0-9.]+)`));
+  assert.ok(match, `missing terminal option: ${name}`);
+  return Number(match[1]);
+}
 
 // SPEC-2356 — extract every @media block matching the supplied condition,
 // using brace-depth tracking so nested rules don't truncate the body.
@@ -211,7 +226,7 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
-test("Active Work sidebar only focuses live Agent windows and falls back to Quick Start", () => {
+test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
     /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
@@ -219,8 +234,18 @@ test("Active Work sidebar only focuses live Agent windows and falls back to Quic
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkQuickStart\(\)[\s\S]+Quick Start[\s\S]+kind:\s*"open_start_work"/,
-    "expected no-Agent Active Work state to offer Quick Start through Start Work",
+    /const\s+activeWorkSection\s*=\s*document\.getElementById\("op-active-work"\)/,
+    "expected Active Work visibility to be controlled at the section level",
+  );
+  assert.match(
+    appSource,
+    /function\s+setActiveWorkSectionVisible\(visible\)[\s\S]+activeWorkSection\.hidden\s*=\s*!visible/,
+    "expected no-Agent Active Work state to hide the entire section instead of leaving stale work UI",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(agentCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
+    "expected no focusable Agent windows to remove the Active Work sidebar section",
   );
   assert.match(
     appSource,
@@ -318,6 +343,21 @@ test("font preload hints exist for Mona/Hubot/JetBrains", () => {
   for (const expected of ["MonaSans.woff2", "HubotSans-Bold.woff2", "JetBrainsMono.woff2"]) {
     assert.ok(preloads.some((h) => h.endsWith(`/assets/fonts/${expected}`)), `missing preload: ${expected}`);
   }
+});
+
+test("developer readability typography keeps working text above minimum sizes", () => {
+  assert.ok(cssRemVar(typographySource, "--type-xs") >= 0.75, "--type-xs must be at least 12px");
+  assert.ok(cssRemVar(typographySource, "--type-sm") >= 0.875, "--type-sm must be at least 14px");
+  assert.match(
+    typographySource,
+    /\.t-mono\s*\{[\s\S]*?line-height:\s*1\.(?:4|[5-9])[\s\S]*?\}/,
+    "expected mono utility line-height to stay readable",
+  );
+  assert.doesNotMatch(
+    typographySource,
+    /\.(?:t-body|t-mono)\s*\{[\s\S]*?font-stretch:\s*75%/,
+    "body and mono working text must not use condensed display typography",
+  );
 });
 
 test("Mission Briefing has accessible role and live region", () => {
@@ -557,6 +597,11 @@ test("xterm content stays on the dark Operator palette across app theme changes"
     /registerXtermThemeAdapter/,
     "theme toggles must not swap xterm content away from the dark palette",
   );
+});
+
+test("xterm developer readability defaults use larger font metrics", () => {
+  assert.ok(terminalOptionNumber("fontSize") >= 14, "xterm fontSize must be at least 14px");
+  assert.ok(terminalOptionNumber("lineHeight") >= 1.25, "xterm lineHeight must be at least 1.25");
 });
 
 test("operator-shell wires sidebar collapse hotkey and Mission Briefing early dismiss", () => {

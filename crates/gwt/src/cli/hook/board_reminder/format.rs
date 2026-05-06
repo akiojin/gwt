@@ -46,11 +46,14 @@ pub(super) fn session_start_text(entries: &[BoardEntry], match_keys: &[String]) 
 }
 
 pub(super) fn entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
-    !entry.target_owners.is_empty()
-        && entry
-            .target_owners
+    entry
+        .target_owners
+        .iter()
+        .any(|t| match_keys.iter().any(|k| k == t))
+        || entry
+            .mentions
             .iter()
-            .any(|t| match_keys.iter().any(|k| k == t))
+            .any(|mention| match_keys.iter().any(|k| k == &mention.typed_key()))
 }
 
 pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> String {
@@ -75,7 +78,9 @@ pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> St
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+    use gwt_core::coordination::{
+        AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
+    };
 
     use super::*;
 
@@ -124,6 +129,21 @@ mod tests {
         let entry = make_entry(vec!["sess-1".into()]);
         assert!(entry_targets_self(&entry, &["sess-1".into()]));
         assert!(!entry_targets_self(&entry, &["sess-other".into()]));
+    }
+
+    #[test]
+    fn entry_targets_self_or_match_with_typed_session_mention() {
+        let entry = make_entry(vec![])
+            .with_mention(BoardMention::new(BoardMentionTargetKind::Session, "sess-1"));
+        assert!(entry_targets_self(&entry, &["session:sess-1".into()]));
+        assert!(!entry_targets_self(&entry, &["session:sess-other".into()]));
+    }
+
+    #[test]
+    fn entry_targets_self_or_match_with_typed_agent_mention() {
+        let entry = make_entry(vec![])
+            .with_mention(BoardMention::new(BoardMentionTargetKind::Agent, "codex"));
+        assert!(entry_targets_self(&entry, &["agent:codex".into()]));
     }
 
     #[test]

@@ -490,7 +490,10 @@ enum UserEvent {
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
-    ApplyUpdate(gwt_core::update::UpdateState),
+    ApplyUpdate {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
     /// [`gwt::BackendEvent::MigrationProgress`].
@@ -601,6 +604,7 @@ mod tests {
                 topics: Vec::new(),
                 owners: Vec::new(),
                 targets: Vec::new(),
+                mentions: Vec::new(),
             }
         ));
     }
@@ -1822,7 +1826,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 3);
+        assert_eq!(error_events.len(), 4);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
         assert_eq!(
             runtime
@@ -1833,11 +1837,16 @@ mod tests {
         );
         assert!(matches!(
             error_events[1].event,
+            BackendEvent::ActiveWorkProjection { ref projection }
+                if projection.active_agents == 1 && projection.agents.len() == 1
+        ));
+        assert!(matches!(
+            error_events[2].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_one_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            error_events[2].event,
+            error_events[3].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
@@ -4694,8 +4703,18 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 clients.dispatch(record_update_available(&mut app, state));
             }
-            Event::UserEvent(UserEvent::ApplyUpdate(state)) => {
-                std::thread::spawn(move || apply_update_state_and_exit(state));
+            Event::UserEvent(UserEvent::ApplyUpdate { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    if let Err(message) = apply_update_state_and_exit(state) {
+                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError { message },
+                            ),
+                        ]));
+                    }
+                });
             }
             Event::UserEvent(UserEvent::MigrationProgress {
                 tab_id,
