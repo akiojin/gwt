@@ -9,7 +9,18 @@
       // module loads so the theme toggle, command palette, hotkey overlay,
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
-      const __op = initOperatorShell();
+      let __op;
+      try {
+        __op = initOperatorShell();
+      } catch (error) {
+        console.error("operator shell failed during startup", error);
+        dismissOperatorBriefing();
+        __op = {
+          themeManager: null,
+          hotkey: null,
+          palette: null,
+        };
+      }
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
@@ -210,6 +221,14 @@
           ]),
         }),
       });
+
+      function dismissOperatorBriefing() {
+        const briefing = document.getElementById("op-briefing");
+        if (!briefing) return;
+        briefing.dataset.state = "exiting";
+        briefing.hidden = true;
+        briefing.setAttribute("aria-hidden", "true");
+      }
 
       // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
       // Incremented on every `terminal.onData` firing so layer-by-layer counts
@@ -832,6 +851,7 @@
       }
 
       function renderAppState(nextState) {
+        dismissOperatorBriefing();
         appState = nextState || {
           app_version: "",
           tabs: [],

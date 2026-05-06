@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.19.1] - 2026-05-06
+
+### Bug Fixes
+
+- Prevent operator splash from blocking startup
+
 ## [9.19.0] - 2026-05-06
 
 ### Bug Fixes
