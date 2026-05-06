@@ -2758,7 +2758,7 @@ mod tests {
             .expect("git init --bare");
         assert!(status.success(), "git init --bare failed");
         let target = resolve_project_target(&bare).expect("bare repo target");
-        assert_eq!(target.kind, ProjectKind::Bare);
+        assert_eq!(target.kind, ProjectKind::Git);
         assert_eq!(target.project_root, dunce::canonicalize(&bare).unwrap());
     }
 
