@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.20.4] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Launch Agentの設定復元を保持
+
 ## [9.20.3] - 2026-05-06
 
 ### Bug Fixes
