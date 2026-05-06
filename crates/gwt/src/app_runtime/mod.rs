@@ -1326,7 +1326,10 @@ impl AppRuntime {
                     asset_url: Some(_), ..
                 },
             ) => {
-                self.proxy.send(UserEvent::ApplyUpdate(state));
+                self.proxy.send(UserEvent::ApplyUpdate {
+                    state,
+                    client_id: client_id.to_string(),
+                });
                 vec![]
             }
             Some(gwt_core::update::UpdateState::Available { .. }) => vec![OutboundEvent::reply(
@@ -4842,11 +4845,15 @@ exit 0
             events.iter().any(|event| {
                 matches!(
                     event,
-                    UserEvent::ApplyUpdate(gwt_core::update::UpdateState::Available {
-                        latest,
-                        asset_url: Some(asset_url),
-                        ..
-                    }) if latest == "9.20.2"
+                    UserEvent::ApplyUpdate {
+                        client_id,
+                        state: gwt_core::update::UpdateState::Available {
+                            latest,
+                            asset_url: Some(asset_url),
+                            ..
+                        },
+                    } if client_id == "client-1"
+                        && latest == "9.20.2"
                         && asset_url == "https://example.invalid/gwt-macos-universal.dmg"
                 )
             })

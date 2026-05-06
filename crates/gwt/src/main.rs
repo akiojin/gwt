@@ -490,7 +490,10 @@ enum UserEvent {
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
-    ApplyUpdate(gwt_core::update::UpdateState),
+    ApplyUpdate {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
     /// [`gwt::BackendEvent::MigrationProgress`].
@@ -4699,8 +4702,18 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 clients.dispatch(record_update_available(&mut app, state));
             }
-            Event::UserEvent(UserEvent::ApplyUpdate(state)) => {
-                std::thread::spawn(move || apply_update_state_and_exit(state));
+            Event::UserEvent(UserEvent::ApplyUpdate { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    if let Err(message) = apply_update_state_and_exit(state) {
+                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError { message },
+                            ),
+                        ]));
+                    }
+                });
             }
             Event::UserEvent(UserEvent::MigrationProgress {
                 tab_id,
