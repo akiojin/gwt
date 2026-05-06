@@ -172,6 +172,41 @@ fn issue_cache_refresh_is_stale(cache_root: &Path, ttl: Duration) -> bool {
         .map_or(true, |age| age >= ttl)
 }
 
+/// SPEC-2017 US-8 — Apply label add / remove operations to a GitHub
+/// Issue via `gh issue edit`. The flags are passed in a single command
+/// so the API call is atomic; either all labels are written or none
+/// are. `labels_to_add` and `labels_to_remove` are deduplicated by the
+/// caller (`update_knowledge_phase`).
+pub(crate) fn write_issue_labels_via_gh(
+    repo_path: &Path,
+    issue_number: u64,
+    labels_to_add: &[String],
+    labels_to_remove: &[String],
+) -> Result<(), String> {
+    if labels_to_add.is_empty() && labels_to_remove.is_empty() {
+        return Ok(());
+    }
+    let mut command = gwt_core::process::hidden_command(gh_executable());
+    command.args(["issue", "edit", &issue_number.to_string()]);
+    for label in labels_to_add {
+        command.arg("--add-label").arg(label);
+    }
+    for label in labels_to_remove {
+        command.arg("--remove-label").arg(label);
+    }
+    let output = command
+        .current_dir(repo_path)
+        .output()
+        .map_err(|err| format!("gh issue edit #{issue_number}: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "gh issue edit #{issue_number}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
     let output = gwt_core::process::hidden_command(gh_executable())
         .args([

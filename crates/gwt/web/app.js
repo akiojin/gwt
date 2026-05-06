@@ -2289,6 +2289,24 @@
         });
       }
 
+      // SPEC-2017 US-8 — push a Kanban phase change to the backend.
+      // The optimistic UI move lives in renderKanbanCard's drop handler;
+      // this helper just wires the WebSocket request and reserves a
+      // request_id so knowledge_bridge_phase_updated can correlate the
+      // response back to a specific drop. target_phase=null means
+      // "Backlog" — the backend strips every phase/* label.
+      function sendUpdateKnowledgePhase(windowId, issueNumber, targetPhase) {
+        const requestId = nextKnowledgeLoadRequestId++;
+        send({
+          kind: "update_knowledge_bridge_phase",
+          id: windowId,
+          request_id: requestId,
+          issue_number: issueNumber,
+          target_phase: targetPhase,
+        });
+        return requestId;
+      }
+
       function openIssueLaunchWizard(windowId, issueNumber) {
         send({
           kind: "open_issue_launch_wizard",
@@ -4820,6 +4838,75 @@
         return "Empty";
       }
 
+      // SPEC-2017 US-8 — wire dragover / dragenter / dragleave / drop on
+      // a Kanban column once. dragover preventDefault is required for
+      // the drop event to fire; we also light up .is-drop-target as a
+      // visual affordance. drop translates the column data-phase into
+      // an `update_knowledge_bridge_phase` request, optimistically
+      // moves the card DOM, and registers a pending entry so the card
+      // shows a spinner until the response confirms.
+      function wireKanbanColumnDropTarget(windowId, column) {
+        column.addEventListener("dragover", (event) => {
+          event.preventDefault();
+          if (event.dataTransfer) {
+            event.dataTransfer.dropEffect = "move";
+          }
+        });
+        column.addEventListener("dragenter", (event) => {
+          event.preventDefault();
+          column.classList.add("is-drop-target");
+        });
+        column.addEventListener("dragleave", (event) => {
+          // dragleave fires for child element transitions; only clear
+          // the marker when leaving the column itself.
+          if (event.target === column) {
+            column.classList.remove("is-drop-target");
+          }
+        });
+        column.addEventListener("drop", (event) => {
+          event.preventDefault();
+          column.classList.remove("is-drop-target");
+          const raw = event.dataTransfer?.getData("text/plain");
+          const issueNumber = raw ? Number.parseInt(raw, 10) : NaN;
+          if (!Number.isFinite(issueNumber)) {
+            return;
+          }
+          const state = ensureKnowledgeBridgeState(
+            windowId,
+            knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
+          );
+          const phaseKey = column.dataset.phase;
+          if (!phaseKey) return;
+          const targetPhase = phaseKey === "backlog" || phaseKey === "done"
+            ? phaseKey === "done"
+              ? "done"
+              : null
+            : phaseKey;
+          // Optimistic UI: rewrite the entry's phase locally and
+          // rerender so the card lands in the target column instantly.
+          if (Array.isArray(state.entries)) {
+            const index = state.entries.findIndex(
+              (entry) => entry.number === issueNumber,
+            );
+            if (index >= 0) {
+              state.entries[index] = {
+                ...state.entries[index],
+                phase: targetPhase,
+                has_unknown_phase: false,
+              };
+            }
+          }
+          if (!state.pendingPhaseUpdates) {
+            state.pendingPhaseUpdates = new Map();
+          }
+          state.pendingPhaseUpdates.set(
+            issueNumber,
+            sendUpdateKnowledgePhase(windowId, issueNumber, targetPhase),
+          );
+          renderKnowledgeBridge(windowId);
+        });
+      }
+
       function renderKanbanCard(windowId, state, entry) {
         const card = createNode("button", "kanban-card");
         card.type = "button";
@@ -4907,6 +4994,31 @@
           requestKnowledgeDetail(windowId, state.kind, entry.number);
           renderKnowledgeBridge(windowId);
         });
+
+        // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
+        // skip these handlers entirely (draggable=false above) so they
+        // can still be clicked but never picked up.
+        if (!isPlain) {
+          card.addEventListener("dragstart", (event) => {
+            // Snapshot the original entry so a failed write-back can
+            // restore it; the snapshot keeps the entire entry value
+            // because labels / phase / state all change on success.
+            state.dndSnapshot = {
+              issueNumber: entry.number,
+              entry: { ...entry },
+              originPhase:
+                entry.state === "closed" ? "done" : entry.phase || "backlog",
+            };
+            card.classList.add("is-dragging");
+            if (event.dataTransfer) {
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", String(entry.number));
+            }
+          });
+          card.addEventListener("dragend", () => {
+            card.classList.remove("is-dragging");
+          });
+        }
         return card;
       }
 
@@ -4984,6 +5096,10 @@
             body.innerHTML = "";
           }
           columnsByPhase.set(column.dataset.phase, column);
+          if (column.dataset.kanbanWired !== "true") {
+            wireKanbanColumnDropTarget(windowId, column);
+            column.dataset.kanbanWired = "true";
+          }
         }
         const counts = new Map();
         for (const entry of visibleEntries) {
@@ -6884,6 +7000,52 @@
             state.loading = false;
             state.error = event.message;
             frontendUnits.logsSurface.renderLogs(event.id);
+            break;
+          }
+          case "knowledge_bridge_phase_updated": {
+            // SPEC-2017 US-8 — phase write-back response. On Ok we
+            // overwrite the optimistic card with fresh_entry and clear
+            // the pending marker so the spinner stops; on Error we
+            // rollback from dndSnapshot and surface a toast.
+            const state = frontendUnits.knowledgeSettingsSurface.ensureKnowledgeBridgeState(
+              event.id,
+              knowledgeKindForPreset(workspaceWindowById(event.id)?.preset),
+            );
+            if (state.pendingPhaseUpdates) {
+              state.pendingPhaseUpdates.delete(event.issue_number);
+            }
+            if (event.result?.kind === "ok") {
+              const fresh = event.result.fresh_entry;
+              if (fresh && Array.isArray(state.entries)) {
+                const index = state.entries.findIndex(
+                  (entry) => entry.number === fresh.number,
+                );
+                if (index >= 0) {
+                  state.entries[index] = fresh;
+                }
+              }
+              state.dndSnapshot = null;
+            } else {
+              const message =
+                event.result?.message || "Failed to update phase. Reverting.";
+              if (
+                state.dndSnapshot &&
+                state.dndSnapshot.issueNumber === event.issue_number &&
+                Array.isArray(state.entries)
+              ) {
+                const index = state.entries.findIndex(
+                  (entry) => entry.number === event.issue_number,
+                );
+                if (index >= 0 && state.dndSnapshot.entry) {
+                  // Restore the card data captured at dragstart so the
+                  // labels / phase / state mirror the pre-drop reality.
+                  state.entries[index] = state.dndSnapshot.entry;
+                }
+                state.dndSnapshot = null;
+              }
+              state.error = message;
+            }
+            frontendUnits.knowledgeSettingsSurface.renderKnowledgeBridge(event.id);
             break;
           }
           case "knowledge_error": {

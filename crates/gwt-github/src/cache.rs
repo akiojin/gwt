@@ -283,6 +283,41 @@ impl Cache {
             Err(e) => Err(CacheError::Io(e)),
         }
     }
+
+    /// SPEC-2017 T-008 — Atomically rewrite the `labels` array on the
+    /// cached `meta.json` for `number`.
+    ///
+    /// This is the local mirror of a Kanban phase change: after the
+    /// frontend D&D pushes the new labels through the GitHub API, the
+    /// cache needs to reflect the same labels so the next render shows
+    /// the card in the right column without waiting for a full refresh.
+    ///
+    /// `body.md`, `sections/*`, and `comments/*` are intentionally left
+    /// alone — only the labels array is rewritten. Returns
+    /// [`CacheError::Io`] when the entry is missing on disk so the
+    /// caller can surface a typed error instead of silently succeeding.
+    pub fn apply_phase_change(
+        &self,
+        number: IssueNumber,
+        new_labels: Vec<String>,
+    ) -> Result<(), CacheError> {
+        let meta_path = self.issue_dir(number).join("meta.json");
+        let meta_bytes = match fs::read(&meta_path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(CacheError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("issue #{} not in cache", number.0),
+                )));
+            }
+            Err(err) => return Err(CacheError::Io(err)),
+        };
+        let mut meta: CacheMeta = serde_json::from_slice(&meta_bytes)?;
+        meta.labels = new_labels;
+        let updated_bytes = serde_json::to_vec_pretty(&meta)?;
+        write_atomic(&meta_path, &updated_bytes)?;
+        Ok(())
+    }
 }
 
 /// Write bytes to `path` atomically via a `.tmp-<pid>-<nanos>` sibling file

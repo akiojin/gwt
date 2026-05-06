@@ -305,6 +305,116 @@ pub fn search_knowledge_bridge(
     )
 }
 
+/// SPEC-2017 US-8 — Apply a Kanban phase change to the GitHub Issue
+/// owning `issue_number` and return the freshly-rebuilt
+/// [`KnowledgeListItem`].
+///
+/// `target_phase` semantics:
+/// - `None` → remove every `phase/*` label (Backlog drop)
+/// - `Some(canonical)` → ensure exactly the matching `phase/<canonical>`
+///   label is set, removing any other `phase/*` labels first
+///
+/// The function shells out to `gh issue edit --add-label / --remove-label`
+/// (matching the existing `sync_issue_cache_from_remote` pattern) and
+/// updates the local Issue cache via [`Cache::apply_phase_change`] so
+/// subsequent [`load_knowledge_bridge`] calls reflect the change without
+/// waiting for a full refresh.
+///
+/// Returns the rebuilt [`KnowledgeListItem`] on success, or a human-
+/// readable error string on failure (network, permission, unknown phase,
+/// missing cache entry).
+pub fn update_knowledge_phase(
+    repo_path: &Path,
+    issue_number: u64,
+    target_phase: Option<&str>,
+) -> Result<KnowledgeListItem, String> {
+    update_knowledge_phase_with_label_writer(
+        repo_path,
+        issue_number,
+        target_phase,
+        |labels_to_add, labels_to_remove| {
+            crate::issue_cache::write_issue_labels_via_gh(
+                repo_path,
+                issue_number,
+                labels_to_add,
+                labels_to_remove,
+            )
+        },
+    )
+}
+
+/// Internal seam that lets unit tests substitute a fake label writer
+/// for the gh CLI shell-out. Production callers go through
+/// [`update_knowledge_phase`] which always wires up the gh writer.
+pub(crate) fn update_knowledge_phase_with_label_writer<F>(
+    repo_path: &Path,
+    issue_number: u64,
+    target_phase: Option<&str>,
+    label_writer: F,
+) -> Result<KnowledgeListItem, String>
+where
+    F: FnOnce(&[String], &[String]) -> Result<(), String>,
+{
+    if let Some(value) = target_phase {
+        if !KNOWLEDGE_PHASE_LABELS.contains(&value) {
+            return Err(format!(
+                "unknown phase '{value}' (expected one of {:?})",
+                KNOWLEDGE_PHASE_LABELS
+            ));
+        }
+    }
+    let cache_root = issue_cache_root_for_repo_path_or_detached(repo_path);
+    let cache = Cache::new(cache_root);
+    let entry = cache
+        .load_entry(gwt_github::IssueNumber(issue_number))
+        .ok_or_else(|| format!("Issue #{issue_number} not in local cache"))?;
+    let target_label = target_phase.map(|value| format!("phase/{value}"));
+    let labels_to_remove: Vec<String> = entry
+        .snapshot
+        .labels
+        .iter()
+        .filter(|label| {
+            label.starts_with("phase/") && Some(label.as_str()) != target_label.as_deref()
+        })
+        .cloned()
+        .collect();
+    let labels_to_add: Vec<String> = target_label
+        .as_ref()
+        .filter(|target| !entry.snapshot.labels.iter().any(|label| label == *target))
+        .cloned()
+        .into_iter()
+        .collect();
+    if !labels_to_add.is_empty() || !labels_to_remove.is_empty() {
+        label_writer(&labels_to_add, &labels_to_remove)?;
+    }
+    let mut updated_labels: Vec<String> = entry
+        .snapshot
+        .labels
+        .iter()
+        .filter(|label| !labels_to_remove.contains(label))
+        .cloned()
+        .collect();
+    for label in &labels_to_add {
+        if !updated_labels.contains(label) {
+            updated_labels.push(label.clone());
+        }
+    }
+    cache
+        .apply_phase_change(gwt_github::IssueNumber(issue_number), updated_labels)
+        .map_err(|error| format!("apply phase change to cache: {error}"))?;
+    let refreshed = cache
+        .load_entry(gwt_github::IssueNumber(issue_number))
+        .ok_or_else(|| format!("Issue #{issue_number} disappeared after cache update"))?;
+    let linked_branches: HashMap<u64, Vec<String>> = HashMap::new();
+    Ok(
+        if refreshed.snapshot.labels.contains(&SPEC_LABEL.to_string()) {
+            spec_list_item(&refreshed, &linked_branches, None)
+        } else {
+            issue_list_item(&refreshed, &linked_branches, None)
+        },
+    )
+}
+
 pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Sized>(
     repo_path: &Path,
     kind: KnowledgeKind,
@@ -1490,5 +1600,168 @@ Extra context.
         // canonical labels at once is malformed input
         assert_eq!(extracted.phase.as_deref(), Some("draft"));
         assert!(extracted.has_unknown_phase);
+    }
+
+    // SPEC-2017 T-027 — phase write-back orchestration coverage. The
+    // tests use `update_knowledge_phase_with_label_writer` to inject a
+    // closure that captures (and optionally fails) the gh CLI call so
+    // we don't need a live `gh` binary on the test runner.
+
+    #[test]
+    fn update_knowledge_phase_replaces_existing_phase_label() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("cache root");
+        Cache::new(cache_root)
+            .write_snapshot(&issue_snapshot(
+                100,
+                "Coverage spec",
+                "Body",
+                &["gwt-spec", "phase/draft"],
+                IssueState::Open,
+            ))
+            .expect("write snapshot");
+
+        let captured: std::cell::RefCell<Option<(Vec<String>, Vec<String>)>> =
+            std::cell::RefCell::new(None);
+        let result = update_knowledge_phase_with_label_writer(
+            &repo,
+            100,
+            Some("implementation"),
+            |add, remove| {
+                *captured.borrow_mut() = Some((add.to_vec(), remove.to_vec()));
+                Ok(())
+            },
+        )
+        .expect("update phase");
+        let snapshot = captured.into_inner().expect("label writer called");
+        assert_eq!(snapshot.0, vec!["phase/implementation".to_string()]);
+        assert_eq!(snapshot.1, vec!["phase/draft".to_string()]);
+        assert_eq!(result.phase.as_deref(), Some("implementation"));
+        assert!(result.is_spec);
+        assert!(!result.has_unknown_phase);
+    }
+
+    #[test]
+    fn update_knowledge_phase_to_backlog_removes_every_phase_label() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("cache root");
+        Cache::new(cache_root)
+            .write_snapshot(&issue_snapshot(
+                200,
+                "Spec to backlog",
+                "Body",
+                &["gwt-spec", "phase/review"],
+                IssueState::Open,
+            ))
+            .expect("write snapshot");
+
+        let captured: std::cell::RefCell<Option<(Vec<String>, Vec<String>)>> =
+            std::cell::RefCell::new(None);
+        let result = update_knowledge_phase_with_label_writer(&repo, 200, None, |add, remove| {
+            *captured.borrow_mut() = Some((add.to_vec(), remove.to_vec()));
+            Ok(())
+        })
+        .expect("update phase");
+        let snapshot = captured.into_inner().expect("label writer called");
+        assert!(
+            snapshot.0.is_empty(),
+            "Backlog drop must not add any phase label"
+        );
+        assert_eq!(snapshot.1, vec!["phase/review".to_string()]);
+        assert!(result.phase.is_none());
+    }
+
+    #[test]
+    fn update_knowledge_phase_rejects_unknown_target() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        let result = update_knowledge_phase_with_label_writer(
+            &repo,
+            999,
+            Some("legacy"),
+            |_add, _remove| panic!("label writer must not be invoked"),
+        );
+        let err = result.expect_err("unknown phase target should error");
+        assert!(err.contains("unknown phase"), "got: {err}");
+    }
+
+    #[test]
+    fn update_knowledge_phase_propagates_label_writer_failure() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("cache root");
+        Cache::new(cache_root)
+            .write_snapshot(&issue_snapshot(
+                300,
+                "Failing spec",
+                "Body",
+                &["gwt-spec", "phase/draft"],
+                IssueState::Open,
+            ))
+            .expect("write snapshot");
+
+        let result = update_knowledge_phase_with_label_writer(
+            &repo,
+            300,
+            Some("planning"),
+            |_add, _remove| Err("gh issue edit #300: 422 Unprocessable Entity".to_string()),
+        );
+        let err = result.expect_err("label writer failure must surface");
+        assert!(err.contains("422"), "got: {err}");
+        // Cache must NOT be updated when the GitHub call failed —
+        // otherwise the local cache drifts away from the source of truth.
+        let cache_root =
+            crate::issue_cache::issue_cache_root_for_repo_path(&repo).expect("cache root");
+        let entry = Cache::new(cache_root)
+            .load_entry(gwt_github::IssueNumber(300))
+            .expect("entry exists");
+        assert_eq!(
+            entry.snapshot.labels,
+            vec!["gwt-spec".to_string(), "phase/draft".to_string()],
+            "labels must remain unchanged after writer failure",
+        );
+    }
+
+    #[test]
+    fn update_knowledge_phase_reports_missing_cache_entry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        init_repo(&repo);
+        let result =
+            update_knowledge_phase_with_label_writer(&repo, 404, Some("draft"), |_add, _remove| {
+                panic!("label writer must not run when cache miss")
+            });
+        let err = result.expect_err("missing cache entry must error");
+        assert!(err.contains("not in local cache"), "got: {err}");
     }
 }
