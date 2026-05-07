@@ -2090,6 +2090,49 @@
         );
       }
 
+      const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+      ]);
+
+      function findClipboardImagePasteItem(items) {
+        for (const item of Array.from(items || [])) {
+          if (
+            item?.kind === "file" &&
+            SUPPORTED_IMAGE_PASTE_MIME_TYPES.has(item.type)
+          ) {
+            return item;
+          }
+        }
+        return null;
+      }
+
+      function dataUrlBase64Payload(dataUrl) {
+        if (typeof dataUrl !== "string") {
+          return null;
+        }
+        const commaIndex = dataUrl.indexOf(",");
+        if (commaIndex < 0) {
+          return null;
+        }
+        const payload = dataUrl.slice(commaIndex + 1);
+        return payload || null;
+      }
+
+      function readClipboardImageAsBase64(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => {
+            resolve(dataUrlBase64Payload(reader.result));
+          });
+          reader.addEventListener("error", () => {
+            reject(reader.error || new Error("Failed to read clipboard image"));
+          });
+          reader.readAsDataURL(file);
+        });
+      }
+
       async function writeClipboardText(text, restoreFocus = null) {
         if (!text) {
           return false;
@@ -2246,6 +2289,44 @@
         };
       }
 
+      function installTerminalImagePasteHandlers(windowId, terminalRoot, terminal) {
+        const handlePaste = (event) => {
+          const item = findClipboardImagePasteItem(event.clipboardData?.items);
+          if (!item) {
+            return;
+          }
+          const file = item.getAsFile?.();
+          if (!file) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+
+          void readClipboardImageAsBase64(file)
+            .then((dataBase64) => {
+              if (!dataBase64) {
+                return;
+              }
+              send({
+                kind: "paste_image",
+                id: windowId,
+                data_base64: dataBase64,
+                mime_type: file.type || item.type,
+                filename: file.name || null,
+              });
+              terminal.focus();
+            })
+            .catch(() => {
+              terminal.focus();
+            });
+        };
+
+        terminalRoot.addEventListener("paste", handlePaste, true);
+        return () => {
+          terminalRoot.removeEventListener("paste", handlePaste, true);
+        };
+      }
+
       function installTerminalViewportRefreshHandlers(windowId, terminal) {
         const viewportScrollDisposable = terminal.onScroll(() => {
           scheduleTerminalViewportRefresh(windowId);
@@ -2300,9 +2381,15 @@
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
+        const imagePasteCleanup = installTerminalImagePasteHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
+          imagePasteCleanup();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {

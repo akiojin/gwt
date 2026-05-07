@@ -1032,6 +1032,8 @@ mod tests {
             branch_name: "feature/test".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            agent_project_root: "E:/gwt/test-repo".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: tab_id.to_string(),
         }
     }
@@ -1892,10 +1894,12 @@ mod tests {
                 "session-3".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo,
+                repo.clone(),
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -2711,6 +2715,8 @@ mod tests {
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -2745,10 +2751,12 @@ mod tests {
                 "session-2".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo,
+                repo.clone(),
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
