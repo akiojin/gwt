@@ -81,8 +81,9 @@ impl AISettings {
         self.effective_language_with_locale(detected.as_deref())
     }
 
-    /// Pure variant of [`effective_language`] that takes an already-detected
-    /// locale, for tests and reuse from contexts that hold the value.
+    /// Pure variant of [`Self::effective_language`] that takes an
+    /// already-detected locale, for tests and reuse from contexts that hold
+    /// the value.
     pub fn effective_language_with_locale(&self, detected: Option<&str>) -> &'static str {
         match self
             .language
