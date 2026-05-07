@@ -2,7 +2,6 @@ use gwt_agent::{ClaudeCodeOpenaiCompatInput, CustomCodingAgent, PresetDefinition
 use gwt_core::{
     coordination::{BoardEntry, BoardEntryKind},
     logging::LogEvent,
-    notes::MemoNote,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +108,12 @@ pub enum FrontendEvent {
         id: String,
         data: String,
     },
+    PasteImage {
+        id: String,
+        data_base64: String,
+        mime_type: String,
+        filename: Option<String>,
+    },
     LoadFileTree {
         id: String,
         path: Option<String>,
@@ -126,9 +131,6 @@ pub enum FrontendEvent {
         limit: usize,
     },
     LoadProfile {
-        id: String,
-    },
-    LoadMemo {
         id: String,
     },
     LoadLogs {
@@ -192,23 +194,6 @@ pub enum FrontendEvent {
         targets: Vec<String>,
         #[serde(default)]
         mentions: Vec<gwt_core::coordination::BoardMention>,
-    },
-    CreateMemoNote {
-        id: String,
-        title: String,
-        body: String,
-        pinned: bool,
-    },
-    UpdateMemoNote {
-        id: String,
-        note_id: String,
-        title: String,
-        body: String,
-        pinned: bool,
-    },
-    DeleteMemoNote {
-        id: String,
-        note_id: String,
     },
     SelectProfile {
         id: String,
@@ -494,11 +479,6 @@ pub enum BackendEvent {
         id: String,
         snapshot: ProfileSnapshotView,
     },
-    MemoNotes {
-        id: String,
-        notes: Vec<MemoNote>,
-        selected_note_id: Option<String>,
-    },
     LogEntries {
         id: String,
         entries: Vec<LogEvent>,
@@ -562,10 +542,6 @@ pub enum BackendEvent {
         message: String,
     },
     ProfileError {
-        id: String,
-        message: String,
-    },
-    MemoError {
         id: String,
         message: String,
     },
@@ -723,7 +699,6 @@ mod tests {
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
         },
         logging::{LogEvent, LogLevel},
-        notes::MemoNote,
     };
     use serde_json::Value;
 
@@ -939,6 +914,50 @@ mod tests {
     }
 
     #[test]
+    fn frontend_event_accepts_terminal_image_paste_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": "tab-1::agent-1",
+            "data_base64": "cG5nLWJ5dGVz",
+            "mime_type": "image/png",
+            "filename": "screenshot.png"
+        }))
+        .expect("deserialize image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImage {
+                    id,
+                    data_base64,
+                    mime_type,
+                    filename: Some(filename),
+                } if id == "tab-1::agent-1"
+                    && data_base64 == "cG5nLWJ5dGVz"
+                    && mime_type == "image/png"
+                    && filename == "screenshot.png"
+            ),
+            "image paste must expose window id, payload, MIME type, and optional filename"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_image_paste_without_filename() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": "tab-1::agent-1",
+            "data_base64": "d2VicC1ieXRlcw==",
+            "mime_type": "image/webp"
+        }))
+        .expect("deserialize image paste event without filename");
+
+        assert!(
+            matches!(event, FrontendEvent::PasteImage { filename: None, .. }),
+            "clipboard images may not have a source filename"
+        );
+    }
+
+    #[test]
     fn frontend_event_accepts_workspace_add_agent_command() {
         let event: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "open_active_work_launch_wizard",
@@ -1134,36 +1153,26 @@ mod tests {
     }
 
     #[test]
-    fn memo_notes_serializes_snapshot_contract() {
-        let event = BackendEvent::MemoNotes {
-            id: "memo-1".to_string(),
-            notes: vec![MemoNote {
-                id: "note-1".to_string(),
-                title: "Pinned note".to_string(),
-                body: "Remember to verify the cache contract".to_string(),
-                pinned: true,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }],
-            selected_note_id: Some("note-1".to_string()),
-        };
-
-        let value = serde_json::to_value(&event).expect("serialize memo notes");
-        assert_eq!(
-            value.get("kind"),
-            Some(&Value::String("memo_notes".to_string()))
-        );
-        assert_eq!(value.get("id"), Some(&Value::String("memo-1".to_string())));
-        assert_eq!(
-            value["notes"][0]["pinned"],
-            Value::Bool(true),
-            "expected memo snapshot payload to keep pin ordering data on the wire",
-        );
-        assert_eq!(
-            value["selected_note_id"],
-            Value::String("note-1".to_string()),
-            "expected memo snapshot payload to carry the preferred editor selection",
-        );
+    fn removed_memo_frontend_events_are_not_part_of_the_wire_contract() {
+        for kind in [
+            "load_memo",
+            "create_memo_note",
+            "update_memo_note",
+            "delete_memo_note",
+        ] {
+            let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": kind,
+                "id": "memo-1",
+                "note_id": "note-1",
+                "title": "Note",
+                "body": "Body",
+                "pinned": false
+            }));
+            assert!(
+                event.is_err(),
+                "removed Memo frontend event `{kind}` must not deserialize"
+            );
+        }
     }
 
     #[test]

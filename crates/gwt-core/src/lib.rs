@@ -11,7 +11,6 @@ pub mod error;
 pub mod index;
 pub mod logging;
 pub mod migration;
-pub mod notes;
 pub mod paths;
 pub mod process;
 mod release_contract;

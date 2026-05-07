@@ -366,7 +366,10 @@ mod tests {
         let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
             .unwrap()
             .unwrap();
-        assert!(additional_context(&plan.output).contains("posted to the Board recently"));
+        let text = additional_context(&plan.output);
+        assert!(
+            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
+        );
     }
 
     #[test]
@@ -383,7 +386,10 @@ mod tests {
         );
 
         let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
-        assert!(system_message(&plan.output).contains("posted to the Board recently"));
+        let text = system_message(&plan.output);
+        assert!(
+            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
+        );
     }
 
     #[test]

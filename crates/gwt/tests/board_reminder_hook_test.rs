@@ -71,7 +71,7 @@ fn reminder_payload_shape_matches_claude_code_contract() {
         .as_str()
         .unwrap();
     assert!(additional.contains("phase"));
-    assert!(additional.contains("Do NOT"));
+    assert!(additional.contains("Do NOT") || additional.contains("手動で作成"));
 }
 
 #[test]

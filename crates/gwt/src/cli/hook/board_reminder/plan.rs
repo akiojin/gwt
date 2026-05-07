@@ -8,10 +8,12 @@
 use chrono::{DateTime, Utc};
 use gwt_core::coordination::{BoardEntry, RemindersState};
 
-use super::format::{filter_and_cap_latest, injection_text, session_start_text};
+use super::format::{
+    filter_and_cap_latest, injection_text_with_language, session_start_text_with_language,
+};
 use super::texts::{
-    format_language_directive, SESSION_START_CAP, STOP_REMINDER, STOP_REMINDER_SHORT,
-    USER_PROMPT_DIFF_CAP, USER_PROMPT_REMINDER, USER_PROMPT_REMINDER_SHORT,
+    format_language_directive, reminder_language, stop_reminder, user_prompt_reminder,
+    SESSION_START_CAP, USER_PROMPT_DIFF_CAP,
 };
 use super::{HookOutput, IntentBoundaryEvent};
 
@@ -64,12 +66,13 @@ pub fn plan_reminder(inputs: ReminderInputs) -> ReminderPlan {
 }
 
 fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
+    let language = reminder_language(&inputs.language);
     let entries = filter_and_cap_latest(
         inputs.recent_entries,
         &inputs.self_session_id,
         SESSION_START_CAP,
     );
-    let mut text = session_start_text(&entries, &inputs.self_match_keys);
+    let mut text = session_start_text_with_language(&entries, &inputs.self_match_keys, language);
     text.push_str(&format_language_directive(&inputs.language));
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
@@ -83,24 +86,21 @@ fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
 }
 
 fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
+    let language = reminder_language(&inputs.language);
     let entries = filter_and_cap_latest(
         inputs.recent_entries,
         &inputs.self_session_id,
         USER_PROMPT_DIFF_CAP,
     );
 
-    let reminder = if inputs.has_recent_own_status {
-        USER_PROMPT_REMINDER_SHORT
-    } else {
-        USER_PROMPT_REMINDER
-    };
+    let reminder = user_prompt_reminder(language, inputs.has_recent_own_status);
 
     let mut context = if entries.is_empty() {
         reminder.to_string()
     } else {
         format!(
             "{}\n\n{}",
-            injection_text(&entries, &inputs.self_match_keys),
+            injection_text_with_language(&entries, &inputs.self_match_keys, language),
             reminder
         )
     };
@@ -118,11 +118,8 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
 }
 
 fn plan_stop(inputs: ReminderInputs) -> ReminderPlan {
-    let text = if inputs.has_recent_own_status {
-        STOP_REMINDER_SHORT
-    } else {
-        STOP_REMINDER
-    };
+    let language = reminder_language(&inputs.language);
+    let text = stop_reminder(language, inputs.has_recent_own_status);
     // Stop does not mutate last_injected_at: a diff injection on the next
     // UserPromptSubmit should still see entries posted after the last prompt.
     ReminderPlan {
@@ -621,6 +618,50 @@ mod tests {
     }
 
     #[test]
+    fn plan_user_prompt_submit_uses_japanese_reminder_when_language_is_ja() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "ja".to_string(),
+        });
+        let text = additional_context(&plan.output);
+
+        assert!(text.contains("共有 Board"));
+        assert!(text.contains("現在の状態"));
+        assert!(text.contains("次"));
+        assert!(text.contains("gwtd workspace update"));
+        assert!(text.contains("Use language: ja"));
+        assert!(!text.contains("Choose the audience before posting"));
+    }
+
+    #[test]
+    fn plan_user_prompt_submit_short_uses_japanese_reminder_when_language_is_ja() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: true,
+            language: "ja".to_string(),
+        });
+        let text = additional_context(&plan.output);
+
+        assert!(text.contains("最近 Board に投稿済み"));
+        assert!(text.contains("Workspace"));
+        assert!(text.contains("Use language: ja"));
+        assert!(!text.contains("You posted to the Board recently"));
+    }
+
+    #[test]
     fn plan_user_prompt_submit_appends_language_directive() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
@@ -651,7 +692,7 @@ mod tests {
             language: "ja".to_string(),
         });
         let text = additional_context(&plan.output);
-        assert!(text.contains("posted to the Board recently"));
+        assert!(text.contains("最近 Board に投稿済み"));
         assert!(text.contains("Use language: ja"));
     }
 

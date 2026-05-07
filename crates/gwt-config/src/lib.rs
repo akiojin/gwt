@@ -15,7 +15,9 @@ pub mod voice_config;
 pub use agent_config::AgentConfig;
 pub use ai_settings::AISettings;
 pub use error::{ConfigError, Result};
-pub use locale::{detect_user_locale, detect_user_locale_from};
+pub use locale::{
+    detect_user_locale, detect_user_locale_from, detect_user_locale_from_env_and_system,
+};
 pub use profile::{Profile, ProfilesConfig};
 pub use settings::Settings;
 pub use voice_config::VoiceConfig;
