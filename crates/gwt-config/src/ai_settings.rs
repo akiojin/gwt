@@ -2,12 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::locale::detect_user_locale;
+
 fn default_endpoint() -> String {
     "https://api.openai.com/v1".to_string()
 }
 
 fn default_language() -> Option<String> {
-    Some("en".to_string())
+    Some("auto".to_string())
 }
 
 fn default_summary_enabled() -> bool {
@@ -66,6 +68,39 @@ impl AISettings {
             "ja" => "ja".to_string(),
             "auto" => "auto".to_string(),
             _ => "en".to_string(),
+        }
+    }
+
+    /// Resolve the language used for narrative outputs (Workspace summaries
+    /// and Board posts). `auto` resolves against the OS locale; `ja` / `en`
+    /// pass through; unknown values fall back to `en`.
+    ///
+    /// SPEC-1933 FR-009 / SC-004.
+    pub fn effective_language(&self) -> &'static str {
+        let detected = detect_user_locale();
+        self.effective_language_with_locale(detected.as_deref())
+    }
+
+    /// Pure variant of [`Self::effective_language`] that takes an
+    /// already-detected locale, for tests and reuse from contexts that hold
+    /// the value.
+    pub fn effective_language_with_locale(&self, detected: Option<&str>) -> &'static str {
+        match self
+            .language
+            .as_deref()
+            .unwrap_or("auto")
+            .trim()
+            .to_lowercase()
+            .as_str()
+        {
+            "ja" => "ja",
+            "en" => "en",
+            "auto" => match detected {
+                Some("ja") => "ja",
+                Some("en") => "en",
+                _ => "en",
+            },
+            _ => "en",
         }
     }
 }
@@ -127,6 +162,77 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.normalized_language(), "en");
+    }
+
+    #[test]
+    fn default_language_is_auto() {
+        let s = AISettings::default();
+        assert_eq!(s.language.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn effective_language_auto_with_ja_locale_returns_ja() {
+        let s = AISettings {
+            language: Some("auto".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(Some("ja")), "ja");
+    }
+
+    #[test]
+    fn effective_language_auto_with_en_locale_returns_en() {
+        let s = AISettings {
+            language: Some("auto".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(Some("en")), "en");
+    }
+
+    #[test]
+    fn effective_language_auto_with_no_locale_falls_back_to_en() {
+        let s = AISettings {
+            language: Some("auto".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(None), "en");
+    }
+
+    #[test]
+    fn effective_language_explicit_ja_returns_ja() {
+        let s = AISettings {
+            language: Some("ja".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(None), "ja");
+        assert_eq!(s.effective_language_with_locale(Some("en")), "ja");
+    }
+
+    #[test]
+    fn effective_language_explicit_en_returns_en() {
+        let s = AISettings {
+            language: Some("en".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(None), "en");
+        assert_eq!(s.effective_language_with_locale(Some("ja")), "en");
+    }
+
+    #[test]
+    fn effective_language_unknown_falls_back_to_en() {
+        let s = AISettings {
+            language: Some("zh".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(Some("ja")), "en");
+    }
+
+    #[test]
+    fn effective_language_none_falls_back_to_en() {
+        let s = AISettings {
+            language: None,
+            ..Default::default()
+        };
+        assert_eq!(s.effective_language_with_locale(None), "en");
     }
 
     #[test]

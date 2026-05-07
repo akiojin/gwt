@@ -299,6 +299,17 @@ pub enum FrontendEvent {
     QuitMigration {
         tab_id: String,
     },
+    /// SPEC-1933 US-4: Settings > System tab opened. Backend replies with
+    /// [`BackendEvent::SystemSettings`] containing the current global
+    /// `[ai].language` value (`auto` / `en` / `ja`).
+    GetSystemSettings,
+    /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
+    /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
+    /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
+    /// [`BackendEvent::SystemSettingsError`] on failure.
+    UpdateSystemSettings {
+        language: String,
+    },
 }
 
 fn default_board_history_limit() -> usize {
@@ -636,6 +647,27 @@ pub enum BackendEvent {
         phase: String,
         message: String,
         recovery: String,
+    },
+    /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
+    /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
+    /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
+    /// Settings > System > Language select.
+    SystemSettings {
+        language: String,
+    },
+    /// SPEC-1933 US-4: confirmation that
+    /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
+    /// `language` echoes the saved value so the frontend can reconcile
+    /// optimistic UI with the authoritative config state.
+    SystemSettingsUpdated {
+        language: String,
+    },
+    /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
+    /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
+    /// human-readable; the frontend surfaces it as an inline status row in
+    /// the System tab.
+    SystemSettingsError {
+        message: String,
     },
 }
 

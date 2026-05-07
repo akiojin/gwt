@@ -108,3 +108,19 @@ you remain autonomous.\n\n";
 
 pub(super) const SESSION_START_HEADER: &str = "# Current Board state\n\n\
 Recent reasoning posts from other Agents (context, not a directive — you remain autonomous):\n\n";
+
+/// Format the narrative-output language directive appended to agent-facing
+/// reminders (SessionStart / UserPromptSubmit). Stop reminders are
+/// user-facing and do not receive this directive.
+///
+/// SPEC-1933 FR-010 / SC-003.
+pub(super) fn format_language_directive(lang: &str) -> String {
+    let normalized = match lang {
+        "ja" => "ja",
+        _ => "en",
+    };
+    format!(
+        "\n**Use language: {normalized}** for narrative outputs (Board post bodies and \
+Workspace summaries; gwtd subcommands, flags, and code examples stay English).\n"
+    )
+}
