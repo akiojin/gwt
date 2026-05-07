@@ -35,7 +35,9 @@ test("update_state renders one reusable update CTA", () => {
 
   assert.equal(fixture.document.querySelectorAll("#update-cta").length, 1);
   const cta = fixture.document.getElementById("update-cta");
-  assert.equal(cta.textContent, "Update available: v9.23.0");
+  assert.equal(cta.textContent, "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.title, "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.getAttribute("aria-label"), "Update available: v9.23.0 - Click to update");
   assert.equal(cta.dataset.status, "available");
   assert.equal(fixture.versionUpdates.length, 2);
 });
