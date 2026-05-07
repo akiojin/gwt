@@ -710,8 +710,14 @@
         display: none;
       }
 
+      /* SPEC-2356 FR-013 (revised): the terminal surface body must stay
+         continuous with the xterm Dark Operator background (#0a0d12). If
+         Light theme leaks var(--color-canvas) here, the xterm region picks
+         up a pale gray frame around the dark terminal and the window looks
+         double-framed. Chrome (titlebar / tab strip) still follows the
+         overall theme; this override is scoped to the body only. */
       .surface-terminal .window-body {
-        background: var(--color-canvas);
+        background: #0a0d12;
       }
 
       .surface-file-tree .window-body,

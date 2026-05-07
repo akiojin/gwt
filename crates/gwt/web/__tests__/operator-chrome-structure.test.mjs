@@ -1326,3 +1326,75 @@ test("agent cards style all four Living Telemetry states (active / blocked / idl
   assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\.op-agent-state\s*\{[^}]*--color-state-idle/);
   assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\.op-agent-state\s*\{[^}]*--color-state-done/);
 });
+
+test("terminal surface body stays on the dark Operator canvas across themes (FR-013)", () => {
+  // SPEC-2356 FR-013 改定: terminal window の body 領域 (.window-body と
+  // terminal-root padding) は xterm の Dark Operator background と連続させ
+  // るため、Light テーマでも Dark Operator background に固定する。Light で
+  // --color-canvas (#e9edf0) が見えると xterm 周囲に「外枠」が現れて二重
+  // 枠になるので、ここで結合してしまうのが正解。
+  const surfaceTerminalRule =
+    /\.surface-terminal\s+\.window-body\s*\{[^}]*background:\s*([^;]+);/;
+  const match = html.match(surfaceTerminalRule);
+  assert.ok(match, "expected .surface-terminal .window-body rule with explicit background");
+  const value = match[1].trim();
+  assert.doesNotMatch(
+    value,
+    /var\(\s*--color-canvas\s*\)/,
+    `.surface-terminal .window-body must not follow --color-canvas (got "${value}")`,
+  );
+  assert.doesNotMatch(
+    value,
+    /var\(\s*--color-surface(?:-elevated)?\s*\)/,
+    `.surface-terminal .window-body must not follow surface tokens (got "${value}")`,
+  );
+  // Accept either an explicit dark hex (Dark Operator canvas) or a dedicated
+  // dark canvas token.  We codify the value contract so the regression cannot
+  // silently flip back to a light token.
+  const usesDarkOperatorBackground =
+    /^#0a0d12$/i.test(value) || /var\(\s*--color-canvas-dark\s*\)/.test(value);
+  assert.ok(
+    usesDarkOperatorBackground,
+    `.surface-terminal .window-body must use Dark Operator canvas (#0a0d12 or --color-canvas-dark); got "${value}"`,
+  );
+});
+
+test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
+  // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
+  // Logs / File Tree / Branches / Knowledge / Mock / Memo / Profile) must
+  // keep tracking the active theme via --color-surface so tabbed windows
+  // still flip body color when a non-terminal tab is selected.
+  const otherSurfaceRule =
+    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|memo|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+  assert.match(
+    html,
+    otherSurfaceRule,
+    "non-terminal surface bodies must continue to use var(--color-surface)",
+  );
+});
+
+test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
+  // SPEC-2356 FR-030 / US-4 AS-11: WebView2 / Chromium の `<button>` UA
+  // default は border + grey background を出す。`.op-layer` は indicator
+  // dot + label color + token-driven focus ring のみで状態を表現するため、
+  // base rule で UA chrome を解除する必要がある。
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const layerRule = css.match(/\.op-layer\s*\{([^}]*)\}/);
+  assert.ok(layerRule, "expected base .op-layer rule in components.css");
+  const body = layerRule[1];
+  assert.match(
+    body,
+    /appearance:\s*none/,
+    ".op-layer must declare appearance:none to disable UA <button> chrome",
+  );
+  assert.match(
+    body,
+    /border:\s*0/,
+    ".op-layer must zero out border so WebView2 stops drawing the default frame",
+  );
+  assert.match(
+    body,
+    /background:\s*transparent/,
+    ".op-layer must clear background so the sidebar surface shows through",
+  );
+});

@@ -244,6 +244,13 @@ body::after {
   font-family: var(--font-body);
   font-size: var(--type-sm);
   color: var(--color-text);
+  /* SPEC-2356 FR-030: WebView2 / Chromium の <button> UA chrome (border +
+     grey background) を解除し、状態は indicator dot + label color + token
+     focus ring のみで表現する。macOS WebKit では UA default が控えめだが
+     Windows で灰色枠が出ていたのを統一して消す。 */
+  appearance: none;
+  border: 0;
+  background: transparent;
 }
 
 .op-layer__indicator {
