@@ -658,6 +658,16 @@ test("workspace windows expose draggable tab docking affordances", () => {
     /\.workspace-window\.dock-target\s+\.titlebar/,
     "expected dockable titlebar targets to have a visible preview state",
   );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s*\{/,
+    "expected dockable targets to outline the whole window, not just the titlebar",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s+\.window-tab-strip::before/,
+    "expected dockable targets to expose a tab insertion indicator",
+  );
 });
 
 test("Project Bar brand prefix wraps GWT OPERATOR with bracket flank", () => {
