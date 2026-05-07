@@ -34,6 +34,9 @@ impl AppRuntime {
         preset: WindowPreset,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if preset.is_removed_legacy() {
+            return Vec::new();
+        }
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
