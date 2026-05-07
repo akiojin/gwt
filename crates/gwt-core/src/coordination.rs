@@ -459,14 +459,17 @@ pub fn append_event(
     worktree_root: &Path,
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
-    ensure_repo_local_files(worktree_root)?;
-    with_coordination_lock(worktree_root, || append_event_locked(worktree_root, event))
+    with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files(worktree_root)?;
+        append_event_locked(worktree_root, event)
+    })
 }
 
 fn with_coordination_lock<T>(
     worktree_root: &Path,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    std::fs::create_dir_all(coordination_dir(worktree_root))?;
     let lock = OpenOptions::new()
         .create(true)
         .read(true)
