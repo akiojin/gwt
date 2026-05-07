@@ -3131,43 +3131,6 @@
         white-space: nowrap;
       }
 
-      .update-cta {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9999;
-        transition: background 0.2s, border-color 0.2s, color 0.2s;
-      }
-
-      .update-cta:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      .update-cta.is-applying {
-        color: var(--color-state-idle);
-        cursor: progress;
-      }
-
-      .update-cta.is-error {
-        border-color: var(--color-state-blocked);
-        color: var(--color-state-blocked);
-      }
-
-      .update-cta:focus-visible {
-        outline: 2px solid var(--color-focus-ring);
-        outline-offset: 2px;
-      }
     </style>
   </head>
   <body>
