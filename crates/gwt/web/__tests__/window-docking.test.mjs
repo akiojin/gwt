@@ -73,3 +73,22 @@ test("titlebar docking is only an entry point for ungrouped source windows", () 
     "dragging a grouped window titlebar must keep moving the group, not redock the tab",
   );
 });
+
+test("titlebar docking ignores invalid pointer points", () => {
+  const windows = [
+    {
+      id: "source",
+      geometry: { x: 40, y: 40, width: 200, height: 120 },
+      z_index: 1,
+    },
+    {
+      id: "target",
+      geometry: { x: 100, y: 100, width: 220, height: 140 },
+      z_index: 9,
+    },
+  ];
+
+  assert.equal(findTitlebarDockTarget(windows, null, "source"), null);
+  assert.equal(findTitlebarDockTarget(windows, { x: Number.NaN, y: 112 }, "source"), null);
+  assert.equal(findTitlebarDockTarget(windows, { x: 130, y: Number.POSITIVE_INFINITY }, "source"), null);
+});
