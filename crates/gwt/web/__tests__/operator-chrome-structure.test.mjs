@@ -172,9 +172,32 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     "expected non-terminal panels to hide the runtime status chip",
   );
   assert.match(
+    inlineStyle,
+    /\.status-chip\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden runtime chips must stay hidden even though .status-chip uses inline-flex",
+  );
+  assert.match(
     appSource,
     /window-list-role/,
     "expected window list rows to include a role badge",
+  );
+});
+
+test("Memo is not exposed as a workspace window feature", () => {
+  assert.equal(
+    document.querySelector('.preset-button[data-preset="memo"]'),
+    null,
+    "Add window must not expose the unusable Memo surface",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /memoSurface|memo-root|load_memo|create_memo_note|update_memo_note|delete_memo_note/,
+    "Memo frontend state, renderer, and protocol events should be removed",
+  );
+  assert.doesNotMatch(
+    inlineStyle,
+    /surface-memo|memo-layout|memo-note|memo-editor|memo-status/,
+    "Memo-specific CSS should be removed with the surface",
   );
 });
 
@@ -1068,12 +1091,11 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Selected list rows mark active item with aria-current", () => {
   // Same pattern as project tabs (PR #2455): list-style buttons with a
   // selected state need aria-current to announce which row is active.
-  // Coverage: knowledge-row, memo-note-row, profile-row, logs-entry.
+  // Coverage: knowledge-row, profile-row, logs-entry.
   // The set/remove pair is required so a previously-selected row
   // doesn't retain the marker after the user picks a different row.
   for (const desc of [
     "knowledge",
-    "memo note",
     "profile",
     "logs entry",
   ]) {
@@ -1082,18 +1104,17 @@ test("Selected list rows mark active item with aria-current", () => {
     // setAttribute and removeAttribute calls exist somewhere in app.js.
     // The descriptive label is just for the failure message.
   }
-  // Count occurrences — should be at least 5 set + 5 remove for the
-  // five list-with-selection surfaces (knowledge / memo / profile /
-  // logs / file-tree) plus the project-tabs case from PR #2455.
+  // Count occurrences: knowledge, profile, logs, file-tree, plus the
+  // project-tabs case from PR #2455.
   const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
   const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
-    setMatches.length >= 6,
-    `expected >= 6 aria-current set calls (project tab + 5 row types), got ${setMatches.length}`,
+    setMatches.length >= 5,
+    `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
   );
   assert.ok(
-    removeMatches.length >= 6,
-    `expected >= 6 aria-current remove calls (one per set call), got ${removeMatches.length}`,
+    removeMatches.length >= 5,
+    `expected >= 5 aria-current remove calls (one per set call), got ${removeMatches.length}`,
   );
 });
 
@@ -1204,12 +1225,10 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // Form fields that aren't wrapped in a <label> element need aria-label
   // so screen readers announce their purpose instead of just "edit text"
   // (input/textarea) or the first option (select). This audit covers
-  // the launch wizard, memo editor, and profile editor surfaces.
+  // the launch wizard and profile editor surfaces.
   const expected = [
     { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
     { selector: 'input\\.setAttribute\\("aria-label", "Issue number"\\)', desc: "wizard issue number" },
-    { selector: 'titleInput\\.setAttribute\\("aria-label", "Note title"\\)', desc: "memo note title" },
-    { selector: 'bodyInput\\.setAttribute\\("aria-label", "Note body"\\)', desc: "memo note body" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
     { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
@@ -1589,11 +1608,11 @@ test("terminal surface body stays on the dark Operator canvas across themes (FR-
 
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
-  // Logs / File Tree / Branches / Knowledge / Mock / Memo / Profile) must
+  // Logs / File Tree / Branches / Knowledge / Mock / Profile) must
   // keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|memo|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     html,
     otherSurfaceRule,
