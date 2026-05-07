@@ -1802,11 +1802,16 @@
             card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
           }
 
-          if (agent.current_focus) {
+          const agentFocusText = agent.title_summary || agent.current_focus;
+          if (agentFocusText) {
             const focusText = coordinationLabel
-              ? `${coordinationLabel}: ${agent.current_focus}`
-              : agent.current_focus;
-            card.appendChild(createNode("div", "op-agent-focus", focusText));
+              ? `${coordinationLabel}: ${agentFocusText}`
+              : agentFocusText;
+            const agentFocus = createNode("div", "op-agent-focus", focusText);
+            if (agent.current_focus && agent.current_focus !== agentFocusText) {
+              agentFocus.title = agent.current_focus;
+            }
+            card.appendChild(agentFocus);
           }
 
           const agentActions = createNode("div", "op-agent-actions");

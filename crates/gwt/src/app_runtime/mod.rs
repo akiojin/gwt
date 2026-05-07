@@ -741,17 +741,9 @@ fn retain_live_workspace_agents(
         .iter()
         .map(|session| session.session_id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    let live_window_ids = sessions
-        .iter()
-        .map(|session| session.window_id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    projection.agents.retain(|agent| {
-        live_session_ids.contains(agent.session_id.as_str())
-            || agent
-                .window_id
-                .as_deref()
-                .is_some_and(|window_id| live_window_ids.contains(window_id))
-    });
+    projection
+        .agents
+        .retain(|agent| live_session_ids.contains(agent.session_id.as_str()));
     if !projection.agents.iter().any(|agent| {
         matches!(
             agent.status_category,
@@ -6052,6 +6044,71 @@ exit 0
         assert!(view.agents.is_empty());
         assert_eq!(view.status_category, "idle");
         assert_eq!(view.status_text, "No active work");
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_filters_stale_agent_when_window_id_is_reused() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let window_id = "tab-1::agent-1";
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection.status_text = "Old agent is running".to_string();
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "stale-session".to_string(),
+                window_id: Some(window_id.to_string()),
+                agent_id: "codex".to_string(),
+                display_name: "Old Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Old focus".to_string()),
+                title_summary: Some("Old title".to_string()),
+                worktree_path: None,
+                branch: Some("work/old".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save stale projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.active_agent_sessions.insert(
+            window_id.to_string(),
+            ActiveAgentSession {
+                window_id: window_id.to_string(),
+                session_id: "live-session".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/live".to_string(),
+                display_name: "Live Codex".to_string(),
+                worktree_path: repo.join("../repo-work-live"),
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_agents, 1);
+        assert_eq!(view.blocked_agents, 0);
+        assert_eq!(view.agents.len(), 1);
+        assert_eq!(view.agents[0].session_id, "live-session");
+        assert_eq!(view.agents[0].display_name, "Live Codex");
+        assert!(!view
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "stale-session"));
     }
 
     #[test]
