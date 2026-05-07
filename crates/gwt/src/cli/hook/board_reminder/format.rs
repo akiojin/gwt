@@ -10,6 +10,8 @@ use gwt_core::coordination::{self, BoardEntry};
 
 use super::texts::{FOR_YOU_MARKER, INJECTION_HEADER, SESSION_START_HEADER, USER_PROMPT_REMINDER};
 
+const ENTRY_BODY_CONTEXT_CHAR_LIMIT: usize = 1_200;
+
 pub(super) fn filter_and_cap_latest(
     mut entries: Vec<BoardEntry>,
     self_session_id: &str,
@@ -57,15 +59,38 @@ pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> St
     } else {
         ""
     };
-    format!(
-        "- {prefix}[{author} @ {branch} / {session}] ({kind}) {body}\n",
+    let mut out = format!(
+        "- {prefix}[{author} @ {branch} / {session}] ({kind})\n",
         prefix = prefix,
         author = entry.author,
         branch = branch,
         session = session_id,
         kind = entry.kind.as_str(),
-        body = entry.body,
-    )
+    );
+    append_indented_body(
+        &mut out,
+        &truncate_body_for_context(&entry.body, ENTRY_BODY_CONTEXT_CHAR_LIMIT),
+        "  ",
+    );
+    out
+}
+
+fn append_indented_body(out: &mut String, body: &str, indent: &str) {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.split('\n') {
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn truncate_body_for_context(body: &str, limit: usize) -> String {
+    if body.chars().count() <= limit {
+        return body.to_string();
+    }
+    let mut truncated: String = body.chars().take(limit).collect();
+    truncated.push_str("\n[truncated]");
+    truncated
 }
 
 #[cfg(test)]
@@ -195,6 +220,61 @@ mod tests {
         let text = injection_text(&[entry], &[]);
         assert!(text.starts_with("# Recent Board updates"));
         assert!(text.contains("[OtherAgent @ feature/other / sess-other]"));
+    }
+
+    #[test]
+    fn format_entry_line_preserves_multiline_body_as_readable_block() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "OtherAgent",
+            BoardEntryKind::Handoff,
+            "Current state: phase 1 is complete.\n\nNext: pick up phase 2.\nRisk: verify Windows CI.",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_branch("feature/other")
+        .with_origin_session_id("sess-other");
+
+        let line = format_entry_line(&entry, &[]);
+
+        assert!(
+            line.starts_with("- [OtherAgent @ feature/other / sess-other] (handoff)\n"),
+            "expected metadata header to be separate from body, got:\n{line}"
+        );
+        assert!(
+            line.contains("  Current state: phase 1 is complete.\n  \n  Next: pick up phase 2.\n  Risk: verify Windows CI.\n"),
+            "expected body block with preserved blank lines, got:\n{line}"
+        );
+    }
+
+    #[test]
+    fn format_entry_line_truncates_very_long_body_for_context_injection() {
+        let long_body = format!("{}END", "a".repeat(1_600));
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "OtherAgent",
+            BoardEntryKind::Status,
+            long_body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_branch("feature/other")
+        .with_origin_session_id("sess-other");
+
+        let line = format_entry_line(&entry, &[]);
+
+        assert!(
+            line.contains("[truncated]"),
+            "expected long body to be explicitly truncated, got:\n{line}"
+        );
+        assert!(
+            !line.contains("END"),
+            "expected tail beyond the context cap to be omitted, got:\n{line}"
+        );
     }
 
     #[test]

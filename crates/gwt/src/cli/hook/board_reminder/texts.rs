@@ -35,6 +35,16 @@ Use `--mention user:<id>` for the human user, `--mention agent:<id>` for an agen
 `--mention session:<id>` for one running session, or `--mention branch:<name>` for a workspace. \
 Questions, blockers, handoffs, next-step requests, and replies that expect a response should be addressed with a mention.\n\
 \n\
+The Board body is the canonical message for both humans and AI agents. Use short paragraphs or bullets, \
+and include the coordination facts another agent needs directly in the body instead of hiding them in metadata. \
+A useful body shape is:\n\
+\n\
+Current state: <what changed or what you found>\n\
+\n\
+Reason: <why this matters or why you chose it>\n\
+\n\
+Next: <what should happen next, if anything>\n\
+\n\
 **Reasoning axes** (the *why* behind your work):\n\
 - Work phase transitions (e.g., implementation -> build check -> PR handoff). Use `--kind status`.\n\
 - Choices between alternatives with the reasoning behind them (e.g., \"A vs B, chose B because ...\"). Use `--kind decision` or `--kind status`.\n\
@@ -65,10 +75,10 @@ Do NOT post tool-level reports (e.g., \"running gcc\", \"opening file X\", \"ran
 Anything already visible in the diff or log does not need a Board entry.\n\
 \n\
 Examples:\n\
-  gwtd board post --kind status --body '<your reasoning>'\n\
-  gwtd board post --kind question --mention user:akiojin --body 'Need a product decision on X'\n\
-  gwtd board post --kind claim --mention branch:feature/foo --body 'taking the migration on feature/foo'\n\
-  gwtd board post --kind handoff --mention agent:codex --body 'phase 1 done, please pick up phase 2'\n";
+  gwtd board post --kind status --body $'Current state: focused tests are RED.\\n\\nReason: CLI and hook output still collapse multiline Board bodies.\\n\\nNext: implement block rendering.'\n\
+  gwtd board post --kind question --mention user:akiojin --body $'Current state: two UX options remain.\\n\\nQuestion: should replies notify only the mentioned user or all viewers?'\n\
+  gwtd board post --kind claim --mention branch:feature/foo --body $'Current state: I am taking the migration slice.\\n\\nBoundary: other agents should avoid files under crates/gwt-core/src/migration.rs.'\n\
+  gwtd board post --kind handoff --mention agent:codex --body $'Current state: phase 1 is merged locally.\\n\\nNext: please run the Windows-focused verification and report failures.'\n";
 
 pub(super) const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
@@ -79,6 +89,9 @@ You posted to the Board recently. Post again only if a new reasoning milestone \
 When a response is expected, address the post with `--mention user:<id>`, \
 `--mention agent:<id>`, `--mention session:<id>`, or `--mention branch:<name>`; \
 omit mentions only for broadcast updates.\n\
+\n\
+The Board body remains the canonical message. Keep it readable with short paragraphs or bullets, \
+and put AI coordination details in the body when another agent needs them.\n\
 \n\
 AGENTS.md is project-local. Do NOT create, switch, or delete branches/worktrees \
 manually; gwt Start Work / Launch materialization owns Git environment creation.\n\
