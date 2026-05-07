@@ -4637,9 +4637,11 @@ exit 0
                     .expect("release bootstrap");
                 Ok(())
             },
-            |_project_root| gwt::ProjectIndexStatusView {
-                state: gwt::ProjectIndexStatusState::Ready,
-                detail: "test bootstrap complete".to_string(),
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(
+                    gwt::ProjectIndexStatusState::Ready,
+                    "test bootstrap complete",
+                )
             },
         );
         let spawn_elapsed = spawn_started.elapsed();
@@ -4707,10 +4709,10 @@ exit 0
             |proxy, project_root| {
                 proxy.send(UserEvent::ProjectIndexStatus {
                     project_root: project_root.display().to_string(),
-                    status: gwt::ProjectIndexStatusView {
-                        state: gwt::ProjectIndexStatusState::Ready,
-                        detail: "ready".to_string(),
-                    },
+                    status: gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        "ready",
+                    ),
                 });
             },
         );
