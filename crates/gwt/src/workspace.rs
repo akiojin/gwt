@@ -93,6 +93,25 @@ impl WorkspaceState {
         true
     }
 
+    pub fn set_dynamic_title_with_detail(
+        &mut self,
+        id: &str,
+        title: Option<String>,
+        detail: Option<String>,
+    ) -> bool {
+        let Some(window) = self
+            .persisted
+            .windows
+            .iter_mut()
+            .find(|window| window.id == id)
+        else {
+            return false;
+        };
+        window.dynamic_title = title.and_then(normalize_title);
+        window.dynamic_title_detail = detail.and_then(normalize_title);
+        true
+    }
+
     pub fn update_viewport(&mut self, viewport: CanvasViewport) {
         self.persisted.viewport = viewport;
     }
@@ -238,6 +257,7 @@ impl WorkspaceState {
             persist,
             purpose_title: None,
             dynamic_title: None,
+            dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
             tab_group_id: None,
@@ -774,6 +794,7 @@ mod tests {
                 persist: false,
                 purpose_title: None,
                 dynamic_title: None,
+                dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
                 tab_group_id: None,

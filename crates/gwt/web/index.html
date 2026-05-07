@@ -482,6 +482,7 @@
         justify-content: space-between;
         gap: 12px;
         height: 38px;
+        min-width: 0;
         padding: 0 12px;
         user-select: none;
         cursor: grab;
@@ -517,11 +518,17 @@
       .title {
         display: flex;
         align-items: center;
+        flex: 1 1 auto;
         gap: 10px;
         min-width: 0;
+        overflow: hidden;
       }
 
       .title-text {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         font-size: var(--type-sm);
         font-weight: 600;
         white-space: nowrap;
@@ -530,6 +537,7 @@
       .window-role-badge {
         display: inline-flex;
         align-items: center;
+        flex-shrink: 0;
         min-height: 20px;
         padding: 2px 7px;
         border: 1px solid var(--color-border);
@@ -550,6 +558,7 @@
       .status-chip {
         display: inline-flex;
         align-items: center;
+        flex-shrink: 0;
         gap: 6px;
         padding: 4px 8px;
         border-radius: var(--radius-pill);
@@ -598,6 +607,7 @@
       .window-actions {
         display: flex;
         align-items: center;
+        flex-shrink: 0;
         gap: 8px;
       }
 
@@ -3336,14 +3346,14 @@
             </div>
           </div>
           <div class="floating-actions" id="floating-window-controls">
-            <button
-              class="op-edge-handle op-edge-handle--windows"
-              id="op-window-controls-edge-toggle"
-              type="button"
-              aria-label="Hide window controls"
+            <div
+              class="op-window-controls-peek"
+              role="button"
+              tabindex="0"
+              aria-label="Show window controls"
               aria-controls="floating-window-controls-primary floating-window-controls-add"
-              aria-expanded="true"
-            >vv</button>
+              data-hover-reveal="window-controls"
+            ></div>
             <button
               class="arrange-button op-palette-trigger"
               id="op-palette-button"
@@ -3378,14 +3388,14 @@
               <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
             </div>
           </div>
-          <button
-            class="op-edge-handle op-edge-handle--sidebar"
-            id="op-sidebar-edge-toggle"
-            type="button"
-            aria-label="Hide sidebar"
+          <div
+            class="op-sidebar-peek"
+            role="button"
+            tabindex="0"
+            aria-label="Show sidebar"
             aria-controls="op-sidebar"
-            aria-expanded="true"
-          ><<</button>
+            data-hover-reveal="sidebar"
+          ></div>
         </div>
         <footer
           class="op-status-strip"
@@ -3500,13 +3510,6 @@
             <div class="op-hotkey-card__row">
               <span>Logs surface</span>
               <kbd class="op-kbd">⌘ L</kbd>
-            </div>
-          </div>
-          <div class="op-hotkey-card__group">
-            <h3 class="op-hotkey-card__group-title">Layout</h3>
-            <div class="op-hotkey-card__row">
-              <span>Toggle sidebar</span>
-              <kbd class="op-kbd">⌘ \</kbd>
             </div>
           </div>
           <div class="op-hotkey-card__group">

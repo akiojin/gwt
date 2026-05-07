@@ -72,6 +72,8 @@ pub struct WorkspaceAgentSummary {
     pub display_name: String,
     pub status_category: WorkspaceStatusCategory,
     pub current_focus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_summary: Option<String>,
     pub worktree_path: Option<PathBuf>,
     pub branch: Option<String>,
     pub last_board_entry_id: Option<String>,
@@ -175,6 +177,13 @@ impl WorkspaceProjection {
                 agent.last_board_entry_kind = Some(entry.kind.clone());
                 agent.coordination_scope = coordination_scope_for_entry(entry);
                 agent.current_focus = Some(entry.body.clone());
+                if let Some(title_summary) = entry
+                    .title_summary
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    agent.title_summary = Some(title_summary.clone());
+                }
                 agent.updated_at = entry.updated_at;
                 match entry.kind {
                     BoardEntryKind::Blocked => {
@@ -253,6 +262,14 @@ impl WorkspaceProjection {
                     agent.current_focus = Some(focus.clone());
                     agent.updated_at = updated_at;
                 }
+                if let Some(title_summary) = update
+                    .agent_title_summary
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    agent.title_summary = Some(title_summary.clone());
+                    agent.updated_at = updated_at;
+                }
             }
         }
         self.updated_at = updated_at;
@@ -268,6 +285,7 @@ impl WorkspaceProjection {
             summary: update.summary,
             agent_session_id: update.agent_session_id,
             agent_current_focus: update.agent_current_focus,
+            agent_title_summary: update.agent_title_summary,
             updated_at,
         }
     }
@@ -352,6 +370,7 @@ pub struct WorkspaceProjectionUpdate {
     pub summary: Option<String>,
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
+    pub agent_title_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +385,7 @@ pub struct WorkspaceJournalEntry {
     pub summary: Option<String>,
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
+    pub agent_title_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -595,6 +615,7 @@ mod tests {
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Blocked,
             current_focus: None,
+            title_summary: None,
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
@@ -629,6 +650,7 @@ mod tests {
         .expect("legacy summary");
 
         assert_eq!(summary.window_id, None);
+        assert_eq!(summary.title_summary, None);
         assert_eq!(summary.last_board_entry_kind, None);
         assert_eq!(summary.coordination_scope, None);
     }
@@ -644,6 +666,7 @@ mod tests {
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
             current_focus: None,
+            title_summary: None,
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
@@ -810,6 +833,7 @@ mod tests {
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
             current_focus: None,
+            title_summary: None,
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
@@ -860,6 +884,58 @@ mod tests {
     }
 
     #[test]
+    fn board_milestone_keeps_title_summary_separate_from_current_focus() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "sess-1".to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: Utc::now(),
+        });
+        let mut entry_value = serde_json::to_value(
+            BoardEntry::new(
+                crate::coordination::AuthorKind::Agent,
+                "codex",
+                BoardEntryKind::Status,
+                "Implementing the title-summary contract across Board, Workspace, runtime, and frontend surfaces",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .with_origin_session_id("sess-1"),
+        )
+        .expect("entry json");
+        entry_value["title_summary"] = serde_json::json!("Title summary contract");
+        let entry: BoardEntry = serde_json::from_value(entry_value).expect("board entry");
+
+        projection.record_board_milestone(&entry);
+        let agent_json = serde_json::to_value(&projection.agents[0]).expect("agent json");
+
+        assert_eq!(
+            projection.agents[0].current_focus.as_deref(),
+            Some(
+                "Implementing the title-summary contract across Board, Workspace, runtime, and frontend surfaces"
+            )
+        );
+        assert_eq!(
+            agent_json
+                .pointer("/title_summary")
+                .and_then(|value| value.as_str()),
+            Some("Title summary contract")
+        );
+    }
+
+    #[test]
     fn board_milestone_next_keeps_blocked_agent_blocked() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
@@ -869,6 +945,7 @@ mod tests {
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
             current_focus: None,
+            title_summary: None,
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
@@ -929,6 +1006,7 @@ mod tests {
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
             current_focus: None,
+            title_summary: None,
             worktree_path: None,
             branch: None,
             last_board_entry_id: None,
@@ -985,6 +1063,7 @@ mod tests {
                 summary: Some("Workspace state is now the source for Active Work.".to_string()),
                 agent_session_id: Some("session-1".to_string()),
                 agent_current_focus: Some("Writing RED tests".to_string()),
+                agent_title_summary: None,
             },
         )
         .expect("update workspace projection");
@@ -1023,6 +1102,61 @@ mod tests {
     }
 
     #[test]
+    fn workspace_update_persists_agent_title_summary_separately_from_focus() {
+        let updated_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 30, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(WorkspaceAgentSummary {
+            session_id: "session-1".to_string(),
+            window_id: Some("tab-1::agent-1".to_string()),
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at,
+        });
+
+        let journal = projection.apply_update(
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                agent_session_id: Some("session-1".to_string()),
+                agent_current_focus: Some(
+                    "Implementing title-summary support across Board and Workspace".to_string(),
+                ),
+                agent_title_summary: Some("Title summary support".to_string()),
+            },
+            updated_at,
+        );
+
+        assert_eq!(
+            projection.agents[0].current_focus.as_deref(),
+            Some("Implementing title-summary support across Board and Workspace")
+        );
+        assert_eq!(
+            projection.agents[0].title_summary.as_deref(),
+            Some("Title summary support")
+        );
+        assert_eq!(
+            journal.agent_current_focus.as_deref(),
+            Some("Implementing title-summary support across Board and Workspace")
+        );
+        assert_eq!(
+            journal.agent_title_summary.as_deref(),
+            Some("Title summary support")
+        );
+    }
+
+    #[test]
     fn stopped_agent_is_removed_from_current_projection_without_losing_summary() {
         let now = Utc::now();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
@@ -1037,6 +1171,7 @@ mod tests {
             display_name: "Codex".to_string(),
             status_category: WorkspaceStatusCategory::Active,
             current_focus: Some("Investigating".to_string()),
+            title_summary: None,
             worktree_path: None,
             branch: Some("work/20260506-1652".to_string()),
             last_board_entry_id: None,
@@ -1079,6 +1214,7 @@ mod tests {
                 summary: Some("First summary".to_string()),
                 agent_session_id: None,
                 agent_current_focus: None,
+                agent_title_summary: None,
             },
             first_at,
         )
@@ -1096,6 +1232,7 @@ mod tests {
                 summary: Some("Second summary".to_string()),
                 agent_session_id: None,
                 agent_current_focus: None,
+                agent_title_summary: None,
             },
             second_at,
         )

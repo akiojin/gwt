@@ -1519,6 +1519,32 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_message_body_preserves_multiline_plaintext() {
+        let html = frontend_bundle_source();
+        let body_block = {
+            let start = html
+                .find(".board-message-body {")
+                .expect("expected Board message body CSS block");
+            let rest = &html[start..];
+            let end = rest.find('}').expect("expected CSS block end");
+            &rest[..=end]
+        };
+
+        assert!(
+            body_block.contains("white-space: pre-wrap"),
+            "Board body must preserve author-provided newlines, got: {body_block}",
+        );
+        assert!(
+            html.contains("createNode(\"div\", \"board-message-body\", entry.body)"),
+            "Board body must be rendered as plaintext from the canonical body field",
+        );
+        assert!(
+            !html.contains("board-message-body`).innerHTML"),
+            "Board body must not switch to HTML rendering for multiline formatting",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_composer_is_body_first_and_resets_after_post() {
         let html = frontend_bundle_source();
         let anchor = html
@@ -1754,9 +1780,15 @@ mod tests {
                 && html.contains("Reconnecting"),
             "expected shared frontend bundle to keep the browser and native user-facing copy on the English contract",
         );
+        // SPEC-1933 NFR-005 exception: the System Settings > Language select
+        // option label "日本語" is the only approved Japanese string in the
+        // embedded bundle. Strip the option text before scanning so the
+        // English-only contract still catches every other unintended copy.
+        let stripped = html.replace(r#"text: "日本語""#, r#"text: ""#);
         assert!(
-            !japanese_scripts.is_match(html),
-            "expected embedded bundle copy to stay English-only for both browser and native modes",
+            !japanese_scripts.is_match(&stripped),
+            "expected embedded bundle copy to stay English-only for both browser and native modes \
+             (SPEC-1933 NFR-005 only allows the Language select '日本語' option label)",
         );
         assert!(
             !html.contains("PoC"),

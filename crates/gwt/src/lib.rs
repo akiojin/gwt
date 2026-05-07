@@ -25,6 +25,7 @@ pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
 pub mod start_work;
+pub mod system_settings;
 pub mod window_state;
 pub mod workspace;
 
