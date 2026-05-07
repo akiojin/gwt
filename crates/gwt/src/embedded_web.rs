@@ -19,6 +19,10 @@ pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
 }
 
+pub fn window_docking_js() -> &'static str {
+    include_str!("../web/window-docking.js")
+}
+
 pub fn board_surface_js() -> &'static str {
     include_str!("../web/board-surface.js")
 }
@@ -111,6 +115,13 @@ pub async fn migration_modal_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         migration_modal_js(),
+    )
+}
+
+pub async fn window_docking_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        window_docking_js(),
     )
 }
 
@@ -232,12 +243,12 @@ pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_js, board_surface_js, branch_cleanup_modal_js, index_html, xterm_css, xterm_fit_js,
-        xterm_js,
+        app_js, board_surface_js, branch_cleanup_modal_js, index_html, window_docking_js,
+        xterm_css, xterm_fit_js, xterm_js,
     };
     use super::{
         app_js_handler, board_surface_js_handler, branch_cleanup_modal_js_handler,
-        xterm_css_handler, xterm_fit_js_handler, xterm_js_handler,
+        window_docking_js_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler,
     };
     // SPEC-2356 — Operator Design System modules.
     use super::{focus_trap_js, hotkey_js, operator_shell_js, theme_manager_js, theme_toggle_js};
@@ -475,12 +486,14 @@ mod tests {
         assert!(!hotkey_js().is_empty());
         assert!(!operator_shell_js().is_empty());
         assert!(!focus_trap_js().is_empty());
+        assert!(!window_docking_js().is_empty());
         assert!(!board_surface_js().is_empty());
         assert!(theme_manager_js().contains("createThemeManager"));
         assert!(theme_toggle_js().contains("wireThemeToggle"));
         assert!(hotkey_js().contains("createHotkeyManager"));
         assert!(operator_shell_js().contains("initOperatorShell"));
         assert!(focus_trap_js().contains("createFocusTrap"));
+        assert!(window_docking_js().contains("findTitlebarDockTarget"));
         assert!(board_surface_js().contains("boardEntryMentionsSelf"));
     }
 
@@ -552,6 +565,7 @@ mod tests {
             hotkey_js_handler().await.into_response(),
             operator_shell_js_handler().await.into_response(),
             focus_trap_js_handler().await.into_response(),
+            window_docking_js_handler().await.into_response(),
         ] {
             assert_eq!(
                 handler_response

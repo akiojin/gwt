@@ -11,6 +11,7 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
 
 function cssRemVar(source, name) {
@@ -531,6 +532,36 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
   assert.match(
     appSource,
+    /function\s+titlebarDockTargetAt\(/,
+    "expected ungrouped windows to find dock targets from titlebar drag",
+  );
+  assert.match(
+    windowDockingSource,
+    /export\s+const\s+TITLEBAR_DOCK_HIT_HEIGHT\s*=\s*38/,
+    "expected dock hit-testing to be constrained to the titlebar height",
+  );
+  assert.match(
+    windowDockingSource,
+    /point\.y\s*<=\s*geometry\.y\s*\+\s*titlebarHeight/,
+    "expected body/canvas drops to avoid the dock path",
+  );
+  assert.match(
+    appSource,
+    /function\s+updateTitlebarDockPreview\(/,
+    "expected titlebar drag to update dock target hover preview",
+  );
+  assert.match(
+    appSource,
+    /function\s+clearTitlebarDockPreview\(/,
+    "expected dock target preview to be cleared after drop or cancel",
+  );
+  assert.match(
+    appSource,
+    /dragState\.dockTargetId[\s\S]+kind:\s*"dock_window_tab"[\s\S]+target_id:\s*dragState\.dockTargetId/,
+    "expected titlebar drag pointerup to dock only when a titlebar target was hit",
+  );
+  assert.match(
+    appSource,
     /kind:\s*"dock_window_tab"/,
     "expected tab drop to send dock_window_tab",
   );
@@ -543,6 +574,11 @@ test("workspace windows expose draggable tab docking affordances", () => {
     appSource,
     /kind:\s*"activate_window_tab"/,
     "expected tab click to activate a grouped window tab",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s+\.titlebar/,
+    "expected dockable titlebar targets to have a visible preview state",
   );
 });
 
