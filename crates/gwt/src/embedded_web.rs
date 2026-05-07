@@ -27,6 +27,10 @@ pub fn board_surface_js() -> &'static str {
     include_str!("../web/board-surface.js")
 }
 
+pub fn update_cta_js() -> &'static str {
+    include_str!("../web/update-cta.js")
+}
+
 pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -129,6 +133,13 @@ pub async fn board_surface_js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         board_surface_js(),
+    )
+}
+
+pub async fn update_cta_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        update_cta_js(),
     )
 }
 
@@ -243,12 +254,13 @@ pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_js, board_surface_js, branch_cleanup_modal_js, index_html, window_docking_js,
-        xterm_css, xterm_fit_js, xterm_js,
+        app_js, board_surface_js, branch_cleanup_modal_js, index_html, update_cta_js,
+        window_docking_js, xterm_css, xterm_fit_js, xterm_js,
     };
     use super::{
         app_js_handler, board_surface_js_handler, branch_cleanup_modal_js_handler,
-        window_docking_js_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler,
+        update_cta_js_handler, window_docking_js_handler, xterm_css_handler, xterm_fit_js_handler,
+        xterm_js_handler,
     };
     // SPEC-2356 — Operator Design System modules.
     use super::{focus_trap_js, hotkey_js, operator_shell_js, theme_manager_js, theme_toggle_js};
@@ -263,7 +275,9 @@ mod tests {
             "\n",
             include_str!("../web/app.js"),
             "\n",
-            include_str!("../web/board-surface.js")
+            include_str!("../web/board-surface.js"),
+            "\n",
+            include_str!("../web/update-cta.js")
         )
     }
 
@@ -580,6 +594,7 @@ mod tests {
         assert!(!focus_trap_js().is_empty());
         assert!(!window_docking_js().is_empty());
         assert!(!board_surface_js().is_empty());
+        assert!(!update_cta_js().is_empty());
         assert!(theme_manager_js().contains("createThemeManager"));
         assert!(theme_toggle_js().contains("wireThemeToggle"));
         assert!(hotkey_js().contains("createHotkeyManager"));
@@ -587,6 +602,7 @@ mod tests {
         assert!(focus_trap_js().contains("createFocusTrap"));
         assert!(window_docking_js().contains("findTitlebarDockTarget"));
         assert!(board_surface_js().contains("boardEntryMentionsSelf"));
+        assert!(update_cta_js().contains("createUpdateCtaController"));
     }
 
     #[tokio::test]
@@ -614,6 +630,15 @@ mod tests {
         );
         assert_eq!(
             board_surface_js_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap(),
+            js,
+        );
+        assert_eq!(
+            update_cta_js_handler()
                 .await
                 .into_response()
                 .headers()
@@ -1185,6 +1210,7 @@ mod tests {
             "/branch-cleanup-modal.js",
             "/migration-modal.js",
             "/board-surface.js",
+            "/update-cta.js",
         ] {
             assert!(
                 js.contains(module_path),

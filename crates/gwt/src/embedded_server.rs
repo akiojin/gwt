@@ -130,6 +130,7 @@ impl EmbeddedServer {
                 "/board-surface.js",
                 get(embedded_web::board_surface_js_handler),
             )
+            .route("/update-cta.js", get(embedded_web::update_cta_js_handler))
             .route(
                 "/assets/xterm/xterm.mjs",
                 get(embedded_web::xterm_js_handler),
