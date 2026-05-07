@@ -137,14 +137,16 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
                 gwt::index_worker::project_index_status_for_path(&path)
             })
             .await
-            .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
-                state: gwt::ProjectIndexStatusState::Error,
-                detail: format!("Project index status task failed: {err}"),
+            .unwrap_or_else(|err| {
+                gwt::ProjectIndexStatusView::new(
+                    gwt::ProjectIndexStatusState::Error,
+                    format!("Project index status task failed: {err}"),
+                )
             }),
-            None => gwt::ProjectIndexStatusView {
-                state: gwt::ProjectIndexStatusState::Skipped,
-                detail: "No current directory".to_string(),
-            },
+            None => gwt::ProjectIndexStatusView::new(
+                gwt::ProjectIndexStatusState::Skipped,
+                "No current directory",
+            ),
         };
         let _ = proxy.send_event(UserEvent::ProjectIndexStatus {
             project_root: project_root_label,
