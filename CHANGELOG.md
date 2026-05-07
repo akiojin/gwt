@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.22.0] - 2026-05-07
+
+### Bug Fixes
+
+- **board:** Board投稿の改行を読みやすく保持
+- **gui:** Use short summaries for agent window titles
+- **docs:** Rustdoc broken intra-doc link を Self:: で修正
+
+### Features
+
+- **index:** Repairing 状態と RebuildProgress を ProjectIndexStatusView に追加 (SPEC-1939 Phase 12)
+- **gui:** SPEC-2356 Phase 9 でサイドバーとウィンドウ操作パネルを hover-reveal 化
+- **settings:** SPEC-1933 で narrative 出力の言語選択を追加
+
+### Miscellaneous Tasks
+
+- Merge origin/develop for title summary branch
+- Merge develop for readable board posts
+
 ## [9.21.1] - 2026-05-07
 
 ### Bug Fixes

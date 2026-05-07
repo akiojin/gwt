@@ -108,6 +108,8 @@ fn format_workspace_help() -> String {
         "  --owner <text>                         Linked owner such as SPEC-2359",
         "  --agent-session <id> --current-focus <text>",
         "                                          Update one Agent focus summary",
+        "  --agent-session <id> --title-summary <text>",
+        "                                          Update the short Agent/window title",
         "",
     ]
     .join("\n")
@@ -216,7 +218,8 @@ fn format_board_help() -> String {
         "Subcommands:",
         "  show [--json]                           Print the Board snapshot",
         "  post --kind <kind> (--body <text> | -f <file>)",
-        "       [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]*",
+        "       [--title-summary <text>] [--parent <id>] [--topic <t>]*",
+        "       [--owner <n>]* [--target <id>]*",
         "                                          Append a Board entry",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",

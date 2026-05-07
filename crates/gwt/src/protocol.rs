@@ -177,6 +177,10 @@ pub enum FrontendEvent {
         branches: Vec<String>,
         delete_remote: bool,
     },
+    RunWorkspaceCleanup {
+        branch: String,
+        delete_remote: bool,
+    },
     PostBoardEntry {
         id: String,
         entry_kind: BoardEntryKind,
@@ -299,6 +303,17 @@ pub enum FrontendEvent {
     QuitMigration {
         tab_id: String,
     },
+    /// SPEC-1933 US-4: Settings > System tab opened. Backend replies with
+    /// [`BackendEvent::SystemSettings`] containing the current global
+    /// `[ai].language` value (`auto` / `en` / `ja`).
+    GetSystemSettings,
+    /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
+    /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
+    /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
+    /// [`BackendEvent::SystemSettingsError`] on failure.
+    UpdateSystemSettings {
+        language: String,
+    },
 }
 
 fn default_board_history_limit() -> usize {
@@ -367,6 +382,7 @@ pub struct ActiveWorkAgentView {
     pub display_name: String,
     pub status_category: String,
     pub current_focus: Option<String>,
+    pub title_summary: Option<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub last_board_entry_id: Option<String>,
@@ -387,6 +403,16 @@ pub struct WorkspaceJournalEntryView {
     pub next_action: Option<String>,
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
+    pub agent_title_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkCleanupCandidateView {
+    pub branch: String,
+    pub worktree_path: Option<String>,
+    pub reason: String,
+    pub default_delete_remote: bool,
+    pub remote_delete_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -405,6 +431,7 @@ pub struct ActiveWorkProjectionView {
     pub pr_number: Option<u64>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
+    pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     pub agents: Vec<ActiveWorkAgentView>,
 }
 
@@ -635,6 +662,27 @@ pub enum BackendEvent {
         message: String,
         recovery: String,
     },
+    /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
+    /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
+    /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
+    /// Settings > System > Language select.
+    SystemSettings {
+        language: String,
+    },
+    /// SPEC-1933 US-4: confirmation that
+    /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
+    /// `language` echoes the saved value so the frontend can reconcile
+    /// optimistic UI with the authoritative config state.
+    SystemSettingsUpdated {
+        language: String,
+    },
+    /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
+    /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
+    /// human-readable; the frontend surfaces it as an inline status row in
+    /// the System tab.
+    SystemSettingsError {
+        message: String,
+    },
 }
 
 /// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
@@ -803,7 +851,15 @@ mod tests {
                     next_action: Some("Run launch tests".to_string()),
                     agent_session_id: Some("session-1".to_string()),
                     agent_current_focus: Some("Run launch tests".to_string()),
+                    agent_title_summary: Some("Launch tests".to_string()),
                 }],
+                cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
+                    branch: "work/20260504-1200".to_string(),
+                    worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    reason: "workspace_done".to_string(),
+                    default_delete_remote: false,
+                    remote_delete_available: true,
+                }),
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
                     window_id: Some("tab-1::agent-1".to_string()),
@@ -811,6 +867,7 @@ mod tests {
                     display_name: "Codex".to_string(),
                     status_category: "active".to_string(),
                     current_focus: Some("Run launch tests".to_string()),
+                    title_summary: Some("Launch tests".to_string()),
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                     last_board_entry_id: Some("board-1".to_string()),
@@ -859,6 +916,13 @@ mod tests {
                 .and_then(Value::as_str),
             Some("Launching from Project Bar"),
             "Workspace Overview should receive recent summary journal entries without replaying Board history"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/cleanup_candidate/default_delete_remote")
+                .and_then(Value::as_bool),
+            Some(false),
+            "Workspace cleanup must default to local-only deletion"
         );
     }
 

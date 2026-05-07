@@ -25,6 +25,7 @@ pub mod process;
 pub mod profile_dispatch;
 pub mod protocol;
 pub mod start_work;
+pub mod system_settings;
 pub mod window_state;
 pub mod workspace;
 
@@ -87,9 +88,9 @@ pub use preset::{
     WindowPreset, WindowSurface,
 };
 pub use protocol::{
-    ActiveWorkAgentView, ActiveWorkProjectionView, AppStateView, ArrangeMode, BackendEvent,
-    BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection, FrontendEvent, ProfileEntryView,
-    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    WorkspaceJournalEntryView, WorkspaceView,
+    ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
+    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
+    FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
+    RecentProjectView, WorkspaceJournalEntryView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

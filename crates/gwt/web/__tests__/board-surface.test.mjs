@@ -14,6 +14,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const indexSource = readFileSync(resolve(here, "../index.html"), "utf8");
 
 test("Board surface requests older history with cursor-based paging", () => {
   assert.match(appSource, /function\s+requestOlderBoardEntries/);
@@ -44,6 +45,18 @@ test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /showBoardMentionNotification/);
   assert.match(appSource, /Jump to original/);
   assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
+});
+
+test("Board message body preserves multiline plaintext", () => {
+  assert.match(
+    appSource,
+    /createNode\("div",\s*"board-message-body",\s*entry\.body\)/,
+  );
+  assert.match(
+    indexSource,
+    /\.board-message-body\s*\{[\s\S]*white-space:\s*pre-wrap/,
+  );
+  assert.doesNotMatch(appSource, /board-message-body[\s\S]{0,120}\.innerHTML/);
 });
 
 test("Board audience helpers match typed self keys and produce visible labels", () => {

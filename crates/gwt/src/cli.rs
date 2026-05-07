@@ -184,6 +184,7 @@ pub enum WorkspaceCommand {
         owner: Option<String>,
         agent_session: Option<String>,
         current_focus: Option<String>,
+        title_summary: Option<String>,
     },
 }
 
@@ -297,17 +298,21 @@ pub enum ActionsCommand {
 pub enum BoardCommand {
     /// `gwtd board show [--json]`.
     Show { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>] [--mention <kind:id>]`.
-    Post {
-        kind: String,
-        body: Option<String>,
-        file: Option<String>,
-        parent: Option<String>,
-        topics: Vec<String>,
-        owners: Vec<String>,
-        targets: Vec<String>,
-        mentions: Vec<String>,
-    },
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--target <id>] [--mention <kind:id>]`.
+    Post(Box<BoardPostCommand>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardPostCommand {
+    pub kind: String,
+    pub body: Option<String>,
+    pub file: Option<String>,
+    pub title_summary: Option<String>,
+    pub parent: Option<String>,
+    pub topics: Vec<String>,
+    pub owners: Vec<String>,
+    pub targets: Vec<String>,
+    pub mentions: Vec<String>,
 }
 
 /// SPEC-1942 family enum for `gwtd index ...`.
@@ -392,7 +397,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd workspace update [--title-summary <text>] [fields] | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -910,15 +915,13 @@ mod tests {
         // gwtd board post --kind status --body x
         let cmd = parse_board_args(&[s("post"), s("--kind"), s("status"), s("--body"), s("x")])
             .expect("parse board post");
-        assert!(matches!(
-            cmd,
-            CliCommand::Board(BoardCommand::Post {
-                kind,
-                body: Some(body),
-                file: None,
-                ..
-            }) if kind == "status" && body == "x"
-        ));
+        let CliCommand::Board(BoardCommand::Post(command)) = cmd else {
+            panic!("expected board post command");
+        };
+        assert_eq!(command.kind, "status");
+        assert_eq!(command.body.as_deref(), Some("x"));
+        assert_eq!(command.file, None);
+        assert_eq!(command.title_summary, None);
 
         // gwtd index status / rebuild
         let cmd = parse_index_args(&[s("status")]).expect("parse index status");
@@ -996,6 +999,7 @@ mod tests {
                 owner: Some("SPEC-2359".to_string()),
                 agent_session: Some("session-1".to_string()),
                 current_focus: Some("Writing RED tests".to_string()),
+                title_summary: None,
             })
         );
 

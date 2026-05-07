@@ -139,6 +139,7 @@ pub fn compute_plan(
     )?;
 
     let self_match_keys = build_self_match_keys(session);
+    let language = resolve_narrative_language();
 
     Ok(Some(plan_reminder(ReminderInputs {
         event: intent_event,
@@ -149,7 +150,17 @@ pub fn compute_plan(
         recent_entries,
         reminders,
         has_recent_own_status,
+        language,
     })))
+}
+
+/// Resolve the narrative-output language from the global gwt config
+/// (SPEC-1933 FR-009 / FR-010). Falls back to `"en"` when settings
+/// cannot be loaded.
+fn resolve_narrative_language() -> String {
+    gwt_config::Settings::load()
+        .map(|settings| settings.ai.effective_language().to_string())
+        .unwrap_or_else(|_| "en".to_string())
 }
 
 #[cfg(test)]
