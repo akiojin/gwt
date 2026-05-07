@@ -691,6 +691,12 @@
         return "Window";
       }
 
+      function windowTitleTooltip(windowData) {
+        const detail = String(windowData?.dynamic_title_detail || "").trim();
+        if (detail) return detail;
+        return windowDisplayTitle(windowData);
+      }
+
       function escapeHtml(value) {
         return String(value || "")
           .replace(/&/g, "&amp;")
@@ -765,6 +771,8 @@
             </div>
             ${runtimeChip}
           `;
+          const windowListTitle = row.querySelector(".window-list-title");
+          if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
           row.addEventListener("click", () => {
             windowListOpen = false;
             renderWindowList();
@@ -7274,6 +7282,8 @@
         }
 
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
+        const titleText = element.querySelector(".title-text");
+        titleText.title = windowTitleTooltip(windowData);
         element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {

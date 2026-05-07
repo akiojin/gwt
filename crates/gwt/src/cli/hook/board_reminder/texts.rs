@@ -60,6 +60,8 @@ but do not assume gwt's AGENTS.md applies to other projects.\n\
 Launch materialization owns Git environment creation.\n\
 - Board is the coordination/history log; Workspace is the current state. When your current task, \
 summary, next action, or focus changes, update Workspace with `gwtd workspace update`.\n\
+- For Agent/window title bars, keep the short label separate from long summaries: use \
+`--title-summary '<short title>'` with `gwtd board post` or `gwtd workspace update --agent-session <id>`.\n\
 \n\
 Do NOT post tool-level reports (e.g., \"running gcc\", \"opening file X\", \"ran test Y\"). \
 Anything already visible in the diff or log does not need a Board entry.\n\
@@ -84,20 +86,20 @@ AGENTS.md is project-local. Do NOT create, switch, or delete branches/worktrees 
 manually; gwt Start Work / Launch materialization owns Git environment creation.\n\
 \n\
 Board is history; Workspace is current state. If the work summary, next action, or focus changed, \
-update Workspace with `gwtd workspace update`.\n";
+update Workspace with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.\n";
 
 // Stop reminders are emitted as `systemMessage` (user-facing) because
 // Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
 // Phrasing is therefore user-oriented rather than agent-oriented.
 pub(super) const STOP_REMINDER: &str = "Board Post Reminder (Stop): the agent is stopping. If you \
 expect a final handoff, prompt the agent to post what it completed to the shared Board \
-with `gwtd board post --kind status` before handing off. Board is history; Workspace is current \
+with `gwtd board post --kind status --title-summary '<short title>'` before handing off. Board is history; Workspace is current \
 state. If the work summary, next action, or focus changed, prompt the agent to update Workspace \
-with `gwtd workspace update`.";
+with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.";
 
 pub(super) const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the agent posted to the \
 Board recently; no additional completed-status post is required before stopping. If Workspace \
-current state changed, update it with `gwtd workspace update`.";
+current state changed, update it with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.";
 
 pub(super) const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
