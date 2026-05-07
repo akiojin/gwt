@@ -1,6 +1,19 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.21.1] - 2026-05-07
+
+### Bug Fixes
+
+- **gui:** Terminal resize後の入力停止を防ぐ
+- **gui:** Resizeキャンセル後の固着を防ぐ
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into resize fix
+- Sync develop after resize fix
+- Sync develop release metadata
+
 ## [9.21.0] - 2026-05-07
 
 ### Bug Fixes
