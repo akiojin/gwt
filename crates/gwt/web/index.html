@@ -471,7 +471,6 @@
       .workspace-window.surface-logs,
       .workspace-window.surface-mock,
       .workspace-window.surface-knowledge,
-      .workspace-window.surface-memo,
       .workspace-window.surface-profile {
         background: var(--color-surface);
       }
@@ -500,7 +499,6 @@
       .surface-logs .titlebar,
       .surface-mock .titlebar,
       .surface-knowledge .titlebar,
-      .surface-memo .titlebar,
       .surface-profile .titlebar {
         background: var(--color-surface-elevated);
         color: var(--color-text);
@@ -566,6 +564,10 @@
         font-family: var(--font-mono);
         font-size: var(--type-xs);
         letter-spacing: var(--tracking-mono);
+      }
+
+      .status-chip[hidden] {
+        display: none;
       }
 
       .surface-terminal .status-chip {
@@ -743,7 +745,6 @@
       .surface-logs .window-body,
       .surface-knowledge .window-body,
       .surface-mock .window-body,
-      .surface-memo .window-body,
       .surface-profile .window-body {
         background: var(--color-surface);
       }
@@ -1231,159 +1232,6 @@
         color: var(--color-text);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
-      }
-
-      .memo-layout {
-        flex: 1;
-        min-height: 0;
-        display: grid;
-        grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.1fr);
-      }
-
-      .memo-note-list,
-      .memo-editor-pane {
-        min-width: 0;
-        min-height: 0;
-      }
-
-      .memo-note-list {
-        overflow: auto;
-        padding: 8px 0;
-        border-right: 1px solid var(--color-border);
-      }
-
-      .memo-editor-pane {
-        overflow: auto;
-        padding: 12px;
-        display: grid;
-        align-content: start;
-        gap: 10px;
-      }
-
-      .memo-status {
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-text-muted);
-      }
-
-      .memo-status.info {
-        color: var(--color-state-active);
-      }
-
-      .memo-status.error {
-        color: var(--color-state-blocked);
-      }
-
-      .memo-note-row {
-        display: grid;
-        gap: 6px;
-        width: 100%;
-        padding: 12px;
-        border: none;
-        border-bottom: 1px solid var(--color-border);
-        background: transparent;
-        color: var(--color-text);
-        text-align: left;
-        cursor: pointer;
-      }
-
-      .memo-note-row:hover {
-        background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
-      }
-
-      .memo-note-row.selected {
-        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-      }
-
-      .memo-note-header,
-      .memo-editor-controls {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .memo-note-title {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-family: var(--font-body);
-        font-size: var(--type-sm);
-        font-weight: 600;
-        color: var(--color-text-strong);
-      }
-
-      .memo-note-chip {
-        padding: 4px 8px;
-        border-radius: var(--radius-pill);
-        background: color-mix(in oklab, var(--agent-claude) 18%, transparent);
-        color: var(--agent-claude);
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-      }
-
-      .memo-note-time,
-      .memo-note-preview,
-      .memo-empty-copy,
-      .memo-editor-meta,
-      .memo-pin-toggle {
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-text-muted);
-      }
-
-      .memo-note-preview {
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-      }
-
-      .memo-empty {
-        display: grid;
-        gap: 10px;
-        padding: 16px 12px;
-      }
-
-      .memo-pin-toggle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-
-      .memo-title-input,
-      .memo-body-input {
-        width: 100%;
-        padding: 10px;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--color-border-strong);
-        background: var(--color-surface);
-        font: inherit;
-        font-family: var(--font-body);
-        color: var(--color-text);
-      }
-      .memo-title-input::placeholder,
-      .memo-body-input::placeholder {
-        color: var(--color-text-muted);
-      }
-      .memo-title-input:focus,
-      .memo-body-input:focus {
-        outline: none;
-        border-color: var(--color-focus-ring);
-      }
-
-      .memo-title-input {
-        min-height: 36px;
-        font-size: var(--type-md);
-        font-weight: 600;
-      }
-
-      .memo-body-input {
-        min-height: 220px;
-        resize: vertical;
-        line-height: 1.5;
       }
 
       .profile-root {
@@ -3490,10 +3338,6 @@
               <button class="preset-button" data-preset="settings">
                 <strong>Settings</strong>
                 <span>Manage custom agents and launch presets</span>
-              </button>
-              <button class="preset-button" data-preset="memo">
-                <strong>Memo</strong>
-                <span>Open a notes surface</span>
               </button>
               <button class="preset-button" data-preset="profile">
                 <strong>Profile</strong>
