@@ -604,6 +604,24 @@ body::after {
   letter-spacing: var(--tracking-mono);
 }
 
+.workspace-pr-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.workspace-pr-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.workspace-pr-link:hover,
+.workspace-pr-link:focus-visible {
+  color: var(--color-text);
+}
+
 .workspace-overview-list {
   display: flex;
   flex-direction: column;

@@ -17,12 +17,37 @@ use crate::cli::{
 };
 
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
+    if let Some(branch) = current_branch_name(repo_path)? {
+        let output = gwt_core::process::hidden_command("gh")
+            .args([
+                "pr",
+                "list",
+                "--head",
+                &branch,
+                "--state",
+                "all",
+                "--json",
+                "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+                "--limit",
+                "100",
+            ])
+            .current_dir(repo_path)
+            .output()?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let prs = gwt_git::pr_status::parse_pr_list_json(&stdout)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            return Ok(gwt_git::pr_status::latest_pr_by_created_at(prs));
+        }
+    }
+
     let output = gwt_core::process::hidden_command("gh")
         .args([
             "pr",
             "view",
             "--json",
-            "number,title,state,url,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+            "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
         ])
         .current_dir(repo_path)
         .output()?;
@@ -44,6 +69,18 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
     let pr = gwt_git::pr_status::parse_pr_status_json(&stdout)
         .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(Some(pr))
+}
+
+fn current_branch_name(repo_path: &std::path::Path) -> io::Result<Option<String>> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_path)
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!branch.is_empty()).then_some(branch))
 }
 
 pub fn create_pr_via_gh(

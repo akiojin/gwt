@@ -1129,7 +1129,8 @@
         const meta = createNode("div", "workspace-overview-meta");
         appendMeta(meta, projection.status_category ? agentStatusLabel(projection.status_category) : "");
         appendMeta(meta, projection.owner);
-        appendMeta(meta, projection.pr_number ? `PR #${projection.pr_number}` : "");
+        const overviewPr = createWorkspacePrMeta(projection);
+        if (overviewPr) meta.appendChild(overviewPr);
         const agentsTotal =
           Number(projection.active_agents || 0) + Number(projection.blocked_agents || 0);
         appendMeta(meta, agentsTotal ? `${agentsTotal} agent${agentsTotal === 1 ? "" : "s"}` : "");
@@ -1661,6 +1662,23 @@
         container.appendChild(createNode("span", "", value));
       }
 
+      function createWorkspacePrMeta(projection) {
+        if (!projection?.pr_number) return null;
+        const item = createNode("span", "workspace-pr-meta");
+        const label = `PR #${projection.pr_number}`;
+        if (projection.pr_url) {
+          const link = createNode("a", "workspace-pr-link", label);
+          link.href = projection.pr_url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          item.appendChild(link);
+        } else {
+          item.appendChild(createNode("span", "", label));
+        }
+        appendMeta(item, projection.pr_state);
+        return item;
+      }
+
       function coordinationKindLabel(kind) {
         switch (String(kind || "").toLowerCase()) {
           case "blocked":
@@ -1736,7 +1754,8 @@
         );
         const meta = createNode("div", "op-work-meta");
         appendMeta(meta, activeWorkProjection.owner);
-        appendMeta(meta, activeWorkProjection.pr_number ? `PR #${activeWorkProjection.pr_number}` : "");
+        const activePr = createWorkspacePrMeta(activeWorkProjection);
+        if (activePr) meta.appendChild(activePr);
         activeWorkSummary.appendChild(meta);
         activeWorkSummary.appendChild(
           createNode(

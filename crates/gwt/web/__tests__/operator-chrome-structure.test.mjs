@@ -334,6 +334,34 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
 });
 
+test("Active Work and Workspace Overview render PR metadata as links", () => {
+  assert.match(
+    appSource,
+    /function\s+createWorkspacePrMeta\(/,
+    "expected a shared PR metadata renderer instead of duplicating string-only PR labels",
+  );
+  assert.match(
+    appSource,
+    /createWorkspacePrMeta\(projection\)/,
+    "expected Workspace Overview to render the saved PR link/state from the projection",
+  );
+  assert.match(
+    appSource,
+    /createWorkspacePrMeta\(activeWorkProjection\)/,
+    "expected Active Work sidebar to render the live PR link/state from the projection",
+  );
+  assert.match(
+    appSource,
+    /pr_url[\s\S]+href[\s\S]+PR #/,
+    "expected PR metadata to use the backend-provided URL for the link target",
+  );
+  assert.match(
+    appSource,
+    /pr_state[\s\S]+appendMeta/,
+    "expected PR state to be displayed next to the PR link",
+  );
+});
+
 test("Workspace Overview exposes user-confirmed cleanup for completed workspaces", () => {
   assert.match(
     appSource,

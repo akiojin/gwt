@@ -28,13 +28,13 @@ use std::{env, fs, process::ExitCode};
 
 fn pr_json(number: &str, title: &str) -> String {
     format!(
-        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"createdAt\":\"2026-05-07T08:00:00Z\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"APPROVED\"}}"
     )
 }
 
 fn behind_pr_json(number: &str, title: &str) -> String {
     format!(
-        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"BEHIND\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"REVIEW_REQUIRED\"}}"
+        "{{\"number\":{number},\"title\":\"{title}\",\"state\":\"OPEN\",\"url\":\"https://github.com/akiojin/gwt/pull/{number}\",\"createdAt\":\"2026-05-07T08:00:00Z\",\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"BEHIND\",\"statusCheckRollup\":[{{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}}],\"reviewDecision\":\"REVIEW_REQUIRED\"}}"
     )
 }
 
@@ -53,6 +53,17 @@ fn main() -> ExitCode {
     let state_file = env::var("GWT_FAKE_GH_STATE_FILE").ok();
 
     match args.as_slice() {
+        [pr, list, ..] if pr == "pr" && list == "list" => {
+            if mode == "multi-pr-current" {
+                println!("{}", r#"[
+{"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN"},
+{"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED"}
+]"#);
+            } else {
+                println!("[{}]", pr_json("12", "Current PR"));
+            }
+            return ExitCode::SUCCESS;
+        }
         [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
             if mode == "no-current-pr" {
                 eprintln!("no pull requests found for branch");
@@ -256,6 +267,7 @@ pub fn sample_pr_status() -> gwt_git::PrStatus {
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://github.com/akiojin/gwt/pull/128".to_string(),
+        created_at: None,
         ci_status: "SUCCESS".to_string(),
         mergeable: "MERGEABLE".to_string(),
         merge_state_status: "CLEAN".to_string(),
