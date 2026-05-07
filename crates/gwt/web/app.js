@@ -6,7 +6,10 @@
       import { createFocusTrap } from "/focus-trap.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
+        clientPointFromDragEvent,
+        detachGeometryFromClientPoint,
         findTitlebarDockTarget,
+        resolveDragReleasePoint,
       } from "/window-docking.js";
       import {
         applyBoardMentionNotificationFocus,
@@ -520,19 +523,27 @@
         return Boolean(windowData.tab_group_active);
       }
 
-      function detachGeometryFromPointer(event, windowData) {
-        const bounds = visibleBounds();
-        const width = windowData?.geometry?.width || 720;
-        const height = windowData?.geometry?.height || 420;
+      function trackWindowTabDragPoint(event) {
+        if (!windowTabDragState) return;
+        const point = clientPointFromDragEvent(event, canvas.getBoundingClientRect());
+        if (point) {
+          windowTabDragState.lastClientPoint = point;
+        }
+      }
+
+      function detachGeometryFromTabDrag(event, drag, windowData) {
         const canvasRect = canvas.getBoundingClientRect();
-        const worldX = bounds.x + (event.clientX - canvasRect.left) / viewport.zoom;
-        const worldY = bounds.y + (event.clientY - canvasRect.top) / viewport.zoom;
-        return {
-          x: worldX - 32,
-          y: worldY - 19,
-          width,
-          height,
-        };
+        const releasePoint = resolveDragReleasePoint(
+          event,
+          drag?.lastClientPoint,
+          canvasRect,
+        );
+        return detachGeometryFromClientPoint(
+          releasePoint,
+          windowData,
+          canvasRect,
+          viewport,
+        );
       }
 
       function pointerWorldPoint(event) {
@@ -2045,22 +2056,33 @@
             send({ kind: "activate_window_tab", id: tab.id });
           });
           tabButton.addEventListener("dragstart", (event) => {
-            windowTabDragState = { id: tab.id, docked: false };
+            windowTabDragState = {
+              id: tab.id,
+              docked: false,
+              lastClientPoint: clientPointFromDragEvent(
+                event,
+                canvas.getBoundingClientRect(),
+              ),
+            };
             event.dataTransfer?.setData("text/plain", tab.id);
             if (event.dataTransfer) {
               event.dataTransfer.effectAllowed = "move";
             }
           });
+          tabButton.addEventListener("drag", trackWindowTabDragPoint);
           tabButton.addEventListener("dragend", (event) => {
             const drag = windowTabDragState;
+            trackWindowTabDragPoint(event);
             windowTabDragState = null;
             if (!drag || drag.docked) return;
             const draggedWindow = workspaceWindowById(drag.id);
             if (!draggedWindow?.tab_group_id) return;
+            const geometry = detachGeometryFromTabDrag(event, drag, draggedWindow);
+            if (!geometry) return;
             send({
               kind: "detach_window_tab",
               id: drag.id,
-              geometry: detachGeometryFromPointer(event, draggedWindow),
+              geometry,
             });
           });
           const closeButton = document.createElement("button");
@@ -7062,6 +7084,7 @@
             if (!windowTabDragState || windowTabDragState.id === windowData.id) {
               return;
             }
+            trackWindowTabDragPoint(event);
             event.preventDefault();
             if (event.dataTransfer) {
               event.dataTransfer.dropEffect = "move";
@@ -7072,6 +7095,7 @@
               return;
             }
             event.preventDefault();
+            trackWindowTabDragPoint(event);
             windowTabDragState.docked = true;
             send({
               kind: "dock_window_tab",
@@ -8025,6 +8049,8 @@
           scheduleTerminalResizeFit(resizeState.id);
         }
       });
+
+      window.addEventListener("dragover", trackWindowTabDragPoint);
 
       window.addEventListener("pointerup", (event) => {
         if (panState && panState.pointerId === event.pointerId) {

@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  detachGeometryFromClientPoint,
   TITLEBAR_DOCK_HIT_HEIGHT,
   findTitlebarDockTarget,
+  resolveDragReleasePoint,
 } from "../window-docking.js";
 
 test("titlebar docking only targets another visible window titlebar", () => {
@@ -91,4 +93,59 @@ test("titlebar docking ignores invalid pointer points", () => {
   assert.equal(findTitlebarDockTarget(windows, null, "source"), null);
   assert.equal(findTitlebarDockTarget(windows, { x: Number.NaN, y: 112 }, "source"), null);
   assert.equal(findTitlebarDockTarget(windows, { x: 130, y: Number.POSITIVE_INFINITY }, "source"), null);
+});
+
+test("tab detach geometry uses the latest valid drag point in canvas world coordinates", () => {
+  const canvasRect = { left: 20, top: 10, right: 820, bottom: 610, width: 800, height: 600 };
+  const viewport = { x: -240, y: -120, zoom: 2 };
+  const draggedWindow = {
+    id: "agent-1",
+    geometry: { x: 40, y: 40, width: 720, height: 420 },
+  };
+
+  const releasePoint = resolveDragReleasePoint(
+    { clientX: 0, clientY: 0 },
+    { x: 220, y: 110 },
+    canvasRect,
+  );
+  const geometry = detachGeometryFromClientPoint(
+    releasePoint,
+    draggedWindow,
+    canvasRect,
+    viewport,
+  );
+
+  assert.deepEqual(releasePoint, { x: 220, y: 110 });
+  assert.deepEqual(geometry, {
+    x: 188,
+    y: 91,
+    width: 720,
+    height: 420,
+  });
+});
+
+test("tab detach release point accepts a valid dragend coordinate before fallback", () => {
+  const canvasRect = { left: 20, top: 10, right: 820, bottom: 610, width: 800, height: 600 };
+
+  assert.deepEqual(
+    resolveDragReleasePoint(
+      { clientX: 320, clientY: 210 },
+      { x: 220, y: 110 },
+      canvasRect,
+    ),
+    { x: 320, y: 210 },
+  );
+});
+
+test("tab detach release point treats dragend zero coordinates as missing when a fallback exists", () => {
+  const canvasRect = { left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600 };
+
+  assert.deepEqual(
+    resolveDragReleasePoint(
+      { clientX: 0, clientY: 0 },
+      { x: 220, y: 110 },
+      canvasRect,
+    ),
+    { x: 220, y: 110 },
+  );
 });
