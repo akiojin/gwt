@@ -18,6 +18,7 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
         title: "Start payment cleanup".to_string(),
         status_category: WorkspaceStatusCategory::Active,
         status_text: "Refining the backend change".to_string(),
+        summary: Some("Payment cleanup is in progress.".to_string()),
         owner: Some("SPEC-2359".to_string()),
         next_action: Some("Run focused tests".to_string()),
         agents: vec![WorkspaceAgentSummary {

@@ -36,6 +36,7 @@ mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
 pub mod update;
+mod workspace;
 
 use std::io::{self};
 
@@ -152,6 +153,8 @@ pub enum CliCommand {
     Update(UpdateCommand),
     /// `gwtd daemon ...` — long-running runtime daemon (SPEC-2077).
     Daemon(DaemonCommand),
+    /// `gwtd workspace ...` — Workspace projection and summary updates.
+    Workspace(WorkspaceCommand),
 }
 
 /// SPEC-2077 family enum for `gwtd daemon ...`.
@@ -166,6 +169,22 @@ pub enum DaemonCommand {
     /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
     /// fan-out pipeline.
     Subscribe { channels: Vec<String> },
+}
+
+/// SPEC-2359 family enum for `gwtd workspace ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceCommand {
+    /// `gwtd workspace update ...` — update Workspace current projection and journal.
+    Update {
+        title: Option<String>,
+        status: Option<String>,
+        status_text: Option<String>,
+        summary: Option<String>,
+        next_action: Option<String>,
+        owner: Option<String>,
+        agent_session: Option<String>,
+        current_focus: Option<String>,
+    },
 }
 
 /// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
@@ -278,7 +297,7 @@ pub enum ActionsCommand {
 pub enum BoardCommand {
     /// `gwtd board show [--json]`.
     Show { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>]`.
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--target <id>] [--mention <kind:id>]`.
     Post {
         kind: String,
         body: Option<String>,
@@ -287,6 +306,7 @@ pub enum BoardCommand {
         topics: Vec<String>,
         owners: Vec<String>,
         targets: Vec<String>,
+        mentions: Vec<String>,
     },
 }
 
@@ -372,7 +392,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -406,6 +426,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "plan"
                     | "build"
                     | "daemon"
+                    | "workspace"
             )
         })
         .unwrap_or(false)
@@ -441,6 +462,11 @@ pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// Parse an argv slice into a `gwtd daemon ...` [`CliCommand`] (SPEC-2077).
 pub fn parse_daemon_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     daemon::parse(args).map(CliCommand::Daemon)
+}
+
+/// Parse an argv slice into a `gwtd workspace ...` [`CliCommand`].
+pub fn parse_workspace_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    workspace::parse(args).map(CliCommand::Workspace)
 }
 
 fn expect_flag(arg: Option<&String>, expected: &'static str) -> Result<(), CliParseError> {
@@ -603,6 +629,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
             std::process::exit(update::run_internal_run_installer(&rest));
         }
         CliCommand::Daemon(inner) => daemon::run(env, inner, &mut out)?,
+        CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)
@@ -832,7 +859,7 @@ mod tests {
     fn cli_command_family_split_round_trip_parses() {
         use crate::cli::{
             ActionsCommand, BoardCommand, CliCommand, DiscussCommand, HookCommand, IndexCommand,
-            IssueCommand, PrCommand, UpdateCommand,
+            IssueCommand, PrCommand, UpdateCommand, WorkspaceCommand,
         };
 
         fn s(value: &str) -> String {
@@ -936,6 +963,41 @@ mod tests {
             cmd,
             CliCommand::Build(SkillStateAction::Start { spec: 1942 })
         ));
+
+        // gwtd workspace update --status-text ... --summary ...
+        let cmd = parse_workspace_args(&[
+            s("update"),
+            s("--title"),
+            s("Fix Active Work"),
+            s("--status"),
+            s("active"),
+            s("--status-text"),
+            s("Cleaning projection state"),
+            s("--summary"),
+            s("Workspace state is updated by the Agent"),
+            s("--next-action"),
+            s("Run regression tests"),
+            s("--owner"),
+            s("SPEC-2359"),
+            s("--agent-session"),
+            s("session-1"),
+            s("--current-focus"),
+            s("Writing RED tests"),
+        ])
+        .expect("parse workspace update");
+        assert_eq!(
+            cmd,
+            CliCommand::Workspace(WorkspaceCommand::Update {
+                title: Some("Fix Active Work".to_string()),
+                status: Some("active".to_string()),
+                status_text: Some("Cleaning projection state".to_string()),
+                summary: Some("Workspace state is updated by the Agent".to_string()),
+                next_action: Some("Run regression tests".to_string()),
+                owner: Some("SPEC-2359".to_string()),
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some("Writing RED tests".to_string()),
+            })
+        );
 
         // `update --check` is parsed inline by `dispatch`. Round-trip it via
         // the public CliCommand builder to keep the family contract pinned.

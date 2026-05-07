@@ -186,6 +186,8 @@ pub enum FrontendEvent {
         owners: Vec<String>,
         #[serde(default)]
         targets: Vec<String>,
+        #[serde(default)]
+        mentions: Vec<gwt_core::coordination::BoardMention>,
     },
     CreateMemoNote {
         id: String,
@@ -374,11 +376,26 @@ pub struct ActiveWorkAgentView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceJournalEntryView {
+    pub id: String,
+    pub updated_at: String,
+    pub title: Option<String>,
+    pub status_category: Option<String>,
+    pub status_text: Option<String>,
+    pub summary: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub agent_current_focus: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
     pub title: String,
     pub status_category: String,
     pub status_text: String,
+    pub summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub active_agents: usize,
@@ -387,6 +404,7 @@ pub struct ActiveWorkProjectionView {
     pub worktree_path: Option<String>,
     pub pr_number: Option<u64>,
     pub board_refs: Vec<String>,
+    pub journal_entries: Vec<WorkspaceJournalEntryView>,
     pub agents: Vec<ActiveWorkAgentView>,
 }
 
@@ -653,7 +671,9 @@ pub enum KnowledgePhaseUpdateResult {
 #[cfg(test)]
 mod tests {
     use gwt_core::{
-        coordination::{AuthorKind, BoardEntry, BoardEntryKind},
+        coordination::{
+            AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
+        },
         logging::{LogEvent, LogLevel},
         notes::MemoNote,
     };
@@ -763,6 +783,7 @@ mod tests {
                 title: "Implement Start Work".to_string(),
                 status_category: "active".to_string(),
                 status_text: "Launching from Project Bar".to_string(),
+                summary: Some("Launching from Project Bar".to_string()),
                 owner: Some("SPEC-2359".to_string()),
                 next_action: Some("Run launch tests".to_string()),
                 active_agents: 1,
@@ -771,6 +792,18 @@ mod tests {
                 worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                 pr_number: None,
                 board_refs: vec!["board-1".to_string()],
+                journal_entries: vec![super::WorkspaceJournalEntryView {
+                    id: "journal-1".to_string(),
+                    updated_at: "2026-05-04T12:01:00Z".to_string(),
+                    title: Some("Implement Start Work".to_string()),
+                    status_category: Some("active".to_string()),
+                    status_text: Some("Launching from Project Bar".to_string()),
+                    summary: Some("Launching from Project Bar".to_string()),
+                    owner: Some("SPEC-2359".to_string()),
+                    next_action: Some("Run launch tests".to_string()),
+                    agent_session_id: Some("session-1".to_string()),
+                    agent_current_focus: Some("Run launch tests".to_string()),
+                }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
                     window_id: Some("tab-1::agent-1".to_string()),
@@ -819,6 +852,13 @@ mod tests {
                 .pointer("/projection/agents/0/coordination_scope")
                 .and_then(Value::as_str),
             Some("SPEC-2359 / start-work")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/journal_entries/0/summary")
+                .and_then(Value::as_str),
+            Some("Launching from Project Bar"),
+            "Workspace Overview should receive recent summary journal entries without replaying Board history"
         );
     }
 
@@ -887,6 +927,62 @@ mod tests {
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
         );
+    }
+
+    #[test]
+    fn board_entries_serializes_typed_mentions_contract() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Question,
+            "Can you verify this?",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_mention(
+            BoardMention::new(BoardMentionTargetKind::User, "akiojin").with_label("Akio"),
+        );
+        let event = BackendEvent::BoardEntries {
+            id: "board-1".to_string(),
+            entries: vec![entry],
+            has_more_before: false,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize board entries");
+
+        assert_eq!(value["entries"][0]["mentions"][0]["target_kind"], "user");
+        assert_eq!(value["entries"][0]["mentions"][0]["target"], "akiojin");
+        assert_eq!(value["entries"][0]["mentions"][0]["label"], "Akio");
+    }
+
+    #[test]
+    fn post_board_entry_deserializes_typed_mentions() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "post_board_entry",
+            "id": "board-1",
+            "entry_kind": "question",
+            "body": "Can you verify this?",
+            "parent_id": null,
+            "topics": [],
+            "owners": [],
+            "mentions": [
+                {"target_kind": "user", "target": "akiojin", "label": "Akio"},
+                {"target_kind": "agent", "target": "codex"}
+            ]
+        }))
+        .expect("deserialize post board entry");
+
+        assert!(matches!(
+            frontend,
+            FrontendEvent::PostBoardEntry { mentions, .. }
+                if mentions.len() == 2
+                    && mentions[0].target_kind == BoardMentionTargetKind::User
+                    && mentions[0].target == "akiojin"
+                    && mentions[1].target_kind == BoardMentionTargetKind::Agent
+                    && mentions[1].target == "codex"
+        ));
     }
 
     #[test]
