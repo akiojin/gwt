@@ -3,7 +3,7 @@ use super::*;
 pub fn resolve_launch_worktree_request(
     repo_path: &Path,
     branch_name: Option<&str>,
-    base_branch: Option<&str>,
+    base_branch: &mut Option<String>,
     working_dir: &mut Option<PathBuf>,
     env_vars: &mut HashMap<String, String>,
 ) -> Result<(), String> {
@@ -57,10 +57,10 @@ pub fn resolve_launch_worktree_request(
         return Ok(());
     }
 
-    let base_branch = base_branch
-        .map(str::to_string)
+    let mut effective_base_branch = base_branch
+        .clone()
         .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string());
-    let remote_base_ref = origin_remote_ref(&base_branch);
+    let mut remote_base_ref = origin_remote_ref(&effective_base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
     let has_local_branch = local_branch_exists(&main_repo_path, &branch_name)?;
 
@@ -75,9 +75,26 @@ pub fn resolve_launch_worktree_request(
                 format!("failed to verify remote base branch {remote_base_ref}: {err}")
             })?
         {
-            return Err(format!(
-                "remote base branch does not exist: {remote_base_ref}"
-            ));
+            if let Some(fallback_base_branch) =
+                gwt::start_work::refallback_start_work_base_branch_with(
+                    &branch_name,
+                    &effective_base_branch,
+                    |candidate| {
+                        let candidate_ref = origin_remote_ref(candidate);
+                        manager.remote_branch_exists(&candidate_ref).map_err(|err| {
+                            format!("failed to verify remote base branch {candidate_ref}: {err}")
+                        })
+                    },
+                )?
+            {
+                effective_base_branch = fallback_base_branch;
+                remote_base_ref = origin_remote_ref(&effective_base_branch);
+                *base_branch = Some(effective_base_branch.clone());
+            } else {
+                return Err(format!(
+                    "remote base branch does not exist: {remote_base_ref}"
+                ));
+            }
         }
 
         if !manager
@@ -125,26 +142,32 @@ pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
+    let mut base_branch = config.base_branch.clone();
     resolve_launch_worktree_request(
         repo_path,
         config.branch.as_deref(),
-        config.base_branch.as_deref(),
+        &mut base_branch,
         &mut config.working_dir,
         &mut config.env_vars,
-    )
+    )?;
+    config.base_branch = base_branch;
+    Ok(())
 }
 
 pub fn resolve_shell_launch_worktree(
     repo_path: &Path,
     config: &mut ShellLaunchConfig,
 ) -> Result<(), String> {
+    let mut base_branch = config.base_branch.clone();
     resolve_launch_worktree_request(
         repo_path,
         config.branch.as_deref(),
-        config.base_branch.as_deref(),
+        &mut base_branch,
         &mut config.working_dir,
         &mut config.env_vars,
-    )
+    )?;
+    config.base_branch = base_branch;
+    Ok(())
 }
 
 pub fn build_shell_process_launch(

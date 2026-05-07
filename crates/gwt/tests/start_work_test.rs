@@ -63,6 +63,11 @@ fn init_git_clone_with_origin(repo: &Path) {
     run_git(repo, &["config", "user.email", "codex@example.com"]);
 }
 
+fn delete_origin_branch(repo: &Path, branch: &str) {
+    let origin = repo.parent().expect("repo parent").join("origin.git");
+    run_git(&origin, &["branch", "-D", branch]);
+}
+
 #[test]
 fn start_work_launch_confirmation_materializes_reserved_work_branch_and_worktree() {
     let temp = tempdir().expect("tempdir");
@@ -114,4 +119,37 @@ fn start_work_launch_confirmation_materializes_reserved_work_branch_and_worktree
         "Start Work branch must not inherit origin/HEAD content when HEAD points to main"
     );
     assert!(git_output(&repo, &["for-each-ref", "refs/heads/work"]).contains(&reserved_branch));
+}
+
+#[test]
+fn start_work_launch_confirmation_falls_back_when_develop_tracking_ref_is_stale() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    delete_origin_branch(&repo, "develop");
+
+    let base_branch =
+        gwt::start_work::resolve_start_work_base_branch(&repo).expect("start work base branch");
+    let reserved_branch = "work/stale-develop";
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch(reserved_branch)
+        .base_branch(&base_branch)
+        .build();
+
+    gwt_agent::resolve_launch_worktree(&repo, &mut config).expect("materialize launch worktree");
+
+    let worktree = config.working_dir.expect("materialized worktree");
+    assert_eq!(base_branch, "origin/develop");
+    assert_eq!(
+        git_output(&worktree, &["branch", "--show-current"]),
+        reserved_branch
+    );
+    assert!(
+        worktree.join("main-only.txt").is_file(),
+        "stale origin/develop should fall back to origin/HEAD"
+    );
+    assert!(
+        !worktree.join("develop-only.txt").exists(),
+        "deleted upstream develop must not be used as the Start Work base"
+    );
 }
