@@ -377,6 +377,39 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_image_paste_sends_backend_event_without_text_fallback() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function installTerminalImagePasteHandlers"),
+            "expected terminal image paste handler bootstrap in embedded html",
+        );
+        assert!(
+            html.contains("terminalRoot.addEventListener(\"paste\""),
+            "expected paste listener to be installed on the terminal root",
+        );
+        assert!(
+            html.contains("event.clipboardData?.items"),
+            "expected paste handler to inspect clipboard items",
+        );
+        assert!(
+            html.contains("SUPPORTED_IMAGE_PASTE_MIME_TYPES"),
+            "expected paste handler to constrain supported image MIME types",
+        );
+        assert!(
+            html.contains("event.preventDefault();") && html.contains("event.stopPropagation();"),
+            "expected image paste to suppress duplicate text paste injection",
+        );
+        assert!(
+            html.contains("kind: \"paste_image\"")
+                && html.contains("data_base64")
+                && html.contains("mime_type")
+                && html.contains("filename"),
+            "expected image paste backend event with payload, MIME type, and filename",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
         let streaming_write = regex::Regex::new(
