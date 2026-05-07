@@ -58,6 +58,7 @@ gix = { version = "0.80", default-features = false, features = [
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
 
 # Configuration
 serde = { version = "1", features = ["derive"] }
