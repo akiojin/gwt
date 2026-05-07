@@ -8,6 +8,15 @@
         TITLEBAR_DOCK_HIT_HEIGHT,
         findTitlebarDockTarget,
       } from "/window-docking.js";
+      import {
+        applyBoardMentionNotificationFocus,
+        boardEntryAudienceLabels,
+        boardEntryMentionsSelf,
+        boardEntryPreview,
+        findBoardEntry,
+        mentionsForBoardSubmit,
+        visibleBoardEntries,
+      } from "/board-surface.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -61,6 +70,10 @@
       const activeWorkCount = document.getElementById("op-active-work-count");
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
+      const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
+      const projectWorkspaceOverviewButton = document.getElementById(
+        "project-workspace-overview-button",
+      );
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -967,6 +980,8 @@
       let kanbanDrawerFocusReturn = null;
       let kanbanDrawerFocusTrapRelease = null;
       let kanbanDrawerActiveContext = null;
+      let workspaceOverviewFocusReturn = null;
+      let workspaceOverviewFocusTrapRelease = null;
       function openKanbanDrawer(context) {
         const drawer = document.getElementById("kanban-drawer");
         const backdrop = document.getElementById("kanban-drawer-backdrop");
@@ -1010,6 +1025,162 @@
         }
         kanbanDrawerFocusReturn = null;
         kanbanDrawerActiveContext = null;
+      }
+
+      function openWorkspaceOverview() {
+        const drawer = document.getElementById("workspace-overview-drawer");
+        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        workspaceOverviewFocusReturn = document.activeElement;
+        backdrop.hidden = false;
+        backdrop.dataset.open = "true";
+        drawer.hidden = false;
+        drawer.dataset.open = "true";
+        renderWorkspaceOverview();
+        try { drawer.focus({ preventScroll: true }); }
+        catch { drawer.focus(); }
+        if (typeof workspaceOverviewFocusTrapRelease === "function") {
+          workspaceOverviewFocusTrapRelease();
+        }
+        workspaceOverviewFocusTrapRelease = createFocusTrap(drawer, { document });
+      }
+
+      function closeWorkspaceOverview() {
+        const drawer = document.getElementById("workspace-overview-drawer");
+        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        if (drawer.dataset.open !== "true") return;
+        drawer.dataset.open = "false";
+        backdrop.dataset.open = "false";
+        backdrop.hidden = true;
+        drawer.hidden = true;
+        if (typeof workspaceOverviewFocusTrapRelease === "function") {
+          workspaceOverviewFocusTrapRelease();
+          workspaceOverviewFocusTrapRelease = null;
+        }
+        if (
+          workspaceOverviewFocusReturn &&
+          typeof workspaceOverviewFocusReturn.focus === "function"
+        ) {
+          try { workspaceOverviewFocusReturn.focus({ preventScroll: true }); }
+          catch { workspaceOverviewFocusReturn.focus(); }
+        }
+        workspaceOverviewFocusReturn = null;
+      }
+
+      function renderWorkspaceOverview() {
+        const titleEl = document.getElementById("workspace-overview-title");
+        const body = document.getElementById("workspace-overview-body");
+        const footer = document.getElementById("workspace-overview-footer");
+        if (!body || !titleEl || !footer) return;
+
+        const projection = activeWorkProjection || {};
+        const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
+        titleEl.textContent = title;
+        body.innerHTML = "";
+        footer.innerHTML = "";
+
+        const summaryCard = createNode("section", "workspace-overview-card");
+        summaryCard.appendChild(createNode("div", "workspace-overview-title", title));
+        const meta = createNode("div", "workspace-overview-meta");
+        appendMeta(meta, projection.status_category ? agentStatusLabel(projection.status_category) : "");
+        appendMeta(meta, projection.owner);
+        appendMeta(meta, projection.pr_number ? `PR #${projection.pr_number}` : "");
+        const agentsTotal =
+          Number(projection.active_agents || 0) + Number(projection.blocked_agents || 0);
+        appendMeta(meta, agentsTotal ? `${agentsTotal} agent${agentsTotal === 1 ? "" : "s"}` : "");
+        summaryCard.appendChild(meta);
+        summaryCard.appendChild(
+          createNode(
+            "div",
+            "workspace-overview-summary",
+            projection.summary || projection.status_text || "No Workspace summary yet",
+          ),
+        );
+        if (projection.next_action) {
+          summaryCard.appendChild(
+            createNode("div", "workspace-overview-next", projection.next_action),
+          );
+        }
+        body.appendChild(summaryCard);
+
+        const agents = Array.isArray(projection.agents) ? projection.agents : [];
+        const agentSection = createNode("section", "workspace-overview-section");
+        agentSection.appendChild(createNode("div", "workspace-overview-heading", "Current Agents"));
+        const agentList = createNode("div", "workspace-overview-list");
+        if (agents.length === 0) {
+          agentList.appendChild(createNode("div", "workspace-overview-empty", "No live Agents"));
+        } else {
+          for (const agent of agents) {
+            const item = createNode("article", "workspace-journal-entry");
+            item.appendChild(
+              createNode(
+                "div",
+                "workspace-journal-summary",
+                agent.current_focus || agent.display_name || agent.agent_id || "Agent",
+              ),
+            );
+            const itemMeta = createNode("div", "workspace-journal-meta");
+            appendMeta(itemMeta, agent.display_name || agent.agent_id);
+            appendMeta(itemMeta, agentStatusLabel(agent.status_category));
+            appendMeta(itemMeta, agent.coordination_scope);
+            item.appendChild(itemMeta);
+            agentList.appendChild(item);
+          }
+        }
+        agentSection.appendChild(agentList);
+        body.appendChild(agentSection);
+
+        const journalEntries = Array.isArray(projection.journal_entries)
+          ? projection.journal_entries
+          : [];
+        const journalSection = createNode("section", "workspace-overview-section");
+        journalSection.appendChild(createNode("div", "workspace-overview-heading", "Recent Summary"));
+        const journalList = createNode("div", "workspace-overview-list");
+        if (journalEntries.length === 0) {
+          journalList.appendChild(
+            createNode("div", "workspace-overview-empty", "No Workspace journal entries"),
+          );
+        } else {
+          for (const entry of journalEntries) {
+            const item = createNode("article", "workspace-journal-entry");
+            item.appendChild(
+              createNode(
+                "div",
+                "workspace-journal-summary",
+                entry.summary ||
+                  entry.status_text ||
+                  entry.next_action ||
+                  entry.title ||
+                  "Workspace update",
+              ),
+            );
+            const itemMeta = createNode("div", "workspace-journal-meta");
+            appendMeta(itemMeta, entry.updated_at);
+            appendMeta(itemMeta, entry.owner);
+            appendMeta(itemMeta, entry.next_action ? "Next action" : "");
+            item.appendChild(itemMeta);
+            journalList.appendChild(item);
+          }
+        }
+        journalSection.appendChild(journalList);
+        body.appendChild(journalSection);
+
+        const boardRefs = Array.isArray(projection.board_refs) ? projection.board_refs : [];
+        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
+        if (latestBoardRef) {
+          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
+          openBoard.type = "button";
+          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
+          footer.appendChild(openBoard);
+        }
+        const startWork = createNode("button", "op-work-action", "Start Work");
+        startWork.type = "button";
+        startWork.addEventListener("click", () => {
+          closeWorkspaceOverview();
+          send({ kind: "open_start_work" });
+        });
+        footer.appendChild(startWork);
       }
 
       function renderKanbanDrawerBody() {
@@ -3791,73 +3962,6 @@
         });
       }
 
-      function boardMentionKind(mention) {
-        return String(mention?.target_kind || mention?.targetKind || "").toLowerCase();
-      }
-
-      function boardMentionLabel(mention) {
-        const label = String(mention?.label || "").trim();
-        if (label) return label;
-        const target = String(mention?.target || "").trim();
-        if (!target) return "Unknown";
-        return target;
-      }
-
-      function boardEntryMentionsUser(entry) {
-        return (entry.mentions || []).some((mention) => boardMentionKind(mention) === "user");
-      }
-
-      function boardEntryAudienceLabels(entry) {
-        const mentions = entry.mentions || [];
-        if (mentions.length > 0) {
-          return mentions.map((mention) => {
-            const kind = boardMentionKind(mention);
-            const label = boardMentionLabel(mention);
-            if (kind === "user") return "For you";
-            if (kind === "agent") return `To: ${label}`;
-            if (kind === "session") return `Session: ${label}`;
-            if (kind === "branch") return `Branch: ${label}`;
-            return `To: ${label}`;
-          });
-        }
-        const targets = entry.target_owners || [];
-        if (targets.length > 0) {
-          return targets.map((target) => `To: ${target}`);
-        }
-        return ["Broadcast"];
-      }
-
-      function boardEntryPreview(entry) {
-        const body = String(entry?.body || "").replace(/\s+/g, " ").trim();
-        if (!body) return "Empty entry";
-        return body.length > 96 ? `${body.slice(0, 96)}...` : body;
-      }
-
-      function findBoardEntry(state, entryId) {
-        return (state.entries || []).find((entry) => entry.id === entryId) || null;
-      }
-
-      function mentionForReplyParent(parentEntry) {
-        if (!parentEntry) return null;
-        const authorKind = String(parentEntry.author_kind || "").toLowerCase();
-        if (authorKind === "user") {
-          return { target_kind: "user", target: "you", label: parentEntry.author || "You" };
-        }
-        if (authorKind === "agent") {
-          const target = parentEntry.origin_agent_id || parentEntry.author;
-          if (target) {
-            return { target_kind: "agent", target, label: parentEntry.author || target };
-          }
-        }
-        return null;
-      }
-
-      function mentionsForBoardSubmit(state) {
-        const parent = findBoardEntry(state, state.replyParentId);
-        const mention = mentionForReplyParent(parent);
-        return mention ? [mention] : [];
-      }
-
       function showBoardMentionNotification(entry, windowId) {
         if (!entry?.id) return;
         let toast = document.getElementById("board-mention-toast");
@@ -3871,8 +3975,7 @@
         toast.textContent = `Board reply for you - ${boardEntryPreview(entry)}`;
         toast.onclick = () => {
           const state = ensureBoardState(windowId);
-          state.audienceFilter = "all";
-          state.forYouUnread = 0;
+          applyBoardMentionNotificationFocus(state, entry.id);
           focusBoardEntry(entry.id);
           toast.remove();
         };
@@ -3989,9 +4092,7 @@
           });
         }
 
-        const visibleEntries = state.audienceFilter === "for_you"
-          ? state.entries.filter(boardEntryMentionsUser)
-          : state.entries;
+        const visibleEntries = visibleBoardEntries(state);
 
         timeline.innerHTML = "";
         if (state.hasMoreBefore) {
@@ -4038,7 +4139,7 @@
             card.tabIndex = -1;
             focusTarget = card;
           }
-          if (boardEntryMentionsUser(entry)) {
+          if (boardEntryMentionsSelf(entry)) {
             card.classList.add("for-you");
             card.setAttribute("aria-label", "Board post addressed to you");
           }
@@ -7199,6 +7300,7 @@
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
+            renderWorkspaceOverview();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -7330,7 +7432,7 @@
               (entry) =>
                 Boolean(entry.id) &&
                 !existingEntryIds.has(entry.id) &&
-                boardEntryMentionsUser(entry),
+                boardEntryMentionsSelf(entry),
             );
             const pendingSubmit = state.pendingSubmit;
             const completedSubmit = Boolean(pendingSubmit)
@@ -8210,6 +8312,24 @@
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
+      const workspaceOverviewCloseButton = document.getElementById(
+        "workspace-overview-close",
+      );
+      if (workspaceOverviewCloseButton) {
+        workspaceOverviewCloseButton.addEventListener("click", closeWorkspaceOverview);
+      }
+      const workspaceOverviewBackdrop = document.getElementById(
+        "workspace-overview-drawer-backdrop",
+      );
+      if (workspaceOverviewBackdrop) {
+        workspaceOverviewBackdrop.addEventListener("click", closeWorkspaceOverview);
+      }
+      if (workspaceOverviewEntry) {
+        workspaceOverviewEntry.addEventListener("click", openWorkspaceOverview);
+      }
+      if (projectWorkspaceOverviewButton) {
+        projectWorkspaceOverviewButton.addEventListener("click", openWorkspaceOverview);
+      }
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -8261,6 +8381,15 @@
         const kanbanDrawer = document.getElementById("kanban-drawer");
         if (kanbanDrawer && kanbanDrawer.dataset.open === "true") {
           closeKanbanDrawer();
+          event.preventDefault();
+          return;
+        }
+        const workspaceOverviewDrawer = document.getElementById("workspace-overview-drawer");
+        if (
+          workspaceOverviewDrawer &&
+          workspaceOverviewDrawer.dataset.open === "true"
+        ) {
+          closeWorkspaceOverview();
           event.preventDefault();
           return;
         }

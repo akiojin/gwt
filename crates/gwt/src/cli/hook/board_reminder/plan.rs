@@ -288,6 +288,54 @@ mod tests {
     }
 
     #[test]
+    fn plan_reminders_include_workspace_update_guidance() {
+        let session_start = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let user_prompt = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: true,
+        });
+        let stop = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::Stop,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+
+        for text in [
+            additional_context(&session_start.output),
+            additional_context(&user_prompt.output),
+            system_message(&stop.output),
+        ] {
+            assert!(text.contains("gwtd workspace update"));
+            assert!(text.contains("Board"));
+            assert!(text.contains("Workspace"));
+        }
+        assert!(
+            !matches!(stop.output, HookOutput::StopBlock { .. }),
+            "Workspace update reminder must not block Stop"
+        );
+    }
+
+    #[test]
     fn plan_user_prompt_submit_short_reminder_mentions_coordination() {
         let plan = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
