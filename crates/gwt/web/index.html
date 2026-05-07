@@ -482,6 +482,7 @@
         justify-content: space-between;
         gap: 12px;
         height: 38px;
+        min-width: 0;
         padding: 0 12px;
         user-select: none;
         cursor: grab;
@@ -517,11 +518,17 @@
       .title {
         display: flex;
         align-items: center;
+        flex: 1 1 auto;
         gap: 10px;
         min-width: 0;
+        overflow: hidden;
       }
 
       .title-text {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         font-size: var(--type-sm);
         font-weight: 600;
         white-space: nowrap;
@@ -530,6 +537,7 @@
       .window-role-badge {
         display: inline-flex;
         align-items: center;
+        flex-shrink: 0;
         min-height: 20px;
         padding: 2px 7px;
         border: 1px solid var(--color-border);
@@ -550,6 +558,7 @@
       .status-chip {
         display: inline-flex;
         align-items: center;
+        flex-shrink: 0;
         gap: 6px;
         padding: 4px 8px;
         border-radius: var(--radius-pill);
@@ -598,6 +607,7 @@
       .window-actions {
         display: flex;
         align-items: center;
+        flex-shrink: 0;
         gap: 8px;
       }
 

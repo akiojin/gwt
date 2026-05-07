@@ -13,6 +13,7 @@ const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), 
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+const inlineStyle = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || "";
 
 function cssRemVar(source, name) {
   const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
@@ -173,6 +174,34 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     appSource,
     /window-list-role/,
     "expected window list rows to include a role badge",
+  );
+});
+
+test("Agent window titles are truncated with long focus detail kept as tooltip", () => {
+  assert.match(
+    appSource,
+    /function\s+windowTitleTooltip\(windowData\)/,
+    "expected a shared helper for long title detail tooltip",
+  );
+  assert.match(
+    appSource,
+    /titleText\.title\s*=\s*windowTitleTooltip\(windowData\)/,
+    "expected titlebar to keep long focus detail in a tooltip",
+  );
+  assert.match(
+    inlineStyle,
+    /\.title\s*\{[\s\S]*flex:\s*1[\s\S]*min-width:\s*0[\s\S]*overflow:\s*hidden/,
+    "title row must shrink instead of pushing window controls",
+  );
+  assert.match(
+    inlineStyle,
+    /\.title-text\s*\{[\s\S]*overflow:\s*hidden[\s\S]*text-overflow:\s*ellipsis[\s\S]*white-space:\s*nowrap/,
+    "title text must use one-line ellipsis",
+  );
+  assert.match(
+    inlineStyle,
+    /\.window-actions\s*\{[\s\S]*flex-shrink:\s*0/,
+    "window controls must not shrink or overlap with long titles",
   );
 });
 

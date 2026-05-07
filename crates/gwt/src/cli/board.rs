@@ -9,7 +9,7 @@ use gwt_core::{
 };
 use gwt_github::SpecOpsError;
 
-use crate::cli::{BoardCommand, CliEnv, CliParseError};
+use crate::cli::{BoardCommand, BoardPostCommand, CliEnv, CliParseError};
 
 pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     let mut it = args.iter().peekable();
@@ -48,16 +48,18 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        BoardCommand::Post {
-            kind,
-            body,
-            file,
-            parent,
-            topics,
-            owners,
-            targets,
-            mentions,
-        } => {
+        BoardCommand::Post(command) => {
+            let BoardPostCommand {
+                kind,
+                body,
+                file,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+            } = *command;
             let body = match (body, file) {
                 (Some(body), None) => body,
                 (None, Some(file)) => env.read_file(&file).map_err(io_as_spec_ops_error)?,
@@ -82,6 +84,9 @@ pub(super) fn run<E: CliEnv>(
                 topics,
                 owners,
             );
+            if let Some(title_summary) = title_summary {
+                entry = entry.with_title_summary(title_summary);
+            }
             if let Some(session) = current_session.as_ref() {
                 if !session.branch.trim().is_empty() {
                     entry = entry.with_origin_branch(session.branch.clone());
@@ -154,6 +159,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut kind: Option<String> = None;
     let mut body: Option<String> = None;
     let mut file: Option<String> = None;
+    let mut title_summary: Option<String> = None;
     let mut parent: Option<String> = None;
     let mut topics = Vec::new();
     let mut owners = Vec::new();
@@ -183,6 +189,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                     return Err(CliParseError::MissingFlag("-f"));
                 }
                 file = Some(args[i].clone());
+            }
+            "--title-summary" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--title-summary"));
+                }
+                title_summary = Some(args[i].clone());
             }
             "--parent" => {
                 i += 1;
@@ -224,16 +237,17 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         i += 1;
     }
 
-    Ok(BoardCommand::Post {
+    Ok(BoardCommand::Post(Box::new(BoardPostCommand {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
+        title_summary,
         parent,
         topics,
         owners,
         targets,
         mentions,
-    })
+    })))
 }
 
 fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
@@ -337,16 +351,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             cmd,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "request".into(),
                 body: Some("hello".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec!["coordination".into()],
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
-            }
+            }))
         );
     }
 
@@ -366,16 +381,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             cmd,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "claim".into(),
                 body: Some("I claim feature/foo".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/foo".into()],
                 mentions: vec![],
-            }
+            }))
         );
     }
 
@@ -396,16 +412,48 @@ mod tests {
 
         assert_eq!(
             cmd,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "question".into(),
                 body: Some("Can you confirm this?".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
                 targets: vec![],
                 mentions: vec!["user:akiojin".into(), "agent:codex".into()],
-            }
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_accepts_title_summary() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("Implementing the title-summary contract across several subsystems"),
+            s("--title-summary"),
+            s("Title summary contract"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some(
+                    "Implementing the title-summary contract across several subsystems".into()
+                ),
+                file: None,
+                title_summary: Some("Title summary contract".into()),
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+            }))
         );
     }
 
@@ -417,16 +465,17 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "claim".into(),
                 body: Some("taking the migration".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/x".into()],
                 mentions: vec![],
-            },
+            })),
             &mut out,
         )
         .unwrap();
@@ -448,16 +497,17 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "question".into(),
                 body: Some("Can you confirm this?".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
                 targets: vec![],
                 mentions: vec!["user:akiojin".into(), "agent:codex".into()],
-            },
+            })),
             &mut out,
         )
         .unwrap();
@@ -493,16 +543,17 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "status".into(),
                 body: Some("Implement current focus title sync".into()),
                 file: None,
+                title_summary: Some("Current focus title sync".into()),
                 parent: None,
                 topics: vec![],
                 owners: vec!["2359".into()],
                 targets: vec![],
                 mentions: vec![],
-            },
+            })),
             &mut out,
         )
         .unwrap();
@@ -512,6 +563,10 @@ mod tests {
         let entry = &snapshot.board.entries[0];
         assert_eq!(entry.author_kind, AuthorKind::Agent);
         assert_eq!(entry.author, "Codex");
+        assert_eq!(
+            entry.title_summary.as_deref(),
+            Some("Current focus title sync")
+        );
         assert_eq!(
             entry.origin_session_id.as_deref(),
             Some(session.id.as_str())
@@ -534,16 +589,17 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "request".into(),
                 body: Some("Need a board".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec!["coordination".into()],
                 owners: vec!["1974".into()],
                 targets: vec![],
                 mentions: vec![],
-            },
+            })),
             &mut out,
         )
         .unwrap();

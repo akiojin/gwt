@@ -367,6 +367,7 @@ pub struct ActiveWorkAgentView {
     pub display_name: String,
     pub status_category: String,
     pub current_focus: Option<String>,
+    pub title_summary: Option<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub last_board_entry_id: Option<String>,
@@ -387,6 +388,7 @@ pub struct WorkspaceJournalEntryView {
     pub next_action: Option<String>,
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
+    pub agent_title_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -803,6 +805,7 @@ mod tests {
                     next_action: Some("Run launch tests".to_string()),
                     agent_session_id: Some("session-1".to_string()),
                     agent_current_focus: Some("Run launch tests".to_string()),
+                    agent_title_summary: Some("Launch tests".to_string()),
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
@@ -811,6 +814,7 @@ mod tests {
                     display_name: "Codex".to_string(),
                     status_category: "active".to_string(),
                     current_focus: Some("Run launch tests".to_string()),
+                    title_summary: Some("Launch tests".to_string()),
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                     last_board_entry_id: Some("board-1".to_string()),

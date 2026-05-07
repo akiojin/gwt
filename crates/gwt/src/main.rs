@@ -742,6 +742,7 @@ mod tests {
             persist: true,
             purpose_title: None,
             dynamic_title: None,
+            dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
             tab_group_id: None,
