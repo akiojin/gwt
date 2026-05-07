@@ -1,4 +1,5 @@
 use super::*;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Initial delay after GUI launch before the first update check (FR-001 / FR-035).
@@ -180,87 +181,179 @@ fn handle_poll_outcome(
     }
 }
 
+trait UpdateApplyOps {
+    fn prepare_update(
+        &mut self,
+        latest: &str,
+        asset_url: &str,
+    ) -> Result<gwt_core::update::PreparedPayload, String>;
+    fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String>;
+    fn make_helper_copy(&mut self, current_exe: &Path, latest: &str) -> Result<PathBuf, String>;
+    fn spawn_internal_apply_update(
+        &mut self,
+        helper_exe: &Path,
+        old_pid: u32,
+        current_exe: &Path,
+        payload: &Path,
+        args_file: &Path,
+    ) -> Result<(), String>;
+    fn spawn_internal_run_installer(
+        &mut self,
+        helper_exe: &Path,
+        old_pid: u32,
+        current_exe: &Path,
+        installer: &Path,
+        kind: gwt_core::update::InstallerKind,
+        args_file: &Path,
+    ) -> Result<(), String>;
+}
+
+struct RealUpdateApplyOps {
+    mgr: gwt_core::update::UpdateManager,
+}
+
+impl Default for RealUpdateApplyOps {
+    fn default() -> Self {
+        Self {
+            mgr: gwt_core::update::UpdateManager::new(),
+        }
+    }
+}
+
+impl UpdateApplyOps for RealUpdateApplyOps {
+    fn prepare_update(
+        &mut self,
+        latest: &str,
+        asset_url: &str,
+    ) -> Result<gwt_core::update::PreparedPayload, String> {
+        self.mgr.prepare_update(latest, asset_url)
+    }
+
+    fn write_restart_args_file(&mut self, path: &Path, args: Vec<String>) -> Result<(), String> {
+        self.mgr.write_restart_args_file(path, args)
+    }
+
+    fn make_helper_copy(&mut self, current_exe: &Path, latest: &str) -> Result<PathBuf, String> {
+        self.mgr.make_helper_copy(current_exe, latest)
+    }
+
+    fn spawn_internal_apply_update(
+        &mut self,
+        helper_exe: &Path,
+        old_pid: u32,
+        current_exe: &Path,
+        payload: &Path,
+        args_file: &Path,
+    ) -> Result<(), String> {
+        self.mgr
+            .spawn_internal_apply_update(helper_exe, old_pid, current_exe, payload, args_file)
+    }
+
+    fn spawn_internal_run_installer(
+        &mut self,
+        helper_exe: &Path,
+        old_pid: u32,
+        current_exe: &Path,
+        installer: &Path,
+        kind: gwt_core::update::InstallerKind,
+        args_file: &Path,
+    ) -> Result<(), String> {
+        self.mgr.spawn_internal_run_installer(
+            helper_exe,
+            old_pid,
+            current_exe,
+            installer,
+            kind,
+            args_file,
+        )
+    }
+}
+
 /// Apply an already-detected update state from the GUI notification path.
 ///
 /// The startup poll has already selected the platform-specific asset. Reusing
 /// that state avoids a second network/cache check that can make a clicked toast
 /// appear to do nothing when the re-check does not return `Available`.
-pub fn apply_update_state_and_exit(state: gwt_core::update::UpdateState) {
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    apply_update_state_with_current_exe_and_exit(state, current_exe);
+pub fn apply_update_state_and_exit(state: gwt_core::update::UpdateState) -> Result<(), String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
+    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    let mut ops = RealUpdateApplyOps::default();
+    start_update_apply_with_ops(
+        &mut ops,
+        state,
+        &current_exe,
+        restart_args,
+        std::process::id(),
+        cfg!(windows),
+    )?;
+    std::process::exit(0);
 }
 
-fn apply_update_state_with_current_exe_and_exit(
+fn start_update_apply_with_ops(
+    ops: &mut impl UpdateApplyOps,
     state: gwt_core::update::UpdateState,
-    current_exe: std::path::PathBuf,
-) {
+    current_exe: &Path,
+    restart_args: Vec<String>,
+    old_pid: u32,
+    use_helper_copy: bool,
+) -> Result<(), String> {
     let (latest, asset_url) = match state {
         gwt_core::update::UpdateState::Available {
             latest,
             asset_url: Some(asset_url),
             ..
         } => (latest, asset_url),
-        _ => return,
+        gwt_core::update::UpdateState::Available { .. } => {
+            return Err("No applicable update asset is available for this platform.".to_string());
+        }
+        gwt_core::update::UpdateState::UpToDate { .. } => {
+            return Err("No pending update is available.".to_string());
+        }
+        gwt_core::update::UpdateState::Failed { message, .. } => {
+            return Err(format!("Update check failed: {message}"));
+        }
     };
-    apply_update_payload_and_exit(&latest, &asset_url, current_exe);
-}
-
-fn apply_update_payload_and_exit(latest: &str, asset_url: &str, current_exe: std::path::PathBuf) {
-    let mgr = gwt_core::update::UpdateManager::new();
-    let payload = match mgr.prepare_update(latest, asset_url) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let args_file = match &payload {
+    let payload = ops
+        .prepare_update(&latest, &asset_url)
+        .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
+    let args_file = (match &payload {
         gwt_core::update::PreparedPayload::PortableBinary { path }
         | gwt_core::update::PreparedPayload::Installer { path, .. } => {
             path.parent().map(|dir| dir.join("restart-args.json"))
         }
-    };
-    let Some(args_file) = args_file else {
-        return;
-    };
-    let restart_args: Vec<String> = std::env::args().skip(1).collect();
-    if mgr
-        .write_restart_args_file(&args_file, restart_args)
-        .is_err()
-    {
-        return;
-    }
-    let helper_exe = if cfg!(windows) {
-        match mgr.make_helper_copy(&current_exe, latest) {
-            Ok(path) => path,
-            Err(_) => return,
-        }
+    })
+    .ok_or_else(|| "Failed to determine update restart args path.".to_string())?;
+    ops.write_restart_args_file(&args_file, restart_args)
+        .map_err(|err| format!("Failed to write update restart args: {err}"))?;
+    let helper_exe = if use_helper_copy {
+        ops.make_helper_copy(current_exe, &latest)
+            .map_err(|err| format!("Failed to prepare update helper: {err}"))?
     } else {
-        current_exe.clone()
+        current_exe.to_path_buf()
     };
-    let old_pid = std::process::id();
-    let result = match payload {
-        gwt_core::update::PreparedPayload::PortableBinary { path } => {
-            mgr.spawn_internal_apply_update(&helper_exe, old_pid, &current_exe, &path, &args_file)
-        }
-        gwt_core::update::PreparedPayload::Installer { path, kind } => mgr
+    match payload {
+        gwt_core::update::PreparedPayload::PortableBinary { path } => ops
+            .spawn_internal_apply_update(&helper_exe, old_pid, current_exe, &path, &args_file)
+            .map_err(|err| format!("Failed to start update helper: {err}")),
+        gwt_core::update::PreparedPayload::Installer { path, kind } => ops
             .spawn_internal_run_installer(
                 &helper_exe,
                 old_pid,
-                &current_exe,
+                current_exe,
                 &path,
                 kind,
                 &args_file,
-            ),
-    };
-    if result.is_ok() {
-        std::process::exit(0);
+            )
+            .map_err(|err| format!("Failed to start update installer: {err}")),
     }
 }
 
 #[cfg(test)]
 mod poll_state_tests {
-    use super::PollState;
+    use super::{start_update_apply_with_ops, PollState, UpdateApplyOps};
+    use gwt_core::update::{InstallerKind, PreparedPayload, UpdateState};
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     const FIVE_MIN: Duration = Duration::from_secs(5 * 60);
@@ -333,5 +426,157 @@ mod poll_state_tests {
         let (should, next) = state.on_success_available("9.19.0");
         assert!(should);
         assert_eq!(next, FIVE_MIN);
+    }
+
+    #[derive(Debug)]
+    struct FakeUpdateApplyOps {
+        prepare_result: Result<PreparedPayload, String>,
+        restart_args_result: Result<(), String>,
+        helper_copy_result: Result<PathBuf, String>,
+        portable_spawn_result: Result<(), String>,
+        installer_spawn_result: Result<(), String>,
+        wrote_restart_args: bool,
+        spawned_portable: bool,
+        spawned_installer: bool,
+    }
+
+    impl FakeUpdateApplyOps {
+        fn portable(payload: PathBuf) -> Self {
+            Self {
+                prepare_result: Ok(PreparedPayload::PortableBinary { path: payload }),
+                restart_args_result: Ok(()),
+                helper_copy_result: Ok(PathBuf::from("/tmp/gwt-helper")),
+                portable_spawn_result: Ok(()),
+                installer_spawn_result: Ok(()),
+                wrote_restart_args: false,
+                spawned_portable: false,
+                spawned_installer: false,
+            }
+        }
+    }
+
+    impl UpdateApplyOps for FakeUpdateApplyOps {
+        fn prepare_update(
+            &mut self,
+            _latest: &str,
+            _asset_url: &str,
+        ) -> Result<PreparedPayload, String> {
+            self.prepare_result.clone()
+        }
+
+        fn write_restart_args_file(
+            &mut self,
+            _path: &Path,
+            _args: Vec<String>,
+        ) -> Result<(), String> {
+            self.wrote_restart_args = true;
+            self.restart_args_result.clone()
+        }
+
+        fn make_helper_copy(
+            &mut self,
+            _current_exe: &Path,
+            _latest: &str,
+        ) -> Result<PathBuf, String> {
+            self.helper_copy_result.clone()
+        }
+
+        fn spawn_internal_apply_update(
+            &mut self,
+            _helper_exe: &Path,
+            _old_pid: u32,
+            _current_exe: &Path,
+            _payload: &Path,
+            _args_file: &Path,
+        ) -> Result<(), String> {
+            self.spawned_portable = true;
+            self.portable_spawn_result.clone()
+        }
+
+        fn spawn_internal_run_installer(
+            &mut self,
+            _helper_exe: &Path,
+            _old_pid: u32,
+            _current_exe: &Path,
+            _installer: &Path,
+            _kind: InstallerKind,
+            _args_file: &Path,
+        ) -> Result<(), String> {
+            self.spawned_installer = true;
+            self.installer_spawn_result.clone()
+        }
+    }
+
+    fn available_update_state() -> UpdateState {
+        UpdateState::Available {
+            current: "9.20.3".to_string(),
+            latest: "9.20.4".to_string(),
+            release_url: "https://example.invalid/releases/v9.20.4".to_string(),
+            asset_url: Some("https://example.invalid/gwt-macos-universal.dmg".to_string()),
+            checked_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn update_apply_start_reports_prepare_update_failure() {
+        let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
+        ops.prepare_result = Err("download failed".to_string());
+
+        let err = start_update_apply_with_ops(
+            &mut ops,
+            available_update_state(),
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+        )
+        .expect_err("prepare failure should be returned to the caller");
+
+        assert!(err.contains("download failed"));
+        assert!(!ops.wrote_restart_args);
+        assert!(!ops.spawned_portable);
+        assert!(!ops.spawned_installer);
+    }
+
+    #[test]
+    fn update_apply_start_reports_restart_args_failure() {
+        let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
+        ops.restart_args_result = Err("restart args write failed".to_string());
+
+        let err = start_update_apply_with_ops(
+            &mut ops,
+            available_update_state(),
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            vec!["--project".to_string(), "/repo".to_string()],
+            42,
+            false,
+        )
+        .expect_err("restart args failure should be returned to the caller");
+
+        assert!(err.contains("restart args write failed"));
+        assert!(ops.wrote_restart_args);
+        assert!(!ops.spawned_portable);
+        assert!(!ops.spawned_installer);
+    }
+
+    #[test]
+    fn update_apply_start_reports_spawn_failure() {
+        let mut ops = FakeUpdateApplyOps::portable(PathBuf::from("/tmp/gwt-update"));
+        ops.portable_spawn_result = Err("helper spawn failed".to_string());
+
+        let err = start_update_apply_with_ops(
+            &mut ops,
+            available_update_state(),
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+        )
+        .expect_err("spawn failure should be returned to the caller");
+
+        assert!(err.contains("helper spawn failed"));
+        assert!(ops.wrote_restart_args);
+        assert!(ops.spawned_portable);
+        assert!(!ops.spawned_installer);
     }
 }

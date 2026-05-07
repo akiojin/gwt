@@ -11,6 +11,22 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
+const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+
+function cssRemVar(source, name) {
+  const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
+  assert.ok(match, `missing typography token: ${name}`);
+  return Number(match[1]);
+}
+
+function terminalOptionNumber(name) {
+  const runtime = appSource.match(/new\s+Terminal\(\{\s*([\s\S]*?)\s*\}\);/);
+  assert.ok(runtime, "expected xterm Terminal constructor options");
+  const match = runtime[1].match(new RegExp(`${name}:\\s*([0-9.]+)`));
+  assert.ok(match, `missing terminal option: ${name}`);
+  return Number(match[1]);
+}
 
 // SPEC-2356 — extract every @media block matching the supplied condition,
 // using brace-depth tracking so nested rules don't truncate the body.
@@ -210,7 +226,7 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
-test("Active Work sidebar only focuses live Agent windows and falls back to Quick Start", () => {
+test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
     /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
@@ -218,8 +234,18 @@ test("Active Work sidebar only focuses live Agent windows and falls back to Quic
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkQuickStart\(\)[\s\S]+Quick Start[\s\S]+kind:\s*"open_start_work"/,
-    "expected no-Agent Active Work state to offer Quick Start through Start Work",
+    /const\s+activeWorkSection\s*=\s*document\.getElementById\("op-active-work"\)/,
+    "expected Active Work visibility to be controlled at the section level",
+  );
+  assert.match(
+    appSource,
+    /function\s+setActiveWorkSectionVisible\(visible\)[\s\S]+activeWorkSection\.hidden\s*=\s*!visible/,
+    "expected no-Agent Active Work state to hide the entire section instead of leaving stale work UI",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(agentCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
+    "expected no focusable Agent windows to remove the Active Work sidebar section",
   );
   assert.match(
     appSource,
@@ -240,6 +266,41 @@ test("Active Work sidebar only focuses live Agent windows and falls back to Quic
     appSource,
     /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
     "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
+  );
+});
+
+test("Workspace Overview is separate from live-only Active Work", () => {
+  assert.ok(
+    document.querySelector("#op-workspace-overview-entry"),
+    "expected Sidebar to expose a Workspace Overview entry even when Active Work is hidden",
+  );
+  assert.ok(
+    document.querySelector("#project-workspace-overview-button"),
+    "expected Project Bar to expose Workspace Overview",
+  );
+  assert.ok(
+    document.querySelector("#workspace-overview-drawer"),
+    "expected Workspace Overview to use a drawer surface",
+  );
+  assert.match(
+    appSource,
+    /function\s+openWorkspaceOverview\(/,
+    "expected a shared opener for Sidebar and Project Bar",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderWorkspaceOverview\(\)[\s\S]+journal_entries/,
+    "expected Overview to render Workspace journal entries from active_work_projection",
+  );
+  assert.match(
+    appSource,
+    /op-workspace-overview-entry[\s\S]+openWorkspaceOverview/,
+    "expected Sidebar Workspace Overview entry to open the overview",
+  );
+  assert.match(
+    appSource,
+    /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
+    "expected Project Bar Workspace Overview button to open the same overview",
   );
 });
 
@@ -317,6 +378,21 @@ test("font preload hints exist for Mona/Hubot/JetBrains", () => {
   for (const expected of ["MonaSans.woff2", "HubotSans-Bold.woff2", "JetBrainsMono.woff2"]) {
     assert.ok(preloads.some((h) => h.endsWith(`/assets/fonts/${expected}`)), `missing preload: ${expected}`);
   }
+});
+
+test("developer readability typography keeps working text above minimum sizes", () => {
+  assert.ok(cssRemVar(typographySource, "--type-xs") >= 0.75, "--type-xs must be at least 12px");
+  assert.ok(cssRemVar(typographySource, "--type-sm") >= 0.875, "--type-sm must be at least 14px");
+  assert.match(
+    typographySource,
+    /\.t-mono\s*\{[\s\S]*?line-height:\s*1\.(?:4|[5-9])[\s\S]*?\}/,
+    "expected mono utility line-height to stay readable",
+  );
+  assert.doesNotMatch(
+    typographySource,
+    /\.(?:t-body|t-mono)\s*\{[\s\S]*?font-stretch:\s*75%/,
+    "body and mono working text must not use condensed display typography",
+  );
 });
 
 test("Mission Briefing has accessible role and live region", () => {
@@ -456,6 +532,36 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
   assert.match(
     appSource,
+    /function\s+titlebarDockTargetAt\(/,
+    "expected ungrouped windows to find dock targets from titlebar drag",
+  );
+  assert.match(
+    windowDockingSource,
+    /export\s+const\s+TITLEBAR_DOCK_HIT_HEIGHT\s*=\s*38/,
+    "expected dock hit-testing to be constrained to the titlebar height",
+  );
+  assert.match(
+    windowDockingSource,
+    /point\.y\s*<=\s*geometry\.y\s*\+\s*titlebarHeight/,
+    "expected body/canvas drops to avoid the dock path",
+  );
+  assert.match(
+    appSource,
+    /function\s+updateTitlebarDockPreview\(/,
+    "expected titlebar drag to update dock target hover preview",
+  );
+  assert.match(
+    appSource,
+    /function\s+clearTitlebarDockPreview\(/,
+    "expected dock target preview to be cleared after drop or cancel",
+  );
+  assert.match(
+    appSource,
+    /dragState\.dockTargetId[\s\S]+kind:\s*"dock_window_tab"[\s\S]+target_id:\s*dragState\.dockTargetId/,
+    "expected titlebar drag pointerup to dock only when a titlebar target was hit",
+  );
+  assert.match(
+    appSource,
     /kind:\s*"dock_window_tab"/,
     "expected tab drop to send dock_window_tab",
   );
@@ -468,6 +574,11 @@ test("workspace windows expose draggable tab docking affordances", () => {
     appSource,
     /kind:\s*"activate_window_tab"/,
     "expected tab click to activate a grouped window tab",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s+\.titlebar/,
+    "expected dockable titlebar targets to have a visible preview state",
   );
 });
 
@@ -521,6 +632,11 @@ test("xterm content stays on the dark Operator palette across app theme changes"
     /registerXtermThemeAdapter/,
     "theme toggles must not swap xterm content away from the dark palette",
   );
+});
+
+test("xterm developer readability defaults use larger font metrics", () => {
+  assert.ok(terminalOptionNumber("fontSize") >= 14, "xterm fontSize must be at least 14px");
+  assert.ok(terminalOptionNumber("lineHeight") >= 1.25, "xterm lineHeight must be at least 1.25");
 });
 
 test("operator-shell wires sidebar collapse hotkey and Mission Briefing early dismiss", () => {
@@ -1325,4 +1441,76 @@ test("agent cards style all four Living Telemetry states (active / blocked / idl
   // The chip labels also need the matching foreground tint per state.
   assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\.op-agent-state\s*\{[^}]*--color-state-idle/);
   assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\.op-agent-state\s*\{[^}]*--color-state-done/);
+});
+
+test("terminal surface body stays on the dark Operator canvas across themes (FR-013)", () => {
+  // SPEC-2356 FR-013 改定: terminal window の body 領域 (.window-body と
+  // terminal-root padding) は xterm の Dark Operator background と連続させ
+  // るため、Light テーマでも Dark Operator background に固定する。Light で
+  // --color-canvas (#e9edf0) が見えると xterm 周囲に「外枠」が現れて二重
+  // 枠になるので、ここで結合してしまうのが正解。
+  const surfaceTerminalRule =
+    /\.surface-terminal\s+\.window-body\s*\{[^}]*background:\s*([^;]+);/;
+  const match = html.match(surfaceTerminalRule);
+  assert.ok(match, "expected .surface-terminal .window-body rule with explicit background");
+  const value = match[1].trim();
+  assert.doesNotMatch(
+    value,
+    /var\(\s*--color-canvas\s*\)/,
+    `.surface-terminal .window-body must not follow --color-canvas (got "${value}")`,
+  );
+  assert.doesNotMatch(
+    value,
+    /var\(\s*--color-surface(?:-elevated)?\s*\)/,
+    `.surface-terminal .window-body must not follow surface tokens (got "${value}")`,
+  );
+  // Accept either an explicit dark hex (Dark Operator canvas) or a dedicated
+  // dark canvas token.  We codify the value contract so the regression cannot
+  // silently flip back to a light token.
+  const usesDarkOperatorBackground =
+    /^#0a0d12$/i.test(value) || /var\(\s*--color-canvas-dark\s*\)/.test(value);
+  assert.ok(
+    usesDarkOperatorBackground,
+    `.surface-terminal .window-body must use Dark Operator canvas (#0a0d12 or --color-canvas-dark); got "${value}"`,
+  );
+});
+
+test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
+  // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
+  // Logs / File Tree / Branches / Knowledge / Mock / Memo / Profile) must
+  // keep tracking the active theme via --color-surface so tabbed windows
+  // still flip body color when a non-terminal tab is selected.
+  const otherSurfaceRule =
+    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|memo|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+  assert.match(
+    html,
+    otherSurfaceRule,
+    "non-terminal surface bodies must continue to use var(--color-surface)",
+  );
+});
+
+test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
+  // SPEC-2356 FR-030 / US-4 AS-11: WebView2 / Chromium の `<button>` UA
+  // default は border + grey background を出す。`.op-layer` は indicator
+  // dot + label color + token-driven focus ring のみで状態を表現するため、
+  // base rule で UA chrome を解除する必要がある。
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const layerRule = css.match(/\.op-layer\s*\{([^}]*)\}/);
+  assert.ok(layerRule, "expected base .op-layer rule in components.css");
+  const body = layerRule[1];
+  assert.match(
+    body,
+    /appearance:\s*none/,
+    ".op-layer must declare appearance:none to disable UA <button> chrome",
+  );
+  assert.match(
+    body,
+    /border:\s*0/,
+    ".op-layer must zero out border so WebView2 stops drawing the default frame",
+  );
+  assert.match(
+    body,
+    /background:\s*transparent/,
+    ".op-layer must clear background so the sidebar surface shows through",
+  );
 });

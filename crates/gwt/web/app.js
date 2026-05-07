@@ -4,6 +4,19 @@
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import {
+        TITLEBAR_DOCK_HIT_HEIGHT,
+        findTitlebarDockTarget,
+      } from "/window-docking.js";
+      import {
+        applyBoardMentionNotificationFocus,
+        boardEntryAudienceLabels,
+        boardEntryMentionsSelf,
+        boardEntryPreview,
+        findBoardEntry,
+        mentionsForBoardSubmit,
+        visibleBoardEntries,
+      } from "/board-surface.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -53,9 +66,14 @@
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
       const worldGrid = document.getElementById("canvas-world-grid");
+      const activeWorkSection = document.getElementById("op-active-work");
       const activeWorkCount = document.getElementById("op-active-work-count");
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
+      const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
+      const projectWorkspaceOverviewButton = document.getElementById(
+        "project-workspace-overview-button",
+      );
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -521,6 +539,53 @@
         };
       }
 
+      function pointerWorldPoint(event) {
+        const bounds = visibleBounds();
+        const canvasRect = canvas.getBoundingClientRect();
+        return {
+          x: bounds.x + (event.clientX - canvasRect.left) / viewport.zoom,
+          y: bounds.y + (event.clientY - canvasRect.top) / viewport.zoom,
+        };
+      }
+
+      function titlebarDockTargetAt(event, sourceId) {
+        const point = pointerWorldPoint(event);
+        return findTitlebarDockTarget(
+          activeWorkspace().windows || [],
+          point,
+          sourceId,
+          TITLEBAR_DOCK_HIT_HEIGHT,
+        );
+      }
+
+      function clearTitlebarDockPreview() {
+        for (const element of windowMap.values()) {
+          element.classList.remove("dock-target");
+        }
+      }
+
+      function updateTitlebarDockPreview(event) {
+        if (!dragState || !dragState.moved || !dragState.allowMove) {
+          clearTitlebarDockPreview();
+          if (dragState) {
+            dragState.dockTargetId = null;
+          }
+          return null;
+        }
+        const targetId = titlebarDockTargetAt(event, dragState.id);
+        if (dragState.dockTargetId === targetId) {
+          return targetId;
+        }
+        if (dragState.dockTargetId) {
+          windowMap.get(dragState.dockTargetId)?.classList.remove("dock-target");
+        }
+        if (targetId) {
+          windowMap.get(targetId)?.classList.add("dock-target");
+        }
+        dragState.dockTargetId = targetId;
+        return targetId;
+      }
+
       function sendOpenProjectDialog() {
         send({ kind: "open_project_dialog" });
       }
@@ -915,6 +980,8 @@
       let kanbanDrawerFocusReturn = null;
       let kanbanDrawerFocusTrapRelease = null;
       let kanbanDrawerActiveContext = null;
+      let workspaceOverviewFocusReturn = null;
+      let workspaceOverviewFocusTrapRelease = null;
       function openKanbanDrawer(context) {
         const drawer = document.getElementById("kanban-drawer");
         const backdrop = document.getElementById("kanban-drawer-backdrop");
@@ -958,6 +1025,162 @@
         }
         kanbanDrawerFocusReturn = null;
         kanbanDrawerActiveContext = null;
+      }
+
+      function openWorkspaceOverview() {
+        const drawer = document.getElementById("workspace-overview-drawer");
+        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        workspaceOverviewFocusReturn = document.activeElement;
+        backdrop.hidden = false;
+        backdrop.dataset.open = "true";
+        drawer.hidden = false;
+        drawer.dataset.open = "true";
+        renderWorkspaceOverview();
+        try { drawer.focus({ preventScroll: true }); }
+        catch { drawer.focus(); }
+        if (typeof workspaceOverviewFocusTrapRelease === "function") {
+          workspaceOverviewFocusTrapRelease();
+        }
+        workspaceOverviewFocusTrapRelease = createFocusTrap(drawer, { document });
+      }
+
+      function closeWorkspaceOverview() {
+        const drawer = document.getElementById("workspace-overview-drawer");
+        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        if (drawer.dataset.open !== "true") return;
+        drawer.dataset.open = "false";
+        backdrop.dataset.open = "false";
+        backdrop.hidden = true;
+        drawer.hidden = true;
+        if (typeof workspaceOverviewFocusTrapRelease === "function") {
+          workspaceOverviewFocusTrapRelease();
+          workspaceOverviewFocusTrapRelease = null;
+        }
+        if (
+          workspaceOverviewFocusReturn &&
+          typeof workspaceOverviewFocusReturn.focus === "function"
+        ) {
+          try { workspaceOverviewFocusReturn.focus({ preventScroll: true }); }
+          catch { workspaceOverviewFocusReturn.focus(); }
+        }
+        workspaceOverviewFocusReturn = null;
+      }
+
+      function renderWorkspaceOverview() {
+        const titleEl = document.getElementById("workspace-overview-title");
+        const body = document.getElementById("workspace-overview-body");
+        const footer = document.getElementById("workspace-overview-footer");
+        if (!body || !titleEl || !footer) return;
+
+        const projection = activeWorkProjection || {};
+        const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
+        titleEl.textContent = title;
+        body.innerHTML = "";
+        footer.innerHTML = "";
+
+        const summaryCard = createNode("section", "workspace-overview-card");
+        summaryCard.appendChild(createNode("div", "workspace-overview-title", title));
+        const meta = createNode("div", "workspace-overview-meta");
+        appendMeta(meta, projection.status_category ? agentStatusLabel(projection.status_category) : "");
+        appendMeta(meta, projection.owner);
+        appendMeta(meta, projection.pr_number ? `PR #${projection.pr_number}` : "");
+        const agentsTotal =
+          Number(projection.active_agents || 0) + Number(projection.blocked_agents || 0);
+        appendMeta(meta, agentsTotal ? `${agentsTotal} agent${agentsTotal === 1 ? "" : "s"}` : "");
+        summaryCard.appendChild(meta);
+        summaryCard.appendChild(
+          createNode(
+            "div",
+            "workspace-overview-summary",
+            projection.summary || projection.status_text || "No Workspace summary yet",
+          ),
+        );
+        if (projection.next_action) {
+          summaryCard.appendChild(
+            createNode("div", "workspace-overview-next", projection.next_action),
+          );
+        }
+        body.appendChild(summaryCard);
+
+        const agents = Array.isArray(projection.agents) ? projection.agents : [];
+        const agentSection = createNode("section", "workspace-overview-section");
+        agentSection.appendChild(createNode("div", "workspace-overview-heading", "Current Agents"));
+        const agentList = createNode("div", "workspace-overview-list");
+        if (agents.length === 0) {
+          agentList.appendChild(createNode("div", "workspace-overview-empty", "No live Agents"));
+        } else {
+          for (const agent of agents) {
+            const item = createNode("article", "workspace-journal-entry");
+            item.appendChild(
+              createNode(
+                "div",
+                "workspace-journal-summary",
+                agent.current_focus || agent.display_name || agent.agent_id || "Agent",
+              ),
+            );
+            const itemMeta = createNode("div", "workspace-journal-meta");
+            appendMeta(itemMeta, agent.display_name || agent.agent_id);
+            appendMeta(itemMeta, agentStatusLabel(agent.status_category));
+            appendMeta(itemMeta, agent.coordination_scope);
+            item.appendChild(itemMeta);
+            agentList.appendChild(item);
+          }
+        }
+        agentSection.appendChild(agentList);
+        body.appendChild(agentSection);
+
+        const journalEntries = Array.isArray(projection.journal_entries)
+          ? projection.journal_entries
+          : [];
+        const journalSection = createNode("section", "workspace-overview-section");
+        journalSection.appendChild(createNode("div", "workspace-overview-heading", "Recent Summary"));
+        const journalList = createNode("div", "workspace-overview-list");
+        if (journalEntries.length === 0) {
+          journalList.appendChild(
+            createNode("div", "workspace-overview-empty", "No Workspace journal entries"),
+          );
+        } else {
+          for (const entry of journalEntries) {
+            const item = createNode("article", "workspace-journal-entry");
+            item.appendChild(
+              createNode(
+                "div",
+                "workspace-journal-summary",
+                entry.summary ||
+                  entry.status_text ||
+                  entry.next_action ||
+                  entry.title ||
+                  "Workspace update",
+              ),
+            );
+            const itemMeta = createNode("div", "workspace-journal-meta");
+            appendMeta(itemMeta, entry.updated_at);
+            appendMeta(itemMeta, entry.owner);
+            appendMeta(itemMeta, entry.next_action ? "Next action" : "");
+            item.appendChild(itemMeta);
+            journalList.appendChild(item);
+          }
+        }
+        journalSection.appendChild(journalList);
+        body.appendChild(journalSection);
+
+        const boardRefs = Array.isArray(projection.board_refs) ? projection.board_refs : [];
+        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
+        if (latestBoardRef) {
+          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
+          openBoard.type = "button";
+          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
+          footer.appendChild(openBoard);
+        }
+        const startWork = createNode("button", "op-work-action", "Start Work");
+        startWork.type = "button";
+        startWork.addEventListener("click", () => {
+          closeWorkspaceOverview();
+          send({ kind: "open_start_work" });
+        });
+        footer.appendChild(startWork);
       }
 
       function renderKanbanDrawerBody() {
@@ -1305,19 +1528,10 @@
         focusWindowRemotely(agent.window_id, { center: true });
       }
 
-      function renderActiveWorkQuickStart() {
-        activeWorkSummary.appendChild(createNode("div", "op-work-title", "Quick Start"));
-        activeWorkSummary.appendChild(
-          createNode("div", "op-work-status", "No agents are running."),
-        );
-        const actions = createNode("div", "op-work-actions");
-        const quickStart = createNode("button", "op-work-action", "Quick Start");
-        quickStart.type = "button";
-        quickStart.addEventListener("click", () => {
-          send({ kind: "open_start_work" });
-        });
-        actions.appendChild(quickStart);
-        activeWorkSummary.appendChild(actions);
+      function setActiveWorkSectionVisible(visible) {
+        if (activeWorkSection) {
+          activeWorkSection.hidden = !visible;
+        }
       }
 
       function projectionIssueNumber(projection) {
@@ -1373,6 +1587,14 @@
           const state = ensureBoardState(windowId);
           state.focusEntryId = entryId;
           state.pendingFocusScroll = true;
+          state.audienceFilter = "all";
+          if (
+            !state.entries.some((entry) => entry.id === entryId) &&
+            state.hasMoreBefore &&
+            !state.loadingOlder
+          ) {
+            requestOlderBoardEntries(windowId);
+          }
           renderBoard(windowId);
         }
         focusOrSpawnPreset("board");
@@ -1385,7 +1607,7 @@
 
         if (!activeWorkProjection) {
           if (activeWorkCount) activeWorkCount.textContent = "0";
-          renderActiveWorkQuickStart();
+          setActiveWorkSectionVisible(false);
           return;
         }
 
@@ -1394,9 +1616,11 @@
         if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
 
         if (agentCount === 0) {
-          renderActiveWorkQuickStart();
+          setActiveWorkSectionVisible(false);
           return;
         }
+
+        setActiveWorkSectionVisible(true);
 
         activeWorkSummary.appendChild(
           createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
@@ -1959,8 +2183,8 @@
           theme: XTERM_THEME_DARK,
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          fontSize: 13,
-          lineHeight: 1.2,
+          fontSize: 14,
+          lineHeight: 1.28,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();
@@ -2310,6 +2534,9 @@
             newEntriesAvailable: false,
             focusEntryId: null,
             pendingFocusScroll: false,
+            audienceFilter: "all",
+            forYouUnread: 0,
+            lastNotifiedMentionEntryId: null,
           });
         }
         return boardStateMap.get(windowId);
@@ -3683,6 +3910,7 @@
           renderBoard(windowId);
           return;
         }
+        const mentions = mentionsForBoardSubmit(state);
         state.loading = true;
         state.submitting = true;
         state.error = "";
@@ -3700,6 +3928,7 @@
           parent_id: parentId,
           topics: [],
           owners: [],
+          mentions,
         });
         renderBoard(windowId);
       }
@@ -3731,6 +3960,30 @@
           return leftKey.localeCompare(rightKey)
             || String(left.id || "").localeCompare(String(right.id || ""));
         });
+      }
+
+      function showBoardMentionNotification(entry, windowId) {
+        if (!entry?.id) return;
+        let toast = document.getElementById("board-mention-toast");
+        if (!toast) {
+          toast = document.createElement("button");
+          toast.id = "board-mention-toast";
+          toast.className = "board-mention-toast";
+          toast.type = "button";
+          document.body.appendChild(toast);
+        }
+        toast.textContent = `Board reply for you - ${boardEntryPreview(entry)}`;
+        toast.onclick = () => {
+          const state = ensureBoardState(windowId);
+          applyBoardMentionNotificationFocus(state, entry.id);
+          focusBoardEntry(entry.id);
+          toast.remove();
+        };
+        setTimeout(() => {
+          if (document.getElementById("board-mention-toast") === toast) {
+            toast.remove();
+          }
+        }, 8000);
       }
 
       function handleBoardHookEvent(event) {
@@ -3770,6 +4023,7 @@
         const status = body.querySelector(".board-status");
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
+        const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
         if (!status || !timeline || !composer) {
           return;
         }
@@ -3795,6 +4049,15 @@
           status.classList.add("error");
         } else if (state.loading) {
           status.classList.add("info");
+        }
+        if (forYouFilter) {
+          forYouFilter.setAttribute(
+            "aria-pressed",
+            state.audienceFilter === "for_you" ? "true" : "false",
+          );
+          forYouFilter.classList.toggle("active", state.audienceFilter === "for_you");
+          forYouFilter.textContent =
+            state.forYouUnread > 0 ? `For you (${state.forYouUnread})` : "For you";
         }
 
         // The actual scroll viewport is `.board-timeline-scroll`, the
@@ -3829,6 +4092,8 @@
           });
         }
 
+        const visibleEntries = visibleBoardEntries(state);
+
         timeline.innerHTML = "";
         if (state.hasMoreBefore) {
           const loadOlder = createNode(
@@ -3841,13 +4106,19 @@
           loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
           timeline.appendChild(loadOlder);
         }
-        if (!state.loading && state.entries.length === 0) {
+        if (!state.loading && visibleEntries.length === 0) {
           timeline.appendChild(
-            createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
+            createNode(
+              "div",
+              "board-empty workspace-empty-state",
+              state.audienceFilter === "for_you"
+                ? "No posts addressed to you."
+                : "No coordination entries yet.",
+            ),
           );
         }
         let focusTarget = null;
-        for (const entry of state.entries) {
+        for (const entry of visibleEntries) {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
           if (authorKind === "user") {
@@ -3868,6 +4139,10 @@
             card.tabIndex = -1;
             focusTarget = card;
           }
+          if (boardEntryMentionsSelf(entry)) {
+            card.classList.add("for-you");
+            card.setAttribute("aria-label", "Board post addressed to you");
+          }
 
           const meta = createNode("div", "board-message-meta");
           if (entry.agent_color) {
@@ -3880,8 +4155,39 @@
               )}`,
             ),
           );
+          for (const label of boardEntryAudienceLabels(entry)) {
+            const badge = createNode("span", "board-audience-badge", label);
+            if (label === "For you") {
+              badge.classList.add("for-you");
+            }
+            meta.appendChild(badge);
+          }
           card.appendChild(meta);
+          if (entry.parent_id) {
+            const parent = findBoardEntry(state, entry.parent_id);
+            const quote = createNode(
+              "button",
+              "board-reply-quote",
+              parent
+                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                : "Reply to earlier Board entry",
+            );
+            quote.type = "button";
+            quote.addEventListener("click", () => focusBoardEntry(entry.parent_id));
+            card.appendChild(quote);
+          }
           card.appendChild(createNode("div", "board-message-body", entry.body));
+          const messageActions = createNode("div", "board-message-actions");
+          const replyButton = createNode("button", "board-reply-button", "Reply");
+          replyButton.type = "button";
+          replyButton.addEventListener("click", () => {
+            state.replyParentId = entry.id;
+            renderBoard(windowId);
+            const input = body.querySelector(".board-textarea");
+            input?.focus();
+          });
+          messageActions.appendChild(replyButton);
+          card.appendChild(messageActions);
           timeline.appendChild(card);
         }
 
@@ -3907,6 +4213,32 @@
         }
 
         composer.innerHTML = "";
+        if (state.replyParentId) {
+          const parent = findBoardEntry(state, state.replyParentId);
+          const banner = createNode("div", "board-reply-banner");
+          banner.appendChild(
+            createNode(
+              "span",
+              "board-reply-banner-text",
+              parent
+                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                : "Replying to earlier Board entry",
+            ),
+          );
+          const jump = createNode("button", "text-button", "Jump to original");
+          jump.type = "button";
+          jump.addEventListener("click", () => focusBoardEntry(state.replyParentId));
+          const cancel = createNode("button", "icon-button", "×");
+          cancel.type = "button";
+          cancel.setAttribute("aria-label", "Cancel reply");
+          cancel.addEventListener("click", () => {
+            state.replyParentId = null;
+            renderBoard(windowId);
+          });
+          banner.appendChild(jump);
+          banner.appendChild(cancel);
+          composer.appendChild(banner);
+        }
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
         const bodyInput = document.createElement("textarea");
@@ -6091,6 +6423,7 @@
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -6115,6 +6448,17 @@
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
               state.error = "";
               frontendUnits.boardSurface.requestBoard(windowData.id);
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-for-you']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter = state.audienceFilter === "for_you" ? "all" : "for_you";
+              if (state.audienceFilter === "for_you") {
+                state.forYouUnread = 0;
+              }
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
@@ -6671,6 +7015,7 @@
               top: parseNumber(element.style.top),
               moved: false,
               allowMove: !currentWindow?.maximized,
+              dockTargetId: null,
             };
             titlebar.setPointerCapture(event.pointerId);
           });
@@ -6955,6 +7300,7 @@
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
+            renderWorkspaceOverview();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -7082,6 +7428,12 @@
             const addedEntry = incomingEntries.some(
               (entry) => Boolean(entry.id) && !existingEntryIds.has(entry.id),
             );
+            const addressedEntry = incomingEntries.find(
+              (entry) =>
+                Boolean(entry.id) &&
+                !existingEntryIds.has(entry.id) &&
+                boardEntryMentionsSelf(entry),
+            );
             const pendingSubmit = state.pendingSubmit;
             const completedSubmit = Boolean(pendingSubmit)
               && incomingEntries.some((entry) => {
@@ -7114,6 +7466,14 @@
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
+            if (
+              addressedEntry &&
+              addressedEntry.id !== state.lastNotifiedMentionEntryId
+            ) {
+              state.forYouUnread += 1;
+              state.lastNotifiedMentionEntryId = addressedEntry.id;
+              showBoardMentionNotification(addressedEntry, event.id);
+            }
             state.loading = false;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
@@ -7132,6 +7492,13 @@
             state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
+            if (
+              state.focusEntryId &&
+              !state.entries.some((entry) => entry.id === state.focusEntryId) &&
+              state.hasMoreBefore
+            ) {
+              frontendUnits.boardSurface.requestOlderBoardEntries(event.id);
+            }
             break;
           }
           case "log_entries": {
@@ -7676,6 +8043,7 @@
           }
           element.style.left = `${dragState.left + deltaX}px`;
           element.style.top = `${dragState.top + deltaY}px`;
+          updateTitlebarDockPreview(event);
           return;
         }
 
@@ -7708,13 +8076,26 @@
 
         if (dragState && dragState.pointerId === event.pointerId) {
           if (dragState.moved) {
-            const runtime = terminalMap.get(dragState.id);
-            sendGeometry(
-              dragState.id,
-              runtime?.terminal.cols || 80,
-              runtime?.terminal.rows || 24,
-            );
+            dragState.dockTargetId = dragState.allowMove
+              ? titlebarDockTargetAt(event, dragState.id)
+              : null;
+            clearTitlebarDockPreview();
+            if (dragState.dockTargetId) {
+              send({
+                kind: "dock_window_tab",
+                id: dragState.id,
+                target_id: dragState.dockTargetId,
+              });
+            } else {
+              const runtime = terminalMap.get(dragState.id);
+              sendGeometry(
+                dragState.id,
+                runtime?.terminal.cols || 80,
+                runtime?.terminal.rows || 24,
+              );
+            }
           } else {
+            clearTitlebarDockPreview();
             handleTitlebarClick(dragState.id);
           }
           dragState = null;
@@ -7729,6 +8110,13 @@
             runtime?.terminal.rows || 24,
           );
           resizeState = null;
+        }
+      });
+
+      window.addEventListener("pointercancel", (event) => {
+        if (dragState && dragState.pointerId === event.pointerId) {
+          clearTitlebarDockPreview();
+          dragState = null;
         }
       });
 
@@ -7924,6 +8312,24 @@
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
+      const workspaceOverviewCloseButton = document.getElementById(
+        "workspace-overview-close",
+      );
+      if (workspaceOverviewCloseButton) {
+        workspaceOverviewCloseButton.addEventListener("click", closeWorkspaceOverview);
+      }
+      const workspaceOverviewBackdrop = document.getElementById(
+        "workspace-overview-drawer-backdrop",
+      );
+      if (workspaceOverviewBackdrop) {
+        workspaceOverviewBackdrop.addEventListener("click", closeWorkspaceOverview);
+      }
+      if (workspaceOverviewEntry) {
+        workspaceOverviewEntry.addEventListener("click", openWorkspaceOverview);
+      }
+      if (projectWorkspaceOverviewButton) {
+        projectWorkspaceOverviewButton.addEventListener("click", openWorkspaceOverview);
+      }
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -7975,6 +8381,15 @@
         const kanbanDrawer = document.getElementById("kanban-drawer");
         if (kanbanDrawer && kanbanDrawer.dataset.open === "true") {
           closeKanbanDrawer();
+          event.preventDefault();
+          return;
+        }
+        const workspaceOverviewDrawer = document.getElementById("workspace-overview-drawer");
+        if (
+          workspaceOverviewDrawer &&
+          workspaceOverviewDrawer.dataset.open === "true"
+        ) {
+          closeWorkspaceOverview();
           event.preventDefault();
           return;
         }

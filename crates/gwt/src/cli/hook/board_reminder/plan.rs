@@ -262,6 +262,9 @@ mod tests {
         assert!(text.contains("--kind claim"));
         assert!(text.contains("--kind handoff"));
         assert!(text.contains("--target"));
+        assert!(text.contains("Choose the audience before posting"));
+        assert!(text.contains("--mention user:"));
+        assert!(text.contains("--mention agent:"));
     }
 
     #[test]
@@ -282,6 +285,54 @@ mod tests {
         assert!(text.contains("Do NOT create, switch, or delete branches"));
         assert!(text.contains("git worktree add"));
         assert!(text.contains("Start Work"));
+    }
+
+    #[test]
+    fn plan_reminders_include_workspace_update_guidance() {
+        let session_start = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+        let user_prompt = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: true,
+        });
+        let stop = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::Stop,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+        });
+
+        for text in [
+            additional_context(&session_start.output),
+            additional_context(&user_prompt.output),
+            system_message(&stop.output),
+        ] {
+            assert!(text.contains("gwtd workspace update"));
+            assert!(text.contains("Board"));
+            assert!(text.contains("Workspace"));
+        }
+        assert!(
+            !matches!(stop.output, HookOutput::StopBlock { .. }),
+            "Workspace update reminder must not block Stop"
+        );
     }
 
     #[test]
