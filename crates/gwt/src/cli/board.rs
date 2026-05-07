@@ -276,13 +276,22 @@ fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::Coordina
     } else {
         for entry in &snapshot.board.entries {
             out.push_str(&format!(
-                "- [{}] {}: {} ({})\n",
+                "- [{}] {} ({})\n",
                 entry.kind.as_str(),
                 format_author(entry),
-                entry.body,
                 entry.id
             ));
+            append_indented_body(out, &entry.body, "  ");
         }
+    }
+}
+
+fn append_indented_body(out: &mut String, body: &str, indent: &str) {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.split('\n') {
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
     }
 }
 
@@ -665,7 +674,8 @@ mod tests {
         let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
 
         assert_eq!(code, 0);
-        assert!(out.contains("user: legacy entry"));
+        assert!(out.contains("- [request] user ("));
+        assert!(out.contains("  legacy entry"));
         assert!(!out.contains(" @ "));
         assert!(!out.contains(" / "));
     }
@@ -697,5 +707,44 @@ mod tests {
         assert!(out.contains("Need a board"));
         assert!(!out.contains("== Cards =="));
         assert!(!out.contains("no agent cards"));
+    }
+
+    #[test]
+    fn board_family_run_show_renders_multiline_body_as_indented_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        post_entry(
+            tmp.path(),
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Decision,
+                "Current state: Board posts are too dense.\n\nDecision: Keep body canonical.\nNext: Update rendering.",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_branch("work/readable-board")
+            .with_origin_session_id("sess-readable"),
+        )
+        .unwrap();
+
+        let mut out = String::new();
+        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("- [decision] Codex @ work/readable-board / sess-readable ("),
+            "expected metadata header without inline body, got:\n{out}"
+        );
+        assert!(
+            out.contains("  Current state: Board posts are too dense.\n  \n  Decision: Keep body canonical.\n  Next: Update rendering."),
+            "expected body lines to be indented while preserving blank lines, got:\n{out}"
+        );
+        assert!(
+            !out.contains("Codex @ work/readable-board / sess-readable: Current state"),
+            "body must not be collapsed into the header, got:\n{out}"
+        );
     }
 }

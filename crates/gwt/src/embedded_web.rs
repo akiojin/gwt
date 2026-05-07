@@ -1519,6 +1519,32 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_message_body_preserves_multiline_plaintext() {
+        let html = frontend_bundle_source();
+        let body_block = {
+            let start = html
+                .find(".board-message-body {")
+                .expect("expected Board message body CSS block");
+            let rest = &html[start..];
+            let end = rest.find('}').expect("expected CSS block end");
+            &rest[..=end]
+        };
+
+        assert!(
+            body_block.contains("white-space: pre-wrap"),
+            "Board body must preserve author-provided newlines, got: {body_block}",
+        );
+        assert!(
+            html.contains("createNode(\"div\", \"board-message-body\", entry.body)"),
+            "Board body must be rendered as plaintext from the canonical body field",
+        );
+        assert!(
+            !html.contains("board-message-body`).innerHTML"),
+            "Board body must not switch to HTML rendering for multiline formatting",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_composer_is_body_first_and_resets_after_post() {
         let html = frontend_bundle_source();
         let anchor = html
