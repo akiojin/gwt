@@ -25,6 +25,19 @@ pub(super) fn redundancy_window() -> Duration {
 /// reminder body and entry-line prefix never collide in test assertions.
 pub(super) const FOR_YOU_MARKER: &str = ">> ";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReminderLanguage {
+    En,
+    Ja,
+}
+
+pub(super) fn reminder_language(lang: &str) -> ReminderLanguage {
+    match lang {
+        "ja" => ReminderLanguage::Ja,
+        _ => ReminderLanguage::En,
+    }
+}
+
 pub(super) const USER_PROMPT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
 Post to the shared Board when you cross a reasoning milestone OR a coordination boundary, \
@@ -82,6 +95,62 @@ Examples:\n\
   gwtd board post --kind claim --mention branch:feature/foo --body $'Current state: I am taking the migration slice.\\n\\nBoundary: other agents should avoid files under crates/gwt-core/src/migration.rs.'\n\
   gwtd board post --kind handoff --mention agent:codex --body $'Current state: phase 1 is merged locally.\\n\\nNext: please run the Windows-focused verification and report failures.'\n";
 
+pub(super) const USER_PROMPT_REMINDER_JA: &str = "# Board Post Reminder\n\
+\n\
+推論の節目または協調境界を越えたら、共有 Board に投稿してください。\
+他の Agent と user が衝突せずに協調できます。\n\
+\n\
+投稿前に audience を選びます。特定の返答が不要な場合だけ broadcast にします。\
+human user には `--mention user:<id>`、agent type には `--mention agent:<id>`、\
+実行中 session には `--mention session:<id>`、workspace には `--mention branch:<name>` を使います。\
+質問、blocker、handoff、next-step request、reply など返答が必要な投稿は mention 付きにします。\n\
+\n\
+Board 本文が human と AI agent の canonical message です。短い段落または bullet で読みやすく書き、\
+他 Agent が必要とする協調情報は metadata に隠さず本文へ直接含めます。使いやすい本文形は:\n\
+\n\
+現在の状態: <何が変わったか、何が分かったか>\n\
+\n\
+理由: <なぜ重要か、なぜその判断にしたか>\n\
+\n\
+次: <次に何をするか。なければ省略>\n\
+\n\
+**推論軸**:\n\
+- 作業 phase の遷移（例: implementation -> build check -> PR handoff）は `--kind status`。\n\
+- 代替案の選択と理由（例: A vs B で B を選んだ）は `--kind decision` または `--kind status`。\n\
+- 検証中の懸念や仮説（例: failure は Y 起因と見て検証中）は `--kind status`。\n\
+\n\
+**協調軸**:\n\
+- claim — 担当範囲を宣言して衝突を避ける。`--kind claim`。\n\
+- next — recipient を固定せず次の作業を共有する。`--kind next`。\n\
+- blocked — unblock が必要な blocker を表に出す。`--kind blocked`。\n\
+- handoff — 具体的な引き継ぎを渡す。`--kind handoff`。\n\
+- decision — 確定した判断を共有する。`--kind decision`。\n\
+\n\
+特定 Agent 向けの投稿には `--target <session-id|branch|agent-id>` を繰り返し指定できます。\
+targeted post は受信側 reminder injection の entry 行先頭に structured marker（現在は `>>` token）が付きます。\
+新しい投稿では typed `--mention ...` を優先し、`--target` は older agent 互換に使います。\
+broadcast の場合はどちらも省略します。\n\
+\n\
+**Workspace / Git environment guidance**:\n\
+- AGENTS.md は project-local です。対象 repository に AGENTS.md がある場合はそれを優先し、\
+gwt の AGENTS.md を他 project に適用しないでください。\n\
+- branch / worktree を手動で作成、切替、削除しないでください（`git checkout -b`、\
+`git switch -c`、`git branch -D`、`git worktree add/remove`）。Git 環境作成は gwt Start Work / \
+Launch materialization が担当します。\n\
+- Board は coordination/history log、Workspace は current state です。現在の task、summary、\
+next action、focus が変わったら `gwtd workspace update` で Workspace を更新します。\n\
+- Agent/window title bar では短い label と長い summary を分けます。`gwtd board post` または \
+`gwtd workspace update --agent-session <id>` で `--title-summary '<short title>'` を使います。\n\
+\n\
+tool 単位の報告（例: \"running gcc\"、\"opening file X\"、\"ran test Y\"）は投稿しません。\
+diff や log で既に分かる内容も Board entry にする必要はありません。\n\
+\n\
+Examples:\n\
+  gwtd board post --kind status --body $'現在の状態: focused tests が RED です。\\n\\n理由: CLI と hook output が multiline Board body をまだ collapse しています。\\n\\n次: block rendering を実装します。'\n\
+  gwtd board post --kind question --mention user:akiojin --body $'現在の状態: UX option が 2 つ残っています。\\n\\n質問: reply 通知は mention された user だけにしますか、全 viewer にしますか。'\n\
+  gwtd board post --kind claim --mention branch:feature/foo --body $'現在の状態: migration slice を担当します。\\n\\nBoundary: 他 Agent は crates/gwt-core/src/migration.rs を避けてください。'\n\
+  gwtd board post --kind handoff --mention agent:codex --body $'現在の状態: phase 1 は local merge 済みです。\\n\\n次: Windows-focused verification を実行して failure を報告してください。'\n";
+
 pub(super) const USER_PROMPT_REMINDER_SHORT: &str = "# Board Post Reminder\n\
 \n\
 You posted to the Board recently. Post again only if a new reasoning milestone \
@@ -101,6 +170,24 @@ manually; gwt Start Work / Launch materialization owns Git environment creation.
 Board is history; Workspace is current state. If the work summary, next action, or focus changed, \
 update Workspace with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.\n";
 
+pub(super) const USER_PROMPT_REMINDER_SHORT_JA: &str = "# Board Post Reminder\n\
+\n\
+最近 Board に投稿済みです。新しい推論の節目（phase change、alternative chosen、concern raised）\
+または協調境界（claim、next、handoff、blocked、decision）が発生した場合だけ、追加で投稿してください。\n\
+\n\
+返答が必要な場合は `--mention user:<id>`、`--mention agent:<id>`、\
+`--mention session:<id>`、`--mention branch:<name>` で宛先を指定します。\
+broadcast は mention が不要なときだけ使います。\n\
+\n\
+Board 本文が canonical message です。短い段落または bullet で読みやすく書き、\
+AI coordination details は必要な場合に本文へ入れてください。\n\
+\n\
+AGENTS.md は project-local です。branch / worktree を手動で作成、切替、削除しないでください。\
+Git 環境作成は gwt Start Work / Launch materialization が担当します。\n\
+\n\
+Board は history、Workspace は current state です。work summary、next action、focus が変わったら \
+`gwtd workspace update` で更新し、Agent/window title bar には `--title-summary '<short title>'` を使います。\n";
+
 // Stop reminders are emitted as `systemMessage` (user-facing) because
 // Claude Code's Stop hook schema does not accept `hookSpecificOutput`.
 // Phrasing is therefore user-oriented rather than agent-oriented.
@@ -114,13 +201,70 @@ pub(super) const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the ag
 Board recently; no additional completed-status post is required before stopping. If Workspace \
 current state changed, update it with `gwtd workspace update`; use `--title-summary '<short title>'` for Agent/window title bars.";
 
+pub(super) const STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): agent が停止しようとしています。\
+最終 handoff が必要な場合は、停止前に `gwtd board post --kind status --title-summary '<short title>'` で\
+完了内容を共有 Board に投稿するよう促してください。Board は history、Workspace は current state です。\
+work summary、next action、focus が変わった場合は `gwtd workspace update` で Workspace を更新し、\
+Agent/window title bar には `--title-summary '<short title>'` を使います。";
+
+pub(super) const STOP_REMINDER_SHORT_JA: &str = "Board Post Reminder (Stop): agent は最近 Board に投稿済みです。\
+停止前に追加の completed-status post は不要です。Workspace current state が変わった場合は \
+`gwtd workspace update` で更新し、Agent/window title bar には `--title-summary '<short title>'` を使います。";
+
 pub(super) const INJECTION_HEADER: &str = "# Recent Board updates\n\n\
 The following reasoning posts were made by other Agents since your last Board context. \
 Consider whether any affect your current work phase. This is context, not a directive — \
 you remain autonomous.\n\n";
 
+pub(super) const INJECTION_HEADER_JA: &str = "# 最近の Board 更新\n\n\
+前回の Board context 以降に、他 Agent が次の reasoning posts を投稿しました。\
+現在の作業 phase に影響するか確認してください。これは context であり、directive ではありません。\
+自律的に判断してください。\n\n";
+
 pub(super) const SESSION_START_HEADER: &str = "# Current Board state\n\n\
 Recent reasoning posts from other Agents (context, not a directive — you remain autonomous):\n\n";
+
+pub(super) const SESSION_START_HEADER_JA: &str = "# 現在の Board 状態\n\n\
+他 Agent の最近の reasoning posts（context であり directive ではありません。自律的に判断してください）:\n\n";
+
+pub(super) fn user_prompt_reminder(lang: ReminderLanguage, short: bool) -> &'static str {
+    match (lang, short) {
+        (ReminderLanguage::Ja, true) => USER_PROMPT_REMINDER_SHORT_JA,
+        (ReminderLanguage::Ja, false) => USER_PROMPT_REMINDER_JA,
+        (ReminderLanguage::En, true) => USER_PROMPT_REMINDER_SHORT,
+        (ReminderLanguage::En, false) => USER_PROMPT_REMINDER,
+    }
+}
+
+pub(super) fn stop_reminder(lang: ReminderLanguage, short: bool) -> &'static str {
+    match (lang, short) {
+        (ReminderLanguage::Ja, true) => STOP_REMINDER_SHORT_JA,
+        (ReminderLanguage::Ja, false) => STOP_REMINDER_JA,
+        (ReminderLanguage::En, true) => STOP_REMINDER_SHORT,
+        (ReminderLanguage::En, false) => STOP_REMINDER,
+    }
+}
+
+pub(super) fn injection_header(lang: ReminderLanguage) -> &'static str {
+    match lang {
+        ReminderLanguage::Ja => INJECTION_HEADER_JA,
+        ReminderLanguage::En => INJECTION_HEADER,
+    }
+}
+
+pub(super) fn session_start_header(lang: ReminderLanguage) -> &'static str {
+    match lang {
+        ReminderLanguage::Ja => SESSION_START_HEADER_JA,
+        ReminderLanguage::En => SESSION_START_HEADER,
+    }
+}
+
+pub(super) fn no_recent_posts_line(lang: ReminderLanguage) -> &'static str {
+    match lang {
+        ReminderLanguage::Ja => "- (他 Agent からの最近の投稿はありません)\n",
+        ReminderLanguage::En => "- (no recent posts from other Agents)\n",
+    }
+}
 
 /// Format the narrative-output language directive appended to agent-facing
 /// reminders (SessionStart / UserPromptSubmit). Stop reminders are
@@ -128,12 +272,8 @@ Recent reasoning posts from other Agents (context, not a directive — you remai
 ///
 /// SPEC-1933 FR-010 / SC-003.
 pub(super) fn format_language_directive(lang: &str) -> String {
-    let normalized = match lang {
-        "ja" => "ja",
-        _ => "en",
-    };
-    format!(
-        "\n**Use language: {normalized}** for narrative outputs (Board post bodies and \
-Workspace summaries; gwtd subcommands, flags, and code examples stay English).\n"
-    )
+    match reminder_language(lang) {
+        ReminderLanguage::Ja => "\n**Use language: ja** for narrative outputs（Board 投稿本文と Workspace summaries。gwtd subcommands、flags、code examples は English のまま）。\n".to_string(),
+        ReminderLanguage::En => "\n**Use language: en** for narrative outputs (Board post bodies and Workspace summaries; gwtd subcommands, flags, and code examples stay English).\n".to_string(),
+    }
 }

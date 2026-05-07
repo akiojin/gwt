@@ -3131,66 +3131,6 @@
         white-space: nowrap;
       }
 
-      .update-toast {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9999;
-        transition: opacity 0.3s;
-      }
-
-      .update-toast:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      /* SPEC-2041 FR-036: persistent "Update available" button. Stays at
-         the bottom-right after the initial 8s toast fades, until the user
-         applies the update or restarts. The textContent is rewritten when
-         a strictly newer `latest` arrives via the 5min poll loop. */
-      .update-button {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9998;
-        transition: bottom 0.3s, background 0.2s;
-      }
-
-      .update-button.has-toast {
-        /* While the toast is still visible (initial 8s window), float the
-           button above it so the two surfaces do not overlap. */
-        bottom: 76px;
-      }
-
-      .update-button:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      .update-button:focus-visible {
-        outline: 2px solid var(--color-focus-ring);
-        outline-offset: 2px;
-      }
     </style>
   </head>
   <body>
@@ -3346,14 +3286,6 @@
             </div>
           </div>
           <div class="floating-actions" id="floating-window-controls">
-            <div
-              class="op-window-controls-peek"
-              role="button"
-              tabindex="0"
-              aria-label="Show window controls"
-              aria-controls="floating-window-controls-primary floating-window-controls-add"
-              data-hover-reveal="window-controls"
-            ></div>
             <button
               class="arrange-button op-palette-trigger"
               id="op-palette-button"
@@ -3364,28 +3296,38 @@
               <span class="op-palette-trigger__label">⌘K</span>
               <span class="op-palette-trigger__hint">Palette</span>
             </button>
-            <div class="floating-window-controls-group" id="floating-window-controls-primary">
-              <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
-              <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
-              <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
-              <div class="window-list-shell" data-window-control="true">
-                <button
-                  class="arrange-button"
-                  id="window-list-button"
-                  aria-label="List windows"
-                  aria-expanded="false"
-                  data-window-control="true"
-                >
-                  Windows
-                </button>
-                <div class="window-list-panel" id="window-list-panel" hidden></div>
-              </div>
-            </div>
             <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-            <div class="floating-window-controls-group" id="floating-window-controls-add">
-              <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+            <div
+              class="op-window-controls-peek"
+              role="button"
+              tabindex="0"
+              aria-label="Show window controls"
+              aria-controls="floating-window-controls-actions"
+              data-hover-reveal="window-controls"
+            ></div>
+            <div class="floating-window-controls-group" id="floating-window-controls-actions">
+              <div class="floating-window-controls-group" id="floating-window-controls-primary">
+                <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
+                <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
+                <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
+                <div class="window-list-shell" data-window-control="true">
+                  <button
+                    class="arrange-button"
+                    id="window-list-button"
+                    aria-label="List windows"
+                    aria-expanded="false"
+                    data-window-control="true"
+                  >
+                    Windows
+                  </button>
+                  <div class="window-list-panel" id="window-list-panel" hidden></div>
+                </div>
+              </div>
+              <div class="floating-window-controls-group" id="floating-window-controls-add">
+                <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+              </div>
             </div>
           </div>
           <div
