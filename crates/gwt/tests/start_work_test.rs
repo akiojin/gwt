@@ -34,6 +34,15 @@ fn init_git_clone_with_origin(repo: &Path) {
     std::fs::write(seed.join("README.md"), "seed\n").expect("write seed");
     run_git(&seed, &["add", "README.md"]);
     run_git(&seed, &["commit", "-qm", "init"]);
+    run_git(&seed, &["checkout", "-qb", "main"]);
+    std::fs::write(seed.join("main-only.txt"), "main\n").expect("write main marker");
+    run_git(&seed, &["add", "main-only.txt"]);
+    run_git(&seed, &["commit", "-qm", "main marker"]);
+    run_git(&seed, &["checkout", "develop"]);
+    std::fs::write(seed.join("develop-only.txt"), "develop\n").expect("write develop marker");
+    run_git(&seed, &["add", "develop-only.txt"]);
+    run_git(&seed, &["commit", "-qm", "develop marker"]);
+    run_git(&seed, &["checkout", "main"]);
 
     let status = Command::new("git")
         .args(["clone", "--bare"])
@@ -91,6 +100,18 @@ fn start_work_launch_confirmation_materializes_reserved_work_branch_and_worktree
         git_output(&worktree, &["branch", "--show-current"]),
         reserved_branch
     );
-    assert_eq!(base_branch, "origin/HEAD");
+    assert_eq!(
+        git_output(&repo, &["rev-parse", "--abbrev-ref", "origin/HEAD"]),
+        "origin/main"
+    );
+    assert_eq!(base_branch, "origin/develop");
+    assert!(
+        worktree.join("develop-only.txt").is_file(),
+        "Start Work branch should be created from origin/develop"
+    );
+    assert!(
+        !worktree.join("main-only.txt").exists(),
+        "Start Work branch must not inherit origin/HEAD content when HEAD points to main"
+    );
     assert!(git_output(&repo, &["for-each-ref", "refs/heads/work"]).contains(&reserved_branch));
 }

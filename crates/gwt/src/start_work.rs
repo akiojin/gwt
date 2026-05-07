@@ -5,8 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 3] =
-    ["origin/develop", "origin/main", "origin/master"];
+pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 4] = [
+    "origin/develop",
+    START_WORK_REMOTE_HEAD_REF,
+    "origin/main",
+    "origin/master",
+];
 pub const START_WORK_REMOTE_HEAD_REF: &str = "origin/HEAD";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartWorkError {
@@ -18,7 +22,7 @@ impl std::fmt::Display for StartWorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingBaseBranch => f.write_str(
-                "No default base branch found (origin/HEAD, origin/develop, origin/main, origin/master)",
+                "No default base branch found (origin/develop, origin/HEAD, origin/main, origin/master)",
             ),
             Self::ReservationIo(error) => {
                 write!(f, "Failed to reserve Start Work branch name: {error}")
@@ -32,9 +36,6 @@ impl std::error::Error for StartWorkError {}
 pub fn resolve_start_work_base_branch_with(
     mut remote_branch_exists: impl FnMut(&str) -> bool,
 ) -> Result<String, StartWorkError> {
-    if remote_branch_exists(START_WORK_REMOTE_HEAD_REF) {
-        return Ok(START_WORK_REMOTE_HEAD_REF.to_string());
-    }
     START_WORK_BASE_BRANCH_CANDIDATES
         .iter()
         .copied()
@@ -165,12 +166,22 @@ mod tests {
     };
 
     #[test]
-    fn start_work_base_branch_prefers_remote_head_before_named_fallbacks() {
+    fn start_work_base_branch_prefers_develop_before_remote_head() {
         let existing = HashSet::from([
             "origin/HEAD".to_string(),
             "origin/develop".to_string(),
             "origin/main".to_string(),
         ]);
+        let resolved =
+            resolve_start_work_base_branch_with(|candidate| existing.contains(candidate))
+                .expect("resolve base branch");
+
+        assert_eq!(resolved, "origin/develop");
+    }
+
+    #[test]
+    fn start_work_base_branch_uses_remote_head_when_develop_is_missing() {
+        let existing = HashSet::from(["origin/HEAD".to_string(), "origin/main".to_string()]);
         let resolved =
             resolve_start_work_base_branch_with(|candidate| existing.contains(candidate))
                 .expect("resolve base branch");
