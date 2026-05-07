@@ -291,6 +291,49 @@ fn forward_owner_forwards_live_event_to_loopback_target() {
 }
 
 #[test]
+fn forward_owner_uses_persisted_agent_session_id_when_hook_session_id_is_missing() {
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().unwrap();
+    env.set("HOME", home.path().as_os_str().to_os_string());
+    env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+
+    let sessions_dir = home.path().join(".gwt").join("sessions");
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).unwrap();
+
+    let mut session = Session::new(&worktree, "feature/runtime-daemon", AgentId::Codex);
+    session.agent_session_id = Some("persisted-agent-session".to_string());
+    session.save(&sessions_dir).unwrap();
+
+    let server = CaptureServer::start();
+    env.set("GWT_SESSION_ID", session.id.clone());
+    env.set(
+        "GWT_SESSION_RUNTIME_PATH",
+        runtime_state_path(&sessions_dir, &session.id)
+            .as_os_str()
+            .to_os_string(),
+    );
+    env.set("GWT_HOOK_FORWARD_URL", server.url.clone());
+    env.set("GWT_HOOK_FORWARD_TOKEN", "secret-token");
+
+    let input = serde_json::json!({
+        "cwd": worktree.display().to_string(),
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "echo daemon"
+        }
+    })
+    .to_string();
+    handle_forward(&input).unwrap();
+
+    let (_auth, payload) = server.recv();
+    assert_eq!(payload["kind"], "forward");
+    assert_eq!(payload["gwt_session_id"], session.id);
+    assert_eq!(payload["agent_session_id"], "persisted-agent-session");
+}
+
+#[test]
 fn forward_owner_is_fail_open_without_live_target_env() {
     let _lock = env_lock();
     let mut env = EnvGuard::new();
