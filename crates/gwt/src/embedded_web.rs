@@ -2195,6 +2195,7 @@ mod tests {
             (WindowSurface::Board, "board"),
             (WindowSurface::Logs, "logs"),
             (WindowSurface::Knowledge, "knowledge"),
+            (WindowSurface::Workspace, "workspace"),
             (WindowSurface::Mock, "mock"),
         ];
 

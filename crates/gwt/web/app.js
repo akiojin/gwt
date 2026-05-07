@@ -114,6 +114,7 @@
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
+      const workspaceKanbanStateMap = new Map();
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
       const pendingMessages = [];
@@ -201,6 +202,13 @@
           mutatedBy: Object.freeze([
             "ensureKnowledgeBridgeState",
             "renderKnowledgeBridge",
+          ]),
+        }),
+        workspaceKanbanStateMap: Object.freeze({
+          owner: "workspace-kanban-surface",
+          mutatedBy: Object.freeze([
+            "ensureWorkspaceKanbanState",
+            "renderWorkspaceKanban",
           ]),
         }),
         wizardState: Object.freeze({
@@ -394,6 +402,9 @@
         }
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
+        }
+        if (preset === "workspace") {
+          return "workspace";
         }
         return "mock";
       }
@@ -625,6 +636,7 @@
           logs: "Logs",
           issue: "Issue",
           spec: "SPEC",
+          workspace: "Workspace",
           board: "Board",
           pr: "PR",
         };
@@ -1037,21 +1049,7 @@
       }
 
       function openWorkspaceOverview() {
-        const drawer = document.getElementById("workspace-overview-drawer");
-        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
-        if (!drawer || !backdrop) return;
-        workspaceOverviewFocusReturn = document.activeElement;
-        backdrop.hidden = false;
-        backdrop.dataset.open = "true";
-        drawer.hidden = false;
-        drawer.dataset.open = "true";
-        renderWorkspaceOverview();
-        try { drawer.focus({ preventScroll: true }); }
-        catch { drawer.focus(); }
-        if (typeof workspaceOverviewFocusTrapRelease === "function") {
-          workspaceOverviewFocusTrapRelease();
-        }
-        workspaceOverviewFocusTrapRelease = createFocusTrap(drawer, { document });
+        focusOrSpawnPreset("workspace");
       }
 
       function closeWorkspaceOverview() {
@@ -1246,6 +1244,317 @@
           send({ kind: "open_start_work" });
         });
         footer.appendChild(startWork);
+      }
+
+      function ensureWorkspaceKanbanState(windowId) {
+        if (!workspaceKanbanStateMap.has(windowId)) {
+          workspaceKanbanStateMap.set(windowId, {
+            selectedId: null,
+          });
+        }
+        return workspaceKanbanStateMap.get(windowId);
+      }
+
+      function workspaceColumnForStatus(statusCategory) {
+        const state = String(statusCategory || "").toLowerCase();
+        if (state === "active" || state === "blocked") {
+          return "active";
+        }
+        if (state === "done" || state === "completed" || state === "closed") {
+          return "completed";
+        }
+        return "suspended";
+      }
+
+      function ownerIssueNumber(owner) {
+        const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
+        if (!match) return null;
+        const number = Number.parseInt(match[1] || match[2], 10);
+        return Number.isFinite(number) ? number : null;
+      }
+
+      function workspaceCardsFromProjection(projection) {
+        if (!projection) return [];
+        const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
+        const branch = projection.branch || "";
+        const worktreePath = projection.worktree_path || "";
+        const cards = [
+          {
+            id: projection.id || "__current_workspace__",
+            kind: "current",
+            title,
+            status_category: projection.status_category || "idle",
+            status_text: projection.status_text || "No active work",
+            summary: projection.summary || projection.status_text || "",
+            owner: projection.owner || "",
+            next_action: projection.next_action || "",
+            branch,
+            worktree_path: worktreePath,
+            pr_number: projection.pr_number || null,
+            board_refs: Array.isArray(projection.board_refs) ? projection.board_refs : [],
+            agents: Array.isArray(projection.agents) ? projection.agents : [],
+            cleanup_candidate: projection.cleanup_candidate || null,
+            updated_at: projection.updated_at || "",
+            column: workspaceColumnForStatus(projection.status_category),
+          },
+        ];
+
+        const journalEntries = Array.isArray(projection.journal_entries)
+          ? projection.journal_entries
+          : [];
+        for (const entry of journalEntries) {
+          const statusCategory = entry.status_category || projection.status_category || "idle";
+          cards.push({
+            id: `journal-${entry.id || cards.length}`,
+            kind: "journal",
+            title: entry.title || title,
+            status_category: statusCategory,
+            status_text: entry.status_text || projection.status_text || "",
+            summary:
+              entry.summary ||
+              entry.agent_title_summary ||
+              entry.agent_current_focus ||
+              entry.status_text ||
+              entry.next_action ||
+              "Workspace update",
+            owner: entry.owner || projection.owner || "",
+            next_action: entry.next_action || "",
+            branch,
+            worktree_path: worktreePath,
+            pr_number: projection.pr_number || null,
+            board_refs: [],
+            agents: [],
+            cleanup_candidate: null,
+            updated_at: entry.updated_at || "",
+            column: workspaceColumnForStatus(statusCategory),
+          });
+        }
+
+        return cards;
+      }
+
+      function resumeWorkspaceCard(card) {
+        const branchName = card?.branch || activeWorkProjection?.branch || "";
+        if (branchName) {
+          send({
+            kind: "open_active_work_launch_wizard",
+            branch_name: branchName,
+            linked_issue_number: ownerIssueNumber(card?.owner || activeWorkProjection?.owner),
+          });
+          return;
+        }
+        send({ kind: "open_start_work" });
+      }
+
+      function renderWorkspaceKanbanCard(windowId, state, cardData) {
+        const card = createNode("article", "kanban-card workspace-kanban-card");
+        card.dataset.workspaceCardId = cardData.id;
+        if (state.selectedId === cardData.id) {
+          card.classList.add("is-selected");
+        }
+
+        const select = () => {
+          state.selectedId = cardData.id;
+          renderWorkspaceKanban(windowId);
+        };
+        const selectButton = createNode("button", "workspace-card-main");
+        selectButton.type = "button";
+        selectButton.addEventListener("click", select);
+        if (state.selectedId === cardData.id) {
+          selectButton.setAttribute("aria-current", "true");
+        }
+
+        const head = createNode("div", "kanban-card-head");
+        head.appendChild(createNode("span", "kanban-card-number", cardData.kind === "current" ? "Current" : "Update"));
+        head.appendChild(
+          createNode(
+            "span",
+            `kanban-card-chip kanban-card-chip--state-${cardData.status_category}`,
+            agentStatusLabel(cardData.status_category),
+          ),
+        );
+        selectButton.appendChild(head);
+        selectButton.appendChild(createNode("div", "kanban-card-title", cardData.title));
+        if (cardData.summary) {
+          selectButton.appendChild(createNode("div", "workspace-card-summary", cardData.summary));
+        }
+
+        const meta = createNode("div", "kanban-card-meta");
+        appendMeta(meta, cardData.owner);
+        appendMeta(meta, cardData.branch);
+        appendMeta(meta, cardData.pr_number ? `PR #${cardData.pr_number}` : "");
+        appendMeta(meta, cardData.updated_at);
+        if (meta.childElementCount > 0) {
+          selectButton.appendChild(meta);
+        }
+        card.appendChild(selectButton);
+
+        const actions = createNode("div", "workspace-card-actions");
+        const resumeButton = createNode("button", "wizard-button primary", "Resume");
+        resumeButton.type = "button";
+        resumeButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          state.selectedId = cardData.id;
+          renderWorkspaceKanban(windowId);
+          resumeWorkspaceCard(cardData);
+        });
+        actions.appendChild(resumeButton);
+        card.appendChild(actions);
+        return card;
+      }
+
+      function renderWorkspaceKanbanDetail(detailPane, cardData) {
+        detailPane.innerHTML = "";
+        if (!cardData) {
+          detailPane.appendChild(
+            createNode("div", "knowledge-detail-empty", "Select a Workspace"),
+          );
+          return;
+        }
+
+        const header = createNode("div", "knowledge-detail-header");
+        const head = createNode("div", "");
+        const headRow = createNode("div", "knowledge-detail-head");
+        headRow.appendChild(createNode("h3", "knowledge-detail-title", cardData.title));
+        headRow.appendChild(
+          createNode(
+            "span",
+            `knowledge-state-chip ${cardData.status_category}`,
+            agentStatusLabel(cardData.status_category),
+          ),
+        );
+        head.appendChild(headRow);
+        const subtitle = [
+          cardData.owner,
+          cardData.branch,
+          cardData.pr_number ? `PR #${cardData.pr_number}` : "",
+        ].filter(Boolean).join(" · ");
+        if (subtitle) {
+          head.appendChild(createNode("div", "knowledge-detail-subtitle", subtitle));
+        }
+        header.appendChild(head);
+
+        const actions = createNode("div", "knowledge-detail-actions");
+        const resumeButton = createNode("button", "wizard-button primary", "Resume");
+        resumeButton.type = "button";
+        resumeButton.addEventListener("click", () => resumeWorkspaceCard(cardData));
+        actions.appendChild(resumeButton);
+        if (cardData.cleanup_candidate?.branch) {
+          const cleanupButton = createNode("button", "wizard-button", "Review Cleanup");
+          cleanupButton.type = "button";
+          cleanupButton.addEventListener("click", openWorkspaceCleanup);
+          actions.appendChild(cleanupButton);
+        }
+        header.appendChild(actions);
+        detailPane.appendChild(header);
+
+        const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll");
+        const summary = createNode("section", "knowledge-section");
+        summary.appendChild(createNode("div", "knowledge-section-title", "Summary"));
+        summary.appendChild(
+          createNode(
+            "pre",
+            "knowledge-section-body",
+            cardData.summary || cardData.status_text || "No Workspace summary yet",
+          ),
+        );
+        scroll.appendChild(summary);
+
+        if (cardData.next_action) {
+          const next = createNode("section", "knowledge-section");
+          next.appendChild(createNode("div", "knowledge-section-title", "Next Action"));
+          next.appendChild(createNode("pre", "knowledge-section-body", cardData.next_action));
+          scroll.appendChild(next);
+        }
+
+        if (cardData.worktree_path) {
+          const context = createNode("section", "knowledge-section");
+          context.appendChild(createNode("div", "knowledge-section-title", "Workspace Context"));
+          context.appendChild(createNode("pre", "knowledge-section-body", cardData.worktree_path));
+          scroll.appendChild(context);
+        }
+
+        if (cardData.agents.length > 0) {
+          const agents = createNode("section", "knowledge-section");
+          agents.appendChild(createNode("div", "knowledge-section-title", "Agents"));
+          agents.appendChild(
+            createNode(
+              "pre",
+              "knowledge-section-body",
+              cardData.agents
+                .map((agent) =>
+                  [
+                    agent.display_name || agent.agent_id || "Agent",
+                    agentStatusLabel(agent.status_category),
+                    agent.current_focus || agent.title_summary || "",
+                  ].filter(Boolean).join(" · "),
+                )
+                .join("\n"),
+            ),
+          );
+          scroll.appendChild(agents);
+        }
+
+        detailPane.appendChild(scroll);
+      }
+
+      function renderWorkspaceKanban(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) return;
+        const state = ensureWorkspaceKanbanState(windowId);
+        const board = element.querySelector(".workspace-kanban-board");
+        const detailPane = element.querySelector(".workspace-kanban-detail-pane");
+        const status = element.querySelector(".workspace-kanban-status");
+        if (!board || !detailPane || !status) return;
+
+        const cards = workspaceCardsFromProjection(activeWorkProjection);
+        if (!state.selectedId || !cards.some((card) => card.id === state.selectedId)) {
+          state.selectedId = cards[0]?.id || null;
+        }
+
+        const columnsByStatus = new Map();
+        for (const column of board.querySelectorAll(".kanban-column[data-workspace-column]")) {
+          const body = column.querySelector("[data-role='body']");
+          if (body) body.innerHTML = "";
+          columnsByStatus.set(column.dataset.workspaceColumn, column);
+        }
+
+        const counts = new Map();
+        for (const cardData of cards) {
+          const column = columnsByStatus.get(cardData.column) || columnsByStatus.get("suspended");
+          const body = column?.querySelector("[data-role='body']");
+          if (!body) continue;
+          body.appendChild(renderWorkspaceKanbanCard(windowId, state, cardData));
+          counts.set(cardData.column, (counts.get(cardData.column) || 0) + 1);
+        }
+
+        for (const [columnKey, column] of columnsByStatus) {
+          const countLabel = column.querySelector("[data-role='count']");
+          if (countLabel) {
+            countLabel.textContent = String(counts.get(columnKey) || 0);
+          }
+          const body = column.querySelector("[data-role='body']");
+          if (body && body.childElementCount === 0) {
+            body.appendChild(createNode("div", "kanban-column-empty", "No Workspaces"));
+          }
+        }
+
+        status.className = "knowledge-status workspace-kanban-status";
+        status.textContent = cards.length === 0 ? "No Workspace history yet" : "";
+        if (cards.length === 0) {
+          status.classList.add("visible", "info");
+        }
+
+        const selected = cards.find((card) => card.id === state.selectedId) || null;
+        renderWorkspaceKanbanDetail(detailPane, selected);
+      }
+
+      function renderWorkspaceKanbanWindows() {
+        for (const [windowId] of windowMap.entries()) {
+          if (workspaceWindowById(windowId)?.preset === "workspace") {
+            renderWorkspaceKanban(windowId);
+          }
+        }
       }
 
       function renderKanbanDrawerBody() {
@@ -5721,14 +6030,11 @@
         }
 
         card.addEventListener("click", () => {
-          // SPEC-2017 US-9 — clicking a card opens the Drawer with the
-          // freshest detail. We always request detail (cheap; cache-
-          // backed) so reopening on the same card still pulls live
-          // comment / linked-branch updates, and we always (re)open
-          // the Drawer so a previously dismissed Drawer reappears.
+          // The selected card stays in the split-pane detail view. We
+          // always request detail (cheap; cache-backed) so selecting the
+          // same card still pulls live comment / linked-branch updates.
           requestKnowledgeDetail(windowId, state.kind, entry.number);
           renderKnowledgeBridge(windowId);
-          openKanbanDrawer({ windowId, kind: state.kind, number: entry.number });
         });
 
         // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
@@ -6280,6 +6586,7 @@
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-workspace",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
@@ -6655,6 +6962,62 @@
             frontendUnits.logsSurface.requestLogs(windowData.id);
           }
           frontendUnits.logsSurface.renderLogs(windowData.id);
+          return;
+        }
+
+        if (surface === "workspace") {
+          body.innerHTML = `
+            <div class="workspace-kanban-root kanban-root">
+              <div class="workspace-toolbar kanban-toolbar is-stacked">
+                <div class="workspace-toolbar-main">
+                  <div class="knowledge-heading">Workspace Overview</div>
+                </div>
+                <div class="workspace-toolbar-actions">
+                  <button class="wizard-button" type="button" data-action="start-workspace">Start Work</button>
+                </div>
+              </div>
+              <div class="knowledge-status workspace-kanban-status"></div>
+              <div class="knowledge-split workspace-split kanban-shell">
+                <div class="knowledge-list-pane kanban-list-pane">
+                  <div class="kanban-board workspace-kanban-board" role="list" aria-label="Workspace Kanban Board">
+                    <div class="kanban-column workspace-kanban-column" data-workspace-column="active" aria-label="Active Workspace column">
+                      <div class="kanban-column-header">
+                        <span class="workspace-column-name">Active</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column workspace-kanban-column" data-workspace-column="suspended" aria-label="Suspended Workspace column">
+                      <div class="kanban-column-header">
+                        <span class="workspace-column-name">Suspended</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                    <div class="kanban-column workspace-kanban-column" data-workspace-column="completed" aria-label="Completed Workspace column">
+                      <div class="kanban-column-header">
+                        <span class="workspace-column-name">Completed</span>
+                        <span class="kanban-column-count" data-role="count">0</span>
+                      </div>
+                      <div class="kanban-column-body" data-role="body"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="knowledge-detail-pane workspace-kanban-detail-pane"></div>
+              </div>
+            </div>
+          `;
+          body.addEventListener("mousedown", () => {
+            focusWindowLocally(windowData.id);
+            socketTransport.send({ kind: "focus_window", id: windowData.id });
+          });
+          body
+            .querySelector("[data-action='start-workspace']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              send({ kind: "open_start_work" });
+            });
+          renderWorkspaceKanban(windowData.id);
           return;
         }
 
@@ -7417,6 +7780,7 @@
           boardStateMap.delete(windowId);
           logStateMap.delete(windowId);
           clearKnowledgeBridgeState(windowId);
+          workspaceKanbanStateMap.delete(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
@@ -7589,6 +7953,7 @@
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
             renderWorkspaceOverview();
+            renderWorkspaceKanbanWindows();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -8753,23 +9118,32 @@
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
       // buttons use, so they share the legacy invariants.
+      function isAutoMaximizedKanbanPreset(preset) {
+        return preset === "issue" || preset === "spec" || preset === "workspace";
+      }
+
       function focusOrSpawnPreset(preset) {
         const allWindows = activeWorkspace().windows || [];
         const existing = allWindows.find(
           (w) => w.preset === preset && !w.minimized,
         );
         if (existing) {
-          frontendUnits.socketTransport.send({
+          const message = {
             kind: "focus_window",
             id: existing.id,
-          });
+          };
+          if (isAutoMaximizedKanbanPreset(preset)) {
+            message.bounds = visibleBounds();
+          }
+          frontendUnits.socketTransport.send(message);
           return;
         }
-        frontendUnits.socketTransport.send({
+        const message = {
           kind: "create_window",
           preset,
           bounds: visibleBounds(),
-        });
+        };
+        frontendUnits.socketTransport.send(message);
       }
 
       document.addEventListener("op:command", (event) => {

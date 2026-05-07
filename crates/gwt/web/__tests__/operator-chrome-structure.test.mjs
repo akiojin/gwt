@@ -308,10 +308,6 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     document.querySelector("#project-workspace-overview-button"),
     "expected Project Bar to expose Workspace Overview",
   );
-  assert.ok(
-    document.querySelector("#workspace-overview-drawer"),
-    "expected Workspace Overview to use a drawer surface",
-  );
   assert.match(
     appSource,
     /function\s+openWorkspaceOverview\(/,
@@ -319,8 +315,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /function\s+renderWorkspaceOverview\(\)[\s\S]+journal_entries/,
-    "expected Overview to render Workspace journal entries from active_work_projection",
+    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("workspace"\)/,
+    "expected Workspace Overview to open the Workspace Kanban window instead of a drawer",
   );
   assert.match(
     appSource,
@@ -331,6 +327,54 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     appSource,
     /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
     "expected Project Bar Workspace Overview button to open the same overview",
+  );
+});
+
+test("Workspace Overview uses the shared full-window Kanban + detail layout", () => {
+  assert.match(
+    appSource,
+    /presetSurface\(preset\)[\s\S]+preset\s*===\s*"workspace"[\s\S]+return\s+"workspace"/,
+    "expected Workspace to be a first-class window surface",
+  );
+  assert.match(
+    appSource,
+    /workspace-kanban-root[\s\S]+workspace-split[\s\S]+kanban-shell/,
+    "expected Workspace Overview to share the split Kanban shell",
+  );
+  for (const column of ["Active", "Suspended", "Completed"]) {
+    assert.match(
+      appSource,
+      new RegExp(`workspace-column-name">${column}`),
+      `expected Workspace Kanban to include ${column} column`,
+    );
+  }
+  assert.match(
+    appSource,
+    /workspace-kanban-detail-pane/,
+    "expected Workspace Kanban to keep selected Workspace detail on the right",
+  );
+  assert.match(
+    appSource,
+    /function\s+workspaceCardsFromProjection\([^)]*\)[\s\S]+journal_entries/,
+    "expected Workspace Kanban to render Workspace journal entries from active_work_projection",
+  );
+  assert.match(
+    appSource,
+    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+open_active_work_launch_wizard[\s\S]+open_start_work/,
+    "expected every Workspace card Resume action to prefer branch resume and fall back to Start Work",
+  );
+});
+
+test("SPEC Issue and Workspace Kanban presets open maximized", () => {
+  assert.match(
+    appSource,
+    /function\s+isAutoMaximizedKanbanPreset\([^)]*\)[\s\S]+issue[\s\S]+spec[\s\S]+workspace/,
+    "expected frontend focus/spawn path to identify Issue, SPEC, and Workspace as auto-maximized Kanban presets",
+  );
+  assert.match(
+    appSource,
+    /focusOrSpawnPreset\(preset\)[\s\S]+isAutoMaximizedKanbanPreset\(preset\)[\s\S]+bounds:\s*visibleBounds\(\)/,
+    "expected focusOrSpawnPreset to send viewport bounds for auto-maximized Kanban presets",
   );
 });
 

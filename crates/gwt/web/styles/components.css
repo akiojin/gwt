@@ -2126,6 +2126,10 @@ kbd.op-kbd {
   display: none;
 }
 
+.workspace-kanban-board {
+  grid-template-columns: repeat(3, minmax(240px, 1fr));
+}
+
 .kanban-column {
   display: flex;
   flex-direction: column;
@@ -2159,6 +2163,10 @@ kbd.op-kbd {
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
   color: var(--color-text-muted);
+}
+
+.workspace-column-name {
+  color: var(--color-display-fg);
 }
 
 .kanban-column-body {
@@ -2249,6 +2257,39 @@ kbd.op-kbd {
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
+}
+
+.workspace-card-summary {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workspace-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.workspace-card-main:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.workspace-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
 }
 
 .kanban-card-chip {
