@@ -18,6 +18,7 @@
         visibleBoardEntries,
       } from "/board-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
+      import { createTerminalContextMenuController } from "/terminal-context-menu.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -2142,6 +2143,20 @@
         });
       }
 
+      async function readNavigatorClipboardItems() {
+        if (!navigator.clipboard?.read) {
+          return [];
+        }
+        return navigator.clipboard.read();
+      }
+
+      async function readNavigatorClipboardText() {
+        if (!navigator.clipboard?.readText) {
+          return "";
+        }
+        return navigator.clipboard.readText();
+      }
+
       async function writeClipboardText(text, restoreFocus = null) {
         if (!text) {
           return false;
@@ -2336,6 +2351,32 @@
         };
       }
 
+      function installTerminalContextMenuHandlers(windowId, terminalRoot, terminal) {
+        const controller = createTerminalContextMenuController({
+          document,
+          window,
+          terminalRoot,
+          readClipboardText: readNavigatorClipboardText,
+          readClipboardItems: readNavigatorClipboardItems,
+          blobToBase64: readClipboardImageAsBase64,
+          supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
+          pasteText: (text) => terminal.paste(text),
+          pasteImage: ({ dataBase64, mimeType, filename }) => {
+            send({
+              kind: "paste_image",
+              id: windowId,
+              data_base64: dataBase64,
+              mime_type: mimeType,
+              filename,
+            });
+          },
+          focusTerminal: () => terminal.focus(),
+        });
+        return () => {
+          controller.dispose();
+        };
+      }
+
       function installTerminalViewportRefreshHandlers(windowId, terminal) {
         const viewportScrollDisposable = terminal.onScroll(() => {
           scheduleTerminalViewportRefresh(windowId);
@@ -2395,10 +2436,16 @@
           terminalContainer,
           terminal,
         );
+        const contextMenuCleanup = installTerminalContextMenuHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
           imagePasteCleanup();
+          contextMenuCleanup();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
