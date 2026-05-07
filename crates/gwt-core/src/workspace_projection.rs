@@ -37,6 +37,32 @@ pub struct GitDetails {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceCleanupReason {
+    WorkspaceDone,
+    PrMerged,
+}
+
+impl WorkspaceCleanupReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceDone => "workspace_done",
+            Self::PrMerged => "pr_merged",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCleanupCandidate {
+    pub branch: String,
+    pub worktree_path: Option<PathBuf>,
+    pub reason: WorkspaceCleanupReason,
+    pub default_delete_remote: bool,
+    #[serde(default)]
+    pub remote_delete_available: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,
@@ -295,6 +321,42 @@ impl WorkspaceProjection {
             }
         }
         removed
+    }
+
+    pub fn cleanup_candidate(
+        &self,
+        branch_has_live_agent: bool,
+    ) -> Option<WorkspaceCleanupCandidate> {
+        if branch_has_live_agent {
+            return None;
+        }
+        let details = self.git_details.as_ref()?;
+        if !details.created_by_start_work {
+            return None;
+        }
+        let branch = details.branch.as_ref()?.trim();
+        if !branch.starts_with("work/") {
+            return None;
+        }
+        let reason = if details
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"))
+        {
+            WorkspaceCleanupReason::PrMerged
+        } else if self.status_category == WorkspaceStatusCategory::Done {
+            WorkspaceCleanupReason::WorkspaceDone
+        } else {
+            return None;
+        };
+
+        Some(WorkspaceCleanupCandidate {
+            branch: branch.to_string(),
+            worktree_path: details.worktree_path.clone(),
+            reason,
+            default_delete_remote: false,
+            remote_delete_available: false,
+        })
     }
 }
 
@@ -617,6 +679,77 @@ mod tests {
             projection.effective_status_category(),
             WorkspaceStatusCategory::Active
         );
+    }
+
+    #[test]
+    fn cleanup_candidate_requires_done_or_merged_start_work_workspace_branch() {
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Done;
+        projection.git_details = Some(GitDetails {
+            branch: Some("work/20260507-0200".to_string()),
+            worktree_path: Some(PathBuf::from("/repo/work/20260507-0200")),
+            base_branch: Some("origin/main".to_string()),
+            pr_number: Some(2525),
+            pr_state: None,
+            created_by_start_work: true,
+            created_at,
+        });
+
+        let candidate = projection
+            .cleanup_candidate(false)
+            .expect("done Start Work workspace should be cleanable");
+
+        assert_eq!(candidate.branch, "work/20260507-0200");
+        assert_eq!(
+            candidate.worktree_path.as_deref(),
+            Some(Path::new("/repo/work/20260507-0200"))
+        );
+        assert_eq!(candidate.reason, WorkspaceCleanupReason::WorkspaceDone);
+        assert!(!candidate.default_delete_remote);
+
+        projection.status_category = WorkspaceStatusCategory::Active;
+        projection
+            .git_details
+            .as_mut()
+            .expect("git details")
+            .pr_state = Some("merged".to_string());
+        let merged = projection
+            .cleanup_candidate(false)
+            .expect("merged PR should trigger cleanup candidate");
+        assert_eq!(merged.reason, WorkspaceCleanupReason::PrMerged);
+    }
+
+    #[test]
+    fn cleanup_candidate_preserves_non_workspace_or_active_branches() {
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Done;
+        projection.git_details = Some(GitDetails {
+            branch: Some("feature/manual".to_string()),
+            worktree_path: Some(PathBuf::from("/repo/feature/manual")),
+            base_branch: Some("origin/main".to_string()),
+            pr_number: None,
+            pr_state: None,
+            created_by_start_work: true,
+            created_at,
+        });
+        assert_eq!(projection.cleanup_candidate(false), None);
+
+        projection.git_details.as_mut().expect("git details").branch =
+            Some("work/20260507-0200".to_string());
+        assert_eq!(
+            projection.cleanup_candidate(true),
+            None,
+            "live Agent sessions must suppress destructive cleanup prompts"
+        );
+
+        projection
+            .git_details
+            .as_mut()
+            .expect("git details")
+            .created_by_start_work = false;
+        assert_eq!(projection.cleanup_candidate(false), None);
     }
 
     #[test]

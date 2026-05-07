@@ -11,6 +11,7 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
 const inlineStyle = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || "";
@@ -330,6 +331,29 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     appSource,
     /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
     "expected Project Bar Workspace Overview button to open the same overview",
+  );
+});
+
+test("Workspace Overview exposes user-confirmed cleanup for completed workspaces", () => {
+  assert.match(
+    appSource,
+    /cleanup_candidate/,
+    "expected active work projection cleanup_candidate to drive Workspace cleanup",
+  );
+  assert.match(
+    appSource,
+    /function\s+openWorkspaceCleanup\(/,
+    "expected Workspace Overview to open a cleanup confirmation instead of deleting automatically",
+  );
+  assert.match(
+    appSource,
+    /default_delete_remote[\s\S]+deleteRemote\s*:\s*false|deleteRemote\s*:\s*false[\s\S]+default_delete_remote/,
+    "expected Workspace cleanup to default remote deletion off",
+  );
+  assert.match(
+    `${appSource}\n${branchCleanupSource}`,
+    /Also delete matching remote branches/,
+    "expected remote deletion to remain an explicit opt-in in the confirmation UI",
   );
 });
 

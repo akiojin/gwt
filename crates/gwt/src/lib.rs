@@ -88,9 +88,9 @@ pub use preset::{
     WindowPreset, WindowSurface,
 };
 pub use protocol::{
-    ActiveWorkAgentView, ActiveWorkProjectionView, AppStateView, ArrangeMode, BackendEvent,
-    BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection, FrontendEvent, ProfileEntryView,
-    ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
-    WorkspaceJournalEntryView, WorkspaceView,
+    ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
+    ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
+    FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
+    RecentProjectView, WorkspaceJournalEntryView, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

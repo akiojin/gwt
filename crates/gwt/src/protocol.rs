@@ -177,6 +177,10 @@ pub enum FrontendEvent {
         branches: Vec<String>,
         delete_remote: bool,
     },
+    RunWorkspaceCleanup {
+        branch: String,
+        delete_remote: bool,
+    },
     PostBoardEntry {
         id: String,
         entry_kind: BoardEntryKind,
@@ -403,6 +407,15 @@ pub struct WorkspaceJournalEntryView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkCleanupCandidateView {
+    pub branch: String,
+    pub worktree_path: Option<String>,
+    pub reason: String,
+    pub default_delete_remote: bool,
+    pub remote_delete_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
     pub title: String,
@@ -418,6 +431,7 @@ pub struct ActiveWorkProjectionView {
     pub pr_number: Option<u64>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
+    pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     pub agents: Vec<ActiveWorkAgentView>,
 }
 
@@ -839,6 +853,13 @@ mod tests {
                     agent_current_focus: Some("Run launch tests".to_string()),
                     agent_title_summary: Some("Launch tests".to_string()),
                 }],
+                cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
+                    branch: "work/20260504-1200".to_string(),
+                    worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    reason: "workspace_done".to_string(),
+                    default_delete_remote: false,
+                    remote_delete_available: true,
+                }),
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
                     window_id: Some("tab-1::agent-1".to_string()),
@@ -895,6 +916,13 @@ mod tests {
                 .and_then(Value::as_str),
             Some("Launching from Project Bar"),
             "Workspace Overview should receive recent summary journal entries without replaying Board history"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/cleanup_candidate/default_delete_remote")
+                .and_then(Value::as_bool),
+            Some(false),
+            "Workspace cleanup must default to local-only deletion"
         );
     }
 
