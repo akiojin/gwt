@@ -40,6 +40,10 @@ pub fn update_cta_js() -> &'static str {
     include_str!("../web/update-cta.js")
 }
 
+pub fn terminal_context_menu_js() -> &'static str {
+    include_str!("../web/terminal-context-menu.js")
+}
+
 pub fn xterm_js() -> &'static str {
     include_str!("../web/vendor/xterm/xterm.mjs")
 }
@@ -98,6 +102,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/update-cta.js",
         source: update_cta_js,
         marker: "createUpdateCtaController",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-context-menu.js",
+        source: terminal_context_menu_js,
+        marker: "createTerminalContextMenuController",
     },
     RootJsModuleAsset {
         path: "/theme-manager.js",
@@ -249,7 +258,10 @@ pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_js, index_html, styles_components_css, xterm_css, xterm_fit_js, xterm_js};
+    use super::{
+        app_js, index_html, styles_components_css, terminal_context_menu_js, xterm_css,
+        xterm_fit_js, xterm_js,
+    };
     use super::{app_js_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler};
     use super::{root_js_module_assets, root_js_module_response};
 
@@ -261,7 +273,9 @@ mod tests {
             "\n",
             include_str!("../web/board-surface.js"),
             "\n",
-            include_str!("../web/update-cta.js")
+            include_str!("../web/update-cta.js"),
+            "\n",
+            include_str!("../web/terminal-context-menu.js")
         )
     }
 
@@ -390,6 +404,40 @@ mod tests {
                 && html.contains("mime_type")
                 && html.contains("filename"),
             "expected image paste backend event with payload, MIME type, and filename",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_context_menu_pastes_text_and_images() {
+        let html = frontend_bundle_source();
+        let context_menu_source = terminal_context_menu_js();
+
+        assert!(
+            html.contains("createTerminalContextMenuController"),
+            "expected app.js to install the terminal context menu controller",
+        );
+        assert!(
+            html.contains("canvas.addEventListener(\"contextmenu\"")
+                && html.contains("event.preventDefault();"),
+            "expected non-terminal canvas contextmenu to remain suppressed",
+        );
+        assert!(
+            html.contains("terminal.paste(text)"),
+            "expected context menu text paste to flow through xterm paste",
+        );
+        assert!(
+            html.contains("navigator.clipboard?.readText")
+                && html.contains("navigator.clipboard?.read"),
+            "expected Paste to use async clipboard text and item APIs",
+        );
+        assert!(
+            context_menu_source.contains("textContent = \"Paste\""),
+            "terminal context menu user-facing action must be English",
+        );
+        assert!(
+            context_menu_source.contains("readClipboardItems")
+                && context_menu_source.contains("pasteImage"),
+            "expected context menu Paste to preserve image paste routing",
         );
     }
 
@@ -1220,6 +1268,7 @@ mod tests {
             "/hotkey.js",
             "/operator-shell.js",
             "/focus-trap.js",
+            "/terminal-context-menu.js",
         ] {
             assert!(
                 registry_paths.contains(&module_path),
