@@ -17,6 +17,7 @@
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
+      import { createUpdateCtaController } from "/update-cta.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -397,6 +398,14 @@
         }
         pendingMessages.push(message);
       }
+
+      const updateCtaController = createUpdateCtaController({
+        document,
+        send,
+        setVersionState,
+        confirmUpdate: (version) =>
+          window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
+      });
 
       function setConnectionState(connected) {
         connectionDot.classList.toggle("connected", connected);
@@ -2074,6 +2083,49 @@
         );
       }
 
+      const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+      ]);
+
+      function findClipboardImagePasteItem(items) {
+        for (const item of Array.from(items || [])) {
+          if (
+            item?.kind === "file" &&
+            SUPPORTED_IMAGE_PASTE_MIME_TYPES.has(item.type)
+          ) {
+            return item;
+          }
+        }
+        return null;
+      }
+
+      function dataUrlBase64Payload(dataUrl) {
+        if (typeof dataUrl !== "string") {
+          return null;
+        }
+        const commaIndex = dataUrl.indexOf(",");
+        if (commaIndex < 0) {
+          return null;
+        }
+        const payload = dataUrl.slice(commaIndex + 1);
+        return payload || null;
+      }
+
+      function readClipboardImageAsBase64(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => {
+            resolve(dataUrlBase64Payload(reader.result));
+          });
+          reader.addEventListener("error", () => {
+            reject(reader.error || new Error("Failed to read clipboard image"));
+          });
+          reader.readAsDataURL(file);
+        });
+      }
+
       async function writeClipboardText(text, restoreFocus = null) {
         if (!text) {
           return false;
@@ -2230,6 +2282,44 @@
         };
       }
 
+      function installTerminalImagePasteHandlers(windowId, terminalRoot, terminal) {
+        const handlePaste = (event) => {
+          const item = findClipboardImagePasteItem(event.clipboardData?.items);
+          if (!item) {
+            return;
+          }
+          const file = item.getAsFile?.();
+          if (!file) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+
+          void readClipboardImageAsBase64(file)
+            .then((dataBase64) => {
+              if (!dataBase64) {
+                return;
+              }
+              send({
+                kind: "paste_image",
+                id: windowId,
+                data_base64: dataBase64,
+                mime_type: file.type || item.type,
+                filename: file.name || null,
+              });
+              terminal.focus();
+            })
+            .catch(() => {
+              terminal.focus();
+            });
+        };
+
+        terminalRoot.addEventListener("paste", handlePaste, true);
+        return () => {
+          terminalRoot.removeEventListener("paste", handlePaste, true);
+        };
+      }
+
       function installTerminalViewportRefreshHandlers(windowId, terminal) {
         const viewportScrollDisposable = terminal.onScroll(() => {
           scheduleTerminalViewportRefresh(windowId);
@@ -2284,9 +2374,15 @@
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
+        const imagePasteCleanup = installTerminalImagePasteHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
+          imagePasteCleanup();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
@@ -7657,20 +7753,11 @@
             break;
           case "update_state":
             if (event.state === "available") {
-              setVersionState(event.current, event.latest);
-              // FR-036: surface the toast only on the first detection of a
-              // given `latest`, or when the polling loop reports a strictly
-              // newer version. Duplicate detections from the 5min poll just
-              // re-render the persistent button.
-              if (firstSeenUpdateVersion !== event.latest) {
-                showUpdateToast(event.latest);
-                firstSeenUpdateVersion = event.latest;
-              }
-              showUpdateButton(event.latest);
+              updateCtaController.handleUpdateState(event);
             }
             break;
           case "update_apply_error":
-            window.alert(event.message || "Failed to start the update.");
+            updateCtaController.showError(event.message || "Failed to start the update.");
             break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
@@ -7800,71 +7887,6 @@
             break;
           }
         }
-      }
-
-      let updateToastTimer = null;
-      // FR-036: remember the last `latest` rendered on the persistent button
-      // so the 5min poll loop does not re-toast on every duplicate detection.
-      let firstSeenUpdateVersion = null;
-
-      function showUpdateToast(version) {
-        let toast = document.getElementById("update-toast");
-        if (!toast) {
-          toast = document.createElement("div");
-          toast.id = "update-toast";
-          toast.className = "update-toast";
-          document.body.appendChild(toast);
-        }
-        toast.textContent = `\u{1F4E6} Update available: v${version} \u2014 click to apply`;
-        toast.style.opacity = "1";
-        toast.onclick = () => {
-          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
-            send({ kind: "apply_update" });
-          }
-        };
-        // While the toast is up, lift the persistent button so the two do
-        // not overlap; the .has-toast class is dropped once the toast fades.
-        const buttonEl = document.getElementById("update-button");
-        if (buttonEl) {
-          buttonEl.classList.add("has-toast");
-        }
-        clearTimeout(updateToastTimer);
-        updateToastTimer = setTimeout(() => {
-          toast.style.opacity = "0";
-          setTimeout(() => toast.remove(), 300);
-          updateToastTimer = null;
-          const after = document.getElementById("update-button");
-          if (after) {
-            after.classList.remove("has-toast");
-          }
-        }, 8000);
-      }
-
-      function showUpdateButton(version) {
-        // FR-036: persistent "Update available" button that stays after the
-        // initial 8s toast fades. Re-rendering on a new `latest` simply
-        // updates the textContent / click target, so this is cheap to call
-        // on every poll detection.
-        let button = document.getElementById("update-button");
-        if (!button) {
-          button = document.createElement("button");
-          button.id = "update-button";
-          button.type = "button";
-          button.className = "update-button";
-          // Offset the button while the initial 8s toast is still visible.
-          if (document.getElementById("update-toast")) {
-            button.classList.add("has-toast");
-          }
-          document.body.appendChild(button);
-        }
-        button.textContent = `\u{1F4E6} Update available: v${version}`;
-        button.title = `Apply update to v${version}`;
-        button.setAttribute("aria-label", `Update available: v${version}, click to apply`);
-        button.onclick = () => {
-          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
-            send({ kind: "apply_update" });
-          }
-        };
       }
 
       window.addEventListener("pointermove", (event) => {

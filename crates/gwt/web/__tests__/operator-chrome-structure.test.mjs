@@ -559,7 +559,7 @@ test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () =
   assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
   assert.equal(
     windowControlsPeek.getAttribute("aria-controls"),
-    "floating-window-controls-primary floating-window-controls-add",
+    "floating-window-controls-actions",
   );
   assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
   assert.match(windowControlsPeek.getAttribute("aria-label") ?? "", /show window controls/i);
@@ -580,32 +580,43 @@ test("window controls peek 帯 targets only collapsible control groups", () => {
   const controlledIds = (windowControlsPeek.getAttribute("aria-controls") ?? "")
     .split(/\s+/)
     .filter(Boolean);
-  assert.deepEqual(controlledIds, [
-    "floating-window-controls-primary",
-    "floating-window-controls-add",
-  ]);
+  assert.deepEqual(controlledIds, ["floating-window-controls-actions"]);
   assert.ok(!controlledIds.includes("floating-window-controls"));
 
+  const actionsGroup = document.getElementById("floating-window-controls-actions");
   const primaryGroup = document.getElementById("floating-window-controls-primary");
   const addGroup = document.getElementById("floating-window-controls-add");
+  assert.ok(actionsGroup, "expected continuous window controls actions group");
   assert.ok(primaryGroup, "expected primary window controls group");
   assert.ok(addGroup, "expected add-window control group");
+
+  const floatingControls = document.getElementById("floating-window-controls");
+  assert.ok(floatingControls, "expected floating window controls root");
+  const toolbarChildren = Array.from(floatingControls.children);
+  assert.ok(
+    toolbarChildren.indexOf(windowControlsPeek) < toolbarChildren.indexOf(actionsGroup),
+    "peek must precede actions in DOM order so forward Tab enters the revealed controls",
+  );
+
+  assert.ok(actionsGroup.contains(primaryGroup), "primary controls must stay inside the continuous actions group");
+  assert.ok(actionsGroup.contains(addGroup), "add controls must stay inside the continuous actions group");
 
   for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
     const control = document.getElementById(id);
     assert.ok(control, `expected ${id}`);
-    assert.ok(primaryGroup.contains(control), `${id} must be inside the primary controlled group`);
+    assert.ok(actionsGroup.contains(control), `${id} must be inside the continuous actions group`);
   }
 
   const addButton = document.getElementById("add-button");
   assert.ok(addButton, "expected add-button");
   assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
+  assert.ok(actionsGroup.contains(addButton), "add-button must be reachable through the continuous actions group");
 
   for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
     const control = document.getElementById(id);
     assert.ok(control, `expected ${id}`);
     assert.equal(
-      primaryGroup.contains(control) || addGroup.contains(control),
+      actionsGroup.contains(control),
       false,
       `${id} must remain outside collapsible window controls groups`,
     );
@@ -780,18 +791,16 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
 });
 
 test("components.css hover-reveals only the marked floating window control groups", () => {
-  // SPEC-2356 Phase 9 (FR-022): primary + add groups auto-hide by default and
+  // SPEC-2356 Phase 9 (FR-022): the continuous actions group auto-hides by default and
   // are revealed only when [data-op-window-controls="revealed"] is set.
   // Palette and Zoom controls remain in the toolbar regardless.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /#floating-window-controls-primary[\s\S]*?display:\s*none/);
+  assert.match(css, /#floating-window-controls-actions[\s\S]*?display:\s*none/);
+  assert.match(css, /#floating-window-controls-actions\s*\{[^}]*order:\s*1/);
+  assert.match(css, /\.op-window-controls-peek\s*\{[^}]*order:\s*2/);
   assert.match(
     css,
-    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-primary[\s\S]*?display:\s*flex/,
-  );
-  assert.match(
-    css,
-    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-add[\s\S]*?display:\s*flex/,
+    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-actions[\s\S]*?display:\s*flex/,
   );
   assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#op-palette-button/);
   assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#zoom-reset-button/);
