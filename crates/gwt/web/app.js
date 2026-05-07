@@ -1616,6 +1616,24 @@
         });
       }
 
+      function activeWorkDisplayTitle(projection, agents) {
+        const agentTitle = (Array.isArray(agents) ? agents : [])
+          .find((agent) => agent && String(agent.title_summary || "").trim())
+          ?.title_summary;
+        const candidates = [
+          agentTitle,
+          projection?.summary,
+          projection?.owner,
+          projection?.title,
+        ];
+        for (const value of candidates) {
+          const title = String(value || "").trim();
+          if (!title || title === "Start Work") continue;
+          return title;
+        }
+        return "Active Work";
+      }
+
       function agentStatusLabel(state) {
         switch (String(state || "").toLowerCase()) {
           case "active":
@@ -1736,7 +1754,7 @@
         setActiveWorkSectionVisible(true);
 
         activeWorkSummary.appendChild(
-          createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
+          createNode("div", "op-work-title", activeWorkDisplayTitle(activeWorkProjection, agents)),
         );
         const meta = createNode("div", "op-work-meta");
         appendMeta(meta, activeWorkProjection.owner);
