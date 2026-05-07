@@ -1,4 +1,7 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use super::QuickStartEntry;
 
@@ -30,9 +33,10 @@ pub(super) fn collect_quick_start_entries_from_sessions(
 ) -> Vec<QuickStartEntry> {
     let mut latest_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
     let mut latest_resumable_by_agent: HashMap<String, gwt_agent::Session> = HashMap::new();
+    let repo_scope = WorktreePathScope::new(repo_path);
 
     for session in sessions {
-        if session.branch != branch_name || session.worktree_path != repo_path {
+        if session.branch != branch_name || !repo_scope.matches(&session.worktree_path) {
             continue;
         }
 
@@ -113,4 +117,28 @@ fn agent_session_resume_id(session: &gwt_agent::Session) -> Option<String> {
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
+}
+
+struct WorktreePathScope<'a> {
+    original: &'a Path,
+    canonical: Option<PathBuf>,
+}
+
+impl<'a> WorktreePathScope<'a> {
+    fn new(original: &'a Path) -> Self {
+        Self {
+            original,
+            canonical: original.canonicalize().ok(),
+        }
+    }
+
+    fn matches(&self, candidate: &Path) -> bool {
+        if candidate == self.original {
+            return true;
+        }
+        match (self.canonical.as_ref(), candidate.canonicalize().ok()) {
+            (Some(expected), Some(candidate)) => candidate == *expected,
+            _ => false,
+        }
+    }
 }

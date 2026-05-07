@@ -205,6 +205,10 @@ fn dispatch_hook_runtime_state_missing_event_exits_2() {
 fn dispatch_hook_event_runs_in_process_without_stdout_noise() {
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let prev_runtime_path = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
+    let prev_session_id = std::env::var_os("GWT_SESSION_ID");
+    std::env::remove_var("GWT_SESSION_RUNTIME_PATH");
+    std::env::remove_var("GWT_SESSION_ID");
     env.stdin = serde_json::json!({
         "tool_name": "Read",
         "tool_input": { "file_path": "Cargo.toml" }
@@ -212,6 +216,13 @@ fn dispatch_hook_event_runs_in_process_without_stdout_noise() {
     .to_string();
 
     let code = dispatch(&mut env, &argv(&["gwt", "hook", "event", "PreToolUse"]));
+
+    if let Some(v) = prev_runtime_path {
+        std::env::set_var("GWT_SESSION_RUNTIME_PATH", v);
+    }
+    if let Some(v) = prev_session_id {
+        std::env::set_var("GWT_SESSION_ID", v);
+    }
 
     assert_eq!(code, 0, "PreToolUse read event should be allowed");
     assert_eq!(env.stdout, b"", "allowed PreToolUse must emit no stdout");

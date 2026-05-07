@@ -3607,6 +3607,58 @@ mod tests {
     }
 
     #[test]
+    fn load_quick_start_entries_matches_canonical_worktree_path() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let same_worktree_with_dot = worktree.join(".");
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &same_worktree_with_dot,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            "resume-canonical",
+        );
+
+        let entries = load_quick_start_entries(&worktree, dir.path(), "feature/gui");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "codex");
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("resume-canonical")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_quick_start_entries_matches_symlinked_worktree_path() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        let symlink = dir.path().join("repo-link");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        std::os::unix::fs::symlink(&worktree, &symlink).expect("repo symlink");
+        sample_session(
+            dir.path(),
+            "feature/gui",
+            &symlink,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            "resume-symlink",
+        );
+
+        let entries = load_quick_start_entries(&worktree, dir.path(), "feature/gui");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].agent_id, "codex");
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("resume-symlink")
+        );
+    }
+
+    #[test]
     fn collect_quick_start_entries_from_sessions_reuses_resumable_session_profile() {
         let worktree = PathBuf::from("/tmp/repo");
         let mut older = sample_session_record(
