@@ -10,8 +10,8 @@ use gwt_core::coordination::{BoardEntry, RemindersState};
 
 use super::format::{filter_and_cap_latest, injection_text, session_start_text};
 use super::texts::{
-    SESSION_START_CAP, STOP_REMINDER, STOP_REMINDER_SHORT, USER_PROMPT_DIFF_CAP,
-    USER_PROMPT_REMINDER, USER_PROMPT_REMINDER_SHORT,
+    format_language_directive, SESSION_START_CAP, STOP_REMINDER, STOP_REMINDER_SHORT,
+    USER_PROMPT_DIFF_CAP, USER_PROMPT_REMINDER, USER_PROMPT_REMINDER_SHORT,
 };
 use super::{HookOutput, IntentBoundaryEvent};
 
@@ -40,6 +40,11 @@ pub struct ReminderInputs {
     /// configured redundancy window. Used to pick between the full and
     /// short reminder text.
     pub has_recent_own_status: bool,
+    /// Resolved narrative-output language (`"ja"` or `"en"`) appended as a
+    /// directive to agent-facing reminders. Stop reminders ignore this
+    /// because they target the user, not the agent.
+    /// SPEC-1933 FR-010.
+    pub language: String,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +69,8 @@ fn plan_session_start(inputs: ReminderInputs) -> ReminderPlan {
         &inputs.self_session_id,
         SESSION_START_CAP,
     );
-    let text = session_start_text(&entries, &inputs.self_match_keys);
+    let mut text = session_start_text(&entries, &inputs.self_match_keys);
+    text.push_str(&format_language_directive(&inputs.language));
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
     ReminderPlan {
@@ -89,7 +95,7 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
         USER_PROMPT_REMINDER
     };
 
-    let context = if entries.is_empty() {
+    let mut context = if entries.is_empty() {
         reminder.to_string()
     } else {
         format!(
@@ -98,6 +104,7 @@ fn plan_user_prompt_submit(inputs: ReminderInputs) -> ReminderPlan {
             reminder
         )
     };
+    context.push_str(&format_language_directive(&inputs.language));
 
     let mut next = inputs.reminders;
     next.last_injected_at = Some(inputs.now);
@@ -214,6 +221,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("phase"));
@@ -231,6 +239,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = system_message(&plan.output);
         assert!(text.contains("Stop"));
@@ -250,6 +259,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
 
@@ -278,6 +288,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
 
@@ -298,6 +309,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let user_prompt = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::UserPromptSubmit,
@@ -308,6 +320,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: true,
+            language: "en".to_string(),
         });
         let stop = plan_reminder(ReminderInputs {
             event: IntentBoundaryEvent::Stop,
@@ -318,6 +331,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
 
         for text in [
@@ -346,6 +360,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: true,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("coordination"));
@@ -375,6 +390,7 @@ mod tests {
             recent_entries: vec![other],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         let entry_line = text
@@ -409,6 +425,7 @@ mod tests {
             recent_entries: vec![other],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         let entry_line = text
@@ -442,6 +459,7 @@ mod tests {
             recent_entries: vec![other],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         let entry_line = text
@@ -465,6 +483,7 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: true,
+            language: "en".to_string(),
         });
         assert!(additional_context(&plan.output).contains("posted to the Board recently"));
     }
@@ -499,6 +518,7 @@ mod tests {
             recent_entries: entries,
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("investigating broken test"));
@@ -519,10 +539,125 @@ mod tests {
             recent_entries: vec![],
             reminders: RemindersState::default(),
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         let text = additional_context(&plan.output);
         assert!(text.contains("Board Post Reminder"));
         assert!(!text.contains("Recent Board updates"));
+    }
+
+    #[test]
+    fn plan_session_start_appends_language_directive_for_en() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "en".to_string(),
+        });
+        let text = additional_context(&plan.output);
+        assert!(
+            text.contains("Use language: en"),
+            "SessionStart reminder must contain language directive: {text}"
+        );
+        assert!(text.contains("narrative outputs"));
+    }
+
+    #[test]
+    fn plan_session_start_appends_language_directive_for_ja() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::SessionStart,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "ja".to_string(),
+        });
+        let text = additional_context(&plan.output);
+        assert!(
+            text.contains("Use language: ja"),
+            "SessionStart reminder with language=ja must instruct ja: {text}"
+        );
+        assert!(!text.contains("Use language: en"));
+    }
+
+    #[test]
+    fn plan_user_prompt_submit_appends_language_directive() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "ja".to_string(),
+        });
+        let text = additional_context(&plan.output);
+        assert!(text.contains("Use language: ja"));
+    }
+
+    #[test]
+    fn plan_user_prompt_submit_short_also_carries_language_directive() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: true,
+            language: "ja".to_string(),
+        });
+        let text = additional_context(&plan.output);
+        assert!(text.contains("posted to the Board recently"));
+        assert!(text.contains("Use language: ja"));
+    }
+
+    #[test]
+    fn plan_stop_does_not_emit_language_directive() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::Stop,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "ja".to_string(),
+        });
+        let text = system_message(&plan.output);
+        assert!(
+            !text.contains("Use language:"),
+            "Stop reminder is user-facing and must not include the agent language directive: {text}"
+        );
+    }
+
+    #[test]
+    fn plan_unknown_language_falls_back_to_en_in_directive() {
+        let plan = plan_reminder(ReminderInputs {
+            event: IntentBoundaryEvent::UserPromptSubmit,
+            now: Utc::now(),
+            self_session_id: "sess-1".into(),
+            display_name: "Codex".into(),
+            self_match_keys: vec![],
+            recent_entries: vec![],
+            reminders: RemindersState::default(),
+            has_recent_own_status: false,
+            language: "zh".to_string(),
+        });
+        let text = additional_context(&plan.output);
+        assert!(text.contains("Use language: en"));
     }
 
     #[test]
@@ -542,6 +677,7 @@ mod tests {
             recent_entries: vec![],
             reminders,
             has_recent_own_status: false,
+            language: "en".to_string(),
         });
         assert_eq!(plan.next_reminders.last_injected_at, Some(before));
     }
