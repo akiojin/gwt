@@ -249,9 +249,10 @@ pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_js, index_html, xterm_css, xterm_fit_js, xterm_js};
+    use super::{app_js, index_html, styles_components_css, xterm_css, xterm_fit_js, xterm_js};
     use super::{app_js_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler};
     use super::{root_js_module_assets, root_js_module_response};
+
     fn frontend_bundle_source() -> &'static str {
         concat!(
             include_str!("../web/index.html"),
@@ -1514,6 +1515,36 @@ mod tests {
                 && !active_work_block.contains("compactPathLabel(agent.worktree_path)")
                 && !active_work_block.contains("appendMeta(agentMeta, agent.branch)"),
             "Active Work must not expose branch names or worktree paths in the normal user summary",
+        );
+    }
+
+    #[test]
+    fn embedded_web_active_work_hidden_attr_overrides_flex_layout() {
+        let css = styles_components_css();
+
+        assert!(
+            css.contains(".op-active-work[hidden]")
+                && css.contains(".op-active-work[hidden] {\n  display: none;"),
+            "Active Work must not render when the hidden attribute is present",
+        );
+    }
+
+    #[test]
+    fn embedded_web_active_work_uses_short_title_summary_before_long_focus_detail() {
+        let html = frontend_bundle_source();
+        let active_work_block = html
+            .split("function renderActiveWorkOverview()")
+            .nth(1)
+            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
+            .expect("active work render block");
+
+        assert!(
+            active_work_block.contains("agent.title_summary || agent.current_focus"),
+            "Active Work Agent cards must prefer the short title summary over long focus text",
+        );
+        assert!(
+            active_work_block.contains("agentFocus.title = agent.current_focus"),
+            "Active Work Agent cards must keep long focus detail available without making it the main visible text",
         );
     }
 
