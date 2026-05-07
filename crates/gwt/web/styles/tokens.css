@@ -103,47 +103,49 @@
 }
 
 :root[data-theme="light"] {
-  /* Surface palette — bone + ink */
-  --color-canvas: #f5f3ee;
+  /* Surface palette — drafting table + ink.
+     Keep the light flagship bright, but give canvas / cards / chrome enough
+     luminance separation to remain scannable in dense work sessions. */
+  --color-canvas: #e9edf0;
   --color-surface: #ffffff;
-  --color-surface-elevated: #fbfaf6;
+  --color-surface-elevated: #f3f6f7;
   --color-overlay: rgba(20, 22, 26, 0.62);
   --color-scrim: rgba(20, 22, 26, 0.45);
 
   /* Text */
-  --color-text: #1a1d24;
+  --color-text: #151922;
   --color-text-strong: #000000;
-  --color-text-muted: #4a5159;
-  --color-text-disabled: #9ca3af;
+  --color-text-muted: #3f4752;
+  --color-text-disabled: #737d89;
 
   /* Display */
   --color-display-fg: #0a0d12;
 
   /* Status Strip — inverted dark strip on light canvas (Mission control feel) */
-  --color-status-strip-bg: #1a1d24;
-  --color-status-strip-fg: #f5f3ee;
-  --color-status-strip-divider: rgba(245, 243, 238, 0.18);
+  --color-status-strip-bg: #151922;
+  --color-status-strip-fg: #f4f7f8;
+  --color-status-strip-divider: rgba(244, 247, 248, 0.22);
 
   /* Buttons */
-  --color-button-bg: #1a1d24;
-  --color-button-bg-hover: #2a3140;
+  --color-button-bg: #151922;
+  --color-button-bg-hover: #263141;
   --color-button-fg: #ffffff;
-  --color-button-border: rgba(26, 29, 36, 0.18);
+  --color-button-border: rgba(21, 25, 34, 0.28);
 
   /* Borders */
-  --color-border: rgba(26, 29, 36, 0.10);
-  --color-border-strong: rgba(26, 29, 36, 0.28);
-  --color-focus-ring: #0e7490;
+  --color-border: rgba(21, 25, 34, 0.18);
+  --color-border-strong: rgba(21, 25, 34, 0.38);
+  --color-focus-ring: #075f73;
 
   /* Link */
-  --color-link: #0e7490;
-  --color-link-hover: #155e75;
+  --color-link: #075f73;
+  --color-link-hover: #064e5d;
 
   /* Live status semantics */
-  --color-state-active: #0e7490;
-  --color-state-idle: #6b7280;
-  --color-state-blocked: #b91c1c;
-  --color-state-done: #4b5563;
+  --color-state-active: #075f73;
+  --color-state-idle: #4b5563;
+  --color-state-blocked: #991b1b;
+  --color-state-done: #334155;
 
   /* Agent colors — dark-tuned chroma for bone background */
   --agent-claude: #92400e;
@@ -159,8 +161,8 @@
   --bg-depth-glow: radial-gradient(ellipse at top, rgba(14, 116, 144, 0.06), transparent 60%);
 
   /* Shadow */
-  --shadow-1: 0 1px 2px rgba(20, 22, 26, 0.06);
-  --shadow-2: 0 8px 24px rgba(20, 22, 26, 0.10);
+  --shadow-1: 0 1px 2px rgba(21, 25, 34, 0.10);
+  --shadow-2: 0 10px 28px rgba(21, 25, 34, 0.16);
   --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active)),
                         0 0 12px 0 color-mix(in oklab, var(--agent-color, var(--color-state-active)) 30%, transparent);
 

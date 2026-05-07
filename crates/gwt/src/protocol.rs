@@ -2,7 +2,6 @@ use gwt_agent::{ClaudeCodeOpenaiCompatInput, CustomCodingAgent, PresetDefinition
 use gwt_core::{
     coordination::{BoardEntry, BoardEntryKind},
     logging::LogEvent,
-    notes::MemoNote,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +108,12 @@ pub enum FrontendEvent {
         id: String,
         data: String,
     },
+    PasteImage {
+        id: String,
+        data_base64: String,
+        mime_type: String,
+        filename: Option<String>,
+    },
     LoadFileTree {
         id: String,
         path: Option<String>,
@@ -126,9 +131,6 @@ pub enum FrontendEvent {
         limit: usize,
     },
     LoadProfile {
-        id: String,
-    },
-    LoadMemo {
         id: String,
     },
     LoadLogs {
@@ -177,6 +179,10 @@ pub enum FrontendEvent {
         branches: Vec<String>,
         delete_remote: bool,
     },
+    RunWorkspaceCleanup {
+        branch: String,
+        delete_remote: bool,
+    },
     PostBoardEntry {
         id: String,
         entry_kind: BoardEntryKind,
@@ -186,23 +192,8 @@ pub enum FrontendEvent {
         owners: Vec<String>,
         #[serde(default)]
         targets: Vec<String>,
-    },
-    CreateMemoNote {
-        id: String,
-        title: String,
-        body: String,
-        pinned: bool,
-    },
-    UpdateMemoNote {
-        id: String,
-        note_id: String,
-        title: String,
-        body: String,
-        pinned: bool,
-    },
-    DeleteMemoNote {
-        id: String,
-        note_id: String,
+        #[serde(default)]
+        mentions: Vec<gwt_core::coordination::BoardMention>,
     },
     SelectProfile {
         id: String,
@@ -297,6 +288,17 @@ pub enum FrontendEvent {
     QuitMigration {
         tab_id: String,
     },
+    /// SPEC-1933 US-4: Settings > System tab opened. Backend replies with
+    /// [`BackendEvent::SystemSettings`] containing the current global
+    /// `[ai].language` value (`auto` / `en` / `ja`).
+    GetSystemSettings,
+    /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
+    /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
+    /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
+    /// [`BackendEvent::SystemSettingsError`] on failure.
+    UpdateSystemSettings {
+        language: String,
+    },
 }
 
 fn default_board_history_limit() -> usize {
@@ -365,6 +367,7 @@ pub struct ActiveWorkAgentView {
     pub display_name: String,
     pub status_category: String,
     pub current_focus: Option<String>,
+    pub title_summary: Option<String>,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub last_board_entry_id: Option<String>,
@@ -374,11 +377,36 @@ pub struct ActiveWorkAgentView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceJournalEntryView {
+    pub id: String,
+    pub updated_at: String,
+    pub title: Option<String>,
+    pub status_category: Option<String>,
+    pub status_text: Option<String>,
+    pub summary: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub agent_current_focus: Option<String>,
+    pub agent_title_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkCleanupCandidateView {
+    pub branch: String,
+    pub worktree_path: Option<String>,
+    pub reason: String,
+    pub default_delete_remote: bool,
+    pub remote_delete_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
     pub title: String,
     pub status_category: String,
     pub status_text: String,
+    pub summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub active_agents: usize,
@@ -387,6 +415,8 @@ pub struct ActiveWorkProjectionView {
     pub worktree_path: Option<String>,
     pub pr_number: Option<u64>,
     pub board_refs: Vec<String>,
+    pub journal_entries: Vec<WorkspaceJournalEntryView>,
+    pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     pub agents: Vec<ActiveWorkAgentView>,
 }
 
@@ -448,11 +478,6 @@ pub enum BackendEvent {
     ProfileSnapshot {
         id: String,
         snapshot: ProfileSnapshotView,
-    },
-    MemoNotes {
-        id: String,
-        notes: Vec<MemoNote>,
-        selected_note_id: Option<String>,
     },
     LogEntries {
         id: String,
@@ -520,10 +545,6 @@ pub enum BackendEvent {
         id: String,
         message: String,
     },
-    MemoError {
-        id: String,
-        message: String,
-    },
     LogError {
         id: String,
         message: String,
@@ -554,6 +575,9 @@ pub enum BackendEvent {
         event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
+    UpdateApplyError {
+        message: String,
+    },
     /// Response to [`FrontendEvent::ListCustomAgents`].
     CustomAgentList {
         agents: Vec<CustomCodingAgent>,
@@ -614,6 +638,27 @@ pub enum BackendEvent {
         message: String,
         recovery: String,
     },
+    /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
+    /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
+    /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
+    /// Settings > System > Language select.
+    SystemSettings {
+        language: String,
+    },
+    /// SPEC-1933 US-4: confirmation that
+    /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
+    /// `language` echoes the saved value so the frontend can reconcile
+    /// optimistic UI with the authoritative config state.
+    SystemSettingsUpdated {
+        language: String,
+    },
+    /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
+    /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
+    /// human-readable; the frontend surfaces it as an inline status row in
+    /// the System tab.
+    SystemSettingsError {
+        message: String,
+    },
 }
 
 /// Stable machine-readable error code on [`BackendEvent::CustomAgentError`].
@@ -650,9 +695,10 @@ pub enum KnowledgePhaseUpdateResult {
 #[cfg(test)]
 mod tests {
     use gwt_core::{
-        coordination::{AuthorKind, BoardEntry, BoardEntryKind},
+        coordination::{
+            AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
+        },
         logging::{LogEvent, LogLevel},
-        notes::MemoNote,
     };
     use serde_json::Value;
 
@@ -760,6 +806,7 @@ mod tests {
                 title: "Implement Start Work".to_string(),
                 status_category: "active".to_string(),
                 status_text: "Launching from Project Bar".to_string(),
+                summary: Some("Launching from Project Bar".to_string()),
                 owner: Some("SPEC-2359".to_string()),
                 next_action: Some("Run launch tests".to_string()),
                 active_agents: 1,
@@ -768,6 +815,26 @@ mod tests {
                 worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                 pr_number: None,
                 board_refs: vec!["board-1".to_string()],
+                journal_entries: vec![super::WorkspaceJournalEntryView {
+                    id: "journal-1".to_string(),
+                    updated_at: "2026-05-04T12:01:00Z".to_string(),
+                    title: Some("Implement Start Work".to_string()),
+                    status_category: Some("active".to_string()),
+                    status_text: Some("Launching from Project Bar".to_string()),
+                    summary: Some("Launching from Project Bar".to_string()),
+                    owner: Some("SPEC-2359".to_string()),
+                    next_action: Some("Run launch tests".to_string()),
+                    agent_session_id: Some("session-1".to_string()),
+                    agent_current_focus: Some("Run launch tests".to_string()),
+                    agent_title_summary: Some("Launch tests".to_string()),
+                }],
+                cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
+                    branch: "work/20260504-1200".to_string(),
+                    worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
+                    reason: "workspace_done".to_string(),
+                    default_delete_remote: false,
+                    remote_delete_available: true,
+                }),
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),
                     window_id: Some("tab-1::agent-1".to_string()),
@@ -775,6 +842,7 @@ mod tests {
                     display_name: "Codex".to_string(),
                     status_category: "active".to_string(),
                     current_focus: Some("Run launch tests".to_string()),
+                    title_summary: Some("Launch tests".to_string()),
                     branch: Some("work/20260504-1200".to_string()),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
                     last_board_entry_id: Some("board-1".to_string()),
@@ -817,6 +885,20 @@ mod tests {
                 .and_then(Value::as_str),
             Some("SPEC-2359 / start-work")
         );
+        assert_eq!(
+            value
+                .pointer("/projection/journal_entries/0/summary")
+                .and_then(Value::as_str),
+            Some("Launching from Project Bar"),
+            "Workspace Overview should receive recent summary journal entries without replaying Board history"
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/cleanup_candidate/default_delete_remote")
+                .and_then(Value::as_bool),
+            Some(false),
+            "Workspace cleanup must default to local-only deletion"
+        );
     }
 
     #[test]
@@ -828,6 +910,50 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_image_paste_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": "tab-1::agent-1",
+            "data_base64": "cG5nLWJ5dGVz",
+            "mime_type": "image/png",
+            "filename": "screenshot.png"
+        }))
+        .expect("deserialize image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImage {
+                    id,
+                    data_base64,
+                    mime_type,
+                    filename: Some(filename),
+                } if id == "tab-1::agent-1"
+                    && data_base64 == "cG5nLWJ5dGVz"
+                    && mime_type == "image/png"
+                    && filename == "screenshot.png"
+            ),
+            "image paste must expose window id, payload, MIME type, and optional filename"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_image_paste_without_filename() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": "tab-1::agent-1",
+            "data_base64": "d2VicC1ieXRlcw==",
+            "mime_type": "image/webp"
+        }))
+        .expect("deserialize image paste event without filename");
+
+        assert!(
+            matches!(event, FrontendEvent::PasteImage { filename: None, .. }),
+            "clipboard images may not have a source filename"
         );
     }
 
@@ -884,6 +1010,62 @@ mod tests {
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
         );
+    }
+
+    #[test]
+    fn board_entries_serializes_typed_mentions_contract() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Question,
+            "Can you verify this?",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_mention(
+            BoardMention::new(BoardMentionTargetKind::User, "akiojin").with_label("Akio"),
+        );
+        let event = BackendEvent::BoardEntries {
+            id: "board-1".to_string(),
+            entries: vec![entry],
+            has_more_before: false,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize board entries");
+
+        assert_eq!(value["entries"][0]["mentions"][0]["target_kind"], "user");
+        assert_eq!(value["entries"][0]["mentions"][0]["target"], "akiojin");
+        assert_eq!(value["entries"][0]["mentions"][0]["label"], "Akio");
+    }
+
+    #[test]
+    fn post_board_entry_deserializes_typed_mentions() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "post_board_entry",
+            "id": "board-1",
+            "entry_kind": "question",
+            "body": "Can you verify this?",
+            "parent_id": null,
+            "topics": [],
+            "owners": [],
+            "mentions": [
+                {"target_kind": "user", "target": "akiojin", "label": "Akio"},
+                {"target_kind": "agent", "target": "codex"}
+            ]
+        }))
+        .expect("deserialize post board entry");
+
+        assert!(matches!(
+            frontend,
+            FrontendEvent::PostBoardEntry { mentions, .. }
+                if mentions.len() == 2
+                    && mentions[0].target_kind == BoardMentionTargetKind::User
+                    && mentions[0].target == "akiojin"
+                    && mentions[1].target_kind == BoardMentionTargetKind::Agent
+                    && mentions[1].target == "codex"
+        ));
     }
 
     #[test]
@@ -971,36 +1153,26 @@ mod tests {
     }
 
     #[test]
-    fn memo_notes_serializes_snapshot_contract() {
-        let event = BackendEvent::MemoNotes {
-            id: "memo-1".to_string(),
-            notes: vec![MemoNote {
-                id: "note-1".to_string(),
-                title: "Pinned note".to_string(),
-                body: "Remember to verify the cache contract".to_string(),
-                pinned: true,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }],
-            selected_note_id: Some("note-1".to_string()),
-        };
-
-        let value = serde_json::to_value(&event).expect("serialize memo notes");
-        assert_eq!(
-            value.get("kind"),
-            Some(&Value::String("memo_notes".to_string()))
-        );
-        assert_eq!(value.get("id"), Some(&Value::String("memo-1".to_string())));
-        assert_eq!(
-            value["notes"][0]["pinned"],
-            Value::Bool(true),
-            "expected memo snapshot payload to keep pin ordering data on the wire",
-        );
-        assert_eq!(
-            value["selected_note_id"],
-            Value::String("note-1".to_string()),
-            "expected memo snapshot payload to carry the preferred editor selection",
-        );
+    fn removed_memo_frontend_events_are_not_part_of_the_wire_contract() {
+        for kind in [
+            "load_memo",
+            "create_memo_note",
+            "update_memo_note",
+            "delete_memo_note",
+        ] {
+            let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": kind,
+                "id": "memo-1",
+                "note_id": "note-1",
+                "title": "Note",
+                "body": "Body",
+                "pinned": false
+            }));
+            assert!(
+                event.is_err(),
+                "removed Memo frontend event `{kind}` must not deserialize"
+            );
+        }
     }
 
     #[test]

@@ -4,12 +4,41 @@
       import { renderMigrationModal as renderMigrationModalView } from "/migration-modal.js";
       import { initOperatorShell, applyTelemetryCounts } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
+      import {
+        TITLEBAR_DOCK_HIT_HEIGHT,
+        clientPointFromDragEvent,
+        detachGeometryFromClientPoint,
+        findTitlebarDockTarget,
+        resolveDragReleasePoint,
+      } from "/window-docking.js";
+      import {
+        applyBoardMentionNotificationFocus,
+        boardEntryAudienceLabels,
+        boardEntryMentionsSelf,
+        boardEntryPreview,
+        findBoardEntry,
+        mentionsForBoardSubmit,
+        visibleBoardEntries,
+      } from "/board-surface.js";
+      import { createUpdateCtaController } from "/update-cta.js";
+      import { createTerminalContextMenuController } from "/terminal-context-menu.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
       // status strip clock, and Mission Briefing intro are wired before the
       // rest of app.js continues bootstrapping the legacy surfaces.
-      const __op = initOperatorShell();
+      let __op;
+      try {
+        __op = initOperatorShell();
+      } catch (error) {
+        console.error("operator shell failed during startup", error);
+        dismissOperatorBriefing();
+        __op = {
+          themeManager: null,
+          hotkey: null,
+          palette: null,
+        };
+      }
       window.__operatorShell = {
         themeManager: __op.themeManager,
         hotkey: __op.hotkey,
@@ -41,9 +70,15 @@
       const alignButton = document.getElementById("align-button");
       const windowListButton = document.getElementById("window-list-button");
       const windowListPanel = document.getElementById("window-list-panel");
+      const worldGrid = document.getElementById("canvas-world-grid");
+      const activeWorkSection = document.getElementById("op-active-work");
       const activeWorkCount = document.getElementById("op-active-work-count");
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
+      const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
+      const projectWorkspaceOverviewButton = document.getElementById(
+        "project-workspace-overview-button",
+      );
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -80,7 +115,6 @@
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const profileStateMap = new Map();
-      const memoStateMap = new Map();
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
@@ -134,17 +168,6 @@
             "deleteProfile",
           ]),
         }),
-        memoStateMap: Object.freeze({
-          owner: "memo-surface",
-          mutatedBy: Object.freeze([
-            "ensureMemoState",
-            "requestMemo",
-            "renderMemo",
-            "createMemoNote",
-            "flushMemoSave",
-            "deleteMemoNote",
-          ]),
-        }),
         boardStateMap: Object.freeze({
           owner: "board-surface",
           mutatedBy: Object.freeze([
@@ -178,7 +201,6 @@
           state: Object.freeze([
             "launchWizard",
             "wizardWasOpen",
-            "wizardAdvancedOpen",
             "wizardBranchDraft",
             "wizardBranchBackendValue",
           ]),
@@ -211,6 +233,14 @@
         }),
       });
 
+      function dismissOperatorBriefing() {
+        const briefing = document.getElementById("op-briefing");
+        if (!briefing) return;
+        briefing.dataset.state = "exiting";
+        briefing.hidden = true;
+        briefing.setAttribute("aria-hidden", "true");
+      }
+
       // Diagnostic counter for intermittent key-input drops (bugfix/input-key).
       // Incremented on every `terminal.onData` firing so layer-by-layer counts
       // can be diffed against backend `gwt_input_trace` logs.
@@ -229,10 +259,10 @@
       let activeWorkProjection = null;
       let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
-      let wizardAdvancedOpen = false;
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
       let branchCleanupWindowId = null;
+      const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
       let windowListOpen = false;
       let windowListEntries = [];
       let titlebarClickState = null;
@@ -343,9 +373,6 @@
         if (preset === "branches") {
           return "branches";
         }
-        if (preset === "memo") {
-          return "memo";
-        }
         if (preset === "profile") {
           return "profile";
         }
@@ -375,6 +402,14 @@
         }
         pendingMessages.push(message);
       }
+
+      const updateCtaController = createUpdateCtaController({
+        document,
+        send,
+        setVersionState,
+        confirmUpdate: (version) =>
+          window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
+      });
 
       function setConnectionState(connected) {
         connectionDot.classList.toggle("connected", connected);
@@ -488,19 +523,74 @@
         return Boolean(windowData.tab_group_active);
       }
 
-      function detachGeometryFromPointer(event, windowData) {
-        const bounds = visibleBounds();
-        const width = windowData?.geometry?.width || 720;
-        const height = windowData?.geometry?.height || 420;
+      function trackWindowTabDragPoint(event) {
+        if (!windowTabDragState) return;
+        const point = clientPointFromDragEvent(event, canvas.getBoundingClientRect());
+        if (point) {
+          windowTabDragState.lastClientPoint = point;
+        }
+      }
+
+      function detachGeometryFromTabDrag(event, drag, windowData) {
         const canvasRect = canvas.getBoundingClientRect();
-        const worldX = bounds.x + (event.clientX - canvasRect.left) / viewport.zoom;
-        const worldY = bounds.y + (event.clientY - canvasRect.top) / viewport.zoom;
+        const releasePoint = resolveDragReleasePoint(
+          event,
+          drag?.lastClientPoint,
+          canvasRect,
+        );
+        return detachGeometryFromClientPoint(
+          releasePoint,
+          windowData,
+          canvasRect,
+          viewport,
+        );
+      }
+
+      function pointerWorldPoint(event) {
+        const bounds = visibleBounds();
+        const canvasRect = canvas.getBoundingClientRect();
         return {
-          x: worldX - 32,
-          y: worldY - 19,
-          width,
-          height,
+          x: bounds.x + (event.clientX - canvasRect.left) / viewport.zoom,
+          y: bounds.y + (event.clientY - canvasRect.top) / viewport.zoom,
         };
+      }
+
+      function titlebarDockTargetAt(event, sourceId) {
+        const point = pointerWorldPoint(event);
+        return findTitlebarDockTarget(
+          activeWorkspace().windows || [],
+          point,
+          sourceId,
+          TITLEBAR_DOCK_HIT_HEIGHT,
+        );
+      }
+
+      function clearTitlebarDockPreview() {
+        for (const element of windowMap.values()) {
+          element.classList.remove("dock-target");
+        }
+      }
+
+      function updateTitlebarDockPreview(event) {
+        if (!dragState || !dragState.moved || !dragState.allowMove) {
+          clearTitlebarDockPreview();
+          if (dragState) {
+            dragState.dockTargetId = null;
+          }
+          return null;
+        }
+        const targetId = titlebarDockTargetAt(event, dragState.id);
+        if (dragState.dockTargetId === targetId) {
+          return targetId;
+        }
+        if (dragState.dockTargetId) {
+          windowMap.get(dragState.dockTargetId)?.classList.remove("dock-target");
+        }
+        if (targetId) {
+          windowMap.get(targetId)?.classList.add("dock-target");
+        }
+        dragState.dockTargetId = targetId;
+        return targetId;
       }
 
       function sendOpenProjectDialog() {
@@ -525,6 +615,29 @@
           .split("_")
           .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
           .join(" ");
+      }
+
+      function presetRoleLabel(preset) {
+        const labels = {
+          shell: "Shell",
+          claude: "Claude",
+          codex: "Codex",
+          agent: "Agent",
+          file_tree: "File Tree",
+          branches: "Branches",
+          settings: "Settings",
+          profile: "Profile",
+          logs: "Logs",
+          issue: "Issue",
+          spec: "SPEC",
+          board: "Board",
+          pr: "PR",
+        };
+        return labels[preset] || presetLabel(preset);
+      }
+
+      function shouldShowRuntimeStatus(windowData) {
+        return presetSurface(windowData?.preset) === "terminal";
       }
 
       const WINDOW_RUNTIME_STATE_LABELS = Object.freeze({
@@ -582,6 +695,12 @@
           if (title) return title;
         }
         return "Window";
+      }
+
+      function windowTitleTooltip(windowData) {
+        const detail = String(windowData?.dynamic_title_detail || "").trim();
+        if (detail) return detail;
+        return windowDisplayTitle(windowData);
       }
 
       function escapeHtml(value) {
@@ -642,19 +761,24 @@
           const geometryLabel = windowGeometryLabel(entry);
           const runtimeState = runtimeStateForWindow(entry);
           const runtimeLabel = windowRuntimeLabel(runtimeState);
+          const runtimeChip = shouldShowRuntimeStatus(entry)
+            ? `<span class="status-chip ${runtimeState}">
+                <span class="status-dot"></span>
+                <span class="status-label">${runtimeLabel}</span>
+              </span>`
+            : "";
           row.innerHTML = `
             <div class="window-list-copy">
               <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
               <div class="window-list-meta">
-                <span class="window-list-preset">${presetLabel(entry.preset)}</span>
+                <span class="window-role-badge window-list-role">${presetRoleLabel(entry.preset)}</span>
                 <span class="window-list-geometry">${geometryLabel}</span>
               </div>
             </div>
-            <span class="status-chip ${runtimeState}">
-              <span class="status-dot"></span>
-              <span class="status-label">${runtimeLabel}</span>
-            </span>
+            ${runtimeChip}
           `;
+          const windowListTitle = row.querySelector(".window-list-title");
+          if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
           row.addEventListener("click", () => {
             windowListOpen = false;
             renderWindowList();
@@ -805,6 +929,7 @@
       }
 
       function renderAppState(nextState) {
+        dismissOperatorBriefing();
         appState = nextState || {
           app_version: "",
           tabs: [],
@@ -820,6 +945,7 @@
         renderProjectOnboarding(tab);
         renderWorkspace(tab?.workspace || emptyWorkspace());
         renderWindowList();
+        renderActiveWorkOverview();
       }
 
       let presetModalFocusReturn = null;
@@ -868,6 +994,8 @@
       let kanbanDrawerFocusReturn = null;
       let kanbanDrawerFocusTrapRelease = null;
       let kanbanDrawerActiveContext = null;
+      let workspaceOverviewFocusReturn = null;
+      let workspaceOverviewFocusTrapRelease = null;
       function openKanbanDrawer(context) {
         const drawer = document.getElementById("kanban-drawer");
         const backdrop = document.getElementById("kanban-drawer-backdrop");
@@ -911,6 +1039,218 @@
         }
         kanbanDrawerFocusReturn = null;
         kanbanDrawerActiveContext = null;
+      }
+
+      function openWorkspaceOverview() {
+        const drawer = document.getElementById("workspace-overview-drawer");
+        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        workspaceOverviewFocusReturn = document.activeElement;
+        backdrop.hidden = false;
+        backdrop.dataset.open = "true";
+        drawer.hidden = false;
+        drawer.dataset.open = "true";
+        renderWorkspaceOverview();
+        try { drawer.focus({ preventScroll: true }); }
+        catch { drawer.focus(); }
+        if (typeof workspaceOverviewFocusTrapRelease === "function") {
+          workspaceOverviewFocusTrapRelease();
+        }
+        workspaceOverviewFocusTrapRelease = createFocusTrap(drawer, { document });
+      }
+
+      function closeWorkspaceOverview() {
+        const drawer = document.getElementById("workspace-overview-drawer");
+        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
+        if (!drawer || !backdrop) return;
+        if (drawer.dataset.open !== "true") return;
+        drawer.dataset.open = "false";
+        backdrop.dataset.open = "false";
+        backdrop.hidden = true;
+        drawer.hidden = true;
+        if (typeof workspaceOverviewFocusTrapRelease === "function") {
+          workspaceOverviewFocusTrapRelease();
+          workspaceOverviewFocusTrapRelease = null;
+        }
+        if (
+          workspaceOverviewFocusReturn &&
+          typeof workspaceOverviewFocusReturn.focus === "function"
+        ) {
+          try { workspaceOverviewFocusReturn.focus({ preventScroll: true }); }
+          catch { workspaceOverviewFocusReturn.focus(); }
+        }
+        workspaceOverviewFocusReturn = null;
+      }
+
+      function workspaceCleanupEntry(candidate) {
+        return {
+          name: candidate.branch,
+          cleanup_ready: true,
+          cleanup: {
+            availability: "safe",
+            upstream: candidate.remote_delete_available
+              ? `origin/${candidate.branch}`
+              : null,
+            merge_target: { kind: "workspace", reference: "Workspace complete" },
+            execution_branch: candidate.branch,
+            risks: [],
+          },
+        };
+      }
+
+      function openWorkspaceCleanup() {
+        const candidate = activeWorkProjection?.cleanup_candidate;
+        if (!candidate?.branch) return;
+        const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
+        state.entries = [workspaceCleanupEntry(candidate)];
+        state.cleanupSelected = new Set([candidate.branch]);
+        state.notice = "";
+        state.cleanupModal = {
+          open: true,
+          stage: "confirm",
+          // Workspace cleanup is local-only by default even when
+          // cleanup_candidate.default_delete_remote is present on the wire.
+          deleteRemote: false,
+          results: [],
+        };
+        branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
+        renderBranchCleanupModal();
+      }
+
+      function renderWorkspaceOverview() {
+        const titleEl = document.getElementById("workspace-overview-title");
+        const body = document.getElementById("workspace-overview-body");
+        const footer = document.getElementById("workspace-overview-footer");
+        if (!body || !titleEl || !footer) return;
+
+        const projection = activeWorkProjection || {};
+        const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
+        titleEl.textContent = title;
+        body.innerHTML = "";
+        footer.innerHTML = "";
+
+        const summaryCard = createNode("section", "workspace-overview-card");
+        summaryCard.appendChild(createNode("div", "workspace-overview-title", title));
+        const meta = createNode("div", "workspace-overview-meta");
+        appendMeta(meta, projection.status_category ? agentStatusLabel(projection.status_category) : "");
+        appendMeta(meta, projection.owner);
+        appendMeta(meta, projection.pr_number ? `PR #${projection.pr_number}` : "");
+        const agentsTotal =
+          Number(projection.active_agents || 0) + Number(projection.blocked_agents || 0);
+        appendMeta(meta, agentsTotal ? `${agentsTotal} agent${agentsTotal === 1 ? "" : "s"}` : "");
+        summaryCard.appendChild(meta);
+        summaryCard.appendChild(
+          createNode(
+            "div",
+            "workspace-overview-summary",
+            projection.summary || projection.status_text || "No Workspace summary yet",
+          ),
+        );
+        if (projection.next_action) {
+          summaryCard.appendChild(
+            createNode("div", "workspace-overview-next", projection.next_action),
+          );
+        }
+        body.appendChild(summaryCard);
+
+        const cleanupCandidate = projection.cleanup_candidate;
+        if (cleanupCandidate?.branch) {
+          const cleanupSection = createNode("section", "workspace-overview-section");
+          cleanupSection.appendChild(
+            createNode("div", "workspace-overview-heading", "Workspace Cleanup"),
+          );
+          const cleanupCopy = createNode(
+            "div",
+            "workspace-overview-summary",
+            `Local workspace ${cleanupCandidate.branch} is ready for cleanup.`,
+          );
+          cleanupSection.appendChild(cleanupCopy);
+          const cleanupActions = createNode("div", "op-work-actions");
+          const cleanupButton = createNode("button", "op-work-action", "Review Cleanup");
+          cleanupButton.type = "button";
+          cleanupButton.addEventListener("click", openWorkspaceCleanup);
+          cleanupActions.appendChild(cleanupButton);
+          cleanupSection.appendChild(cleanupActions);
+          body.appendChild(cleanupSection);
+        }
+
+        const agents = Array.isArray(projection.agents) ? projection.agents : [];
+        const agentSection = createNode("section", "workspace-overview-section");
+        agentSection.appendChild(createNode("div", "workspace-overview-heading", "Current Agents"));
+        const agentList = createNode("div", "workspace-overview-list");
+        if (agents.length === 0) {
+          agentList.appendChild(createNode("div", "workspace-overview-empty", "No live Agents"));
+        } else {
+          for (const agent of agents) {
+            const item = createNode("article", "workspace-journal-entry");
+            item.appendChild(
+              createNode(
+                "div",
+                "workspace-journal-summary",
+                agent.current_focus || agent.display_name || agent.agent_id || "Agent",
+              ),
+            );
+            const itemMeta = createNode("div", "workspace-journal-meta");
+            appendMeta(itemMeta, agent.display_name || agent.agent_id);
+            appendMeta(itemMeta, agentStatusLabel(agent.status_category));
+            appendMeta(itemMeta, agent.coordination_scope);
+            item.appendChild(itemMeta);
+            agentList.appendChild(item);
+          }
+        }
+        agentSection.appendChild(agentList);
+        body.appendChild(agentSection);
+
+        const journalEntries = Array.isArray(projection.journal_entries)
+          ? projection.journal_entries
+          : [];
+        const journalSection = createNode("section", "workspace-overview-section");
+        journalSection.appendChild(createNode("div", "workspace-overview-heading", "Recent Summary"));
+        const journalList = createNode("div", "workspace-overview-list");
+        if (journalEntries.length === 0) {
+          journalList.appendChild(
+            createNode("div", "workspace-overview-empty", "No Workspace journal entries"),
+          );
+        } else {
+          for (const entry of journalEntries) {
+            const item = createNode("article", "workspace-journal-entry");
+            item.appendChild(
+              createNode(
+                "div",
+                "workspace-journal-summary",
+                entry.summary ||
+                  entry.status_text ||
+                  entry.next_action ||
+                  entry.title ||
+                  "Workspace update",
+              ),
+            );
+            const itemMeta = createNode("div", "workspace-journal-meta");
+            appendMeta(itemMeta, entry.updated_at);
+            appendMeta(itemMeta, entry.owner);
+            appendMeta(itemMeta, entry.next_action ? "Next action" : "");
+            item.appendChild(itemMeta);
+            journalList.appendChild(item);
+          }
+        }
+        journalSection.appendChild(journalList);
+        body.appendChild(journalSection);
+
+        const boardRefs = Array.isArray(projection.board_refs) ? projection.board_refs : [];
+        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
+        if (latestBoardRef) {
+          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
+          openBoard.type = "button";
+          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
+          footer.appendChild(openBoard);
+        }
+        const startWork = createNode("button", "op-work-action", "Start Work");
+        startWork.type = "button";
+        startWork.addEventListener("click", () => {
+          closeWorkspaceOverview();
+          send({ kind: "open_start_work" });
+        });
+        footer.appendChild(startWork);
       }
 
       function renderKanbanDrawerBody() {
@@ -991,8 +1331,30 @@
         return Number.parseFloat(value || "0");
       }
 
+      function applyWorldGridViewport() {
+        if (!worldGrid) {
+          return;
+        }
+        const gridSize = 32 * viewport.zoom;
+        const majorGridSize = gridSize * 4;
+        const gridPosition = `${viewport.x}px ${viewport.y}px`;
+        worldGrid.style.backgroundSize = [
+          `${gridSize}px ${gridSize}px`,
+          `${gridSize}px ${gridSize}px`,
+          `${majorGridSize}px ${majorGridSize}px`,
+          `${majorGridSize}px ${majorGridSize}px`,
+        ].join(", ");
+        worldGrid.style.backgroundPosition = [
+          gridPosition,
+          gridPosition,
+          gridPosition,
+          gridPosition,
+        ].join(", ");
+      }
+
       function applyViewport() {
         stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`;
+        applyWorldGridViewport();
         stage.style.willChange = "transform";
         if (viewportRasterTimer !== null) {
           clearTimeout(viewportRasterTimer);
@@ -1119,6 +1481,50 @@
         sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
       }
 
+      function scheduleTerminalResizeFit(windowId) {
+        if (!terminalMap.has(windowId)) {
+          return;
+        }
+        if (!resizeState || resizeState.id !== windowId || resizeState.fitFrame !== null) {
+          return;
+        }
+        resizeState.fitFrame = requestAnimationFrame(() => {
+          if (!resizeState || resizeState.id !== windowId) {
+            return;
+          }
+          resizeState.fitFrame = null;
+          fitTerminal(windowId, false);
+        });
+      }
+
+      function cancelTerminalResizeFit() {
+        if (!resizeState || resizeState.fitFrame === null) {
+          return;
+        }
+        cancelAnimationFrame(resizeState.fitFrame);
+        resizeState.fitFrame = null;
+      }
+
+      function finishWindowResize(pointerId) {
+        if (!resizeState || resizeState.pointerId !== pointerId) {
+          return;
+        }
+        const runtime = terminalMap.get(resizeState.id);
+        cancelTerminalResizeFit();
+        fitTerminal(resizeState.id, false);
+        sendGeometry(
+          resizeState.id,
+          runtime?.terminal.cols || 80,
+          runtime?.terminal.rows || 24,
+        );
+        runtime?.terminal.focus();
+        resizeState = null;
+        // SPEC-2356 Phase 9 (T-136): release the hover-reveal peek strip lock
+        // so pointer events resume on the screen-edge triggers once resize
+        // ends.
+        delete document.documentElement.dataset.opResizeActive;
+      }
+
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
         if (
@@ -1143,6 +1549,23 @@
           return;
         }
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
+      }
+
+      function scheduleTerminalFocusActivation(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.activationFrame !== null) {
+          return;
+        }
+        runtime.activationFrame = requestAnimationFrame(() => {
+          runtime.activationFrame = null;
+          const activeRuntime = terminalMap.get(windowId);
+          if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
+            return;
+          }
+          fitTerminal(windowId, false);
+          scheduleTerminalViewportRefresh(windowId);
+          activeRuntime.terminal.focus();
+        });
       }
 
       function sendGeometry(windowId, cols, rows) {
@@ -1192,7 +1615,6 @@
           if (category === "done") counts.done = Math.max(counts.done, 1);
           counts.blocked = Math.max(counts.blocked, blockedAgents);
           counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
-          counts.branches = activeWorkProjection.branch ? 1 : "—";
         }
         try {
           window.__operatorShell.applyTelemetryCounts(counts);
@@ -1201,10 +1623,64 @@
         }
       }
 
-      function activeWorkAgentCount(projection) {
+      function activeWorkFocusableAgents(projection) {
         const agents = Array.isArray(projection?.agents) ? projection.agents : [];
-        if (agents.length > 0) return agents.length;
-        return Number(projection?.active_agents || 0) + Number(projection?.blocked_agents || 0);
+        return agents.filter((agent) => {
+          if (!agent?.window_id) return false;
+          const windowData = workspaceWindowById(agent.window_id);
+          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) return false;
+          const status = String(windowData.status || "running").toLowerCase();
+          return status !== "stopped" && status !== "exited" && status !== "error";
+        });
+      }
+
+      function activeWorkDisplayTitle(projection, agents) {
+        const agentTitle = (Array.isArray(agents) ? agents : [])
+          .find((agent) => agent && String(agent.title_summary || "").trim())
+          ?.title_summary;
+        const candidates = [
+          agentTitle,
+          projection?.summary,
+          projection?.owner,
+          projection?.title,
+        ];
+        for (const value of candidates) {
+          const title = String(value || "").trim();
+          if (!title || title === "Start Work") continue;
+          return title;
+        }
+        return "Active Work";
+      }
+
+      function agentStatusLabel(state) {
+        switch (String(state || "").toLowerCase()) {
+          case "active":
+            return "Running";
+          case "blocked":
+            return "Blocked";
+          case "idle":
+            return "Idle";
+          case "done":
+            return "Done";
+          default:
+            return "Unknown";
+        }
+      }
+
+      function focusActiveWorkAgentWindow(agent) {
+        if (!agent?.window_id) return;
+        const windowData = workspaceWindowById(agent.window_id);
+        if (!windowData) return;
+        if (windowData.minimized) {
+          send({ kind: "restore_window", id: agent.window_id });
+        }
+        focusWindowRemotely(agent.window_id, { center: true });
+      }
+
+      function setActiveWorkSectionVisible(visible) {
+        if (activeWorkSection) {
+          activeWorkSection.hidden = !visible;
+        }
       }
 
       function projectionIssueNumber(projection) {
@@ -1260,6 +1736,14 @@
           const state = ensureBoardState(windowId);
           state.focusEntryId = entryId;
           state.pendingFocusScroll = true;
+          state.audienceFilter = "all";
+          if (
+            !state.entries.some((entry) => entry.id === entryId) &&
+            state.hasMoreBefore &&
+            !state.loadingOlder
+          ) {
+            requestOlderBoardEntries(windowId);
+          }
           renderBoard(windowId);
         }
         focusOrSpawnPreset("board");
@@ -1272,22 +1756,26 @@
 
         if (!activeWorkProjection) {
           if (activeWorkCount) activeWorkCount.textContent = "0";
-          activeWorkSummary.appendChild(createNode("div", "op-work-empty", "No active work"));
+          setActiveWorkSectionVisible(false);
           return;
         }
 
-        const agents = Array.isArray(activeWorkProjection.agents)
-          ? activeWorkProjection.agents
-          : [];
-        const agentCount = activeWorkAgentCount(activeWorkProjection);
+        const agents = activeWorkFocusableAgents(activeWorkProjection);
+        const agentCount = agents.length;
         if (activeWorkCount) activeWorkCount.textContent = String(agentCount);
 
+        if (agentCount === 0) {
+          setActiveWorkSectionVisible(false);
+          return;
+        }
+
+        setActiveWorkSectionVisible(true);
+
         activeWorkSummary.appendChild(
-          createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
+          createNode("div", "op-work-title", activeWorkDisplayTitle(activeWorkProjection, agents)),
         );
         const meta = createNode("div", "op-work-meta");
         appendMeta(meta, activeWorkProjection.owner);
-        appendMeta(meta, activeWorkProjection.branch);
         appendMeta(meta, activeWorkProjection.pr_number ? `PR #${activeWorkProjection.pr_number}` : "");
         activeWorkSummary.appendChild(meta);
         activeWorkSummary.appendChild(
@@ -1325,15 +1813,8 @@
           activeWorkSummary.appendChild(actions);
         }
 
-        if (agents.length === 0) {
-          activeWorkAgents.appendChild(
-            createNode("div", "op-work-empty", "Agent details unavailable"),
-          );
-          return;
-        }
-
         for (const agent of agents) {
-          const state = agent.status_category || "unknown";
+          const state = String(agent.status_category || "unknown").toLowerCase();
           const coordinationKind = String(agent.last_board_entry_kind || "").toLowerCase();
           const coordinationLabel = coordinationKindLabel(coordinationKind);
           const card = createNode("article", "op-agent-card");
@@ -1349,13 +1830,11 @@
           if (coordinationLabel) {
             chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
           }
-          chips.appendChild(createNode("div", "op-agent-state", state));
+          chips.appendChild(createNode("div", "op-agent-state", agentStatusLabel(state)));
           head.appendChild(chips);
           card.appendChild(head);
 
           const agentMeta = createNode("div", "op-agent-meta");
-          appendMeta(agentMeta, agent.branch);
-          appendMeta(agentMeta, compactPathLabel(agent.worktree_path));
           appendMeta(agentMeta, agent.last_board_entry_id ? "Board linked" : "");
           card.appendChild(agentMeta);
 
@@ -1363,22 +1842,25 @@
             card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
           }
 
-          if (agent.current_focus) {
+          const agentFocusText = agent.title_summary || agent.current_focus;
+          if (agentFocusText) {
             const focusText = coordinationLabel
-              ? `${coordinationLabel}: ${agent.current_focus}`
-              : agent.current_focus;
-            card.appendChild(createNode("div", "op-agent-focus", focusText));
+              ? `${coordinationLabel}: ${agentFocusText}`
+              : agentFocusText;
+            const agentFocus = createNode("div", "op-agent-focus", focusText);
+            if (agent.current_focus && agent.current_focus !== agentFocusText) {
+              agentFocus.title = agent.current_focus;
+            }
+            card.appendChild(agentFocus);
           }
 
           const agentActions = createNode("div", "op-agent-actions");
-          if (agent.window_id) {
-            const focusButton = createNode("button", "op-agent-action", "Focus");
-            focusButton.type = "button";
-            focusButton.addEventListener("click", () => {
-              focusWindowRemotely(agent.window_id, { center: true });
-            });
-            agentActions.appendChild(focusButton);
-          }
+          const focusButton = createNode("button", "op-agent-action", "Focus");
+          focusButton.type = "button";
+          focusButton.addEventListener("click", () => {
+            focusActiveWorkAgentWindow(agent);
+          });
+          agentActions.appendChild(focusButton);
           if (agent.last_board_entry_id) {
             const boardButton = createNode("button", "op-agent-action", "Open Entry");
             boardButton.type = "button";
@@ -1432,6 +1914,8 @@
         const chip = element.querySelector(".status-chip");
         const label = element.querySelector(".status-label");
         const overlay = element.querySelector(".terminal-overlay");
+        const runtimeChip = chip;
+        runtimeChip.hidden = !shouldShowRuntimeStatus(windowData);
         chip.classList.remove(
           "starting",
           "running",
@@ -1572,22 +2056,33 @@
             send({ kind: "activate_window_tab", id: tab.id });
           });
           tabButton.addEventListener("dragstart", (event) => {
-            windowTabDragState = { id: tab.id, docked: false };
+            windowTabDragState = {
+              id: tab.id,
+              docked: false,
+              lastClientPoint: clientPointFromDragEvent(
+                event,
+                canvas.getBoundingClientRect(),
+              ),
+            };
             event.dataTransfer?.setData("text/plain", tab.id);
             if (event.dataTransfer) {
               event.dataTransfer.effectAllowed = "move";
             }
           });
+          tabButton.addEventListener("drag", trackWindowTabDragPoint);
           tabButton.addEventListener("dragend", (event) => {
             const drag = windowTabDragState;
+            trackWindowTabDragPoint(event);
             windowTabDragState = null;
             if (!drag || drag.docked) return;
             const draggedWindow = workspaceWindowById(drag.id);
             if (!draggedWindow?.tab_group_id) return;
+            const geometry = detachGeometryFromTabDrag(event, drag, draggedWindow);
+            if (!geometry) return;
             send({
               kind: "detach_window_tab",
               id: drag.id,
-              geometry: detachGeometryFromPointer(event, draggedWindow),
+              geometry,
             });
           });
           const closeButton = document.createElement("button");
@@ -1649,6 +2144,63 @@
           !event.metaKey &&
           key === "c"
         );
+      }
+
+      const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+      ]);
+
+      function findClipboardImagePasteItem(items) {
+        for (const item of Array.from(items || [])) {
+          if (
+            item?.kind === "file" &&
+            SUPPORTED_IMAGE_PASTE_MIME_TYPES.has(item.type)
+          ) {
+            return item;
+          }
+        }
+        return null;
+      }
+
+      function dataUrlBase64Payload(dataUrl) {
+        if (typeof dataUrl !== "string") {
+          return null;
+        }
+        const commaIndex = dataUrl.indexOf(",");
+        if (commaIndex < 0) {
+          return null;
+        }
+        const payload = dataUrl.slice(commaIndex + 1);
+        return payload || null;
+      }
+
+      function readClipboardImageAsBase64(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => {
+            resolve(dataUrlBase64Payload(reader.result));
+          });
+          reader.addEventListener("error", () => {
+            reject(reader.error || new Error("Failed to read clipboard image"));
+          });
+          reader.readAsDataURL(file);
+        });
+      }
+
+      async function readNavigatorClipboardItems() {
+        if (!navigator.clipboard?.read) {
+          return [];
+        }
+        return navigator.clipboard.read();
+      }
+
+      async function readNavigatorClipboardText() {
+        if (!navigator.clipboard?.readText) {
+          return "";
+        }
+        return navigator.clipboard.readText();
       }
 
       async function writeClipboardText(text, restoreFocus = null) {
@@ -1807,6 +2359,70 @@
         };
       }
 
+      function installTerminalImagePasteHandlers(windowId, terminalRoot, terminal) {
+        const handlePaste = (event) => {
+          const item = findClipboardImagePasteItem(event.clipboardData?.items);
+          if (!item) {
+            return;
+          }
+          const file = item.getAsFile?.();
+          if (!file) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+
+          void readClipboardImageAsBase64(file)
+            .then((dataBase64) => {
+              if (!dataBase64) {
+                return;
+              }
+              send({
+                kind: "paste_image",
+                id: windowId,
+                data_base64: dataBase64,
+                mime_type: file.type || item.type,
+                filename: file.name || null,
+              });
+              terminal.focus();
+            })
+            .catch(() => {
+              terminal.focus();
+            });
+        };
+
+        terminalRoot.addEventListener("paste", handlePaste, true);
+        return () => {
+          terminalRoot.removeEventListener("paste", handlePaste, true);
+        };
+      }
+
+      function installTerminalContextMenuHandlers(windowId, terminalRoot, terminal) {
+        const controller = createTerminalContextMenuController({
+          document,
+          window,
+          terminalRoot,
+          readClipboardText: readNavigatorClipboardText,
+          readClipboardItems: readNavigatorClipboardItems,
+          blobToBase64: readClipboardImageAsBase64,
+          supportedImageTypes: SUPPORTED_IMAGE_PASTE_MIME_TYPES,
+          pasteText: (text) => terminal.paste(text),
+          pasteImage: ({ dataBase64, mimeType, filename }) => {
+            send({
+              kind: "paste_image",
+              id: windowId,
+              data_base64: dataBase64,
+              mime_type: mimeType,
+              filename,
+            });
+          },
+          focusTerminal: () => terminal.focus(),
+        });
+        return () => {
+          controller.dispose();
+        };
+      }
+
       function installTerminalViewportRefreshHandlers(windowId, terminal) {
         const viewportScrollDisposable = terminal.onScroll(() => {
           scheduleTerminalViewportRefresh(windowId);
@@ -1853,17 +2469,29 @@
           theme: XTERM_THEME_DARK,
           fontFamily:
             "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-          fontSize: 13,
-          lineHeight: 1.2,
+          fontSize: 14,
+          lineHeight: 1.28,
           scrollback: 5000,
         });
         const fitAddon = new FitAddon();
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
+        const imagePasteCleanup = installTerminalImagePasteHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
+        const contextMenuCleanup = installTerminalContextMenuHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
+          imagePasteCleanup();
+          contextMenuCleanup();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
@@ -1877,7 +2505,13 @@
           });
           send({ kind: "terminal_input", id: windowId, data });
         });
-        const runtime = { terminal, fitAddon, cleanup, viewportRefreshFrame: null };
+        const runtime = {
+          terminal,
+          fitAddon,
+          cleanup,
+          viewportRefreshFrame: null,
+          activationFrame: null,
+        };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
@@ -1934,15 +2568,6 @@
                 ["Theme", "Canvas"],
                 ["Agents", "Claude / Codex"],
                 ["Transport", "Local server"],
-              ],
-            };
-          case "memo":
-            return {
-              heading: "Daily Notes",
-              rows: [
-                ["Workspace", "Floating windows"],
-                ["Pinned", "2 notes"],
-                ["Draft", "Canvas review"],
               ],
             };
           case "profile":
@@ -2045,23 +2670,6 @@
           });
         }
         return branchListStateMap.get(windowId);
-      }
-
-      function ensureMemoState(windowId) {
-        if (!memoStateMap.has(windowId)) {
-          memoStateMap.set(windowId, {
-            notes: [],
-            loading: false,
-            saving: false,
-            error: "",
-            selectedNoteId: null,
-            draftTitle: "",
-            draftBody: "",
-            draftPinned: false,
-            saveTimer: null,
-          });
-        }
-        return memoStateMap.get(windowId);
       }
 
       function ensureProfileState(windowId) {
@@ -2204,6 +2812,9 @@
             newEntriesAvailable: false,
             focusEntryId: null,
             pendingFocusScroll: false,
+            audienceFilter: "all",
+            forYouUnread: 0,
+            lastNotifiedMentionEntryId: null,
           });
         }
         return boardStateMap.get(windowId);
@@ -2289,19 +2900,6 @@
           id: windowId,
           before_entry_id: beforeEntryId,
           limit: 50,
-        });
-      }
-
-      function requestMemo(windowId) {
-        const state = ensureMemoState(windowId);
-        if (state.loading) {
-          return;
-        }
-        state.loading = true;
-        state.error = "";
-        send({
-          kind: "load_memo",
-          id: windowId,
         });
       }
 
@@ -2529,11 +3127,6 @@
         return node;
       }
 
-      function memoTitleLabel(note) {
-        const title = String(note?.title || "").trim();
-        return title || "Untitled note";
-      }
-
       function boardTimestampLabel(value) {
         if (!value) {
           return "";
@@ -2754,327 +3347,6 @@
             ),
           );
         }
-      }
-
-      function memoSelectedNote(state) {
-        return (
-          (state.selectedNoteId &&
-            state.notes.find((note) => note.id === state.selectedNoteId)) ||
-          null
-        );
-      }
-
-      function syncMemoDraftFromSelection(state) {
-        const note = memoSelectedNote(state);
-        state.draftTitle = note ? note.title || "" : "";
-        state.draftBody = note ? note.body || "" : "";
-        state.draftPinned = Boolean(note && note.pinned);
-      }
-
-      function memoDraftIsDirty(state) {
-        const note = memoSelectedNote(state);
-        if (!note) {
-          return false;
-        }
-        return (
-          state.draftTitle !== (note.title || "") ||
-          state.draftBody !== (note.body || "") ||
-          state.draftPinned !== Boolean(note.pinned)
-        );
-      }
-
-      function clearMemoSaveTimer(state) {
-        if (state.saveTimer) {
-          clearTimeout(state.saveTimer);
-          state.saveTimer = null;
-        }
-      }
-
-      function updateMemoStatus(windowId) {
-        const element = windowMap.get(windowId);
-        if (!element) {
-          return;
-        }
-        const body = element.querySelector(".window-body");
-        if (!body) {
-          return;
-        }
-        const status = body.querySelector(".memo-status");
-        const deleteButton = body.querySelector("[data-action='delete-note']");
-        if (!status) {
-          return;
-        }
-        const state = ensureMemoState(windowId);
-        status.textContent = state.error
-          ? state.error
-          : state.loading
-            ? state.saving
-              ? "Saving note..."
-              : "Loading notes..."
-            : state.saving
-              ? "Saving note..."
-              : `${state.notes.length} note${state.notes.length === 1 ? "" : "s"}`;
-        status.className = "memo-status";
-        if (state.error) {
-          status.classList.add("error");
-        } else if (state.loading || state.saving) {
-          status.classList.add("info");
-        }
-        if (deleteButton) {
-          deleteButton.disabled = !state.selectedNoteId || state.loading;
-        }
-      }
-
-      function flushMemoSave(windowId) {
-        const state = ensureMemoState(windowId);
-        clearMemoSaveTimer(state);
-        if (!state.selectedNoteId) {
-          state.saving = false;
-          updateMemoStatus(windowId);
-          return;
-        }
-        if (!memoDraftIsDirty(state)) {
-          state.saving = false;
-          updateMemoStatus(windowId);
-          return;
-        }
-        state.loading = true;
-        state.saving = true;
-        state.error = "";
-        updateMemoStatus(windowId);
-        send({
-          kind: "update_memo_note",
-          id: windowId,
-          note_id: state.selectedNoteId,
-          title: state.draftTitle,
-          body: state.draftBody,
-          pinned: state.draftPinned,
-        });
-      }
-
-      function scheduleMemoSave(windowId) {
-        const state = ensureMemoState(windowId);
-        clearMemoSaveTimer(state);
-        state.saving = true;
-        updateMemoStatus(windowId);
-        state.saveTimer = setTimeout(() => {
-          state.saveTimer = null;
-          flushMemoSave(windowId);
-        }, 250);
-      }
-
-      function selectMemoNote(windowId, noteId) {
-        const state = ensureMemoState(windowId);
-        if (state.selectedNoteId === noteId) {
-          return;
-        }
-        if (memoDraftIsDirty(state)) {
-          flushMemoSave(windowId);
-        } else {
-          clearMemoSaveTimer(state);
-        }
-        state.selectedNoteId = noteId;
-        syncMemoDraftFromSelection(state);
-        renderMemo(windowId);
-      }
-
-      function createMemoNote(windowId) {
-        const state = ensureMemoState(windowId);
-        if (memoDraftIsDirty(state)) {
-          flushMemoSave(windowId);
-        } else {
-          clearMemoSaveTimer(state);
-        }
-        state.loading = true;
-        state.saving = true;
-        state.error = "";
-        updateMemoStatus(windowId);
-        send({
-          kind: "create_memo_note",
-          id: windowId,
-          title: "",
-          body: "",
-          pinned: false,
-        });
-      }
-
-      function deleteMemoNote(windowId) {
-        const state = ensureMemoState(windowId);
-        if (!state.selectedNoteId) {
-          return;
-        }
-        clearMemoSaveTimer(state);
-        state.loading = true;
-        state.saving = true;
-        state.error = "";
-        updateMemoStatus(windowId);
-        send({
-          kind: "delete_memo_note",
-          id: windowId,
-          note_id: state.selectedNoteId,
-        });
-      }
-
-      function renderMemo(windowId, preserveEditor = false) {
-        const element = windowMap.get(windowId);
-        if (!element) {
-          return;
-        }
-        const body = element.querySelector(".window-body");
-        if (!body) {
-          return;
-        }
-        const state = ensureMemoState(windowId);
-        const status = body.querySelector(".memo-status");
-        const list = body.querySelector(".memo-note-list");
-        const editor = body.querySelector(".memo-editor-pane");
-        if (!status || !list || !editor) {
-          return;
-        }
-
-        if (
-          state.selectedNoteId &&
-          !state.notes.some((note) => note.id === state.selectedNoteId)
-        ) {
-          state.selectedNoteId = null;
-        }
-        if (!state.selectedNoteId && state.notes.length > 0) {
-          state.selectedNoteId = state.notes[0].id;
-          syncMemoDraftFromSelection(state);
-          preserveEditor = false;
-        }
-
-        updateMemoStatus(windowId);
-        list.innerHTML = "";
-        if (!state.loading && state.notes.length === 0) {
-          const empty = createNode("div", "memo-empty workspace-empty-state");
-          empty.appendChild(createNode("div", "mock-label", "No notes yet"));
-          empty.appendChild(
-            createNode(
-              "div",
-              "memo-empty-copy",
-              "Create a repo-scoped note to capture follow-ups, checklists, or review context.",
-            ),
-          );
-          list.appendChild(empty);
-        }
-        for (const note of state.notes) {
-          const row = createNode("button", "memo-note-row");
-          row.type = "button";
-          if (note.id === state.selectedNoteId) {
-            row.classList.add("selected");
-            row.setAttribute("aria-current", "true");
-          } else {
-            row.removeAttribute("aria-current");
-          }
-          row.addEventListener("click", () => selectMemoNote(windowId, note.id));
-
-          const header = createNode("div", "memo-note-header");
-          header.appendChild(createNode("div", "memo-note-title", memoTitleLabel(note)));
-          if (note.pinned) {
-            header.appendChild(createNode("span", "memo-note-chip", "Pinned"));
-          }
-          row.appendChild(header);
-          row.appendChild(
-            createNode("div", "memo-note-time", boardTimestampLabel(note.updated_at)),
-          );
-          row.appendChild(
-            createNode(
-              "div",
-              "memo-note-preview",
-              String(note.body || "").trim() || "Empty note",
-            ),
-          );
-          list.appendChild(row);
-        }
-
-        const selectedNote = memoSelectedNote(state);
-        if (preserveEditor && editor.dataset.noteId === (state.selectedNoteId || "")) {
-          const meta = editor.querySelector(".memo-editor-meta");
-          if (meta && selectedNote) {
-            meta.textContent = `Updated ${boardTimestampLabel(selectedNote.updated_at)}`;
-          }
-          updateMemoStatus(windowId);
-          return;
-        }
-
-        editor.innerHTML = "";
-        editor.dataset.noteId = state.selectedNoteId || "";
-        if (!selectedNote) {
-          const empty = createNode("div", "memo-empty workspace-empty-state");
-          empty.appendChild(createNode("div", "mock-label", "Select or create a note"));
-          empty.appendChild(
-            createNode(
-              "div",
-              "memo-empty-copy",
-              "Pinned notes stay at the top of the repo-scoped list.",
-            ),
-          );
-          const button = createNode("button", "wizard-button primary", "New note");
-          button.type = "button";
-          button.addEventListener("click", () => createMemoNote(windowId));
-          empty.appendChild(button);
-          editor.appendChild(empty);
-          updateMemoStatus(windowId);
-          return;
-        }
-
-        const controls = createNode("div", "memo-editor-controls");
-        const pinToggle = createNode("label", "memo-pin-toggle");
-        const pinInput = document.createElement("input");
-        pinInput.type = "checkbox";
-        pinInput.checked = state.draftPinned;
-        pinInput.addEventListener("change", () => {
-          state.draftPinned = pinInput.checked;
-          scheduleMemoSave(windowId);
-        });
-        pinToggle.appendChild(pinInput);
-        pinToggle.appendChild(createNode("span", "", "Pinned"));
-        controls.appendChild(pinToggle);
-        const deleteButton = createNode("button", "wizard-button", "Delete");
-        deleteButton.type = "button";
-        deleteButton.dataset.action = "delete-note";
-        deleteButton.addEventListener("click", () => deleteMemoNote(windowId));
-        controls.appendChild(deleteButton);
-        editor.appendChild(controls);
-
-        editor.appendChild(
-          createNode(
-            "div",
-            "memo-editor-meta",
-            `Updated ${boardTimestampLabel(selectedNote.updated_at)}`,
-          ),
-        );
-
-        const titleInput = document.createElement("input");
-        titleInput.className = "memo-title-input";
-        titleInput.type = "text";
-        titleInput.placeholder = "Untitled note";
-        // SPEC-2356 — memo title input has no surrounding <label>; set
-        // aria-label so screen readers announce the purpose instead of
-        // just "edit text".
-        titleInput.setAttribute("aria-label", "Note title");
-        titleInput.value = state.draftTitle;
-        titleInput.addEventListener("input", () => {
-          state.draftTitle = titleInput.value;
-          scheduleMemoSave(windowId);
-        });
-        titleInput.addEventListener("blur", () => flushMemoSave(windowId));
-        editor.appendChild(titleInput);
-
-        const bodyInput = document.createElement("textarea");
-        bodyInput.className = "memo-body-input";
-        bodyInput.placeholder = "Capture context, next steps, or review notes";
-        bodyInput.setAttribute("aria-label", "Note body");
-        bodyInput.value = state.draftBody;
-        bodyInput.addEventListener("input", () => {
-          state.draftBody = bodyInput.value;
-          scheduleMemoSave(windowId);
-        });
-        bodyInput.addEventListener("blur", () => flushMemoSave(windowId));
-        editor.appendChild(bodyInput);
-
-        updateMemoStatus(windowId);
       }
 
       function clearProfileSaveTimer(state) {
@@ -3577,6 +3849,7 @@
           renderBoard(windowId);
           return;
         }
+        const mentions = mentionsForBoardSubmit(state);
         state.loading = true;
         state.submitting = true;
         state.error = "";
@@ -3594,6 +3867,7 @@
           parent_id: parentId,
           topics: [],
           owners: [],
+          mentions,
         });
         renderBoard(windowId);
       }
@@ -3625,6 +3899,30 @@
           return leftKey.localeCompare(rightKey)
             || String(left.id || "").localeCompare(String(right.id || ""));
         });
+      }
+
+      function showBoardMentionNotification(entry, windowId) {
+        if (!entry?.id) return;
+        let toast = document.getElementById("board-mention-toast");
+        if (!toast) {
+          toast = document.createElement("button");
+          toast.id = "board-mention-toast";
+          toast.className = "board-mention-toast";
+          toast.type = "button";
+          document.body.appendChild(toast);
+        }
+        toast.textContent = `Board reply for you - ${boardEntryPreview(entry)}`;
+        toast.onclick = () => {
+          const state = ensureBoardState(windowId);
+          applyBoardMentionNotificationFocus(state, entry.id);
+          focusBoardEntry(entry.id);
+          toast.remove();
+        };
+        setTimeout(() => {
+          if (document.getElementById("board-mention-toast") === toast) {
+            toast.remove();
+          }
+        }, 8000);
       }
 
       function handleBoardHookEvent(event) {
@@ -3664,6 +3962,7 @@
         const status = body.querySelector(".board-status");
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
+        const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
         if (!status || !timeline || !composer) {
           return;
         }
@@ -3689,6 +3988,15 @@
           status.classList.add("error");
         } else if (state.loading) {
           status.classList.add("info");
+        }
+        if (forYouFilter) {
+          forYouFilter.setAttribute(
+            "aria-pressed",
+            state.audienceFilter === "for_you" ? "true" : "false",
+          );
+          forYouFilter.classList.toggle("active", state.audienceFilter === "for_you");
+          forYouFilter.textContent =
+            state.forYouUnread > 0 ? `For you (${state.forYouUnread})` : "For you";
         }
 
         // The actual scroll viewport is `.board-timeline-scroll`, the
@@ -3723,6 +4031,8 @@
           });
         }
 
+        const visibleEntries = visibleBoardEntries(state);
+
         timeline.innerHTML = "";
         if (state.hasMoreBefore) {
           const loadOlder = createNode(
@@ -3735,13 +4045,19 @@
           loadOlder.addEventListener("click", () => requestOlderBoardEntries(windowId));
           timeline.appendChild(loadOlder);
         }
-        if (!state.loading && state.entries.length === 0) {
+        if (!state.loading && visibleEntries.length === 0) {
           timeline.appendChild(
-            createNode("div", "board-empty workspace-empty-state", "No coordination entries yet."),
+            createNode(
+              "div",
+              "board-empty workspace-empty-state",
+              state.audienceFilter === "for_you"
+                ? "No posts addressed to you."
+                : "No coordination entries yet.",
+            ),
           );
         }
         let focusTarget = null;
-        for (const entry of state.entries) {
+        for (const entry of visibleEntries) {
           const authorKind = String(entry.author_kind || "").toLowerCase();
           let card;
           if (authorKind === "user") {
@@ -3762,6 +4078,10 @@
             card.tabIndex = -1;
             focusTarget = card;
           }
+          if (boardEntryMentionsSelf(entry)) {
+            card.classList.add("for-you");
+            card.setAttribute("aria-label", "Board post addressed to you");
+          }
 
           const meta = createNode("div", "board-message-meta");
           if (entry.agent_color) {
@@ -3774,8 +4094,39 @@
               )}`,
             ),
           );
+          for (const label of boardEntryAudienceLabels(entry)) {
+            const badge = createNode("span", "board-audience-badge", label);
+            if (label === "For you") {
+              badge.classList.add("for-you");
+            }
+            meta.appendChild(badge);
+          }
           card.appendChild(meta);
+          if (entry.parent_id) {
+            const parent = findBoardEntry(state, entry.parent_id);
+            const quote = createNode(
+              "button",
+              "board-reply-quote",
+              parent
+                ? `Reply to ${parent.author || "Unknown"}: ${boardEntryPreview(parent)}`
+                : "Reply to earlier Board entry",
+            );
+            quote.type = "button";
+            quote.addEventListener("click", () => focusBoardEntry(entry.parent_id));
+            card.appendChild(quote);
+          }
           card.appendChild(createNode("div", "board-message-body", entry.body));
+          const messageActions = createNode("div", "board-message-actions");
+          const replyButton = createNode("button", "board-reply-button", "Reply");
+          replyButton.type = "button";
+          replyButton.addEventListener("click", () => {
+            state.replyParentId = entry.id;
+            renderBoard(windowId);
+            const input = body.querySelector(".board-textarea");
+            input?.focus();
+          });
+          messageActions.appendChild(replyButton);
+          card.appendChild(messageActions);
           timeline.appendChild(card);
         }
 
@@ -3801,6 +4152,32 @@
         }
 
         composer.innerHTML = "";
+        if (state.replyParentId) {
+          const parent = findBoardEntry(state, state.replyParentId);
+          const banner = createNode("div", "board-reply-banner");
+          banner.appendChild(
+            createNode(
+              "span",
+              "board-reply-banner-text",
+              parent
+                ? `Replying to ${parent.author || "Unknown"} - ${boardEntryPreview(parent)}`
+                : "Replying to earlier Board entry",
+            ),
+          );
+          const jump = createNode("button", "text-button", "Jump to original");
+          jump.type = "button";
+          jump.addEventListener("click", () => focusBoardEntry(state.replyParentId));
+          const cancel = createNode("button", "icon-button", "×");
+          cancel.type = "button";
+          cancel.setAttribute("aria-label", "Cancel reply");
+          cancel.addEventListener("click", () => {
+            state.replyParentId = null;
+            renderBoard(windowId);
+          });
+          banner.appendChild(jump);
+          banner.appendChild(cancel);
+          composer.appendChild(banner);
+        }
         const bodyField = createNode("label", "board-composer-field");
         bodyField.appendChild(createNode("span", "mock-label", "Share a Board update"));
         const bodyInput = document.createElement("textarea");
@@ -3988,7 +4365,6 @@
       function syncWizardDraftState() {
         if (!launchWizard) {
           wizardWasOpen = false;
-          wizardAdvancedOpen = false;
           wizardBranchDraft = "";
           wizardBranchBackendValue = "";
           return;
@@ -3996,9 +4372,6 @@
 
         if (!wizardWasOpen) {
           wizardWasOpen = true;
-          wizardAdvancedOpen =
-            launchWizard.selected_runtime_target === "docker" ||
-            Boolean(launchWizard.selected_docker_service);
           wizardBranchDraft = launchWizard.branch_name || "";
           wizardBranchBackendValue = wizardBranchDraft;
           return;
@@ -4419,6 +4792,59 @@
           panel.appendChild(section);
         }
 
+        if (
+          launchWizard.show_version ||
+          launchWizard.show_skip_permissions ||
+          launchWizard.show_codex_fast_mode
+        ) {
+          const section = createLaunchSection(
+            "Launch settings",
+            "Version, permissions, and tool-specific launch behavior.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          if (launchWizard.show_version) {
+            appendSelectField(
+              grid,
+              "Version",
+              launchWizard.version_options || [],
+              launchWizard.selected_version,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_version",
+                  version: value,
+                }),
+            );
+          }
+          if (launchWizard.show_skip_permissions) {
+            appendCheckboxField(
+              grid,
+              "Permissions",
+              "Skip permission prompts",
+              launchWizard.skip_permissions,
+              (enabled) =>
+                sendWizardAction({
+                  kind: "set_skip_permissions",
+                  enabled,
+                }),
+            );
+          }
+          if (launchWizard.show_codex_fast_mode) {
+            appendCheckboxField(
+              grid,
+              "Codex fast mode",
+              "Use the fast service tier",
+              launchWizard.codex_fast_mode,
+              (enabled) =>
+                sendWizardAction({
+                  kind: "set_codex_fast_mode",
+                  enabled,
+                }),
+            );
+          }
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
         if (launchWizard.show_agent_settings) {
           const section = createLaunchSection(
             "Linked issue",
@@ -4453,122 +4879,64 @@
           panel.appendChild(section);
         }
 
-        {
+        if (
+          launchWizard.show_runtime_target ||
+          (launchWizard.show_docker_service &&
+            (launchWizard.docker_service_options || []).length > 0) ||
+          (launchWizard.show_docker_lifecycle &&
+            (launchWizard.docker_lifecycle_options || []).length > 0)
+        ) {
           const section = createLaunchSection(
-            "Advanced",
-            "Runtime target, versions, and launch flags.",
+            "Runtime",
+            "Choose where the session runs and how Docker services are used.",
           );
-          const toggleRow = createNode("div", "launch-toggle-row");
-          toggleRow.appendChild(
-            createNode(
-              "div",
-              "launch-note",
-              wizardAdvancedOpen
-                ? "Docker, version, permissions, and tool-specific flags."
-                : "Show runtime and launch flags.",
-            ),
-          );
-          const toggleButton = createNode(
-            "button",
-            "wizard-button",
-            wizardAdvancedOpen ? "Hide advanced" : "Show advanced",
-          );
-          toggleButton.type = "button";
-          toggleButton.addEventListener("click", () => {
-            wizardAdvancedOpen = !wizardAdvancedOpen;
-            renderLaunchWizard();
-          });
-          toggleRow.appendChild(toggleButton);
-          section.appendChild(toggleRow);
-
-          if (wizardAdvancedOpen) {
-            const grid = createNode("div", "launch-form-grid");
-            if (launchWizard.show_runtime_target) {
-              appendSelectField(
-                grid,
-                "Runtime target",
-                launchWizard.runtime_target_options || [],
-                launchWizard.selected_runtime_target,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_runtime_target",
-                    target: runtimeTargetPayload(value),
-                  }),
-              );
-            }
-            if (
-              launchWizard.show_docker_service &&
-              (launchWizard.docker_service_options || []).length > 0
-            ) {
-              appendSelectField(
-                grid,
-                "Docker service",
-                launchWizard.docker_service_options || [],
-                launchWizard.selected_docker_service,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_docker_service",
-                    service: value,
-                  }),
-              );
-            }
-            if (
-              launchWizard.show_docker_lifecycle &&
-              (launchWizard.docker_lifecycle_options || []).length > 0
-            ) {
-              appendSelectField(
-                grid,
-                "Docker lifecycle",
-                launchWizard.docker_lifecycle_options || [],
-                launchWizard.selected_docker_lifecycle,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_docker_lifecycle",
-                    intent: dockerLifecyclePayload(value),
-                  }),
-              );
-            }
-            if (launchWizard.show_version) {
-              appendSelectField(
-                grid,
-                "Version",
-                launchWizard.version_options || [],
-                launchWizard.selected_version,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_version",
-                    version: value,
-                  }),
-              );
-            }
-            if (launchWizard.show_skip_permissions) {
-              appendCheckboxField(
-                grid,
-                "Permissions",
-                "Skip permission prompts",
-                launchWizard.skip_permissions,
-                (enabled) =>
-                  sendWizardAction({
-                    kind: "set_skip_permissions",
-                    enabled,
-                  }),
-              );
-            }
-            if (launchWizard.show_codex_fast_mode) {
-              appendCheckboxField(
-                grid,
-                "Codex fast mode",
-                "Use the fast service tier",
-                launchWizard.codex_fast_mode,
-                (enabled) =>
-                  sendWizardAction({
-                    kind: "set_codex_fast_mode",
-                    enabled,
-                  }),
-              );
-            }
-            section.appendChild(grid);
+          const grid = createNode("div", "launch-form-grid");
+          if (launchWizard.show_runtime_target) {
+            appendSelectField(
+              grid,
+              "Runtime target",
+              launchWizard.runtime_target_options || [],
+              launchWizard.selected_runtime_target,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_runtime_target",
+                  target: runtimeTargetPayload(value),
+                }),
+            );
           }
+          if (
+            launchWizard.show_docker_service &&
+            (launchWizard.docker_service_options || []).length > 0
+          ) {
+            appendSelectField(
+              grid,
+              "Docker service",
+              launchWizard.docker_service_options || [],
+              launchWizard.selected_docker_service,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_docker_service",
+                  service: value,
+                }),
+            );
+          }
+          if (
+            launchWizard.show_docker_lifecycle &&
+            (launchWizard.docker_lifecycle_options || []).length > 0
+          ) {
+            appendSelectField(
+              grid,
+              "Docker lifecycle",
+              launchWizard.docker_lifecycle_options || [],
+              launchWizard.selected_docker_lifecycle,
+              (value) =>
+                sendWizardAction({
+                  kind: "set_docker_lifecycle",
+                  intent: dockerLifecyclePayload(value),
+                }),
+            );
+          }
+          section.appendChild(grid);
 
           panel.appendChild(section);
         }
@@ -5518,6 +5886,8 @@
             return "A running agent session is using this branch";
           case "remote_tracking_without_local":
             return "Remote-tracking branch without a local counterpart";
+          case "non_workspace_branch":
+            return "Only gwt-managed workspaces can be cleaned up";
           default:
             return "This branch cannot be cleaned up";
         }
@@ -5638,6 +6008,14 @@
         state.cleanupModal.stage = "running";
         state.cleanupModal.results = [];
         renderBranchCleanupModal();
+        if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
+          send({
+            kind: "run_workspace_cleanup",
+            branch: branches[0],
+            delete_remote: state.cleanupModal.deleteRemote,
+          });
+          return;
+        }
         send({
           kind: "run_branch_cleanup",
           id: windowId,
@@ -5728,7 +6106,6 @@
           "surface-terminal",
           "surface-file-tree",
           "surface-branches",
-          "surface-memo",
           "surface-board",
           "surface-logs",
           "surface-knowledge",
@@ -5889,52 +6266,6 @@
           return;
         }
 
-        if (surface === "memo") {
-          body.innerHTML = `
-            <div class="memo-root">
-              <div class="workspace-toolbar is-stacked">
-                <div class="workspace-toolbar-main">
-                  <div class="knowledge-heading">Repo notes</div>
-                  <div class="memo-status"></div>
-                </div>
-                <div class="workspace-toolbar-actions">
-                  <button class="wizard-button" type="button" data-action="new-note">New note</button>
-                  <button class="icon-button" data-action="refresh-memo" aria-label="Refresh memo">↻</button>
-                </div>
-              </div>
-              <div class="memo-layout workspace-split">
-                <div class="memo-note-list"></div>
-                <div class="memo-editor-pane"></div>
-              </div>
-            </div>
-          `;
-          body.addEventListener("mousedown", () => {
-            focusWindowLocally(windowData.id);
-            socketTransport.send({ kind: "focus_window", id: windowData.id });
-          });
-          body
-            .querySelector("[data-action='refresh-memo']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              const state = frontendUnits.memoSurface.ensureMemoState(windowData.id);
-              state.error = "";
-              frontendUnits.memoSurface.requestMemo(windowData.id);
-              frontendUnits.memoSurface.renderMemo(windowData.id);
-            });
-          body
-            .querySelector("[data-action='new-note']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              frontendUnits.memoSurface.createMemoNote(windowData.id);
-            });
-          const state = frontendUnits.memoSurface.ensureMemoState(windowData.id);
-          if (state.notes.length === 0 && !state.loading && !state.error) {
-            frontendUnits.memoSurface.requestMemo(windowData.id);
-          }
-          frontendUnits.memoSurface.renderMemo(windowData.id);
-          return;
-        }
-
         if (surface === "profile") {
           body.innerHTML = `
             <div class="profile-root">
@@ -5992,6 +6323,7 @@
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -6016,6 +6348,17 @@
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
               state.error = "";
               frontendUnits.boardSurface.requestBoard(windowData.id);
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-for-you']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter = state.audienceFilter === "for_you" ? "all" : "for_you";
+              if (state.audienceFilter === "for_you") {
+                state.forYouUnread = 0;
+              }
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
@@ -6304,6 +6647,14 @@
         statusMessage: "",
         statusKind: "",
       };
+      // SPEC-1933 US-4: System tab state. `language` is the raw stored value
+      // (auto/en/ja); the backend `system_settings` reply seeds it.
+      const systemSettingsState = {
+        language: "auto",
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
+      };
       const settingsWindowBodies = new Set();
       let pendingAddFromPreset = null;
 
@@ -6319,35 +6670,188 @@
         }
       }
 
+      // SPEC-1933 Phase: System Settings (Output Language).
+      // Build a tabbed Settings surface (System | Custom Agents) using
+      // Operator Design tokens. Existing renderSettingsAgentList continues
+      // to populate the Custom Agents panel via [data-role='settings-scroll'].
       function renderSettingsWindow(body, windowData) {
         // Sweep detached bodies up-front so repeated open/close cycles do
         // not accumulate references.
         purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
-        const root = createDiv("mock-root");
-        const toolbar = createDiv("mock-toolbar");
-        const heading = createDiv("mock-heading");
-        heading.textContent = "Custom Agents";
-        const chip = document.createElement("span");
-        chip.className = "mock-chip";
-        chip.textContent = windowData.title || "Settings";
+
+        const root = createDiv("settings-root");
+
+        const toolbar = document.createElement("header");
+        toolbar.className = "settings-toolbar";
+        const heading = document.createElement("h2");
+        heading.className = "settings-heading";
+        heading.textContent = windowData.title || "Settings";
+
+        const tabs = document.createElement("nav");
+        tabs.className = "settings-tabs";
+        tabs.setAttribute("role", "tablist");
+        tabs.appendChild(buildSettingsTab("system", "System", true));
+        tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+
         toolbar.appendChild(heading);
-        toolbar.appendChild(chip);
-        const scroll = createDiv("mock-scroll");
-        scroll.dataset.role = "settings-scroll";
+        toolbar.appendChild(tabs);
+
+        const bodyEl = createDiv("settings-body");
+
+        const panelSystem = document.createElement("section");
+        panelSystem.className = "settings-panel";
+        panelSystem.setAttribute("role", "tabpanel");
+        panelSystem.dataset.settingsPanel = "system";
+
+        const panelAgents = document.createElement("section");
+        panelAgents.className = "settings-panel hidden";
+        panelAgents.setAttribute("role", "tabpanel");
+        panelAgents.dataset.settingsPanel = "custom-agents";
+        // Existing renderSettingsAgentList queries this attribute to inject
+        // the Add button and agent rows.
+        panelAgents.dataset.role = "settings-scroll";
+
+        bodyEl.appendChild(panelSystem);
+        bodyEl.appendChild(panelAgents);
+
         root.appendChild(toolbar);
-        root.appendChild(scroll);
+        root.appendChild(bodyEl);
         body.appendChild(root);
+
+        tabs.addEventListener("click", (e) => {
+          const btn = e.target.closest("[data-settings-tab]");
+          if (!btn) return;
+          switchSettingsTab(body, btn.dataset.settingsTab);
+        });
+        tabs.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          const btn = e.target.closest("[data-settings-tab]");
+          if (!btn) return;
+          e.preventDefault();
+          switchSettingsTab(body, btn.dataset.settingsTab);
+        });
 
         body.addEventListener("mousedown", () => {
           focusWindowLocally(windowData.id);
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+
+        renderSystemPanel(panelSystem);
+        // Always request fresh system settings on open so the dropdown
+        // reflects the on-disk config, even if the user changed it from a
+        // different gwt instance.
+        send({ kind: "get_system_settings" });
+
         renderSettingsAgentList();
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
+        }
+      }
+
+      function buildSettingsTab(id, label, selected) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = selected ? "settings-tab active" : "settings-tab";
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", String(selected));
+        btn.dataset.settingsTab = id;
+        btn.textContent = label;
+        return btn;
+      }
+
+      function switchSettingsTab(body, target) {
+        const tabs = body.querySelectorAll(".settings-tab");
+        tabs.forEach((tab) => {
+          const isSelected = tab.dataset.settingsTab === target;
+          tab.setAttribute("aria-selected", String(isSelected));
+          tab.classList.toggle("active", isSelected);
+        });
+        const panels = body.querySelectorAll(".settings-panel");
+        panels.forEach((panel) => {
+          panel.classList.toggle(
+            "hidden",
+            panel.dataset.settingsPanel !== target,
+          );
+        });
+      }
+
+      function renderSystemPanel(panel) {
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+
+        const section = createDiv("settings-section");
+
+        const label = document.createElement("label");
+        label.className = "settings-label";
+        label.setAttribute("for", "settings-system-language");
+        label.textContent = "Output Language";
+        section.appendChild(label);
+
+        const select = document.createElement("select");
+        select.className = "settings-select";
+        select.id = "settings-system-language";
+        for (const opt of [
+          { value: "auto", text: "Auto (OS locale)" },
+          { value: "en", text: "English" },
+          { value: "ja", text: "日本語" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          select.appendChild(option);
+        }
+        select.value = systemSettingsState.language || "auto";
+        select.addEventListener("change", (e) => {
+          const next = e.target.value;
+          systemSettingsState.language = next;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({ kind: "update_system_settings", language: next });
+        });
+        section.appendChild(select);
+
+        const help = document.createElement("p");
+        help.className = "settings-help";
+        help.textContent =
+          "Used for narrative outputs (Workspace summaries and Board post bodies). " +
+          "Settings UI text and gwtd subcommands stay English.";
+        section.appendChild(help);
+
+        const status = document.createElement("p");
+        status.className = "settings-status";
+        status.dataset.role = "system-settings-status";
+        section.appendChild(status);
+
+        panel.appendChild(section);
+        renderSystemPanelStatus(panel);
+      }
+
+      function renderSystemPanelStatus(panel) {
+        const status = panel.querySelector(
+          "[data-role='system-settings-status']",
+        );
+        if (!status) return;
+        status.textContent = systemSettingsState.statusMessage || "";
+        if (systemSettingsState.statusKind) {
+          status.dataset.kind = systemSettingsState.statusKind;
+        } else {
+          delete status.dataset.kind;
+        }
+      }
+
+      function renderSystemPanelInAllSettingsWindows() {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) {
+            settingsWindowBodies.delete(body);
+            continue;
+          }
+          const panel = body.querySelector(
+            "[data-settings-panel='system']",
+          );
+          if (panel) renderSystemPanel(panel);
         }
       }
 
@@ -6517,6 +7021,7 @@
             <div class="titlebar">
               <div class="title">
                 <span class="title-text"></span>
+                <span class="window-role-badge"></span>
                 <span class="status-chip running">
                   <span class="status-dot"></span>
                   <span class="status-label">Running</span>
@@ -6571,6 +7076,7 @@
               top: parseNumber(element.style.top),
               moved: false,
               allowMove: !currentWindow?.maximized,
+              dockTargetId: null,
             };
             titlebar.setPointerCapture(event.pointerId);
           });
@@ -6578,6 +7084,7 @@
             if (!windowTabDragState || windowTabDragState.id === windowData.id) {
               return;
             }
+            trackWindowTabDragPoint(event);
             event.preventDefault();
             if (event.dataTransfer) {
               event.dataTransfer.dropEffect = "move";
@@ -6588,6 +7095,7 @@
               return;
             }
             event.preventDefault();
+            trackWindowTabDragPoint(event);
             windowTabDragState.docked = true;
             send({
               kind: "dock_window_tab",
@@ -6605,8 +7113,16 @@
               startY: event.clientY,
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
+              fitFrame: null,
             };
+            // SPEC-2356 Phase 9 (T-136): suppress hover-reveal peek strip
+            // hits while resize is active so pointer movements that cross
+            // the screen edge do not steal focus mid-resize.
+            document.documentElement.dataset.opResizeActive = "true";
             resizeHandle.setPointerCapture(event.pointerId);
+          });
+          resizeHandle.addEventListener("lostpointercapture", (event) => {
+            finishWindowResize(event.pointerId);
           });
         }
 
@@ -6616,6 +7132,9 @@
         }
 
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
+        const titleText = element.querySelector(".title-text");
+        titleText.title = windowTitleTooltip(windowData);
+        element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
           element.dataset.agentColor = windowData.agent_color;
@@ -6623,7 +7142,13 @@
           delete element.dataset.agentColor;
         }
         const wasMinimized = element.classList.contains("minimized");
-        const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized;
+        const previousWidth = parseFloat(element.style.width || "0");
+        const previousHeight = parseFloat(element.style.height || "0");
+        const dimensionsChanged =
+          previousWidth !== windowData.geometry.width ||
+          previousHeight !== windowData.geometry.height;
+        const shouldPersistTerminalGeometry =
+          (wasMinimized && !windowData.minimized) || dimensionsChanged;
         element.classList.toggle("minimized", Boolean(windowData.minimized));
         element.classList.toggle("maximized", Boolean(windowData.maximized));
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
@@ -6658,6 +7183,9 @@
           const runtime = terminalMap.get(windowId);
           if (runtime && runtime.viewportRefreshFrame !== null) {
             cancelAnimationFrame(runtime.viewportRefreshFrame);
+          }
+          if (runtime && runtime.activationFrame !== null) {
+            cancelAnimationFrame(runtime.activationFrame);
           }
           runtime?.cleanup?.();
           runtime?.terminal.dispose();
@@ -6698,10 +7226,7 @@
         const topmostId = topmostWindowId(workspace);
         if (topmostId && ids.has(topmostId)) {
           focusWindowLocally(topmostId);
-          const runtime = terminalMap.get(topmostId);
-          if (runtime) {
-            runtime.terminal.focus();
-          }
+          scheduleTerminalFocusActivation(topmostId);
         } else {
           focusedId = null;
         }
@@ -6771,16 +7296,6 @@
         renderBranchCleanupModal,
       });
 
-      const memoSurface = Object.freeze({
-        ensureMemoState,
-        requestMemo,
-        renderMemo,
-        createMemoNote,
-        flushMemoSave,
-        deleteMemoNote,
-        syncDraftFromSelection: syncMemoDraftFromSelection,
-      });
-
       const profileSurface = Object.freeze({
         ensureProfileState,
         requestProfile,
@@ -6832,7 +7347,6 @@
         terminalHost,
         launchWizardSurface,
         branchesFileTreeSurface,
-        memoSurface,
         profileSurface,
         boardSurface,
         logsSurface,
@@ -6848,6 +7362,7 @@
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
+            renderWorkspaceOverview();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -6928,32 +7443,6 @@
             }
             break;
           }
-          case "memo_notes": {
-            const state = frontendUnits.memoSurface.ensureMemoState(event.id);
-            state.notes = event.notes || [];
-            state.loading = false;
-            state.saving = Boolean(state.saveTimer);
-            state.error = "";
-            const preferredNoteId = event.selected_note_id || null;
-            const hasCurrentSelection =
-              state.selectedNoteId &&
-              state.notes.some((note) => note.id === state.selectedNoteId);
-            if (preferredNoteId && preferredNoteId !== state.selectedNoteId) {
-              state.selectedNoteId = preferredNoteId;
-              frontendUnits.memoSurface.syncDraftFromSelection(state);
-              frontendUnits.memoSurface.renderMemo(event.id);
-              break;
-            }
-            if (!hasCurrentSelection) {
-              state.selectedNoteId =
-                preferredNoteId || (state.notes[0] ? state.notes[0].id : null);
-              frontendUnits.memoSurface.syncDraftFromSelection(state);
-              frontendUnits.memoSurface.renderMemo(event.id);
-              break;
-            }
-            frontendUnits.memoSurface.renderMemo(event.id, true);
-            break;
-          }
           case "profile_snapshot": {
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
             state.snapshot = event.snapshot || null;
@@ -6974,6 +7463,12 @@
             );
             const addedEntry = incomingEntries.some(
               (entry) => Boolean(entry.id) && !existingEntryIds.has(entry.id),
+            );
+            const addressedEntry = incomingEntries.find(
+              (entry) =>
+                Boolean(entry.id) &&
+                !existingEntryIds.has(entry.id) &&
+                boardEntryMentionsSelf(entry),
             );
             const pendingSubmit = state.pendingSubmit;
             const completedSubmit = Boolean(pendingSubmit)
@@ -7007,6 +7502,14 @@
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
+            if (
+              addressedEntry &&
+              addressedEntry.id !== state.lastNotifiedMentionEntryId
+            ) {
+              state.forYouUnread += 1;
+              state.lastNotifiedMentionEntryId = addressedEntry.id;
+              showBoardMentionNotification(addressedEntry, event.id);
+            }
             state.loading = false;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
@@ -7025,6 +7528,13 @@
             state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
             frontendUnits.boardSurface.renderBoard(event.id);
+            if (
+              state.focusEntryId &&
+              !state.entries.some((entry) => entry.id === state.focusEntryId) &&
+              state.hasMoreBefore
+            ) {
+              frontendUnits.boardSurface.requestOlderBoardEntries(event.id);
+            }
             break;
           }
           case "log_entries": {
@@ -7193,6 +7703,11 @@
             state.cleanupModal.stage = "result";
             state.cleanupModal.results = event.results || [];
             branchCleanupWindowId = event.id;
+            if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+              frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
+              renderWorkspaceOverview();
+              break;
+            }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
@@ -7203,6 +7718,10 @@
             state.loading = false;
             if (state.cleanupModal.stage === "running") {
               failRunningBranchCleanup(event.id, event.message);
+              if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+                frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
+                break;
+              }
               frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
               break;
             }
@@ -7213,14 +7732,6 @@
               state.error = event.message;
             }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-            break;
-          }
-          case "memo_error": {
-            const state = frontendUnits.memoSurface.ensureMemoState(event.id);
-            state.loading = false;
-            state.saving = Boolean(state.saveTimer);
-            state.error = event.message;
-            frontendUnits.memoSurface.renderMemo(event.id, true);
             break;
           }
           case "profile_error": {
@@ -7359,17 +7870,11 @@
             break;
           case "update_state":
             if (event.state === "available") {
-              setVersionState(event.current, event.latest);
-              // FR-036: surface the toast only on the first detection of a
-              // given `latest`, or when the polling loop reports a strictly
-              // newer version. Duplicate detections from the 5min poll just
-              // re-render the persistent button.
-              if (firstSeenUpdateVersion !== event.latest) {
-                showUpdateToast(event.latest);
-                firstSeenUpdateVersion = event.latest;
-              }
-              showUpdateButton(event.latest);
+              updateCtaController.handleUpdateState(event);
             }
+            break;
+          case "update_apply_error":
+            updateCtaController.showError(event.message || "Failed to start the update.");
             break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
@@ -7398,6 +7903,29 @@
               (a) => a.id !== event.agent_id,
             );
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
+            break;
+          case "system_settings":
+            // SPEC-1933 US-4: backend echoed the on-disk language value.
+            systemSettingsState.language = event.language || "auto";
+            systemSettingsState.loaded = true;
+            // Don't clobber an in-flight "Saving…" status; only seed when no
+            // pending feedback is shown.
+            if (!systemSettingsState.statusMessage || systemSettingsState.statusKind === "info") {
+              systemSettingsState.statusMessage = "";
+              systemSettingsState.statusKind = "";
+            }
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          case "system_settings_updated":
+            systemSettingsState.language = event.language || systemSettingsState.language;
+            systemSettingsState.statusMessage = `Saved language: ${event.language}.`;
+            systemSettingsState.statusKind = "success";
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          case "system_settings_error":
+            systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
+            systemSettingsState.statusKind = "error";
+            renderSystemPanelInAllSettingsWindows();
             break;
           case "backend_connection_result":
             frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
@@ -7478,71 +8006,6 @@
         }
       }
 
-      let updateToastTimer = null;
-      // FR-036: remember the last `latest` rendered on the persistent button
-      // so the 5min poll loop does not re-toast on every duplicate detection.
-      let firstSeenUpdateVersion = null;
-
-      function showUpdateToast(version) {
-        let toast = document.getElementById("update-toast");
-        if (!toast) {
-          toast = document.createElement("div");
-          toast.id = "update-toast";
-          toast.className = "update-toast";
-          document.body.appendChild(toast);
-        }
-        toast.textContent = `\u{1F4E6} Update available: v${version} \u2014 click to apply`;
-        toast.style.opacity = "1";
-        toast.onclick = () => {
-          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
-            send({ kind: "apply_update" });
-          }
-        };
-        // While the toast is up, lift the persistent button so the two do
-        // not overlap; the .has-toast class is dropped once the toast fades.
-        const buttonEl = document.getElementById("update-button");
-        if (buttonEl) {
-          buttonEl.classList.add("has-toast");
-        }
-        clearTimeout(updateToastTimer);
-        updateToastTimer = setTimeout(() => {
-          toast.style.opacity = "0";
-          setTimeout(() => toast.remove(), 300);
-          updateToastTimer = null;
-          const after = document.getElementById("update-button");
-          if (after) {
-            after.classList.remove("has-toast");
-          }
-        }, 8000);
-      }
-
-      function showUpdateButton(version) {
-        // FR-036: persistent "Update available" button that stays after the
-        // initial 8s toast fades. Re-rendering on a new `latest` simply
-        // updates the textContent / click target, so this is cheap to call
-        // on every poll detection.
-        let button = document.getElementById("update-button");
-        if (!button) {
-          button = document.createElement("button");
-          button.id = "update-button";
-          button.type = "button";
-          button.className = "update-button";
-          // Offset the button while the initial 8s toast is still visible.
-          if (document.getElementById("update-toast")) {
-            button.classList.add("has-toast");
-          }
-          document.body.appendChild(button);
-        }
-        button.textContent = `\u{1F4E6} Update available: v${version}`;
-        button.title = `Apply update to v${version}`;
-        button.setAttribute("aria-label", `Update available: v${version}, click to apply`);
-        button.onclick = () => {
-          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
-            send({ kind: "apply_update" });
-          }
-        };
-      }
-
       window.addEventListener("pointermove", (event) => {
         if (panState && panState.pointerId === event.pointerId) {
           viewport.x = panState.x + event.clientX - panState.startX;
@@ -7566,6 +8029,7 @@
           }
           element.style.left = `${dragState.left + deltaX}px`;
           element.style.top = `${dragState.top + deltaY}px`;
+          updateTitlebarDockPreview(event);
           return;
         }
 
@@ -7582,9 +8046,11 @@
             resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
             260,
           )}px`;
-          fitTerminal(resizeState.id, false);
+          scheduleTerminalResizeFit(resizeState.id);
         }
       });
+
+      window.addEventListener("dragover", trackWindowTabDragPoint);
 
       window.addEventListener("pointerup", (event) => {
         if (panState && panState.pointerId === event.pointerId) {
@@ -7598,28 +8064,42 @@
 
         if (dragState && dragState.pointerId === event.pointerId) {
           if (dragState.moved) {
-            const runtime = terminalMap.get(dragState.id);
-            sendGeometry(
-              dragState.id,
-              runtime?.terminal.cols || 80,
-              runtime?.terminal.rows || 24,
-            );
+            dragState.dockTargetId = dragState.allowMove
+              ? titlebarDockTargetAt(event, dragState.id)
+              : null;
+            clearTitlebarDockPreview();
+            if (dragState.dockTargetId) {
+              send({
+                kind: "dock_window_tab",
+                id: dragState.id,
+                target_id: dragState.dockTargetId,
+              });
+            } else {
+              const runtime = terminalMap.get(dragState.id);
+              sendGeometry(
+                dragState.id,
+                runtime?.terminal.cols || 80,
+                runtime?.terminal.rows || 24,
+              );
+            }
           } else {
+            clearTitlebarDockPreview();
             handleTitlebarClick(dragState.id);
           }
           dragState = null;
         }
 
         if (resizeState && resizeState.pointerId === event.pointerId) {
-          const runtime = terminalMap.get(resizeState.id);
-          fitTerminal(resizeState.id, false);
-          sendGeometry(
-            resizeState.id,
-            runtime?.terminal.cols || 80,
-            runtime?.terminal.rows || 24,
-          );
-          resizeState = null;
+          finishWindowResize(event.pointerId);
         }
+      });
+
+      window.addEventListener("pointercancel", (event) => {
+        if (dragState && dragState.pointerId === event.pointerId) {
+          clearTitlebarDockPreview();
+          dragState = null;
+        }
+        finishWindowResize(event.pointerId);
       });
 
       canvas.addEventListener("contextmenu", (event) => {
@@ -7687,8 +8167,8 @@
         }
         // SPEC-2008 FR-032: terminal-only opt-out. xterm.js owns wheel inside
         // `.surface-terminal`; every other workspace-window forwards plain
-        // wheel to the DOM so panel scroll regions (Knowledge / Memo /
-        // Profile / Logs / Board / Issue / SPEC / Settings ...) and modal
+        // wheel to the DOM so panel scroll regions (Knowledge / Profile /
+        // Logs / Board / Issue / SPEC / Settings ...) and modal
         // content scroll natively without registering a per-class whitelist.
         if (
           !event.ctrlKey &&
@@ -7814,6 +8294,24 @@
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
+      const workspaceOverviewCloseButton = document.getElementById(
+        "workspace-overview-close",
+      );
+      if (workspaceOverviewCloseButton) {
+        workspaceOverviewCloseButton.addEventListener("click", closeWorkspaceOverview);
+      }
+      const workspaceOverviewBackdrop = document.getElementById(
+        "workspace-overview-drawer-backdrop",
+      );
+      if (workspaceOverviewBackdrop) {
+        workspaceOverviewBackdrop.addEventListener("click", closeWorkspaceOverview);
+      }
+      if (workspaceOverviewEntry) {
+        workspaceOverviewEntry.addEventListener("click", openWorkspaceOverview);
+      }
+      if (projectWorkspaceOverviewButton) {
+        projectWorkspaceOverviewButton.addEventListener("click", openWorkspaceOverview);
+      }
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -7865,6 +8363,15 @@
         const kanbanDrawer = document.getElementById("kanban-drawer");
         if (kanbanDrawer && kanbanDrawer.dataset.open === "true") {
           closeKanbanDrawer();
+          event.preventDefault();
+          return;
+        }
+        const workspaceOverviewDrawer = document.getElementById("workspace-overview-drawer");
+        if (
+          workspaceOverviewDrawer &&
+          workspaceOverviewDrawer.dataset.open === "true"
+        ) {
+          closeWorkspaceOverview();
           event.preventDefault();
           return;
         }

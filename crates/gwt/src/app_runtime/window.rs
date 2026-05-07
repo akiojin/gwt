@@ -34,6 +34,9 @@ impl AppRuntime {
         preset: WindowPreset,
         bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
+        if preset.is_removed_legacy() {
+            return Vec::new();
+        }
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Vec::new();
         };
@@ -313,7 +316,11 @@ impl AppRuntime {
             return Vec::new();
         }
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
+        events
     }
 
     pub(crate) fn list_windows_event(&self) -> BackendEvent {

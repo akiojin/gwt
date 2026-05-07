@@ -11,6 +11,24 @@ const html = readFileSync(indexPath, "utf8");
 const { document } = parseHTML(html);
 const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
+const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
+const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+const inlineStyle = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || "";
+
+function cssRemVar(source, name) {
+  const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
+  assert.ok(match, `missing typography token: ${name}`);
+  return Number(match[1]);
+}
+
+function terminalOptionNumber(name) {
+  const runtime = appSource.match(/new\s+Terminal\(\{\s*([\s\S]*?)\s*\}\);/);
+  assert.ok(runtime, "expected xterm Terminal constructor options");
+  const match = runtime[1].match(new RegExp(`${name}:\\s*([0-9.]+)`));
+  assert.ok(match, `missing terminal option: ${name}`);
+  return Number(match[1]);
+}
 
 // SPEC-2356 — extract every @media block matching the supplied condition,
 // using brace-depth tracking so nested rules don't truncate the body.
@@ -110,8 +128,8 @@ test("Workspace sidebar exposes active work and per-agent overview", () => {
   );
   assert.match(
     appSource,
-    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkProjection\.agents/,
-    "expected frontend to render per-agent projection data, not only aggregate counters",
+    /function\s+renderActiveWorkOverview\(\)[\s\S]+activeWorkFocusableAgents\(activeWorkProjection\)/,
+    "expected frontend to render focusable per-agent projection data, not only aggregate counters",
   );
   assert.match(
     appSource,
@@ -129,6 +147,107 @@ test("Workspace sidebar keeps Quick before the expanding active work list", () =
     headings.slice(0, 3),
     ["Layers", "Quick", "Active Work"],
     "Quick must stay above Active Work so agent cards do not push it off-screen",
+  );
+});
+
+test("workspace windows expose role badges and hide panel runtime chips", () => {
+  assert.match(
+    appSource,
+    /function\s+presetRoleLabel\(preset\)/,
+    "expected a shared preset role label helper",
+  );
+  assert.match(
+    appSource,
+    /class="window-role-badge"/,
+    "expected titlebar template to include a role badge surface",
+  );
+  assert.match(
+    appSource,
+    /function\s+shouldShowRuntimeStatus\(windowData\)/,
+    "expected runtime chip visibility to be centralized",
+  );
+  assert.match(
+    appSource,
+    /runtimeChip\.hidden\s*=\s*!shouldShowRuntimeStatus\(windowData\)/,
+    "expected non-terminal panels to hide the runtime status chip",
+  );
+  assert.match(
+    inlineStyle,
+    /\.status-chip\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden runtime chips must stay hidden even though .status-chip uses inline-flex",
+  );
+  assert.match(
+    appSource,
+    /window-list-role/,
+    "expected window list rows to include a role badge",
+  );
+});
+
+test("Memo is not exposed as a workspace window feature", () => {
+  assert.equal(
+    document.querySelector('.preset-button[data-preset="memo"]'),
+    null,
+    "Add window must not expose the unusable Memo surface",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /memoSurface|memo-root|load_memo|create_memo_note|update_memo_note|delete_memo_note/,
+    "Memo frontend state, renderer, and protocol events should be removed",
+  );
+  assert.doesNotMatch(
+    inlineStyle,
+    /surface-memo|memo-layout|memo-note|memo-editor|memo-status/,
+    "Memo-specific CSS should be removed with the surface",
+  );
+});
+
+test("Agent window titles are truncated with long focus detail kept as tooltip", () => {
+  assert.match(
+    appSource,
+    /function\s+windowTitleTooltip\(windowData\)/,
+    "expected a shared helper for long title detail tooltip",
+  );
+  assert.match(
+    appSource,
+    /titleText\.title\s*=\s*windowTitleTooltip\(windowData\)/,
+    "expected titlebar to keep long focus detail in a tooltip",
+  );
+  assert.match(
+    inlineStyle,
+    /\.title\s*\{[\s\S]*flex:\s*1[\s\S]*min-width:\s*0[\s\S]*overflow:\s*hidden/,
+    "title row must shrink instead of pushing window controls",
+  );
+  assert.match(
+    inlineStyle,
+    /\.title-text\s*\{[\s\S]*overflow:\s*hidden[\s\S]*text-overflow:\s*ellipsis[\s\S]*white-space:\s*nowrap/,
+    "title text must use one-line ellipsis",
+  );
+  assert.match(
+    inlineStyle,
+    /\.window-actions\s*\{[\s\S]*flex-shrink:\s*0/,
+    "window controls must not shrink or overlap with long titles",
+  );
+});
+
+test("canvas world grid is synchronized from viewport state", () => {
+  assert.ok(
+    document.querySelector("#canvas-world-grid.canvas-world-grid"),
+    "expected canvas to expose a dedicated world-space grid layer",
+  );
+  assert.match(
+    appSource,
+    /const\s+worldGrid\s*=\s*document\.getElementById\("canvas-world-grid"\)/,
+    "expected app.js to bind the canvas world grid element",
+  );
+  assert.match(
+    appSource,
+    /function\s+applyWorldGridViewport\(\)[\s\S]+viewport\.x[\s\S]+viewport\.y[\s\S]+viewport\.zoom/,
+    "expected world grid sync to derive position and size from the viewport",
+  );
+  assert.match(
+    appSource,
+    /function\s+applyViewport\(\)[\s\S]+applyWorldGridViewport\(\)/,
+    "expected applyViewport to update the grid together with the stage transform",
   );
 });
 
@@ -157,6 +276,125 @@ test("Workspace active work overview behaves like a command center", () => {
     appSource,
     /data-board-entry-id/,
     "expected Board timeline entries to be addressable from Workspace links",
+  );
+});
+
+test("Active Work title prefers concrete work context over Start Work workflow label", () => {
+  assert.match(
+    appSource,
+    /function\s+activeWorkDisplayTitle\(projection,\s*agents\)[\s\S]+agent\.title_summary[\s\S]+projection\?\.summary[\s\S]+projection\?\.owner[\s\S]+projection\?\.title[\s\S]+Start Work[\s\S]+Active Work/,
+    "expected Active Work title resolution to prefer Agent/Workspace work context and treat Start Work as a fallback-only workflow label",
+  );
+  assert.match(
+    appSource,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(activeWorkProjection,\s*agents\)\)/,
+    "expected Active Work summary title to use the display-title helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkProjection\.title\s*\|\|\s*"Active Work"\)/,
+    "Active Work must not render the saved Start Work workflow title directly",
+  );
+});
+
+test("Active Work sidebar only renders while live Agent windows are focusable", () => {
+  assert.match(
+    appSource,
+    /function\s+activeWorkFocusableAgents\(projection\)[\s\S]+workspaceWindowById\(agent\.window_id\)/,
+    "expected Active Work cards to be filtered against live workspace windows",
+  );
+  assert.match(
+    appSource,
+    /const\s+activeWorkSection\s*=\s*document\.getElementById\("op-active-work"\)/,
+    "expected Active Work visibility to be controlled at the section level",
+  );
+  assert.match(
+    appSource,
+    /function\s+setActiveWorkSectionVisible\(visible\)[\s\S]+activeWorkSection\.hidden\s*=\s*!visible/,
+    "expected no-Agent Active Work state to hide the entire section instead of leaving stale work UI",
+  );
+  assert.match(
+    appSource,
+    /if\s*\(agentCount\s*===\s*0\)\s*\{[\s\S]+setActiveWorkSectionVisible\(false\)[\s\S]+return;/,
+    "expected no focusable Agent windows to remove the Active Work sidebar section",
+  );
+  assert.match(
+    appSource,
+    /function\s+focusActiveWorkAgentWindow\(agent\)[\s\S]+restore_window[\s\S]+focusWindowRemotely\(agent\.window_id,\s*\{\s*center:\s*true\s*\}\)/,
+    "expected Focus to restore minimized Agent windows before focusing them",
+  );
+  assert.match(
+    appSource,
+    /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
+    "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("div",\s*"op-agent-state",\s*state\)/,
+    "Active Work must not render raw status wire values such as ACTIVE",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
+    "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
+  );
+});
+
+test("Workspace Overview is separate from live-only Active Work", () => {
+  assert.ok(
+    document.querySelector("#op-workspace-overview-entry"),
+    "expected Sidebar to expose a Workspace Overview entry even when Active Work is hidden",
+  );
+  assert.ok(
+    document.querySelector("#project-workspace-overview-button"),
+    "expected Project Bar to expose Workspace Overview",
+  );
+  assert.ok(
+    document.querySelector("#workspace-overview-drawer"),
+    "expected Workspace Overview to use a drawer surface",
+  );
+  assert.match(
+    appSource,
+    /function\s+openWorkspaceOverview\(/,
+    "expected a shared opener for Sidebar and Project Bar",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderWorkspaceOverview\(\)[\s\S]+journal_entries/,
+    "expected Overview to render Workspace journal entries from active_work_projection",
+  );
+  assert.match(
+    appSource,
+    /op-workspace-overview-entry[\s\S]+openWorkspaceOverview/,
+    "expected Sidebar Workspace Overview entry to open the overview",
+  );
+  assert.match(
+    appSource,
+    /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
+    "expected Project Bar Workspace Overview button to open the same overview",
+  );
+});
+
+test("Workspace Overview exposes user-confirmed cleanup for completed workspaces", () => {
+  assert.match(
+    appSource,
+    /cleanup_candidate/,
+    "expected active work projection cleanup_candidate to drive Workspace cleanup",
+  );
+  assert.match(
+    appSource,
+    /function\s+openWorkspaceCleanup\(/,
+    "expected Workspace Overview to open a cleanup confirmation instead of deleting automatically",
+  );
+  assert.match(
+    appSource,
+    /default_delete_remote[\s\S]+deleteRemote\s*:\s*false|deleteRemote\s*:\s*false[\s\S]+default_delete_remote/,
+    "expected Workspace cleanup to default remote deletion off",
+  );
+  assert.match(
+    `${appSource}\n${branchCleanupSource}`,
+    /Also delete matching remote branches/,
+    "expected remote deletion to remain an explicit opt-in in the confirmation UI",
   );
 });
 
@@ -189,19 +427,27 @@ test("Branches remains a branch browser, not a planning workspace", () => {
   );
 });
 
-test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc plus the layout toggle", () => {
+test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
   const text = overlay.textContent.replace(/\s+/g, " ");
-  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "⌘ \\", "Esc"]) {
+  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "Esc"]) {
     assert.ok(text.includes(phrase), `expected ${phrase} in hotkey overlay`);
   }
+  // SPEC-2356 Phase 9 (FR-021/FR-032): the Layout group + "Toggle sidebar / ⌘\\"
+  // row are removed in favor of the hover-reveal peek 帯.
+  assert.ok(!text.includes("⌘ \\"), "Cmd+\\\\ must not appear in the hotkey overlay");
+  assert.ok(
+    !text.toLowerCase().includes("toggle sidebar"),
+    "Toggle sidebar row must not appear in the hotkey overlay",
+  );
   const groups = Array.from(overlay.querySelectorAll(".op-hotkey-card__group-title")).map((el) =>
     el.textContent?.trim().toLowerCase(),
   );
-  for (const expected of ["navigation", "layout", "help"]) {
+  for (const expected of ["navigation", "help"]) {
     assert.ok(groups.includes(expected), `expected hotkey overlay group "${expected}", got ${groups.join("/")}`);
   }
+  assert.ok(!groups.includes("layout"), "Layout group is removed in Phase 9");
 });
 
 test("head loads tokens, typography, components, and Operator modules", () => {
@@ -234,6 +480,21 @@ test("font preload hints exist for Mona/Hubot/JetBrains", () => {
   for (const expected of ["MonaSans.woff2", "HubotSans-Bold.woff2", "JetBrainsMono.woff2"]) {
     assert.ok(preloads.some((h) => h.endsWith(`/assets/fonts/${expected}`)), `missing preload: ${expected}`);
   }
+});
+
+test("developer readability typography keeps working text above minimum sizes", () => {
+  assert.ok(cssRemVar(typographySource, "--type-xs") >= 0.75, "--type-xs must be at least 12px");
+  assert.ok(cssRemVar(typographySource, "--type-sm") >= 0.875, "--type-sm must be at least 14px");
+  assert.match(
+    typographySource,
+    /\.t-mono\s*\{[\s\S]*?line-height:\s*1\.(?:4|[5-9])[\s\S]*?\}/,
+    "expected mono utility line-height to stay readable",
+  );
+  assert.doesNotMatch(
+    typographySource,
+    /\.(?:t-body|t-mono)\s*\{[\s\S]*?font-stretch:\s*75%/,
+    "body and mono working text must not use condensed display typography",
+  );
 });
 
 test("Mission Briefing has accessible role and live region", () => {
@@ -284,15 +545,100 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("Project Bar exposes persistent chrome visibility toggles", () => {
-  const sidebarToggle = document.getElementById("op-sidebar-toggle");
-  const windowControlsToggle = document.getElementById("op-window-controls-toggle");
-  assert.ok(sidebarToggle, "expected Project Bar sidebar visibility toggle");
-  assert.ok(windowControlsToggle, "expected Project Bar window controls visibility toggle");
-  assert.equal(sidebarToggle.getAttribute("aria-pressed"), "true");
-  assert.equal(windowControlsToggle.getAttribute("aria-pressed"), "true");
-  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /sidebar/i);
-  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /window controls/i);
+test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () => {
+  // SPEC-2356 Phase 9 (FR-021/FR-022): the chip-style toggles and Project Bar
+  // text toggles are removed; auto-hide chrome is summoned via the peek 帯
+  // (`.op-sidebar-peek` / `.op-window-controls-peek`).
+  assert.equal(
+    document.getElementById("op-sidebar-toggle"),
+    null,
+    "Project Bar must not expose a SIDEBAR text toggle",
+  );
+  assert.equal(
+    document.getElementById("op-window-controls-toggle"),
+    null,
+    "Project Bar must not expose a WINDOWS text toggle",
+  );
+  assert.equal(
+    document.getElementById("op-sidebar-edge-toggle"),
+    null,
+    "<< chip toggle is removed in Phase 9",
+  );
+  assert.equal(
+    document.getElementById("op-window-controls-edge-toggle"),
+    null,
+    "vv chip toggle is removed in Phase 9",
+  );
+
+  const sidebarPeek = document.querySelector(".op-sidebar-peek");
+  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
+  assert.ok(sidebarPeek, "expected .op-sidebar-peek hover trigger");
+  assert.ok(windowControlsPeek, "expected .op-window-controls-peek hover trigger");
+  assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
+  assert.equal(
+    windowControlsPeek.getAttribute("aria-controls"),
+    "floating-window-controls-actions",
+  );
+  assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
+  assert.match(windowControlsPeek.getAttribute("aria-label") ?? "", /show window controls/i);
+  assert.equal(sidebarPeek.getAttribute("tabindex"), "0", "sidebar peek 帯 must be keyboard-focusable");
+  assert.equal(
+    windowControlsPeek.getAttribute("tabindex"),
+    "0",
+    "window controls peek 帯 must be keyboard-focusable",
+  );
+  assert.equal(sidebarPeek.getAttribute("role"), "button");
+  assert.equal(windowControlsPeek.getAttribute("role"), "button");
+});
+
+test("window controls peek 帯 targets only collapsible control groups", () => {
+  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
+  assert.ok(windowControlsPeek, "expected window controls peek 帯");
+
+  const controlledIds = (windowControlsPeek.getAttribute("aria-controls") ?? "")
+    .split(/\s+/)
+    .filter(Boolean);
+  assert.deepEqual(controlledIds, ["floating-window-controls-actions"]);
+  assert.ok(!controlledIds.includes("floating-window-controls"));
+
+  const actionsGroup = document.getElementById("floating-window-controls-actions");
+  const primaryGroup = document.getElementById("floating-window-controls-primary");
+  const addGroup = document.getElementById("floating-window-controls-add");
+  assert.ok(actionsGroup, "expected continuous window controls actions group");
+  assert.ok(primaryGroup, "expected primary window controls group");
+  assert.ok(addGroup, "expected add-window control group");
+
+  const floatingControls = document.getElementById("floating-window-controls");
+  assert.ok(floatingControls, "expected floating window controls root");
+  const toolbarChildren = Array.from(floatingControls.children);
+  assert.ok(
+    toolbarChildren.indexOf(windowControlsPeek) < toolbarChildren.indexOf(actionsGroup),
+    "peek must precede actions in DOM order so forward Tab enters the revealed controls",
+  );
+
+  assert.ok(actionsGroup.contains(primaryGroup), "primary controls must stay inside the continuous actions group");
+  assert.ok(actionsGroup.contains(addGroup), "add controls must stay inside the continuous actions group");
+
+  for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.ok(actionsGroup.contains(control), `${id} must be inside the continuous actions group`);
+  }
+
+  const addButton = document.getElementById("add-button");
+  assert.ok(addButton, "expected add-button");
+  assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
+  assert.ok(actionsGroup.contains(addButton), "add-button must be reachable through the continuous actions group");
+
+  for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
+    const control = document.getElementById(id);
+    assert.ok(control, `expected ${id}`);
+    assert.equal(
+      actionsGroup.contains(control),
+      false,
+      `${id} must remain outside collapsible window controls groups`,
+    );
+  }
 });
 
 test("floating window controls mark only window operations as hideable", () => {
@@ -316,6 +662,36 @@ test("workspace windows expose draggable tab docking affordances", () => {
   );
   assert.match(
     appSource,
+    /function\s+titlebarDockTargetAt\(/,
+    "expected ungrouped windows to find dock targets from titlebar drag",
+  );
+  assert.match(
+    windowDockingSource,
+    /export\s+const\s+TITLEBAR_DOCK_HIT_HEIGHT\s*=\s*38/,
+    "expected dock hit-testing to be constrained to the titlebar height",
+  );
+  assert.match(
+    windowDockingSource,
+    /point\.y\s*<=\s*geometry\.y\s*\+\s*titlebarHeight/,
+    "expected body/canvas drops to avoid the dock path",
+  );
+  assert.match(
+    appSource,
+    /function\s+updateTitlebarDockPreview\(/,
+    "expected titlebar drag to update dock target hover preview",
+  );
+  assert.match(
+    appSource,
+    /function\s+clearTitlebarDockPreview\(/,
+    "expected dock target preview to be cleared after drop or cancel",
+  );
+  assert.match(
+    appSource,
+    /dragState\.dockTargetId[\s\S]+kind:\s*"dock_window_tab"[\s\S]+target_id:\s*dragState\.dockTargetId/,
+    "expected titlebar drag pointerup to dock only when a titlebar target was hit",
+  );
+  assert.match(
+    appSource,
     /kind:\s*"dock_window_tab"/,
     "expected tab drop to send dock_window_tab",
   );
@@ -328,6 +704,21 @@ test("workspace windows expose draggable tab docking affordances", () => {
     appSource,
     /kind:\s*"activate_window_tab"/,
     "expected tab click to activate a grouped window tab",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s+\.titlebar/,
+    "expected dockable titlebar targets to have a visible preview state",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s*\{/,
+    "expected dockable targets to outline the whole window, not just the titlebar",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s+\.window-tab-strip::before/,
+    "expected dockable targets to expose a tab insertion indicator",
   );
 });
 
@@ -348,17 +739,18 @@ test("Mission Briefing splash has dismissible affordance (pointer-events + curso
   assert.match(briefing[0], /cursor:\s*pointer/);
 });
 
-test("operator-shell wires theme toggle aria-label updates on every render", () => {
-  const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  // wireThemeToggle.renderLabel must update aria-label every render so
-  // screen readers know the live preference + effective theme.
+test("theme-toggle wires aria-label updates on every render", () => {
+  // SPEC-2356 FR-024 — segmented toggle exposes the live preference + effective
+  // theme via the radiogroup container's aria-label so screen readers always
+  // announce the current state.
+  const themeToggle = readFileSync(resolve(here, "../theme-toggle.js"), "utf8");
   assert.match(
-    operatorShell,
-    /btn\.setAttribute\(\s*"aria-label"/,
-    "expected wireThemeToggle to update aria-label on every render",
+    themeToggle,
+    /root\.setAttribute\(\s*"aria-label"/,
+    "expected segmented theme toggle to update aria-label on every render",
   );
   assert.match(
-    operatorShell,
+    themeToggle,
     /Theme: \$\{pref === "auto" \? `auto/,
     "expected aria-label format to disclose preference + effective theme",
   );
@@ -382,19 +774,30 @@ test("xterm content stays on the dark Operator palette across app theme changes"
   );
 });
 
-test("operator-shell wires sidebar collapse hotkey and Mission Briefing early dismiss", () => {
+test("xterm developer readability defaults use larger font metrics", () => {
+  assert.ok(terminalOptionNumber("fontSize") >= 14, "xterm fontSize must be at least 14px");
+  assert.ok(terminalOptionNumber("lineHeight") >= 1.25, "xterm lineHeight must be at least 1.25");
+});
+
+test("operator-shell wires hover-reveal chrome and Mission Briefing early dismiss", () => {
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  // The source contains `cmd+\\\\` (escaped backslash in JS source).
+  // SPEC-2356 Phase 9 (FR-021/FR-022/FR-031): hover-reveal state machine sets
+  // root.dataset.opSidebar = "revealed" / opWindowControls = "revealed" rather
+  // than "collapsed", and Cmd+\\ hotkey is removed.
   assert.ok(
-    operatorShell.includes('hotkey.register("cmd+\\\\"'),
-    "expected Cmd+backslash hotkey registration for sidebar collapse",
+    !operatorShell.includes('hotkey.register("cmd+\\\\"'),
+    "Cmd+backslash hotkey must be removed in Phase 9",
+  );
+  assert.doesNotMatch(
+    operatorShell,
+    /toggleSidebar\s*:/,
+    "Phase 9 hover-reveal controller must not expose a toggleSidebar entrypoint",
   );
   assert.match(
     operatorShell,
-    /toggleSidebar/,
-    "expected Cmd+backslash to route through the persistent sidebar visibility controller",
+    /root\.dataset\[datasetKey\]\s*=\s*"revealed"/,
+    "expected hover-reveal state machine to write data-op-* = \"revealed\"",
   );
-  assert.match(operatorShell, /root\.dataset\.opSidebar\s*=\s*"collapsed"/);
   assert.match(
     operatorShell,
     /earlyDismiss/,
@@ -402,11 +805,36 @@ test("operator-shell wires sidebar collapse hotkey and Mission Briefing early di
   );
 });
 
-test("components.css hides only marked floating window controls", () => {
+test("app state rendering dismisses Mission Briefing so startup cannot stay on splash", () => {
+  assert.match(
+    appSource,
+    /function\s+dismissOperatorBriefing\(\)[\s\S]+op-briefing[\s\S]+hidden\s*=\s*true/,
+    "expected app.js to expose a fail-open Mission Briefing dismiss helper",
+  );
+  assert.match(
+    appSource,
+    /function\s+renderAppState\(nextState\)\s*\{\s*dismissOperatorBriefing\(\)/,
+    "expected first app state render to unblock Welcome/Workspace surfaces",
+  );
+});
+
+test("components.css hover-reveals only the marked floating window control groups", () => {
+  // SPEC-2356 Phase 9 (FR-022): the continuous actions group auto-hides by default and
+  // are revealed only when [data-op-window-controls="revealed"] is set.
+  // Palette and Zoom controls remain in the toolbar regardless.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
+  assert.match(css, /#floating-window-controls-actions[\s\S]*?display:\s*none/);
+  assert.match(css, /#floating-window-controls-actions\s*\{[^}]*order:\s*1/);
+  assert.match(css, /\.op-window-controls-peek\s*\{[^}]*order:\s*2/);
+  assert.match(
+    css,
+    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-actions[\s\S]*?display:\s*flex/,
+  );
+  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#op-palette-button/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#zoom-reset-button/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\]/);
+  assert.match(css, /\.op-window-controls-peek\s*\{/);
+  assert.match(css, /\.op-sidebar-peek\s*\{/);
 });
 
 test("floating actions expose Align without resizing windows", () => {
@@ -420,12 +848,23 @@ test("floating actions expose Align without resizing windows", () => {
   );
 });
 
-test("operator-shell persists sidebar and window controls visibility independently", () => {
+test("operator-shell migrates legacy chrome keys and wires hover-reveal independently", () => {
+  // SPEC-2356 Phase 9 (FR-032): legacy localStorage keys are removed on boot
+  // and the chip-style toggles (and their Project Bar text counterparts) must
+  // not be referenced anywhere in operator-shell.
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  assert.match(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
-  assert.match(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
-  assert.match(operatorShell, /opWindowControls/);
-  assert.match(operatorShell, /window-controls-changed/);
+  assert.doesNotMatch(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
+  assert.doesNotMatch(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
+  assert.doesNotMatch(operatorShell, /op-sidebar-edge-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-edge-toggle/);
+  assert.doesNotMatch(operatorShell, /op-sidebar-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-toggle/);
+  assert.match(operatorShell, /removeItem\("gwt:ui:sidebar-collapsed"\)/);
+  assert.match(operatorShell, /removeItem\("gwt:ui:window-controls"\)/);
+  assert.match(operatorShell, /op:chrome-visibility-changed/);
+  assert.match(operatorShell, /op:window-controls-changed/);
+  assert.match(operatorShell, /\.op-sidebar-peek/);
+  assert.match(operatorShell, /\.op-window-controls-peek/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
@@ -610,15 +1049,81 @@ test("Launch wizard choice buttons expose toggle state via aria-pressed", () => 
   );
 });
 
+test("Launch wizard separates launch settings from runtime controls", () => {
+  assert.equal(
+    appSource.includes("wizardAdvancedOpen"),
+    false,
+    "Launch wizard should not keep an Advanced disclosure state",
+  );
+  for (const retiredCopy of ["Advanced", "Show advanced", "Hide advanced"]) {
+    assert.equal(
+      appSource.includes(`"${retiredCopy}"`),
+      false,
+      `Launch wizard should not render ${retiredCopy}`,
+    );
+  }
+
+  const launchSettingsStart = appSource.indexOf(
+    'createLaunchSection(\n            "Launch settings"',
+  );
+  const linkedIssueStart = appSource.indexOf(
+    'createLaunchSection(\n            "Linked issue"',
+  );
+  const runtimeStart = appSource.indexOf(
+    'createLaunchSection(\n            "Runtime"',
+  );
+
+  assert.notEqual(launchSettingsStart, -1, "expected Launch settings section");
+  assert.notEqual(linkedIssueStart, -1, "expected Linked issue section");
+  assert.notEqual(runtimeStart, -1, "expected Runtime section");
+  assert.ok(
+    launchSettingsStart < linkedIssueStart && linkedIssueStart < runtimeStart,
+    "expected Launch settings before Linked issue and Runtime after Linked issue",
+  );
+
+  const launchSettingsBlock = appSource.slice(
+    launchSettingsStart,
+    linkedIssueStart,
+  );
+  for (const copy of ["Version", "Skip permission prompts", "Codex fast mode"]) {
+    assert.ok(
+      launchSettingsBlock.includes(`"${copy}"`),
+      `expected Launch settings to include ${copy}`,
+    );
+  }
+  assert.equal(
+    launchSettingsBlock.includes('"Runtime target"'),
+    false,
+    "Launch settings should not contain runtime target controls",
+  );
+
+  const runtimeBlock = appSource.slice(
+    runtimeStart,
+    appSource.indexOf("wizardBody.appendChild(panel);"),
+  );
+  for (const copy of ["Runtime target", "Docker service", "Docker lifecycle"]) {
+    assert.ok(
+      runtimeBlock.includes(`"${copy}"`),
+      `expected Runtime to include ${copy}`,
+    );
+  }
+  for (const copy of ["Version", "Skip permission prompts", "Codex fast mode"]) {
+    assert.equal(
+      runtimeBlock.includes(`"${copy}"`),
+      false,
+      `Runtime should not contain ${copy}`,
+    );
+  }
+});
+
 test("Selected list rows mark active item with aria-current", () => {
   // Same pattern as project tabs (PR #2455): list-style buttons with a
   // selected state need aria-current to announce which row is active.
-  // Coverage: knowledge-row, memo-note-row, profile-row, logs-entry.
+  // Coverage: knowledge-row, profile-row, logs-entry.
   // The set/remove pair is required so a previously-selected row
   // doesn't retain the marker after the user picks a different row.
   for (const desc of [
     "knowledge",
-    "memo note",
     "profile",
     "logs entry",
   ]) {
@@ -627,18 +1132,17 @@ test("Selected list rows mark active item with aria-current", () => {
     // setAttribute and removeAttribute calls exist somewhere in app.js.
     // The descriptive label is just for the failure message.
   }
-  // Count occurrences — should be at least 5 set + 5 remove for the
-  // five list-with-selection surfaces (knowledge / memo / profile /
-  // logs / file-tree) plus the project-tabs case from PR #2455.
+  // Count occurrences: knowledge, profile, logs, file-tree, plus the
+  // project-tabs case from PR #2455.
   const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
   const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
-    setMatches.length >= 6,
-    `expected >= 6 aria-current set calls (project tab + 5 row types), got ${setMatches.length}`,
+    setMatches.length >= 5,
+    `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
   );
   assert.ok(
-    removeMatches.length >= 6,
-    `expected >= 6 aria-current remove calls (one per set call), got ${removeMatches.length}`,
+    removeMatches.length >= 5,
+    `expected >= 5 aria-current remove calls (one per set call), got ${removeMatches.length}`,
   );
 });
 
@@ -749,12 +1253,10 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // Form fields that aren't wrapped in a <label> element need aria-label
   // so screen readers announce their purpose instead of just "edit text"
   // (input/textarea) or the first option (select). This audit covers
-  // the launch wizard, memo editor, and profile editor surfaces.
+  // the launch wizard and profile editor surfaces.
   const expected = [
     { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
     { selector: 'input\\.setAttribute\\("aria-label", "Issue number"\\)', desc: "wizard issue number" },
-    { selector: 'titleInput\\.setAttribute\\("aria-label", "Note title"\\)', desc: "memo note title" },
-    { selector: 'bodyInput\\.setAttribute\\("aria-label", "Note body"\\)', desc: "memo note body" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
     { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
@@ -1098,4 +1600,76 @@ test("agent cards style all four Living Telemetry states (active / blocked / idl
   // The chip labels also need the matching foreground tint per state.
   assert.match(css, /\.op-agent-card\[data-state="idle"\]\s*\.op-agent-state\s*\{[^}]*--color-state-idle/);
   assert.match(css, /\.op-agent-card\[data-state="done"\]\s*\.op-agent-state\s*\{[^}]*--color-state-done/);
+});
+
+test("terminal surface body stays on the dark Operator canvas across themes (FR-013)", () => {
+  // SPEC-2356 FR-013 改定: terminal window の body 領域 (.window-body と
+  // terminal-root padding) は xterm の Dark Operator background と連続させ
+  // るため、Light テーマでも Dark Operator background に固定する。Light で
+  // --color-canvas (#e9edf0) が見えると xterm 周囲に「外枠」が現れて二重
+  // 枠になるので、ここで結合してしまうのが正解。
+  const surfaceTerminalRule =
+    /\.surface-terminal\s+\.window-body\s*\{[^}]*background:\s*([^;]+);/;
+  const match = html.match(surfaceTerminalRule);
+  assert.ok(match, "expected .surface-terminal .window-body rule with explicit background");
+  const value = match[1].trim();
+  assert.doesNotMatch(
+    value,
+    /var\(\s*--color-canvas\s*\)/,
+    `.surface-terminal .window-body must not follow --color-canvas (got "${value}")`,
+  );
+  assert.doesNotMatch(
+    value,
+    /var\(\s*--color-surface(?:-elevated)?\s*\)/,
+    `.surface-terminal .window-body must not follow surface tokens (got "${value}")`,
+  );
+  // Accept either an explicit dark hex (Dark Operator canvas) or a dedicated
+  // dark canvas token.  We codify the value contract so the regression cannot
+  // silently flip back to a light token.
+  const usesDarkOperatorBackground =
+    /^#0a0d12$/i.test(value) || /var\(\s*--color-canvas-dark\s*\)/.test(value);
+  assert.ok(
+    usesDarkOperatorBackground,
+    `.surface-terminal .window-body must use Dark Operator canvas (#0a0d12 or --color-canvas-dark); got "${value}"`,
+  );
+});
+
+test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
+  // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
+  // Logs / File Tree / Branches / Knowledge / Mock / Profile) must
+  // keep tracking the active theme via --color-surface so tabbed windows
+  // still flip body color when a non-terminal tab is selected.
+  const otherSurfaceRule =
+    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+  assert.match(
+    html,
+    otherSurfaceRule,
+    "non-terminal surface bodies must continue to use var(--color-surface)",
+  );
+});
+
+test("Sidebar Layer buttons reset UA chrome so Windows WebView2 stops drawing default border (FR-030)", () => {
+  // SPEC-2356 FR-030 / US-4 AS-11: WebView2 / Chromium の `<button>` UA
+  // default は border + grey background を出す。`.op-layer` は indicator
+  // dot + label color + token-driven focus ring のみで状態を表現するため、
+  // base rule で UA chrome を解除する必要がある。
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const layerRule = css.match(/\.op-layer\s*\{([^}]*)\}/);
+  assert.ok(layerRule, "expected base .op-layer rule in components.css");
+  const body = layerRule[1];
+  assert.match(
+    body,
+    /appearance:\s*none/,
+    ".op-layer must declare appearance:none to disable UA <button> chrome",
+  );
+  assert.match(
+    body,
+    /border:\s*0/,
+    ".op-layer must zero out border so WebView2 stops drawing the default frame",
+  );
+  assert.match(
+    body,
+    /background:\s*transparent/,
+    ".op-layer must clear background so the sidebar surface shows through",
+  );
 });

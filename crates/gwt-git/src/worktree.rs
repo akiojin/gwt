@@ -493,6 +493,9 @@ pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
         .map_err(|e| GwtError::Git(format!("rev-parse --git-common-dir: {e}")))?;
 
     if !output.status.success() {
+        if let Some(bare_child) = first_child_bare_repository(repo_path) {
+            return Ok(std::fs::canonicalize(&bare_child).unwrap_or(bare_child));
+        }
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(GwtError::Git(format!(
             "rev-parse --git-common-dir: {stderr}"
@@ -516,6 +519,20 @@ pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
     }
 
     Ok(common_dir)
+}
+
+fn first_child_bare_repository(repo_path: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(repo_path).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.join("HEAD").exists()
+                && path.join("objects").exists()
+                && path.join("refs").exists()
+        })
+        .min()
 }
 
 /// Derive a sibling worktree path from the repo root and branch name.
@@ -883,6 +900,20 @@ prunable gitdir file points to non-existent location
         assert_eq!(
             comparable_path(&sibling_worktree_path(&layout_root, "feature/banner")),
             comparable_path(&expected_parent.join("feature").join("banner"))
+        );
+    }
+
+    #[test]
+    fn main_worktree_root_accepts_workspace_home_with_child_bare_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare_repo_path = tmp.path().join("gwt.git");
+        init_bare_git_repo(&bare_repo_path);
+
+        let layout_root = main_worktree_root(tmp.path()).unwrap();
+
+        assert_eq!(
+            comparable_path(&layout_root),
+            comparable_path(&std::fs::canonicalize(&bare_repo_path).unwrap())
         );
     }
 

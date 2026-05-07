@@ -3,6 +3,15 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
+const JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
+
+#[derive(Clone, Copy)]
+pub struct RootJsModuleAsset {
+    pub path: &'static str,
+    pub source: fn() -> &'static str,
+    pub marker: &'static str,
+}
+
 pub fn index_html() -> &'static str {
     include_str!("../web/index.html")
 }
@@ -17,6 +26,22 @@ pub fn branch_cleanup_modal_js() -> &'static str {
 
 pub fn migration_modal_js() -> &'static str {
     include_str!("../web/migration-modal.js")
+}
+
+pub fn window_docking_js() -> &'static str {
+    include_str!("../web/window-docking.js")
+}
+
+pub fn board_surface_js() -> &'static str {
+    include_str!("../web/board-surface.js")
+}
+
+pub fn update_cta_js() -> &'static str {
+    include_str!("../web/update-cta.js")
+}
+
+pub fn terminal_context_menu_js() -> &'static str {
+    include_str!("../web/terminal-context-menu.js")
 }
 
 pub fn xterm_js() -> &'static str {
@@ -36,6 +61,10 @@ pub fn theme_manager_js() -> &'static str {
     include_str!("../web/theme-manager.js")
 }
 
+pub fn theme_toggle_js() -> &'static str {
+    include_str!("../web/theme-toggle.js")
+}
+
 pub fn hotkey_js() -> &'static str {
     include_str!("../web/hotkey.js")
 }
@@ -46,6 +75,68 @@ pub fn operator_shell_js() -> &'static str {
 
 pub fn focus_trap_js() -> &'static str {
     include_str!("../web/focus-trap.js")
+}
+
+pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
+    RootJsModuleAsset {
+        path: "/branch-cleanup-modal.js",
+        source: branch_cleanup_modal_js,
+        marker: "renderBranchCleanupModal",
+    },
+    RootJsModuleAsset {
+        path: "/migration-modal.js",
+        source: migration_modal_js,
+        marker: "renderMigrationModal",
+    },
+    RootJsModuleAsset {
+        path: "/window-docking.js",
+        source: window_docking_js,
+        marker: "findTitlebarDockTarget",
+    },
+    RootJsModuleAsset {
+        path: "/board-surface.js",
+        source: board_surface_js,
+        marker: "boardEntryMentionsSelf",
+    },
+    RootJsModuleAsset {
+        path: "/update-cta.js",
+        source: update_cta_js,
+        marker: "createUpdateCtaController",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-context-menu.js",
+        source: terminal_context_menu_js,
+        marker: "createTerminalContextMenuController",
+    },
+    RootJsModuleAsset {
+        path: "/theme-manager.js",
+        source: theme_manager_js,
+        marker: "createThemeManager",
+    },
+    RootJsModuleAsset {
+        path: "/theme-toggle.js",
+        source: theme_toggle_js,
+        marker: "wireThemeToggle",
+    },
+    RootJsModuleAsset {
+        path: "/hotkey.js",
+        source: hotkey_js,
+        marker: "createHotkeyManager",
+    },
+    RootJsModuleAsset {
+        path: "/operator-shell.js",
+        source: operator_shell_js,
+        marker: "initOperatorShell",
+    },
+    RootJsModuleAsset {
+        path: "/focus-trap.js",
+        source: focus_trap_js,
+        marker: "createFocusTrap",
+    },
+];
+
+pub fn root_js_module_assets() -> &'static [RootJsModuleAsset] {
+    ROOT_JS_MODULE_ASSETS
 }
 
 pub fn styles_tokens_css() -> &'static str {
@@ -86,73 +177,31 @@ pub async fn index_handler() -> Html<&'static str> {
 }
 
 pub async fn app_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        app_js(),
-    )
+    js_response(app_js())
 }
 
-pub async fn branch_cleanup_modal_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        branch_cleanup_modal_js(),
-    )
+fn js_response(source: &'static str) -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, JS_CONTENT_TYPE)], source)
 }
 
-pub async fn migration_modal_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        migration_modal_js(),
-    )
+pub fn root_js_module_response(asset: RootJsModuleAsset) -> impl IntoResponse {
+    let source = (asset.source)();
+    debug_assert!(source.contains(asset.marker));
+    js_response(source)
 }
 
 pub async fn xterm_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        xterm_js(),
-    )
+    js_response(xterm_js())
 }
 
 pub async fn xterm_fit_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        xterm_fit_js(),
-    )
+    js_response(xterm_fit_js())
 }
 
 pub async fn xterm_css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         xterm_css(),
-    )
-}
-
-// SPEC-2356 — Operator Design System: module + style + font handlers.
-pub async fn theme_manager_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        theme_manager_js(),
-    )
-}
-
-pub async fn hotkey_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        hotkey_js(),
-    )
-}
-
-pub async fn operator_shell_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        operator_shell_js(),
-    )
-}
-
-pub async fn focus_trap_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        focus_trap_js(),
     )
 }
 
@@ -209,23 +258,24 @@ pub async fn font_jetbrains_mono_handler() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_js, branch_cleanup_modal_js, index_html, xterm_css, xterm_fit_js, xterm_js};
     use super::{
-        app_js_handler, branch_cleanup_modal_js_handler, xterm_css_handler, xterm_fit_js_handler,
-        xterm_js_handler,
+        app_js, index_html, styles_components_css, terminal_context_menu_js, xterm_css,
+        xterm_fit_js, xterm_js,
     };
-    // SPEC-2356 — Operator Design System modules.
-    use super::{focus_trap_js, hotkey_js, operator_shell_js, theme_manager_js};
-    use super::{
-        focus_trap_js_handler, hotkey_js_handler, operator_shell_js_handler,
-        theme_manager_js_handler,
-    };
+    use super::{app_js_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler};
+    use super::{root_js_module_assets, root_js_module_response};
 
     fn frontend_bundle_source() -> &'static str {
         concat!(
             include_str!("../web/index.html"),
             "\n",
-            include_str!("../web/app.js")
+            include_str!("../web/app.js"),
+            "\n",
+            include_str!("../web/board-surface.js"),
+            "\n",
+            include_str!("../web/update-cta.js"),
+            "\n",
+            include_str!("../web/terminal-context-menu.js")
         )
     }
 
@@ -325,6 +375,73 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_terminal_image_paste_sends_backend_event_without_text_fallback() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function installTerminalImagePasteHandlers"),
+            "expected terminal image paste handler bootstrap in embedded html",
+        );
+        assert!(
+            html.contains("terminalRoot.addEventListener(\"paste\""),
+            "expected paste listener to be installed on the terminal root",
+        );
+        assert!(
+            html.contains("event.clipboardData?.items"),
+            "expected paste handler to inspect clipboard items",
+        );
+        assert!(
+            html.contains("SUPPORTED_IMAGE_PASTE_MIME_TYPES"),
+            "expected paste handler to constrain supported image MIME types",
+        );
+        assert!(
+            html.contains("event.preventDefault();") && html.contains("event.stopPropagation();"),
+            "expected image paste to suppress duplicate text paste injection",
+        );
+        assert!(
+            html.contains("kind: \"paste_image\"")
+                && html.contains("data_base64")
+                && html.contains("mime_type")
+                && html.contains("filename"),
+            "expected image paste backend event with payload, MIME type, and filename",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_context_menu_pastes_text_and_images() {
+        let html = frontend_bundle_source();
+        let context_menu_source = terminal_context_menu_js();
+
+        assert!(
+            html.contains("createTerminalContextMenuController"),
+            "expected app.js to install the terminal context menu controller",
+        );
+        assert!(
+            html.contains("canvas.addEventListener(\"contextmenu\"")
+                && html.contains("event.preventDefault();"),
+            "expected non-terminal canvas contextmenu to remain suppressed",
+        );
+        assert!(
+            html.contains("terminal.paste(text)"),
+            "expected context menu text paste to flow through xterm paste",
+        );
+        assert!(
+            html.contains("navigator.clipboard?.readText")
+                && html.contains("navigator.clipboard?.read"),
+            "expected Paste to use async clipboard text and item APIs",
+        );
+        assert!(
+            context_menu_source.contains("textContent = \"Paste\""),
+            "terminal context menu user-facing action must be English",
+        );
+        assert!(
+            context_menu_source.contains("readClipboardItems")
+                && context_menu_source.contains("pasteImage"),
+            "expected context menu Paste to preserve image paste routing",
+        );
+    }
+
+    #[test]
     fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
         let html = frontend_bundle_source();
         let streaming_write = regex::Regex::new(
@@ -371,16 +488,77 @@ mod tests {
             "expected terminal viewport refresh to skip minimized windows",
         );
         assert!(
-            !html.contains("fitTerminal(windowId, false);"),
+            !html.contains(
+                "runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {\n          fitTerminal(windowId, false);"
+            ) && !html.contains(
+                "runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {\n          fitTerminal(windowId, false);"
+            ),
             "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
         assert!(
             html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
-                && html.contains(
-                    "const shouldPersistTerminalGeometry = wasMinimized && !windowData.minimized",
-                )
+                && html.contains("const previousWidth = parseFloat(element.style.width")
+                && html.contains("const previousHeight = parseFloat(element.style.height")
+                && html.contains("const dimensionsChanged =")
+                && html.contains("(wasMinimized && !windowData.minimized) || dimensionsChanged",)
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
-            "expected restored terminals to persist fitted geometry after becoming visible",
+            "expected terminals to persist fitted geometry to backend on \
+             restore-from-minimized OR window resize (Tile/Stack/Align)",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
+        let html = frontend_bundle_source();
+        let direct_pointermove_fit = regex::Regex::new(
+            r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
+        )
+        .expect("valid regex");
+        let resize_finalizer = regex::Regex::new(
+            r"function finishWindowResize\(pointerId\) \{(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function scheduleTerminalResizeFit(windowId)")
+                && html.contains("function cancelTerminalResizeFit()"),
+            "expected terminal resize fits to be requestAnimationFrame-coalesced",
+        );
+        assert!(
+            !direct_pointermove_fit.is_match(html),
+            "expected pointermove resize to avoid direct terminal fit/geometry churn",
+        );
+        assert!(
+            resize_finalizer.is_match(html),
+            "expected resize finalizer to cancel pending fit, sync once, and restore terminal focus",
+        );
+    }
+
+    #[test]
+    fn embedded_web_window_resize_cancellation_uses_shared_finalizer() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function finishWindowResize(pointerId)"),
+            "expected all floating window resize completion paths to share one finalizer",
+        );
+        assert!(
+            html.contains("finishWindowResize(event.pointerId);"),
+            "expected pointerup resize path to use the shared finalizer",
+        );
+        assert!(
+            html.contains("window.addEventListener(\"pointercancel\", (event) => {")
+                && html.contains("finishWindowResize(event.pointerId);"),
+            "expected pointercancel to finalize resize state",
+        );
+        assert!(
+            html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
+                && html.contains("finishWindowResize(event.pointerId);"),
+            "expected lost pointer capture to finalize resize state",
+        );
+        assert!(
+            html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
+            "expected terminal resize fit scheduling to skip non-terminal panel windows",
         );
     }
 
@@ -434,21 +612,21 @@ mod tests {
 
     #[test]
     fn embedded_web_secondary_assets_are_embedded() {
-        assert!(!branch_cleanup_modal_js().is_empty());
         assert!(!xterm_js().is_empty());
         assert!(!xterm_fit_js().is_empty());
         assert!(xterm_css().contains(".xterm"));
-        // SPEC-2356 — Operator Design System modules. Assert they ship in
-        // the binary so a missing include_str! macro fails CI rather than
-        // silently 404ing in production.
-        assert!(!theme_manager_js().is_empty());
-        assert!(!hotkey_js().is_empty());
-        assert!(!operator_shell_js().is_empty());
-        assert!(!focus_trap_js().is_empty());
-        assert!(theme_manager_js().contains("createThemeManager"));
-        assert!(hotkey_js().contains("createHotkeyManager"));
-        assert!(operator_shell_js().contains("initOperatorShell"));
-        assert!(focus_trap_js().contains("createFocusTrap"));
+        // Root module registry is the include coverage source: a missing
+        // include_str! macro fails CI rather than silently 404ing in production.
+        for asset in root_js_module_assets() {
+            let source = (asset.source)();
+            assert!(!source.is_empty(), "expected {} to be embedded", asset.path);
+            assert!(
+                source.contains(asset.marker),
+                "expected {} to contain marker {}",
+                asset.path,
+                asset.marker,
+            );
+        }
     }
 
     #[tokio::test]
@@ -465,15 +643,18 @@ mod tests {
                 .unwrap(),
             js,
         );
-        assert_eq!(
-            branch_cleanup_modal_js_handler()
-                .await
-                .into_response()
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .unwrap(),
-            js,
-        );
+        for asset in root_js_module_assets() {
+            assert_eq!(
+                root_js_module_response(*asset)
+                    .into_response()
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap(),
+                js,
+                "expected {} to use JavaScript content type",
+                asset.path,
+            );
+        }
         assert_eq!(
             xterm_js_handler()
                 .await
@@ -501,23 +682,6 @@ mod tests {
                 .unwrap(),
             "text/css; charset=utf-8",
         );
-        // SPEC-2356 — Operator Design System module handlers. All four
-        // serve JavaScript with the same charset; the assertion catches
-        // regressions if a handler ever changes its content-type.
-        for handler_response in [
-            theme_manager_js_handler().await.into_response(),
-            hotkey_js_handler().await.into_response(),
-            operator_shell_js_handler().await.into_response(),
-            focus_trap_js_handler().await.into_response(),
-        ] {
-            assert_eq!(
-                handler_response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .unwrap(),
-                js,
-            );
-        }
     }
 
     #[test]
@@ -556,7 +720,7 @@ mod tests {
     fn embedded_web_canvas_apply_viewport_debounces_raster_hint_reset() {
         let js = app_js();
         let apply_viewport = regex::Regex::new(
-            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
+            r#"(?s)function applyViewport\(\)\s*\{\s*stage\.style\.transform = `translate\(\$\{viewport\.x\}px, \$\{viewport\.y\}px\) scale\(\$\{viewport\.zoom\}\)`;\s*applyWorldGridViewport\(\);\s*stage\.style\.willChange = "transform";\s*if \(viewportRasterTimer !== null\) \{\s*clearTimeout\(viewportRasterTimer\);\s*\}\s*viewportRasterTimer = setTimeout\(\(\) => \{\s*stage\.style\.willChange = "auto";\s*viewportRasterTimer = null;\s*\}, 300\);\s*\}"#,
         )
         .expect("valid regex");
 
@@ -567,6 +731,33 @@ mod tests {
         assert!(
             apply_viewport.is_match(js),
             "expected viewport application to opt into the transform layer only during motion and reset it after 300ms",
+        );
+    }
+
+    #[test]
+    fn embedded_web_canvas_grid_tracks_viewport_as_world_space_cue() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains("id=\"canvas-world-grid\""),
+            "expected canvas to expose a dedicated world-space grid layer",
+        );
+        assert!(
+            html.contains(".canvas-world-grid"),
+            "expected embedded html to define the world-space grid CSS",
+        );
+        assert!(
+            js.contains("const worldGrid = document.getElementById(\"canvas-world-grid\")"),
+            "expected frontend to bind the world-space grid element",
+        );
+        assert!(
+            js.contains("function applyWorldGridViewport()"),
+            "expected grid viewport sync to live behind a named helper",
+        );
+        assert!(
+            js.contains("applyWorldGridViewport();"),
+            "expected applyViewport to update the grid whenever viewport state changes",
         );
     }
 
@@ -716,6 +907,46 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_window_role_badges_identify_every_window_surface() {
+        let html = index_html();
+        let js = app_js();
+
+        assert!(
+            html.contains(".window-role-badge") && html.contains(".window-list-role"),
+            "expected role badge styling for titlebars and the window list",
+        );
+        assert!(
+            js.contains("function presetRoleLabel(preset)"),
+            "expected a shared presetRoleLabel helper",
+        );
+        for label in [
+            "Shell",
+            "Claude",
+            "Codex",
+            "Agent",
+            "File Tree",
+            "Branches",
+            "Settings",
+            "Profile",
+            "Logs",
+            "Issue",
+            "SPEC",
+            "Board",
+            "PR",
+        ] {
+            assert!(
+                js.contains(label),
+                "expected presetRoleLabel to cover {label}",
+            );
+        }
+        assert!(
+            js.contains("function shouldShowRuntimeStatus(windowData)")
+                && js.contains("runtimeChip.hidden = !shouldShowRuntimeStatus(windowData)"),
+            "expected non-terminal panels to hide runtime status chips",
+        );
+    }
+
+    #[test]
     fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
         let js = app_js();
         let apply_status = regex::Regex::new(
@@ -745,6 +976,32 @@ mod tests {
             js.contains("if (entry.minimized) {")
                 && js.contains("send({ kind: \"restore_window\", id: entry.id });"),
             "expected window list selection to keep restoring minimized windows after focus",
+        );
+    }
+
+    #[test]
+    fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
+        let js = app_js();
+        let render_activation = regex::Regex::new(
+            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId\);"#,
+        )
+        .expect("valid regex");
+        let activation_helper = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?fitTerminal\(windowId,\s*false\);.*?scheduleTerminalViewportRefresh\(windowId\);.*?activeRuntime\.terminal\.focus\(\);"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            js.contains("function scheduleTerminalFocusActivation(windowId)"),
+            "expected a shared xterm activation helper for programmatic window focus",
+        );
+        assert!(
+            activation_helper.is_match(js),
+            "expected programmatic terminal activation to refit, refresh, and focus xterm after render",
+        );
+        assert!(
+            render_activation.is_match(js),
+            "expected workspace render to reactivate the topmost terminal for cycle focus, window list, command palette, and tab activation",
         );
     }
 
@@ -941,7 +1198,7 @@ mod tests {
         let branches_block = html
             .split("if (surface === \"branches\")")
             .nth(1)
-            .and_then(|tail| tail.split("if (surface === \"memo\")").next())
+            .and_then(|tail| tail.split("if (surface === \"profile\")").next())
             .expect("branches render block");
 
         assert!(
@@ -960,18 +1217,26 @@ mod tests {
 
     #[test]
     fn embedded_web_serves_every_root_module_import() {
-        let js = app_js();
         let embedded_web_source = include_str!("embedded_web.rs");
         let embedded_server_source = include_str!("embedded_server.rs");
+        let mut module_graph_source = String::from(app_js());
+        for asset in root_js_module_assets() {
+            module_graph_source.push('\n');
+            module_graph_source.push_str((asset.source)());
+        }
 
-        for module_path in ["/branch-cleanup-modal.js", "/migration-modal.js"] {
+        assert!(
+            embedded_server_source.contains("root_js_module_assets()"),
+            "expected embedded server root module routes to be registry-driven",
+        );
+
+        for asset in root_js_module_assets() {
+            let module_path = asset.path;
+            let relative_module_path = format!("./{}", module_path.trim_start_matches('/'));
             assert!(
-                js.contains(module_path),
-                "expected app.js to import {module_path}",
-            );
-            assert!(
-                embedded_server_source.contains(&format!("\"{module_path}\"")),
-                "expected embedded server to route {module_path}",
+                module_graph_source.contains(module_path)
+                    || module_graph_source.contains(&relative_module_path),
+                "expected frontend module graph to import {module_path}",
             );
 
             let source_name = module_path
@@ -982,9 +1247,32 @@ mod tests {
                 embedded_web_source.contains(&format!("fn {source_name}_js()")),
                 "expected embedded web module source function for {module_path}",
             );
+        }
+    }
+
+    #[test]
+    fn embedded_web_root_js_module_registry_covers_app_imports() {
+        let registry_paths: Vec<&str> = root_js_module_assets()
+            .iter()
+            .map(|asset| asset.path)
+            .collect();
+
+        for module_path in [
+            "/branch-cleanup-modal.js",
+            "/migration-modal.js",
+            "/window-docking.js",
+            "/board-surface.js",
+            "/update-cta.js",
+            "/theme-manager.js",
+            "/theme-toggle.js",
+            "/hotkey.js",
+            "/operator-shell.js",
+            "/focus-trap.js",
+            "/terminal-context-menu.js",
+        ] {
             assert!(
-                embedded_web_source.contains(&format!("fn {source_name}_js_handler()")),
-                "expected embedded web module handler for {module_path}",
+                registry_paths.contains(&module_path),
+                "expected root JS registry to include {module_path}",
             );
         }
     }
@@ -1250,6 +1538,22 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_board_surface_exposes_audience_reply_and_notification_ui() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("board-for-you-filter")
+                && html.contains("board-audience-badge")
+                && html.contains("board-reply-button")
+                && html.contains("board-reply-banner")
+                && html.contains("board-reply-quote")
+                && html.contains("showBoardMentionNotification")
+                && html.contains("Jump to original"),
+            "expected Board UI to expose mention audience, reply, quote, and notification affordances",
+        );
+    }
+
+    #[test]
     fn embedded_web_board_surface_does_not_render_workspace_or_planning_cards() {
         let html = frontend_bundle_source();
         let board_block = html
@@ -1269,6 +1573,53 @@ mod tests {
                 && !board_block.contains("workspace-card")
                 && !board_block.contains("active_work_projection"),
             "expected Board surface not to render Workspace or Planning Session cards",
+        );
+    }
+
+    #[test]
+    fn embedded_web_active_work_hides_internal_git_identity_from_user_summary() {
+        let html = frontend_bundle_source();
+        let active_work_block = html
+            .split("function renderActiveWorkOverview()")
+            .nth(1)
+            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
+            .expect("active work render block");
+
+        assert!(
+            !active_work_block.contains("appendMeta(meta, activeWorkProjection.branch)")
+                && !active_work_block.contains("compactPathLabel(agent.worktree_path)")
+                && !active_work_block.contains("appendMeta(agentMeta, agent.branch)"),
+            "Active Work must not expose branch names or worktree paths in the normal user summary",
+        );
+    }
+
+    #[test]
+    fn embedded_web_active_work_hidden_attr_overrides_flex_layout() {
+        let css = styles_components_css();
+
+        assert!(
+            css.contains(".op-active-work[hidden]")
+                && css.contains(".op-active-work[hidden] {\n  display: none;"),
+            "Active Work must not render when the hidden attribute is present",
+        );
+    }
+
+    #[test]
+    fn embedded_web_active_work_uses_short_title_summary_before_long_focus_detail() {
+        let html = frontend_bundle_source();
+        let active_work_block = html
+            .split("function renderActiveWorkOverview()")
+            .nth(1)
+            .and_then(|tail| tail.split("function mapAgentTelemetryState").next())
+            .expect("active work render block");
+
+        assert!(
+            active_work_block.contains("agent.title_summary || agent.current_focus"),
+            "Active Work Agent cards must prefer the short title summary over long focus text",
+        );
+        assert!(
+            active_work_block.contains("agentFocus.title = agent.current_focus"),
+            "Active Work Agent cards must keep long focus detail available without making it the main visible text",
         );
     }
 
@@ -1294,6 +1645,32 @@ mod tests {
             agent_block.contains("align-self: flex-start")
                 && agent_block.contains("border-bottom-left-radius"),
             "expected agent messages to render on the left, got: {agent_block}",
+        );
+    }
+
+    #[test]
+    fn embedded_web_board_message_body_preserves_multiline_plaintext() {
+        let html = frontend_bundle_source();
+        let body_block = {
+            let start = html
+                .find(".board-message-body {")
+                .expect("expected Board message body CSS block");
+            let rest = &html[start..];
+            let end = rest.find('}').expect("expected CSS block end");
+            &rest[..=end]
+        };
+
+        assert!(
+            body_block.contains("white-space: pre-wrap"),
+            "Board body must preserve author-provided newlines, got: {body_block}",
+        );
+        assert!(
+            html.contains("createNode(\"div\", \"board-message-body\", entry.body)"),
+            "Board body must be rendered as plaintext from the canonical body field",
+        );
+        assert!(
+            !html.contains("board-message-body`).innerHTML"),
+            "Board body must not switch to HTML rendering for multiline formatting",
         );
     }
 
@@ -1349,26 +1726,27 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_memo_surface_uses_repo_scoped_notes_contract() {
+    fn embedded_web_does_not_expose_removed_memo_surface() {
         let html = frontend_bundle_source();
 
         assert!(
-            html.contains("memo-root"),
-            "expected Memo root scaffold in embedded html",
+            !html.contains("data-preset=\"memo\""),
+            "Memo must not be offered from Add window",
         );
         assert!(
-            html.contains("load_memo"),
-            "expected Memo load event in embedded html",
+            !html.contains("memo-root"),
+            "Memo root scaffold should be removed from embedded html",
         );
         assert!(
-            html.contains("create_memo_note")
-                && html.contains("update_memo_note")
-                && html.contains("delete_memo_note"),
-            "expected Memo surface to expose create/update/delete note events",
+            !html.contains("load_memo")
+                && !html.contains("create_memo_note")
+                && !html.contains("update_memo_note")
+                && !html.contains("delete_memo_note"),
+            "Memo protocol events should be removed from the frontend bundle",
         );
         assert!(
-            html.contains("Pinned notes stay at the top of the repo-scoped list."),
-            "expected Memo surface to explain the repo-scoped pin ordering contract",
+            !html.contains("memoSurface,"),
+            "frontend unit registry should not expose a removed Memo surface",
         );
     }
 
@@ -1533,9 +1911,15 @@ mod tests {
                 && html.contains("Reconnecting"),
             "expected shared frontend bundle to keep the browser and native user-facing copy on the English contract",
         );
+        // SPEC-1933 NFR-005 exception: the System Settings > Language select
+        // option label "日本語" is the only approved Japanese string in the
+        // embedded bundle. Strip the option text before scanning so the
+        // English-only contract still catches every other unintended copy.
+        let stripped = html.replace(r#"text: "日本語""#, r#"text: ""#);
         assert!(
-            !japanese_scripts.is_match(html),
-            "expected embedded bundle copy to stay English-only for both browser and native modes",
+            !japanese_scripts.is_match(&stripped),
+            "expected embedded bundle copy to stay English-only for both browser and native modes \
+             (SPEC-1933 NFR-005 only allows the Language select '日本語' option label)",
         );
         assert!(
             !html.contains("PoC"),
@@ -1558,12 +1942,11 @@ mod tests {
                 && html.contains("terminalHost,")
                 && html.contains("launchWizardSurface,")
                 && html.contains("branchesFileTreeSurface,")
-                && html.contains("memoSurface,")
                 && html.contains("profileSurface,")
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Memo, Profile, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Profile, Board, Logs, and knowledge/settings surfaces",
         );
         assert!(
             !html.contains("window.__POC__"),
@@ -1677,7 +2060,7 @@ mod tests {
     /// - `.surface-* .titlebar` — the chrome at the top of the window
     /// - `.surface-* .window-body` — the panel content surface
     ///
-    /// `.surface-memo`, `.surface-profile`, and `.surface-knowledge` had been
+    /// `.surface-profile`, and `.surface-knowledge` had been
     /// missing from one or more of these rules, which left those panels
     /// partially transparent and visually distinct from the rest.
     #[test]
@@ -1691,7 +2074,6 @@ mod tests {
             ".surface-logs",
             ".surface-knowledge",
             ".surface-mock",
-            ".surface-memo",
             ".surface-profile",
         ];
 
@@ -1788,7 +2170,7 @@ mod tests {
     /// SPEC-2008 FR-034: every panel surface must adopt the shared layout
     /// primitives in its rendered HTML so paddings, scrollbars, and splits
     /// stay in lockstep. The toolbar misnomer `.knowledge-toolbar` (which was
-    /// reused by Memo/Profile/Logs/Board as the generic toolbar block) is
+    /// reused by Profile/Logs/Board as the generic toolbar block) is
     /// retired in favour of `.workspace-toolbar`. Stacked toolbars (multi-row
     /// content with search and filter chips) opt into the
     /// `.workspace-toolbar.is-stacked` modifier rather than carrying a
@@ -1812,8 +2194,8 @@ mod tests {
         // layered alongside (e.g. `.branch-toolbar`).
         let toolbar_count = js.matches("class=\"workspace-toolbar").count();
         assert!(
-            toolbar_count >= 7,
-            "expected at least 7 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
+            toolbar_count >= 6,
+            "expected at least 6 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
         );
 
         // Stacked modifier replaces the old `.knowledge-toolbar` override.
@@ -1824,7 +2206,6 @@ mod tests {
 
         let split_adopters = [
             "knowledge-split workspace-split",
-            "memo-layout workspace-split",
             "profile-layout workspace-split",
             "logs-layout workspace-split",
         ];
@@ -1937,7 +2318,6 @@ mod tests {
             (WindowSurface::Terminal, "terminal"),
             (WindowSurface::FileTree, "file-tree"),
             (WindowSurface::Branches, "branches"),
-            (WindowSurface::Memo, "memo"),
             (WindowSurface::Profile, "profile"),
             (WindowSurface::Board, "board"),
             (WindowSurface::Logs, "logs"),

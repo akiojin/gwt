@@ -30,28 +30,78 @@ fn cleanup_selected_branches_deletes_local_and_remote_branch() {
         ],
     );
     run_git(&repo, &["push", "-u", "origin", "main"]);
-    run_git(&repo, &["checkout", "-qb", "feature/prune-me"]);
-    std::fs::write(repo.join("feature.txt"), "feature\n").expect("write feature");
-    run_git(&repo, &["add", "feature.txt"]);
+    run_git(&repo, &["checkout", "-qb", "work/prune-me"]);
+    std::fs::write(repo.join("work.txt"), "work\n").expect("write work");
+    run_git(&repo, &["add", "work.txt"]);
     run_git(&repo, &["commit", "-qm", "feature"]);
-    run_git(&repo, &["push", "-u", "origin", "feature/prune-me"]);
+    run_git(&repo, &["push", "-u", "origin", "work/prune-me"]);
     run_git(&repo, &["checkout", "main"]);
     run_git(&repo, &["fetch", "origin", "--prune"]);
 
     let entries =
         list_branch_entries_with_active_sessions(&repo, &HashSet::new()).expect("entries");
     let results =
-        cleanup_selected_branches(&repo, &entries, &[String::from("feature/prune-me")], true);
+        cleanup_selected_branches(&repo, &entries, &[String::from("work/prune-me")], true);
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
     assert!(
-        !branch_exists(&repo, "refs/heads/feature/prune-me"),
+        !branch_exists(&repo, "refs/heads/work/prune-me"),
         "local branch should be deleted"
     );
     assert!(
-        !branch_exists(&repo, "refs/remotes/origin/feature/prune-me"),
+        !branch_exists(&repo, "refs/remotes/origin/work/prune-me"),
         "remote-tracking branch should be deleted"
+    );
+}
+
+#[test]
+fn cleanup_selected_branches_defaults_to_local_only_when_remote_delete_is_false() {
+    let temp = tempdir().expect("tempdir");
+    let remote = temp.path().join("origin.git");
+    let repo = temp.path().join("repo");
+
+    run_git(
+        temp.path(),
+        &["init", "--bare", remote.to_str().expect("remote path")],
+    );
+    run_git(
+        temp.path(),
+        &["init", "-q", repo.to_str().expect("repo path")],
+    );
+    init_repo(&repo);
+    run_git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().expect("remote path"),
+        ],
+    );
+    run_git(&repo, &["push", "-u", "origin", "main"]);
+    run_git(&repo, &["checkout", "-qb", "work/local-only"]);
+    std::fs::write(repo.join("work.txt"), "work\n").expect("write work");
+    run_git(&repo, &["add", "work.txt"]);
+    run_git(&repo, &["commit", "-qm", "feature"]);
+    run_git(&repo, &["push", "-u", "origin", "work/local-only"]);
+    run_git(&repo, &["checkout", "main"]);
+    run_git(&repo, &["fetch", "origin", "--prune"]);
+
+    let entries =
+        list_branch_entries_with_active_sessions(&repo, &HashSet::new()).expect("entries");
+    let results =
+        cleanup_selected_branches(&repo, &entries, &[String::from("work/local-only")], false);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
+    assert!(
+        !branch_exists(&repo, "refs/heads/work/local-only"),
+        "local branch should be deleted"
+    );
+    assert!(
+        branch_exists(&repo, "refs/remotes/origin/work/local-only"),
+        "remote-tracking branch should remain without explicit remote delete"
     );
 }
 

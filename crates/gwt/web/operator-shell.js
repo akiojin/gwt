@@ -5,121 +5,260 @@
 
 import { createThemeManager, createBrowserEnv } from "/theme-manager.js";
 import { createHotkeyManager } from "/hotkey.js";
+import { wireThemeToggle as wireSegmentedThemeToggle } from "/theme-toggle.js";
 
 const SIDEBAR_KEY = "gwt:ui:sidebar";
-const SIDEBAR_COLLAPSED_KEY = "gwt:ui:sidebar-collapsed";
-const WINDOW_CONTROLS_KEY = "gwt:ui:window-controls";
 const BRIEFING_KEY = "gwt:ui:briefing";
+
+// SPEC-2356 Phase 9 (FR-031): hover-reveal state machine close delay window.
+// open delay = 0 (instant reveal), close delay defaults to 250ms (200〜400ms range).
+const HOVER_REVEAL_CLOSE_DELAY_MS = 250;
 
 export function initOperatorShell(deps = {}) {
   const doc = deps.document ?? document;
   const win = deps.window ?? window;
 
-  const themeManager = deps.themeManager ?? createThemeManager(createBrowserEnv(doc, win));
+  let shellDegraded = false;
+  const markDegraded = (label, error) => {
+    shellDegraded = true;
+    hideMissionBriefingImmediately(doc);
+    try { console.warn(`operator shell ${label} failed`, error); } catch { /* no-op */ }
+  };
+
+  const themeManager = deps.themeManager ?? createThemeManagerSafe(doc, win, markDegraded);
   const hotkey = deps.hotkey ?? createHotkeyManager();
 
-  wireThemeToggle({ doc, themeManager });
-  const chromeVisibility = wireChromeVisibility({ doc, win });
-  wireSidebarLayers({ doc, win });
-  wireStatusStripClock({ doc });
-  wireMissionBriefing({ doc, win });
-  wireHotkeyOverlay({ doc, hotkey });
-  const palette = wireCommandPalette({ doc, hotkey });
-  wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility });
+  safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
+  const chromeVisibility = safeWire(
+    "chrome visibility",
+    () => wireChromeVisibility({ doc, win }),
+    markDegraded,
+    null,
+  );
+  safeWire("sidebar layers", () => wireSidebarLayers({ doc, win }), markDegraded);
+  safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
+  if (shellDegraded) hideMissionBriefingImmediately(doc);
+  else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
+  safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
+  const palette = safeWire(
+    "command palette",
+    () => wireCommandPalette({ doc, hotkey }),
+    markDegraded,
+    null,
+  );
+  safeWire(
+    "global hotkeys",
+    () => wireGlobalHotkeys({ doc, hotkey, palette }),
+    markDegraded,
+  );
+
+  void chromeVisibility;
 
   return { themeManager, hotkey, palette };
 }
 
-// ------------------------------------------------------------
-// Chrome visibility — persist full sidebar and window controls
-// ------------------------------------------------------------
+function safeWire(label, fn, onError, fallback = undefined) {
+  try {
+    return fn();
+  } catch (error) {
+    onError(label, error);
+    return fallback;
+  }
+}
 
-function wireChromeVisibility({ doc, win }) {
-  const sidebarButton = doc.getElementById("op-sidebar-toggle");
-  const windowControlsButton = doc.getElementById("op-window-controls-toggle");
-  const root = doc.documentElement;
+function createThemeManagerSafe(doc, win, onError) {
+  try {
+    return createThemeManager(createBrowserEnv(doc, win));
+  } catch (error) {
+    onError("theme manager", error);
+    doc.documentElement?.setAttribute?.("data-theme", "dark");
+    return createFallbackThemeManager();
+  }
+}
 
-  let sidebarVisible = readBoolean(win, SIDEBAR_COLLAPSED_KEY, false) !== true;
-  let windowControlsVisible = readString(win, WINDOW_CONTROLS_KEY, "visible") !== "hidden";
-
-  const renderSidebar = () => {
-    if (sidebarVisible) delete root.dataset.opSidebar;
-    else root.dataset.opSidebar = "collapsed";
-    if (!sidebarButton) return;
-    sidebarButton.setAttribute("aria-pressed", sidebarVisible ? "true" : "false");
-    sidebarButton.setAttribute("aria-label", sidebarVisible ? "Hide sidebar" : "Show sidebar");
-  };
-
-  const renderWindowControls = () => {
-    if (windowControlsVisible) delete root.dataset.opWindowControls;
-    else root.dataset.opWindowControls = "hidden";
-    if (!windowControlsButton) return;
-    windowControlsButton.setAttribute("aria-pressed", windowControlsVisible ? "true" : "false");
-    windowControlsButton.setAttribute(
-      "aria-label",
-      windowControlsVisible ? "Hide window controls" : "Show window controls",
-    );
-  };
-
-  const setSidebarVisible = (next) => {
-    sidebarVisible = Boolean(next);
-    writeString(win, SIDEBAR_COLLAPSED_KEY, sidebarVisible ? "false" : "true");
-    renderSidebar();
-    doc.dispatchEvent(new CustomEvent("op:chrome-visibility-changed", {
-      detail: { sidebarVisible, windowControlsVisible },
-    }));
-  };
-
-  const setWindowControlsVisible = (next) => {
-    windowControlsVisible = Boolean(next);
-    writeString(win, WINDOW_CONTROLS_KEY, windowControlsVisible ? "visible" : "hidden");
-    renderWindowControls();
-    doc.dispatchEvent(new CustomEvent("op:window-controls-changed", {
-      detail: { visible: windowControlsVisible },
-    }));
-  };
-
-  sidebarButton?.addEventListener("click", () => setSidebarVisible(!sidebarVisible));
-  windowControlsButton?.addEventListener("click", () => setWindowControlsVisible(!windowControlsVisible));
-  renderSidebar();
-  renderWindowControls();
-
+function createFallbackThemeManager() {
   return {
-    toggleSidebar: () => setSidebarVisible(!sidebarVisible),
-    toggleWindowControls: () => setWindowControlsVisible(!windowControlsVisible),
+    getPreference() { return "auto"; },
+    getEffective() { return "dark"; },
+    setTheme() {},
+    subscribe() { return () => {}; },
   };
 }
 
-// ------------------------------------------------------------
-// Theme toggle (Project Bar)
-// ------------------------------------------------------------
+function hideMissionBriefingImmediately(doc) {
+  const overlay = doc.getElementById("op-briefing");
+  if (!overlay) return;
+  overlay.dataset.state = "exiting";
+  overlay.hidden = true;
+  overlay.setAttribute("aria-hidden", "true");
+}
 
-function wireThemeToggle({ doc, themeManager }) {
-  const btn = doc.getElementById("op-theme-toggle");
-  const value = doc.getElementById("op-theme-toggle-value");
-  if (!btn || !value) return;
+// ------------------------------------------------------------
+// Chrome visibility — hover-reveal state machine (SPEC-2356 Phase 9)
+// ------------------------------------------------------------
+// FR-021/FR-022: Sidebar と Window controls を auto-hide にし、画面端の peek 帯
+// (`.op-sidebar-peek` / `.op-window-controls-peek`) への pointer hover /
+// keyboard focus / pointer tap で overlay 展開、panel + peek 領域から離れて
+// 200〜400ms 経過後に収納する hover-reveal state machine。
+// FR-031: prefers-reduced-motion: reduce で close delay 0ms に縮退。
+// FR-032: 起動時に旧 localStorage キー (`gwt:ui:sidebar-collapsed` /
+// `gwt:ui:window-controls`) を `removeItem` で 1 回だけ migration する。
 
-  const renderLabel = () => {
-    const pref = themeManager.getPreference();
-    const eff = themeManager.getEffective();
-    btn.dataset.themeState = pref;
-    value.textContent = pref === "auto"
-      ? `AUTO ${eff === "dark" ? "▮" : "▯"}`
-      : pref.toUpperCase();
-    // SPEC-2356 — expose the live preference to assistive tech.
-    btn.setAttribute(
-      "aria-label",
-      `Theme: ${pref === "auto" ? `auto (currently ${eff})` : pref}. Click to cycle.`,
-    );
+function wireChromeVisibility({ doc, win }) {
+  removeLegacyChromeKeys(win);
+
+  const root = doc.documentElement;
+  const closeDelayFor = () =>
+    matchPrefersReducedMotion(win) ? 0 : HOVER_REVEAL_CLOSE_DELAY_MS;
+
+  const sidebar = createHoverRevealController({
+    doc,
+    win,
+    peek: doc.querySelector(".op-sidebar-peek"),
+    panel: doc.getElementById("op-sidebar"),
+    revealedAttr: "opSidebar",
+    eventName: "op:chrome-visibility-changed",
+    eventDetail: () => ({ sidebarVisible: sidebarRevealed() }),
+    closeDelayFor,
+  });
+
+  const windowControls = createHoverRevealController({
+    doc,
+    win,
+    peek: doc.querySelector(".op-window-controls-peek"),
+    panel: doc.getElementById("floating-window-controls-actions"),
+    revealedAttr: "opWindowControls",
+    eventName: "op:window-controls-changed",
+    eventDetail: () => ({ visible: windowControlsRevealed() }),
+    closeDelayFor,
+  });
+
+  function sidebarRevealed() {
+    return root.dataset.opSidebar === "revealed";
+  }
+  function windowControlsRevealed() {
+    return root.dataset.opWindowControls === "revealed";
+  }
+
+  return {
+    isSidebarRevealed: sidebarRevealed,
+    isWindowControlsRevealed: windowControlsRevealed,
+    closeSidebar: () => sidebar.requestClose(0),
+    closeWindowControls: () => windowControls.requestClose(0),
+  };
+}
+
+function removeLegacyChromeKeys(win) {
+  const storage = safeLocalStorage(win);
+  if (!storage) return;
+  try { storage.removeItem("gwt:ui:sidebar-collapsed"); } catch { /* no-op */ }
+  try { storage.removeItem("gwt:ui:window-controls"); } catch { /* no-op */ }
+}
+
+function safeLocalStorage(win) {
+  try { return win.localStorage ?? null; } catch { return null; }
+}
+
+function matchPrefersReducedMotion(win) {
+  try {
+    return Boolean(win.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+  } catch {
+    return false;
+  }
+}
+
+function createHoverRevealController({
+  doc,
+  win,
+  peek,
+  panel,
+  extraPanels = [],
+  revealedAttr,
+  eventName,
+  eventDetail,
+  closeDelayFor,
+}) {
+  const root = doc.documentElement;
+  const datasetKey = revealedAttr;
+  const setTimeoutFn = win.setTimeout?.bind(win) ?? globalThis.setTimeout;
+  const clearTimeoutFn = win.clearTimeout?.bind(win) ?? globalThis.clearTimeout;
+  let closeTimer = null;
+
+  const cancelClose = () => {
+    if (closeTimer !== null) {
+      clearTimeoutFn(closeTimer);
+      closeTimer = null;
+    }
   };
 
-  renderLabel();
-  themeManager.subscribe(renderLabel);
+  const setRevealed = (next) => {
+    const before = root.dataset[datasetKey];
+    if (next) {
+      root.dataset[datasetKey] = "revealed";
+    } else {
+      delete root.dataset[datasetKey];
+    }
+    if (before !== root.dataset[datasetKey]) {
+      try {
+        doc.dispatchEvent(new CustomEvent(eventName, { detail: eventDetail() }));
+      } catch { /* no-op */ }
+    }
+  };
 
-  btn.addEventListener("click", () => {
-    const cycle = { auto: "dark", dark: "light", light: "auto" };
-    themeManager.setTheme(cycle[themeManager.getPreference()] ?? "auto");
+  const open = () => {
+    cancelClose();
+    setRevealed(true);
+  };
+
+  const requestClose = (delay) => {
+    cancelClose();
+    if (!delay || delay <= 0) {
+      setRevealed(false);
+      return;
+    }
+    closeTimer = setTimeoutFn(() => {
+      closeTimer = null;
+      setRevealed(false);
+    }, delay);
+  };
+
+  if (!peek || !panel) {
+    return { open, requestClose };
+  }
+
+  const allTargets = [peek, panel, ...extraPanels].filter(Boolean);
+
+  for (const target of allTargets) {
+    target.addEventListener("pointerenter", open);
+    target.addEventListener("focusin", open);
+    target.addEventListener("pointerdown", (event) => {
+      if (event && event.pointerType === "touch") open();
+    });
+    target.addEventListener("pointerleave", () => requestClose(closeDelayFor()));
+    target.addEventListener("focusout", () => requestClose(closeDelayFor()));
+  }
+
+  // Tap-away: pointerdown outside the peek / panel collapses an open overlay.
+  doc.addEventListener("pointerdown", (event) => {
+    if (root.dataset[datasetKey] !== "revealed") return;
+    const target = event?.target;
+    if (!target) return;
+    const inside = allTargets.some((node) => node === target || node?.contains?.(target));
+    if (!inside) requestClose(closeDelayFor());
   });
+
+  return { open, requestClose };
+}
+
+// ------------------------------------------------------------
+// Theme toggle (Project Bar) — segmented radiogroup
+// ------------------------------------------------------------
+// SPEC-2356 FR-024: AUTO / DARK / LIGHT are exposed as a parallel radiogroup
+// so AUTO is reachable from any state in a single click. Implementation lives
+// in `/theme-toggle.js` so it is unit-testable under Node.
+
+function wireThemeToggle(opts) {
+  wireSegmentedThemeToggle(opts);
 }
 
 // ------------------------------------------------------------
@@ -557,7 +696,7 @@ function createActionRegistry(doc) {
 // Global hotkeys (delegate to operator command bus)
 // ------------------------------------------------------------
 
-function wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility }) {
+function wireGlobalHotkeys({ doc, hotkey, palette }) {
   const send = (id) => () => {
     doc.dispatchEvent(new CustomEvent("op:command", { detail: { id } }));
     return true;
@@ -566,12 +705,9 @@ function wireGlobalHotkeys({ doc, hotkey, palette, chromeVisibility }) {
   hotkey.register("cmd+b", send("open-board"));
   hotkey.register("cmd+g", send("open-git"));
   hotkey.register("cmd+l", send("open-logs"));
-  // SPEC-2356 — Cmd+\ collapses/expands the Sidebar Layers, freeing canvas
-  // real estate when the user wants more room for floating windows.
-  hotkey.register("cmd+\\", () => {
-    chromeVisibility?.toggleSidebar?.();
-    return true;
-  });
+  // SPEC-2356 Phase 9: Cmd+\\ sidebar toggle hotkey is removed in favor of the
+  // hover-reveal peek 帯. Chrome visibility is now driven entirely by pointer
+  // hover / keyboard focus / pointer tap.
 
   if (typeof palette?.close === "function") {
     doc.addEventListener("keydown", (e) => {
@@ -599,26 +735,6 @@ function readJson(win, key, fallback) {
 
 function writeJson(win, key, value) {
   try { win.localStorage.setItem(key, JSON.stringify(value)); } catch { /* no-op */ }
-}
-
-function readString(win, key, fallback) {
-  try {
-    const raw = win.localStorage.getItem(key);
-    return typeof raw === "string" && raw.length > 0 ? raw : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeString(win, key, value) {
-  try { win.localStorage.setItem(key, value); } catch { /* no-op */ }
-}
-
-function readBoolean(win, key, fallback) {
-  const raw = readString(win, key, fallback ? "true" : "false");
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  return fallback;
 }
 
 function matchReduced(doc) {

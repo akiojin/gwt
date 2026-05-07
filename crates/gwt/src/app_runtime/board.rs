@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use gwt_core::{
-    coordination::{self, BoardEntryKind},
+    coordination::{self, BoardEntryKind, BoardMention},
     workspace_projection,
 };
 
@@ -33,6 +33,7 @@ pub struct BoardPostRequest {
     pub(crate) topics: Vec<String>,
     pub(crate) owners: Vec<String>,
     pub(crate) targets: Vec<String>,
+    pub(crate) mentions: Vec<BoardMention>,
 }
 
 impl AppRuntime {
@@ -49,6 +50,7 @@ impl AppRuntime {
             topics,
             owners,
             targets,
+            mentions,
         } = request;
 
         let Some(address) = self.window_lookup.get(&id) else {
@@ -109,6 +111,7 @@ impl AppRuntime {
         let topics = sanitize_board_list(&topics);
         let owners = sanitize_board_list(&owners);
         let targets = sanitize_board_list(&targets);
+        let mentions = coordination::normalize_board_mentions(&mentions);
 
         if let Some(parent_id) = parent_id.as_deref() {
             let parent_exists = match coordination::board_entry_exists(&tab.project_root, parent_id)
@@ -147,6 +150,9 @@ impl AppRuntime {
         );
         if !targets.is_empty() {
             entry = entry.with_target_owners(targets);
+        }
+        if !mentions.is_empty() {
+            entry = entry.with_mentions(mentions);
         }
         match coordination::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
@@ -248,11 +254,23 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return false;
         };
+        let Some(title_summary) = entry
+            .title_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            return false;
+        };
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return false;
         };
-        tab.workspace
-            .set_dynamic_title(&address.raw_id, Some(entry.body.clone()))
+        tab.workspace.set_dynamic_title_with_detail(
+            &address.raw_id,
+            Some(title_summary),
+            Some(entry.body.clone()),
+        )
     }
 }
 
