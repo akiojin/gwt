@@ -1,6 +1,52 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.23.0] - 2026-05-07
+
+### Bug Fixes
+
+- ウィンドウタブのドッキング状態を補正
+- **gui:** Keep Add window reachable from hover controls
+- **gui:** Unify update notification CTA
+- **gui:** Preserve window controls tab flow
+- Localize board reminder guidance
+- Ignore stale workspace identity
+- **gui:** Ignore image paste outside agent sessions
+- Prefer develop for start work base
+- Remove memo surface and hide panel runtime status
+- Filter stale active work agents by session
+- Prefer work context in active work title
+- ウィンドウ切替後のターミナルフォーカスを復旧
+- Refallback stale start work base
+- Improve window tab docking feedback
+- **cli:** Add gwtd pane command for gwt-agent
+- Resolve workspace cleanup git root
+- **active-work:** Update merged GitDetails tests
+- **coordination:** Lock board initialization before append
+- **pr:** Scope current branch pr metadata
+
+### Features
+
+- **gui:** Add image paste file references
+- **gui:** Add terminal paste context menu
+- **active-work:** Show latest PR metadata
+
+### Miscellaneous Tasks
+
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin develop
+- Merge origin/develop
+- Merge origin/develop
+- Merge origin/develop into work branch
+- Merge develop into workspace cleanup fix
+
+### Refactor
+
+- **gui:** Centralize update CTA asset wiring
+
 ## [9.22.0] - 2026-05-07
 
 ### Bug Fixes
