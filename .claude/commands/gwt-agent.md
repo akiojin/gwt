@@ -25,7 +25,8 @@ gwtd board post --kind handoff --target <session-id|branch|agent-id> --body '<me
 
 1. Load `.claude/skills/gwt-agent/SKILL.md` and follow the workflow.
 2. Auto-detect the appropriate action based on provided arguments.
-3. Execute the pane management operation, or route coordination through Board.
+3. Resolve `gwtd` as `GWT_BIN` from `GWT_BIN_PATH`, `command -v gwtd`, or `target/debug/gwtd`.
+4. Execute pane management through `gwtd pane list`, `gwtd pane read <id>`, or `gwtd pane close <id>`, and route coordination through Board.
 
 ## Examples
 

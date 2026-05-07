@@ -1313,17 +1313,24 @@ mod tests {
             assert!(
                 content.contains("Auto-detect the operation mode from arguments")
                     && content.contains("gwtd board post")
+                    && content.contains("GWT_BIN_PATH")
+                    && content.contains("gwtd pane list")
+                    && content.contains("gwtd pane read")
+                    && content.contains("gwtd pane close")
                     && content.contains("--target")
                     && content.contains("handoff")
                     && content.contains("request"),
-                "expected agent Board coordination contract in {relative}"
+                "expected agent Board coordination and gwtd pane contract in {relative}"
             );
             assert!(
                 !content.contains("pane send")
                     && !content.contains("pane broadcast")
+                    && !content.contains("`pane list`")
+                    && !content.contains("`pane read")
+                    && !content.contains("`pane close")
                     && !content.contains("<pane-id> <message>")
                     && !content.contains("broadcast <message>"),
-                "unexpected direct pane communication contract in {relative}"
+                "unexpected bare pane or direct communication contract in {relative}"
             );
         }
 
@@ -1332,9 +1339,10 @@ mod tests {
         assert!(
             command.contains("Board")
                 && command.contains("gwtd board post")
+                && command.contains("gwtd pane")
                 && !command.contains("[message]")
                 && !command.contains("sending"),
-            "expected gwt-agent command to route communication through Board"
+            "expected gwt-agent command to route pane operations through gwtd and communication through Board"
         );
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))

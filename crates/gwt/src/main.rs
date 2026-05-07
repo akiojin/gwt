@@ -1032,6 +1032,8 @@ mod tests {
             branch_name: "feature/test".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            agent_project_root: "E:/gwt/test-repo".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: tab_id.to_string(),
         }
     }
@@ -1892,10 +1894,12 @@ mod tests {
                 "session-3".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo,
+                repo.clone(),
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -2711,6 +2715,8 @@ mod tests {
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -2745,10 +2751,12 @@ mod tests {
                 "session-2".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo,
+                repo.clone(),
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -3768,10 +3776,11 @@ mod tests {
 
         let mut working_dir = None;
         let mut env_vars = HashMap::new();
+        let mut base_branch = None;
         super::resolve_launch_worktree_request(
             temp.path(),
             None,
-            None,
+            &mut base_branch,
             &mut working_dir,
             &mut env_vars,
         )
@@ -3781,10 +3790,11 @@ mod tests {
 
         let scratch = temp.path().join("scratch");
         fs::create_dir_all(&scratch).expect("create scratch");
+        let mut base_branch = None;
         super::resolve_launch_worktree_request(
             &scratch,
             Some("feature/demo"),
-            None,
+            &mut base_branch,
             &mut working_dir,
             &mut env_vars,
         )
@@ -3798,12 +3808,15 @@ mod tests {
             .expect("detach head");
         assert!(detach.success(), "git checkout --detach failed");
 
+        let mut base_branch = None;
+        let mut detached_dir = None;
+        let mut detached_env = HashMap::new();
         let err = super::resolve_launch_worktree_request(
             &repo,
             Some("feature/detached"),
-            None,
-            &mut None,
-            &mut HashMap::new(),
+            &mut base_branch,
+            &mut detached_dir,
+            &mut detached_env,
         )
         .expect_err("repo branch resolution failure should not silently skip");
         assert!(err.contains("git branch --show-current"));
@@ -3817,10 +3830,11 @@ mod tests {
 
         let mut current_dir = None;
         let mut current_env = HashMap::new();
+        let mut base_branch = None;
         super::resolve_launch_worktree_request(
             &repo,
             Some("develop"),
-            None,
+            &mut base_branch,
             &mut current_dir,
             &mut current_env,
         )
@@ -3833,10 +3847,11 @@ mod tests {
         let preset = temp.path().join("preset");
         let mut preset_dir = Some(preset.clone());
         let mut preset_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/ignored"),
-            Some("develop"),
+            &mut base_branch,
             &mut preset_dir,
             &mut preset_env,
         )
@@ -3862,10 +3877,11 @@ mod tests {
 
         let mut existing_dir = None;
         let mut existing_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/existing"),
-            Some("develop"),
+            &mut base_branch,
             &mut existing_dir,
             &mut existing_env,
         )
@@ -3877,22 +3893,26 @@ mod tests {
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
 
+        let mut base_branch = Some("release".to_string());
+        let mut missing_base_dir = None;
+        let mut missing_base_env = HashMap::new();
         let err = super::resolve_launch_worktree_request(
             &repo,
             Some("feature/missing-base"),
-            Some("release"),
-            &mut None,
-            &mut HashMap::new(),
+            &mut base_branch,
+            &mut missing_base_dir,
+            &mut missing_base_env,
         )
         .expect_err("missing base branch");
         assert!(err.contains("remote base branch does not exist"));
 
         let mut created_dir = None;
         let mut created_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/created"),
-            Some("develop"),
+            &mut base_branch,
             &mut created_dir,
             &mut created_env,
         )
@@ -3926,10 +3946,11 @@ mod tests {
 
         let mut local_only_dir = None;
         let mut local_only_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/local-only"),
-            Some("develop"),
+            &mut base_branch,
             &mut local_only_dir,
             &mut local_only_env,
         )
@@ -3984,6 +4005,69 @@ mod tests {
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_refalls_back_when_start_work_develop_ref_is_stale() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let origin = init_git_clone_with_origin(&repo);
+
+        let main = gwt_core::process::hidden_command("git")
+            .args(["checkout", "-qb", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git checkout main");
+        assert!(main.success(), "git checkout main failed");
+        let push_main = gwt_core::process::hidden_command("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git push main");
+        assert!(push_main.success(), "git push main failed");
+        let set_head = gwt_core::process::hidden_command("git")
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .current_dir(&origin)
+            .status()
+            .expect("set origin head");
+        assert!(set_head.success(), "set origin head failed");
+        let checkout_develop = gwt_core::process::hidden_command("git")
+            .args(["checkout", "develop"])
+            .current_dir(&repo)
+            .status()
+            .expect("git checkout develop");
+        assert!(checkout_develop.success(), "git checkout develop failed");
+        let refresh_head = gwt_core::process::hidden_command("git")
+            .args(["remote", "set-head", "origin", "-a"])
+            .current_dir(&repo)
+            .status()
+            .expect("refresh origin head");
+        assert!(refresh_head.success(), "refresh origin head failed");
+        let delete_develop = gwt_core::process::hidden_command("git")
+            .args(["branch", "-D", "develop"])
+            .current_dir(&origin)
+            .status()
+            .expect("delete origin develop");
+        assert!(delete_develop.success(), "delete origin develop failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let mut base_branch = Some("origin/develop".to_string());
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("work/stale-develop"),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("stale Start Work base should refallback after fetch");
+
+        let worktree = working_dir.expect("materialized worktree");
+        assert_eq!(base_branch.as_deref(), Some("origin/HEAD"));
+        assert!(worktree.exists());
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &worktree)));
     }
 
     #[test]

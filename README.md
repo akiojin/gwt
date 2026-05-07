@@ -29,7 +29,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator canvas** — arrange Agent, Board, Issue, SPEC, Logs, Memo, Profile,
+- **Operator canvas** — arrange Agent, Board, Issue, SPEC, Logs, Profile,
   File Tree, Branches, and PR surfaces in one mission-control style workspace.
 
 ## Install
@@ -150,7 +150,7 @@ Common windows include:
 - `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
   search, detail panes, and Launch Agent handoff
 - `Logs` — project diagnostics and live log surface
-- `Memo` and `Profile` — repo-scoped notes and environment/profile management
+- `Profile` — environment/profile management
 - `File Tree` — live read-only repository tree
 - `Branches` — branch inspection, filtering, cleanup, and Git details
 - `Settings` — application and agent configuration. The `System` tab lets
