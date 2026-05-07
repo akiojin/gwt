@@ -1996,20 +1996,17 @@ impl AppRuntime {
             tracing::debug!(window_id = %id, "image paste dropped: window not found");
             return Vec::new();
         };
-        let Some(tab) = self.tab(&address.tab_id) else {
+        if self.tab(&address.tab_id).is_none() {
             tracing::debug!(window_id = %id, "image paste dropped: project tab not found");
             return Vec::new();
+        }
+        let Some(session) = self.active_agent_sessions.get(id) else {
+            tracing::debug!(window_id = %id, "image paste dropped: active agent session not found");
+            return Vec::new();
         };
-        let session = self.active_agent_sessions.get(id);
-        let worktree_path = session
-            .map(|session| session.worktree_path.clone())
-            .unwrap_or_else(|| tab.project_root.clone());
-        let agent_project_root = session
-            .map(|session| session.agent_project_root.clone())
-            .unwrap_or_else(|| worktree_path.display().to_string());
-        let runtime_target = session
-            .map(|session| session.runtime_target)
-            .unwrap_or(gwt_agent::LaunchRuntimeTarget::Host);
+        let worktree_path = session.worktree_path.clone();
+        let agent_project_root = session.agent_project_root.clone();
+        let runtime_target = session.runtime_target;
 
         let image = match prepare_image_paste_file(
             &worktree_path,
@@ -5102,6 +5099,42 @@ exit 0
         assert_eq!(
             fs::read(saved_path).expect("read saved image"),
             b"webp-bytes"
+        );
+    }
+
+    #[test]
+    fn image_paste_event_ignores_non_agent_terminal_window() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "shell-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"png-bytes");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": window_id,
+            "data_base64": payload,
+            "mime_type": "image/png",
+            "filename": "capture.png"
+        }))
+        .expect("deserialize paste image event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        assert!(
+            !worktree.join(".gwt").join("paste-images").exists(),
+            "non-agent terminal paste must not create image files"
         );
     }
 
