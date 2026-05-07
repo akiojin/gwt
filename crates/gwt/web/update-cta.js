@@ -36,7 +36,7 @@ export function createUpdateCtaController({
   function showAvailable(version) {
     if (!version) return null;
     latestVersion = version;
-    return render("available", `Update available: v${version}`);
+    return render("available", `Update available: v${version} - Click to update`);
   }
 
   function showError(message) {
