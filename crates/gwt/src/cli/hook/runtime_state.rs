@@ -15,7 +15,7 @@ use chrono::{SecondsFormat, Utc};
 use gwt_agent::{persist_agent_session_id, PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
 use serde::Serialize;
 
-use super::{HookError, HookEvent};
+use super::{HookError, HookSessionId, RawHookEvent};
 use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
 
@@ -104,27 +104,21 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
 fn sync_agent_session_id(
     sessions_dir: &Path,
     gwt_session_id: Option<&str>,
-    agent_session_id: Option<&str>,
+    agent_session_id: &HookSessionId,
 ) -> io::Result<()> {
     let Some(gwt_session_id) = gwt_session_id.map(str::trim).filter(|id| !id.is_empty()) else {
         return Ok(());
     };
-    let Some(agent_session_id) = agent_session_id.map(str::trim).filter(|id| !id.is_empty()) else {
-        return Ok(());
-    };
-    persist_agent_session_id(sessions_dir, gwt_session_id, agent_session_id)
+    persist_agent_session_id(sessions_dir, gwt_session_id, agent_session_id.as_str())
 }
 
-fn validated_hook_agent_session_id<'a>(
+fn validated_hook_agent_session_id(
     event: &str,
     gwt_session_id: Option<&str>,
     session: Option<&Session>,
-    hook_event: Option<&'a HookEvent>,
-) -> Result<Option<&'a str>, HookError> {
-    let agent_session_id = hook_event
-        .and_then(|event| event.session_id.as_deref())
-        .map(str::trim)
-        .filter(|id| !id.is_empty());
+    hook_event: Option<&RawHookEvent>,
+) -> Result<Option<HookSessionId>, HookError> {
+    let agent_session_id = hook_event.and_then(RawHookEvent::session_id);
 
     if agent_session_id.is_none() && session.map(is_codex_session).unwrap_or(false) {
         log_missing_codex_hook_session_id(event, gwt_session_id, session, hook_event);
@@ -144,7 +138,7 @@ fn log_missing_codex_hook_session_id(
     event: &str,
     gwt_session_id: Option<&str>,
     session: Option<&Session>,
-    hook_event: Option<&HookEvent>,
+    hook_event: Option<&RawHookEvent>,
 ) {
     let gwt_session_id = gwt_session_id.unwrap_or("-");
     let persisted_agent_session_id = session
@@ -152,9 +146,7 @@ fn log_missing_codex_hook_session_id(
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .unwrap_or("-");
-    let tool_name = hook_event
-        .and_then(|event| event.tool_name.as_deref())
-        .unwrap_or("-");
+    let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
     eprintln!(
         "gwtd hook runtime-state: missing Codex hook session_id event={event} gwt_session_id={gwt_session_id} persisted_agent_session_id={persisted_agent_session_id} tool_name={tool_name}"
     );
@@ -183,7 +175,7 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     let hook_event = if input.trim().is_empty() {
         None
     } else {
-        HookEvent::read_from_str(input)?
+        RawHookEvent::read_from_str(input)?
     };
     let sessions_dir = sessions_dir_for_current_runtime();
     let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
@@ -194,7 +186,9 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
         session.as_ref(),
         hook_event.as_ref(),
     )?;
-    sync_agent_session_id(&sessions_dir, gwt_session_id.as_deref(), agent_session_id)?;
+    if let Some(agent_session_id) = agent_session_id.as_ref() {
+        sync_agent_session_id(&sessions_dir, gwt_session_id.as_deref(), agent_session_id)?;
+    }
 
     let Some(path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
         return Ok(());
@@ -399,7 +393,12 @@ mod tests {
         let session_id = session.id.clone();
         session.save(&sessions_dir).unwrap();
 
-        sync_agent_session_id(&sessions_dir, Some(&session_id), Some("agent-123")).unwrap();
+        let agent_session_id = RawHookEvent::read_from_str(r#"{"session_id":"agent-123"}"#)
+            .unwrap()
+            .unwrap()
+            .session_id()
+            .unwrap();
+        sync_agent_session_id(&sessions_dir, Some(&session_id), &agent_session_id).unwrap();
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
@@ -414,7 +413,13 @@ mod tests {
         let session_id = session.id.clone();
         session.save(&sessions_dir).unwrap();
 
-        sync_agent_session_id(&sessions_dir, Some(&session_id), None).unwrap();
+        let parsed = RawHookEvent::read_from_str(r#"{"tool_name":"Bash"}"#)
+            .unwrap()
+            .unwrap()
+            .session_id();
+        if let Some(agent_session_id) = parsed.as_ref() {
+            sync_agent_session_id(&sessions_dir, Some(&session_id), agent_session_id).unwrap();
+        }
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-existing"));

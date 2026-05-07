@@ -8,7 +8,7 @@ use gwt_agent::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::hook::{coordination_event, forward, runtime_state, HookError, HookEvent};
+use crate::cli::hook::{coordination_event, forward, runtime_state, HookError, RawHookEvent};
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
 
@@ -129,12 +129,16 @@ impl RuntimeHookEvent {
         status: Option<String>,
         message: Option<String>,
         session: Option<Session>,
-        hook_event: Option<HookEvent>,
+        hook_event: Option<RawHookEvent>,
     ) -> Self {
         let project_root = session
             .as_ref()
             .map(|session| session.worktree_path.display().to_string())
-            .or_else(|| hook_event.as_ref().and_then(|event| event.cwd.clone()));
+            .or_else(|| {
+                hook_event
+                    .as_ref()
+                    .and_then(|event| event.cwd().map(str::to_string))
+            });
         let branch = session.as_ref().map(|session| session.branch.clone());
         let agent_session_id =
             live_event_agent_session_id(&kind, source_event, session.as_ref(), hook_event.as_ref());
@@ -149,7 +153,7 @@ impl RuntimeHookEvent {
             status,
             tool_name: hook_event
                 .as_ref()
-                .and_then(|event| event.tool_name.clone()),
+                .and_then(|event| event.tool_name().map(str::to_string)),
             message,
             occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         }
@@ -160,14 +164,10 @@ fn live_event_agent_session_id(
     kind: &RuntimeHookEventKind,
     source_event: Option<&str>,
     session: Option<&Session>,
-    hook_event: Option<&HookEvent>,
+    hook_event: Option<&RawHookEvent>,
 ) -> Option<String> {
-    if let Some(agent_session_id) = hook_event
-        .and_then(|event| event.session_id.as_deref())
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        return Some(agent_session_id.to_string());
+    if let Some(agent_session_id) = hook_event.and_then(RawHookEvent::session_id) {
+        return Some(agent_session_id.into_string());
     }
 
     if session.map(is_codex_session).unwrap_or(false) {
@@ -178,9 +178,7 @@ fn live_event_agent_session_id(
             .filter(|id| !id.is_empty())
             .unwrap_or("-");
         let source_event = source_event.unwrap_or("-");
-        let tool_name = hook_event
-            .and_then(|event| event.tool_name.as_deref())
-            .unwrap_or("-");
+        let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
         eprintln!(
             "gwtd hook live event: missing Codex hook session_id kind={kind:?} source_event={source_event} gwt_session_id={gwt_session_id} persisted_agent_session_id={persisted_agent_session_id} tool_name={tool_name}"
         );
@@ -227,8 +225,8 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_hook_event_best_effort(input: &str) -> Option<HookEvent> {
-    HookEvent::read_from_str(input).ok().flatten()
+fn parse_hook_event_best_effort(input: &str) -> Option<RawHookEvent> {
+    RawHookEvent::read_from_str(input).ok().flatten()
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {
