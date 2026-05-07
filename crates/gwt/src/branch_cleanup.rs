@@ -26,7 +26,8 @@ pub fn cleanup_selected_branches(
     selected_branches: &[String],
     delete_remote: bool,
 ) -> Vec<BranchCleanupResultEntry> {
-    let manager = gwt_git::WorktreeManager::new(repo_path);
+    let git_root = git_command_root(repo_path);
+    let manager = gwt_git::WorktreeManager::new(&git_root);
     let lookup: HashMap<&str, &BranchListEntry> = entries
         .iter()
         .map(|entry| (entry.name.as_str(), entry))
@@ -132,6 +133,10 @@ pub fn cleanup_selected_branches(
 
 fn is_gwt_workspace_branch(branch_name: &str) -> bool {
     branch_name.starts_with("work/")
+}
+
+fn git_command_root(repo_path: &Path) -> std::path::PathBuf {
+    gwt_git::worktree::main_worktree_root(repo_path).unwrap_or_else(|_| repo_path.to_path_buf())
 }
 
 fn blocked_reason_message(reason: BranchCleanupBlockedReason) -> String {
