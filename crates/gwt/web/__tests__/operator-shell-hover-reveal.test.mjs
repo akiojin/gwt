@@ -159,6 +159,39 @@ test("hover-reveal: panel 自体への pointerenter は close timer を中断す
   }
 });
 
+test("hover-reveal: moving from window controls peek to Add window keeps controls revealed", async () => {
+  const fixture = await mountFixture();
+  try {
+    fixture.init();
+    const peek = fixture.document.querySelector(".op-window-controls-peek");
+    const actions = fixture.document.getElementById("floating-window-controls-actions");
+    const addButton = fixture.document.getElementById("add-button");
+    assert.ok(peek, "expected .op-window-controls-peek element");
+    assert.ok(actions, "expected continuous window controls actions group");
+    assert.ok(addButton, "expected Add window button");
+    assert.ok(actions.contains(addButton), "Add window must stay inside the continuous actions group");
+
+    peek.dispatchEvent(new fixture.window.Event("pointerenter", { bubbles: true }));
+    assert.equal(fixture.document.documentElement.dataset.opWindowControls, "revealed");
+
+    peek.dispatchEvent(new fixture.window.Event("pointerleave", { bubbles: true }));
+    fixture.advanceTime(200);
+    actions.dispatchEvent(new fixture.window.Event("pointerenter", { bubbles: true }));
+    fixture.advanceTime(100);
+    assert.equal(
+      fixture.document.documentElement.dataset.opWindowControls,
+      "revealed",
+      "entering the continuous Add-window path must cancel the pending close timer",
+    );
+
+    actions.dispatchEvent(new fixture.window.Event("pointerleave", { bubbles: true }));
+    fixture.advanceTime(260);
+    assert.equal(fixture.document.documentElement.dataset.opWindowControls, undefined);
+  } finally {
+    fixture.dispose();
+  }
+});
+
 test("migration: 起動時に旧 localStorage キーが removeItem される", async () => {
   const fixture = await mountFixture();
   try {

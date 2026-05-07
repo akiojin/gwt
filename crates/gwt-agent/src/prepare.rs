@@ -22,6 +22,12 @@ const DOCKER_GWT_OVERRIDE_HEADER: &str =
     "# Auto-generated docker-compose override for gwt bundle mounting";
 const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
 const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
+const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 4] = [
+    "origin/develop",
+    "origin/HEAD",
+    "origin/main",
+    "origin/master",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
@@ -315,10 +321,10 @@ pub fn resolve_launch_worktree_request(
         return Ok(());
     }
 
-    let base_branch = base_branch
+    let mut base_branch = base_branch
         .map(str::to_string)
         .unwrap_or_else(|| "develop".to_string());
-    let remote_base_ref = origin_remote_ref(&base_branch);
+    let mut remote_base_ref = origin_remote_ref(&base_branch);
     let remote_branch_ref = origin_remote_ref(&branch_name);
 
     manager
@@ -329,9 +335,21 @@ pub fn resolve_launch_worktree_request(
         .remote_branch_exists(&remote_base_ref)
         .map_err(|err| format!("failed to verify remote base branch {remote_base_ref}: {err}"))?
     {
-        return Err(format!(
-            "remote base branch does not exist: {remote_base_ref}"
-        ));
+        if let Some(fallback_base_branch) =
+            refallback_start_work_base_branch(&branch_name, &base_branch, |candidate| {
+                let candidate_ref = origin_remote_ref(candidate);
+                manager.remote_branch_exists(&candidate_ref).map_err(|err| {
+                    format!("failed to verify remote base branch {candidate_ref}: {err}")
+                })
+            })?
+        {
+            base_branch = fallback_base_branch;
+            remote_base_ref = origin_remote_ref(&base_branch);
+        } else {
+            return Err(format!(
+                "remote base branch does not exist: {remote_base_ref}"
+            ));
+        }
     }
 
     if !manager
@@ -1215,6 +1233,36 @@ fn origin_remote_ref(branch_name: &str) -> String {
     } else {
         format!("origin/{branch_name}")
     }
+}
+
+fn refallback_start_work_base_branch<E>(
+    branch_name: &str,
+    selected_base_branch: &str,
+    mut remote_branch_exists: impl FnMut(&str) -> Result<bool, E>,
+) -> Result<Option<String>, E> {
+    if !is_start_work_branch_name(branch_name)
+        || !START_WORK_BASE_BRANCH_CANDIDATES.contains(&selected_base_branch)
+    {
+        return Ok(None);
+    }
+    if remote_branch_exists(selected_base_branch)? {
+        return Ok(Some(selected_base_branch.to_string()));
+    }
+    for candidate in START_WORK_BASE_BRANCH_CANDIDATES {
+        if candidate == selected_base_branch {
+            continue;
+        }
+        if remote_branch_exists(candidate)? {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn is_start_work_branch_name(branch_name: &str) -> bool {
+    branch_name
+        .strip_prefix("work/")
+        .is_some_and(|name| !name.is_empty())
 }
 
 fn current_git_branch(repo_path: &Path) -> Result<String, String> {

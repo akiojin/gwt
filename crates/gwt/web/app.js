@@ -17,6 +17,7 @@
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
+      import { createUpdateCtaController } from "/update-cta.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -110,7 +111,6 @@
       const fileTreeStateMap = new Map();
       const branchListStateMap = new Map();
       const profileStateMap = new Map();
-      const memoStateMap = new Map();
       const boardStateMap = new Map();
       const logStateMap = new Map();
       const knowledgeBridgeStateMap = new Map();
@@ -162,17 +162,6 @@
             "createProfile",
             "flushProfileSave",
             "deleteProfile",
-          ]),
-        }),
-        memoStateMap: Object.freeze({
-          owner: "memo-surface",
-          mutatedBy: Object.freeze([
-            "ensureMemoState",
-            "requestMemo",
-            "renderMemo",
-            "createMemoNote",
-            "flushMemoSave",
-            "deleteMemoNote",
           ]),
         }),
         boardStateMap: Object.freeze({
@@ -380,9 +369,6 @@
         if (preset === "branches") {
           return "branches";
         }
-        if (preset === "memo") {
-          return "memo";
-        }
         if (preset === "profile") {
           return "profile";
         }
@@ -412,6 +398,14 @@
         }
         pendingMessages.push(message);
       }
+
+      const updateCtaController = createUpdateCtaController({
+        document,
+        send,
+        setVersionState,
+        confirmUpdate: (version) =>
+          window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`),
+      });
 
       function setConnectionState(connected) {
         connectionDot.classList.toggle("connected", connected);
@@ -620,7 +614,6 @@
           file_tree: "File Tree",
           branches: "Branches",
           settings: "Settings",
-          memo: "Memo",
           profile: "Profile",
           logs: "Logs",
           issue: "Issue",
@@ -1546,6 +1539,23 @@
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
 
+      function scheduleTerminalFocusActivation(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.activationFrame !== null) {
+          return;
+        }
+        runtime.activationFrame = requestAnimationFrame(() => {
+          runtime.activationFrame = null;
+          const activeRuntime = terminalMap.get(windowId);
+          if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
+            return;
+          }
+          fitTerminal(windowId, false);
+          scheduleTerminalViewportRefresh(windowId);
+          activeRuntime.terminal.focus();
+        });
+      }
+
       function sendGeometry(windowId, cols, rows) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -1610,6 +1620,24 @@
           const status = String(windowData.status || "running").toLowerCase();
           return status !== "stopped" && status !== "exited" && status !== "error";
         });
+      }
+
+      function activeWorkDisplayTitle(projection, agents) {
+        const agentTitle = (Array.isArray(agents) ? agents : [])
+          .find((agent) => agent && String(agent.title_summary || "").trim())
+          ?.title_summary;
+        const candidates = [
+          agentTitle,
+          projection?.summary,
+          projection?.owner,
+          projection?.title,
+        ];
+        for (const value of candidates) {
+          const title = String(value || "").trim();
+          if (!title || title === "Start Work") continue;
+          return title;
+        }
+        return "Active Work";
       }
 
       function agentStatusLabel(state) {
@@ -1732,7 +1760,7 @@
         setActiveWorkSectionVisible(true);
 
         activeWorkSummary.appendChild(
-          createNode("div", "op-work-title", activeWorkProjection.title || "Active Work"),
+          createNode("div", "op-work-title", activeWorkDisplayTitle(activeWorkProjection, agents)),
         );
         const meta = createNode("div", "op-work-meta");
         appendMeta(meta, activeWorkProjection.owner);
@@ -1802,11 +1830,16 @@
             card.appendChild(createNode("div", "op-agent-scope", agent.coordination_scope));
           }
 
-          if (agent.current_focus) {
+          const agentFocusText = agent.title_summary || agent.current_focus;
+          if (agentFocusText) {
             const focusText = coordinationLabel
-              ? `${coordinationLabel}: ${agent.current_focus}`
-              : agent.current_focus;
-            card.appendChild(createNode("div", "op-agent-focus", focusText));
+              ? `${coordinationLabel}: ${agentFocusText}`
+              : agentFocusText;
+            const agentFocus = createNode("div", "op-agent-focus", focusText);
+            if (agent.current_focus && agent.current_focus !== agentFocusText) {
+              agentFocus.title = agent.current_focus;
+            }
+            card.appendChild(agentFocus);
           }
 
           const agentActions = createNode("div", "op-agent-actions");
@@ -2090,6 +2123,49 @@
         );
       }
 
+      const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+      ]);
+
+      function findClipboardImagePasteItem(items) {
+        for (const item of Array.from(items || [])) {
+          if (
+            item?.kind === "file" &&
+            SUPPORTED_IMAGE_PASTE_MIME_TYPES.has(item.type)
+          ) {
+            return item;
+          }
+        }
+        return null;
+      }
+
+      function dataUrlBase64Payload(dataUrl) {
+        if (typeof dataUrl !== "string") {
+          return null;
+        }
+        const commaIndex = dataUrl.indexOf(",");
+        if (commaIndex < 0) {
+          return null;
+        }
+        const payload = dataUrl.slice(commaIndex + 1);
+        return payload || null;
+      }
+
+      function readClipboardImageAsBase64(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => {
+            resolve(dataUrlBase64Payload(reader.result));
+          });
+          reader.addEventListener("error", () => {
+            reject(reader.error || new Error("Failed to read clipboard image"));
+          });
+          reader.readAsDataURL(file);
+        });
+      }
+
       async function writeClipboardText(text, restoreFocus = null) {
         if (!text) {
           return false;
@@ -2246,6 +2322,44 @@
         };
       }
 
+      function installTerminalImagePasteHandlers(windowId, terminalRoot, terminal) {
+        const handlePaste = (event) => {
+          const item = findClipboardImagePasteItem(event.clipboardData?.items);
+          if (!item) {
+            return;
+          }
+          const file = item.getAsFile?.();
+          if (!file) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+
+          void readClipboardImageAsBase64(file)
+            .then((dataBase64) => {
+              if (!dataBase64) {
+                return;
+              }
+              send({
+                kind: "paste_image",
+                id: windowId,
+                data_base64: dataBase64,
+                mime_type: file.type || item.type,
+                filename: file.name || null,
+              });
+              terminal.focus();
+            })
+            .catch(() => {
+              terminal.focus();
+            });
+        };
+
+        terminalRoot.addEventListener("paste", handlePaste, true);
+        return () => {
+          terminalRoot.removeEventListener("paste", handlePaste, true);
+        };
+      }
+
       function installTerminalViewportRefreshHandlers(windowId, terminal) {
         const viewportScrollDisposable = terminal.onScroll(() => {
           scheduleTerminalViewportRefresh(windowId);
@@ -2300,9 +2414,15 @@
         terminal.loadAddon(fitAddon);
         terminal.open(terminalContainer);
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
+        const imagePasteCleanup = installTerminalImagePasteHandlers(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
         const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
         const cleanup = () => {
           copyCleanup();
+          imagePasteCleanup();
           viewportRefreshCleanup();
         };
         terminal.onData((data) => {
@@ -2316,7 +2436,13 @@
           });
           send({ kind: "terminal_input", id: windowId, data });
         });
-        const runtime = { terminal, fitAddon, cleanup, viewportRefreshFrame: null };
+        const runtime = {
+          terminal,
+          fitAddon,
+          cleanup,
+          viewportRefreshFrame: null,
+          activationFrame: null,
+        };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
@@ -2373,15 +2499,6 @@
                 ["Theme", "Canvas"],
                 ["Agents", "Claude / Codex"],
                 ["Transport", "Local server"],
-              ],
-            };
-          case "memo":
-            return {
-              heading: "Daily Notes",
-              rows: [
-                ["Workspace", "Floating windows"],
-                ["Pinned", "2 notes"],
-                ["Draft", "Canvas review"],
               ],
             };
           case "profile":
@@ -2484,23 +2601,6 @@
           });
         }
         return branchListStateMap.get(windowId);
-      }
-
-      function ensureMemoState(windowId) {
-        if (!memoStateMap.has(windowId)) {
-          memoStateMap.set(windowId, {
-            notes: [],
-            loading: false,
-            saving: false,
-            error: "",
-            selectedNoteId: null,
-            draftTitle: "",
-            draftBody: "",
-            draftPinned: false,
-            saveTimer: null,
-          });
-        }
-        return memoStateMap.get(windowId);
       }
 
       function ensureProfileState(windowId) {
@@ -2734,19 +2834,6 @@
         });
       }
 
-      function requestMemo(windowId) {
-        const state = ensureMemoState(windowId);
-        if (state.loading) {
-          return;
-        }
-        state.loading = true;
-        state.error = "";
-        send({
-          kind: "load_memo",
-          id: windowId,
-        });
-      }
-
       function requestProfile(windowId) {
         const state = ensureProfileState(windowId);
         if (state.loading) {
@@ -2971,11 +3058,6 @@
         return node;
       }
 
-      function memoTitleLabel(note) {
-        const title = String(note?.title || "").trim();
-        return title || "Untitled note";
-      }
-
       function boardTimestampLabel(value) {
         if (!value) {
           return "";
@@ -3196,327 +3278,6 @@
             ),
           );
         }
-      }
-
-      function memoSelectedNote(state) {
-        return (
-          (state.selectedNoteId &&
-            state.notes.find((note) => note.id === state.selectedNoteId)) ||
-          null
-        );
-      }
-
-      function syncMemoDraftFromSelection(state) {
-        const note = memoSelectedNote(state);
-        state.draftTitle = note ? note.title || "" : "";
-        state.draftBody = note ? note.body || "" : "";
-        state.draftPinned = Boolean(note && note.pinned);
-      }
-
-      function memoDraftIsDirty(state) {
-        const note = memoSelectedNote(state);
-        if (!note) {
-          return false;
-        }
-        return (
-          state.draftTitle !== (note.title || "") ||
-          state.draftBody !== (note.body || "") ||
-          state.draftPinned !== Boolean(note.pinned)
-        );
-      }
-
-      function clearMemoSaveTimer(state) {
-        if (state.saveTimer) {
-          clearTimeout(state.saveTimer);
-          state.saveTimer = null;
-        }
-      }
-
-      function updateMemoStatus(windowId) {
-        const element = windowMap.get(windowId);
-        if (!element) {
-          return;
-        }
-        const body = element.querySelector(".window-body");
-        if (!body) {
-          return;
-        }
-        const status = body.querySelector(".memo-status");
-        const deleteButton = body.querySelector("[data-action='delete-note']");
-        if (!status) {
-          return;
-        }
-        const state = ensureMemoState(windowId);
-        status.textContent = state.error
-          ? state.error
-          : state.loading
-            ? state.saving
-              ? "Saving note..."
-              : "Loading notes..."
-            : state.saving
-              ? "Saving note..."
-              : `${state.notes.length} note${state.notes.length === 1 ? "" : "s"}`;
-        status.className = "memo-status";
-        if (state.error) {
-          status.classList.add("error");
-        } else if (state.loading || state.saving) {
-          status.classList.add("info");
-        }
-        if (deleteButton) {
-          deleteButton.disabled = !state.selectedNoteId || state.loading;
-        }
-      }
-
-      function flushMemoSave(windowId) {
-        const state = ensureMemoState(windowId);
-        clearMemoSaveTimer(state);
-        if (!state.selectedNoteId) {
-          state.saving = false;
-          updateMemoStatus(windowId);
-          return;
-        }
-        if (!memoDraftIsDirty(state)) {
-          state.saving = false;
-          updateMemoStatus(windowId);
-          return;
-        }
-        state.loading = true;
-        state.saving = true;
-        state.error = "";
-        updateMemoStatus(windowId);
-        send({
-          kind: "update_memo_note",
-          id: windowId,
-          note_id: state.selectedNoteId,
-          title: state.draftTitle,
-          body: state.draftBody,
-          pinned: state.draftPinned,
-        });
-      }
-
-      function scheduleMemoSave(windowId) {
-        const state = ensureMemoState(windowId);
-        clearMemoSaveTimer(state);
-        state.saving = true;
-        updateMemoStatus(windowId);
-        state.saveTimer = setTimeout(() => {
-          state.saveTimer = null;
-          flushMemoSave(windowId);
-        }, 250);
-      }
-
-      function selectMemoNote(windowId, noteId) {
-        const state = ensureMemoState(windowId);
-        if (state.selectedNoteId === noteId) {
-          return;
-        }
-        if (memoDraftIsDirty(state)) {
-          flushMemoSave(windowId);
-        } else {
-          clearMemoSaveTimer(state);
-        }
-        state.selectedNoteId = noteId;
-        syncMemoDraftFromSelection(state);
-        renderMemo(windowId);
-      }
-
-      function createMemoNote(windowId) {
-        const state = ensureMemoState(windowId);
-        if (memoDraftIsDirty(state)) {
-          flushMemoSave(windowId);
-        } else {
-          clearMemoSaveTimer(state);
-        }
-        state.loading = true;
-        state.saving = true;
-        state.error = "";
-        updateMemoStatus(windowId);
-        send({
-          kind: "create_memo_note",
-          id: windowId,
-          title: "",
-          body: "",
-          pinned: false,
-        });
-      }
-
-      function deleteMemoNote(windowId) {
-        const state = ensureMemoState(windowId);
-        if (!state.selectedNoteId) {
-          return;
-        }
-        clearMemoSaveTimer(state);
-        state.loading = true;
-        state.saving = true;
-        state.error = "";
-        updateMemoStatus(windowId);
-        send({
-          kind: "delete_memo_note",
-          id: windowId,
-          note_id: state.selectedNoteId,
-        });
-      }
-
-      function renderMemo(windowId, preserveEditor = false) {
-        const element = windowMap.get(windowId);
-        if (!element) {
-          return;
-        }
-        const body = element.querySelector(".window-body");
-        if (!body) {
-          return;
-        }
-        const state = ensureMemoState(windowId);
-        const status = body.querySelector(".memo-status");
-        const list = body.querySelector(".memo-note-list");
-        const editor = body.querySelector(".memo-editor-pane");
-        if (!status || !list || !editor) {
-          return;
-        }
-
-        if (
-          state.selectedNoteId &&
-          !state.notes.some((note) => note.id === state.selectedNoteId)
-        ) {
-          state.selectedNoteId = null;
-        }
-        if (!state.selectedNoteId && state.notes.length > 0) {
-          state.selectedNoteId = state.notes[0].id;
-          syncMemoDraftFromSelection(state);
-          preserveEditor = false;
-        }
-
-        updateMemoStatus(windowId);
-        list.innerHTML = "";
-        if (!state.loading && state.notes.length === 0) {
-          const empty = createNode("div", "memo-empty workspace-empty-state");
-          empty.appendChild(createNode("div", "mock-label", "No notes yet"));
-          empty.appendChild(
-            createNode(
-              "div",
-              "memo-empty-copy",
-              "Create a repo-scoped note to capture follow-ups, checklists, or review context.",
-            ),
-          );
-          list.appendChild(empty);
-        }
-        for (const note of state.notes) {
-          const row = createNode("button", "memo-note-row");
-          row.type = "button";
-          if (note.id === state.selectedNoteId) {
-            row.classList.add("selected");
-            row.setAttribute("aria-current", "true");
-          } else {
-            row.removeAttribute("aria-current");
-          }
-          row.addEventListener("click", () => selectMemoNote(windowId, note.id));
-
-          const header = createNode("div", "memo-note-header");
-          header.appendChild(createNode("div", "memo-note-title", memoTitleLabel(note)));
-          if (note.pinned) {
-            header.appendChild(createNode("span", "memo-note-chip", "Pinned"));
-          }
-          row.appendChild(header);
-          row.appendChild(
-            createNode("div", "memo-note-time", boardTimestampLabel(note.updated_at)),
-          );
-          row.appendChild(
-            createNode(
-              "div",
-              "memo-note-preview",
-              String(note.body || "").trim() || "Empty note",
-            ),
-          );
-          list.appendChild(row);
-        }
-
-        const selectedNote = memoSelectedNote(state);
-        if (preserveEditor && editor.dataset.noteId === (state.selectedNoteId || "")) {
-          const meta = editor.querySelector(".memo-editor-meta");
-          if (meta && selectedNote) {
-            meta.textContent = `Updated ${boardTimestampLabel(selectedNote.updated_at)}`;
-          }
-          updateMemoStatus(windowId);
-          return;
-        }
-
-        editor.innerHTML = "";
-        editor.dataset.noteId = state.selectedNoteId || "";
-        if (!selectedNote) {
-          const empty = createNode("div", "memo-empty workspace-empty-state");
-          empty.appendChild(createNode("div", "mock-label", "Select or create a note"));
-          empty.appendChild(
-            createNode(
-              "div",
-              "memo-empty-copy",
-              "Pinned notes stay at the top of the repo-scoped list.",
-            ),
-          );
-          const button = createNode("button", "wizard-button primary", "New note");
-          button.type = "button";
-          button.addEventListener("click", () => createMemoNote(windowId));
-          empty.appendChild(button);
-          editor.appendChild(empty);
-          updateMemoStatus(windowId);
-          return;
-        }
-
-        const controls = createNode("div", "memo-editor-controls");
-        const pinToggle = createNode("label", "memo-pin-toggle");
-        const pinInput = document.createElement("input");
-        pinInput.type = "checkbox";
-        pinInput.checked = state.draftPinned;
-        pinInput.addEventListener("change", () => {
-          state.draftPinned = pinInput.checked;
-          scheduleMemoSave(windowId);
-        });
-        pinToggle.appendChild(pinInput);
-        pinToggle.appendChild(createNode("span", "", "Pinned"));
-        controls.appendChild(pinToggle);
-        const deleteButton = createNode("button", "wizard-button", "Delete");
-        deleteButton.type = "button";
-        deleteButton.dataset.action = "delete-note";
-        deleteButton.addEventListener("click", () => deleteMemoNote(windowId));
-        controls.appendChild(deleteButton);
-        editor.appendChild(controls);
-
-        editor.appendChild(
-          createNode(
-            "div",
-            "memo-editor-meta",
-            `Updated ${boardTimestampLabel(selectedNote.updated_at)}`,
-          ),
-        );
-
-        const titleInput = document.createElement("input");
-        titleInput.className = "memo-title-input";
-        titleInput.type = "text";
-        titleInput.placeholder = "Untitled note";
-        // SPEC-2356 — memo title input has no surrounding <label>; set
-        // aria-label so screen readers announce the purpose instead of
-        // just "edit text".
-        titleInput.setAttribute("aria-label", "Note title");
-        titleInput.value = state.draftTitle;
-        titleInput.addEventListener("input", () => {
-          state.draftTitle = titleInput.value;
-          scheduleMemoSave(windowId);
-        });
-        titleInput.addEventListener("blur", () => flushMemoSave(windowId));
-        editor.appendChild(titleInput);
-
-        const bodyInput = document.createElement("textarea");
-        bodyInput.className = "memo-body-input";
-        bodyInput.placeholder = "Capture context, next steps, or review notes";
-        bodyInput.setAttribute("aria-label", "Note body");
-        bodyInput.value = state.draftBody;
-        bodyInput.addEventListener("input", () => {
-          state.draftBody = bodyInput.value;
-          scheduleMemoSave(windowId);
-        });
-        bodyInput.addEventListener("blur", () => flushMemoSave(windowId));
-        editor.appendChild(bodyInput);
-
-        updateMemoStatus(windowId);
       }
 
       function clearProfileSaveTimer(state) {
@@ -6276,7 +6037,6 @@
           "surface-terminal",
           "surface-file-tree",
           "surface-branches",
-          "surface-memo",
           "surface-board",
           "surface-logs",
           "surface-knowledge",
@@ -6434,52 +6194,6 @@
             frontendUnits.branchesFileTreeSurface.requestBranches(windowData.id);
           }
           frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
-          return;
-        }
-
-        if (surface === "memo") {
-          body.innerHTML = `
-            <div class="memo-root">
-              <div class="workspace-toolbar is-stacked">
-                <div class="workspace-toolbar-main">
-                  <div class="knowledge-heading">Repo notes</div>
-                  <div class="memo-status"></div>
-                </div>
-                <div class="workspace-toolbar-actions">
-                  <button class="wizard-button" type="button" data-action="new-note">New note</button>
-                  <button class="icon-button" data-action="refresh-memo" aria-label="Refresh memo">↻</button>
-                </div>
-              </div>
-              <div class="memo-layout workspace-split">
-                <div class="memo-note-list"></div>
-                <div class="memo-editor-pane"></div>
-              </div>
-            </div>
-          `;
-          body.addEventListener("mousedown", () => {
-            focusWindowLocally(windowData.id);
-            socketTransport.send({ kind: "focus_window", id: windowData.id });
-          });
-          body
-            .querySelector("[data-action='refresh-memo']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              const state = frontendUnits.memoSurface.ensureMemoState(windowData.id);
-              state.error = "";
-              frontendUnits.memoSurface.requestMemo(windowData.id);
-              frontendUnits.memoSurface.renderMemo(windowData.id);
-            });
-          body
-            .querySelector("[data-action='new-note']")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              frontendUnits.memoSurface.createMemoNote(windowData.id);
-            });
-          const state = frontendUnits.memoSurface.ensureMemoState(windowData.id);
-          if (state.notes.length === 0 && !state.loading && !state.error) {
-            frontendUnits.memoSurface.requestMemo(windowData.id);
-          }
-          frontendUnits.memoSurface.renderMemo(windowData.id);
           return;
         }
 
@@ -7399,6 +7113,9 @@
           if (runtime && runtime.viewportRefreshFrame !== null) {
             cancelAnimationFrame(runtime.viewportRefreshFrame);
           }
+          if (runtime && runtime.activationFrame !== null) {
+            cancelAnimationFrame(runtime.activationFrame);
+          }
           runtime?.cleanup?.();
           runtime?.terminal.dispose();
           terminalMap.delete(windowId);
@@ -7438,10 +7155,7 @@
         const topmostId = topmostWindowId(workspace);
         if (topmostId && ids.has(topmostId)) {
           focusWindowLocally(topmostId);
-          const runtime = terminalMap.get(topmostId);
-          if (runtime) {
-            runtime.terminal.focus();
-          }
+          scheduleTerminalFocusActivation(topmostId);
         } else {
           focusedId = null;
         }
@@ -7511,16 +7225,6 @@
         renderBranchCleanupModal,
       });
 
-      const memoSurface = Object.freeze({
-        ensureMemoState,
-        requestMemo,
-        renderMemo,
-        createMemoNote,
-        flushMemoSave,
-        deleteMemoNote,
-        syncDraftFromSelection: syncMemoDraftFromSelection,
-      });
-
       const profileSurface = Object.freeze({
         ensureProfileState,
         requestProfile,
@@ -7572,7 +7276,6 @@
         terminalHost,
         launchWizardSurface,
         branchesFileTreeSurface,
-        memoSurface,
         profileSurface,
         boardSurface,
         logsSurface,
@@ -7667,32 +7370,6 @@
             } catch (e) {
               console.warn("operator branch telemetry failed", e);
             }
-            break;
-          }
-          case "memo_notes": {
-            const state = frontendUnits.memoSurface.ensureMemoState(event.id);
-            state.notes = event.notes || [];
-            state.loading = false;
-            state.saving = Boolean(state.saveTimer);
-            state.error = "";
-            const preferredNoteId = event.selected_note_id || null;
-            const hasCurrentSelection =
-              state.selectedNoteId &&
-              state.notes.some((note) => note.id === state.selectedNoteId);
-            if (preferredNoteId && preferredNoteId !== state.selectedNoteId) {
-              state.selectedNoteId = preferredNoteId;
-              frontendUnits.memoSurface.syncDraftFromSelection(state);
-              frontendUnits.memoSurface.renderMemo(event.id);
-              break;
-            }
-            if (!hasCurrentSelection) {
-              state.selectedNoteId =
-                preferredNoteId || (state.notes[0] ? state.notes[0].id : null);
-              frontendUnits.memoSurface.syncDraftFromSelection(state);
-              frontendUnits.memoSurface.renderMemo(event.id);
-              break;
-            }
-            frontendUnits.memoSurface.renderMemo(event.id, true);
             break;
           }
           case "profile_snapshot": {
@@ -7986,14 +7663,6 @@
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
-          case "memo_error": {
-            const state = frontendUnits.memoSurface.ensureMemoState(event.id);
-            state.loading = false;
-            state.saving = Boolean(state.saveTimer);
-            state.error = event.message;
-            frontendUnits.memoSurface.renderMemo(event.id, true);
-            break;
-          }
           case "profile_error": {
             const state = frontendUnits.profileSurface.ensureProfileState(event.id);
             state.loading = false;
@@ -8130,20 +7799,11 @@
             break;
           case "update_state":
             if (event.state === "available") {
-              setVersionState(event.current, event.latest);
-              // FR-036: surface the toast only on the first detection of a
-              // given `latest`, or when the polling loop reports a strictly
-              // newer version. Duplicate detections from the 5min poll just
-              // re-render the persistent button.
-              if (firstSeenUpdateVersion !== event.latest) {
-                showUpdateToast(event.latest);
-                firstSeenUpdateVersion = event.latest;
-              }
-              showUpdateButton(event.latest);
+              updateCtaController.handleUpdateState(event);
             }
             break;
           case "update_apply_error":
-            window.alert(event.message || "Failed to start the update.");
+            updateCtaController.showError(event.message || "Failed to start the update.");
             break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
@@ -8273,71 +7933,6 @@
             break;
           }
         }
-      }
-
-      let updateToastTimer = null;
-      // FR-036: remember the last `latest` rendered on the persistent button
-      // so the 5min poll loop does not re-toast on every duplicate detection.
-      let firstSeenUpdateVersion = null;
-
-      function showUpdateToast(version) {
-        let toast = document.getElementById("update-toast");
-        if (!toast) {
-          toast = document.createElement("div");
-          toast.id = "update-toast";
-          toast.className = "update-toast";
-          document.body.appendChild(toast);
-        }
-        toast.textContent = `\u{1F4E6} Update available: v${version} \u2014 click to apply`;
-        toast.style.opacity = "1";
-        toast.onclick = () => {
-          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
-            send({ kind: "apply_update" });
-          }
-        };
-        // While the toast is up, lift the persistent button so the two do
-        // not overlap; the .has-toast class is dropped once the toast fades.
-        const buttonEl = document.getElementById("update-button");
-        if (buttonEl) {
-          buttonEl.classList.add("has-toast");
-        }
-        clearTimeout(updateToastTimer);
-        updateToastTimer = setTimeout(() => {
-          toast.style.opacity = "0";
-          setTimeout(() => toast.remove(), 300);
-          updateToastTimer = null;
-          const after = document.getElementById("update-button");
-          if (after) {
-            after.classList.remove("has-toast");
-          }
-        }, 8000);
-      }
-
-      function showUpdateButton(version) {
-        // FR-036: persistent "Update available" button that stays after the
-        // initial 8s toast fades. Re-rendering on a new `latest` simply
-        // updates the textContent / click target, so this is cheap to call
-        // on every poll detection.
-        let button = document.getElementById("update-button");
-        if (!button) {
-          button = document.createElement("button");
-          button.id = "update-button";
-          button.type = "button";
-          button.className = "update-button";
-          // Offset the button while the initial 8s toast is still visible.
-          if (document.getElementById("update-toast")) {
-            button.classList.add("has-toast");
-          }
-          document.body.appendChild(button);
-        }
-        button.textContent = `\u{1F4E6} Update available: v${version}`;
-        button.title = `Apply update to v${version}`;
-        button.setAttribute("aria-label", `Update available: v${version}, click to apply`);
-        button.onclick = () => {
-          if (window.confirm(`Apply update to v${version} now?\n\ngwt will restart automatically.`)) {
-            send({ kind: "apply_update" });
-          }
-        };
       }
 
       window.addEventListener("pointermove", (event) => {
@@ -8499,8 +8094,8 @@
         }
         // SPEC-2008 FR-032: terminal-only opt-out. xterm.js owns wheel inside
         // `.surface-terminal`; every other workspace-window forwards plain
-        // wheel to the DOM so panel scroll regions (Knowledge / Memo /
-        // Profile / Logs / Board / Issue / SPEC / Settings ...) and modal
+        // wheel to the DOM so panel scroll regions (Knowledge / Profile /
+        // Logs / Board / Issue / SPEC / Settings ...) and modal
         // content scroll natively without registering a per-class whitelist.
         if (
           !event.ctrlKey &&
