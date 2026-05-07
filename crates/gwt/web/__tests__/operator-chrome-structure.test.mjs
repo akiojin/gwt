@@ -256,6 +256,24 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
+test("Active Work title prefers concrete work context over Start Work workflow label", () => {
+  assert.match(
+    appSource,
+    /function\s+activeWorkDisplayTitle\(projection,\s*agents\)[\s\S]+agent\.title_summary[\s\S]+projection\?\.summary[\s\S]+projection\?\.owner[\s\S]+projection\?\.title[\s\S]+Start Work[\s\S]+Active Work/,
+    "expected Active Work title resolution to prefer Agent/Workspace work context and treat Start Work as a fallback-only workflow label",
+  );
+  assert.match(
+    appSource,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(activeWorkProjection,\s*agents\)\)/,
+    "expected Active Work summary title to use the display-title helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkProjection\.title\s*\|\|\s*"Active Work"\)/,
+    "Active Work must not render the saved Start Work workflow title directly",
+  );
+});
+
 test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
