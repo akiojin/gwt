@@ -566,6 +566,15 @@ test("window controls peek 帯 targets only collapsible control groups", () => {
   assert.ok(actionsGroup, "expected continuous window controls actions group");
   assert.ok(primaryGroup, "expected primary window controls group");
   assert.ok(addGroup, "expected add-window control group");
+
+  const floatingControls = document.getElementById("floating-window-controls");
+  assert.ok(floatingControls, "expected floating window controls root");
+  const toolbarChildren = Array.from(floatingControls.children);
+  assert.ok(
+    toolbarChildren.indexOf(windowControlsPeek) < toolbarChildren.indexOf(actionsGroup),
+    "peek must precede actions in DOM order so forward Tab enters the revealed controls",
+  );
+
   assert.ok(actionsGroup.contains(primaryGroup), "primary controls must stay inside the continuous actions group");
   assert.ok(actionsGroup.contains(addGroup), "add controls must stay inside the continuous actions group");
 
@@ -764,6 +773,8 @@ test("components.css hover-reveals only the marked floating window control group
   // Palette and Zoom controls remain in the toolbar regardless.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   assert.match(css, /#floating-window-controls-actions[\s\S]*?display:\s*none/);
+  assert.match(css, /#floating-window-controls-actions\s*\{[^}]*order:\s*1/);
+  assert.match(css, /\.op-window-controls-peek\s*\{[^}]*order:\s*2/);
   assert.match(
     css,
     /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-actions[\s\S]*?display:\s*flex/,
