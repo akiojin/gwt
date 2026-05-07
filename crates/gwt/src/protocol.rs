@@ -109,6 +109,12 @@ pub enum FrontendEvent {
         id: String,
         data: String,
     },
+    PasteImage {
+        id: String,
+        data_base64: String,
+        mime_type: String,
+        filename: Option<String>,
+    },
     LoadFileTree {
         id: String,
         path: Option<String>,
@@ -935,6 +941,50 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_image_paste_payload() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": "tab-1::agent-1",
+            "data_base64": "cG5nLWJ5dGVz",
+            "mime_type": "image/png",
+            "filename": "screenshot.png"
+        }))
+        .expect("deserialize image paste event");
+
+        assert!(
+            matches!(
+                event,
+                FrontendEvent::PasteImage {
+                    id,
+                    data_base64,
+                    mime_type,
+                    filename: Some(filename),
+                } if id == "tab-1::agent-1"
+                    && data_base64 == "cG5nLWJ5dGVz"
+                    && mime_type == "image/png"
+                    && filename == "screenshot.png"
+            ),
+            "image paste must expose window id, payload, MIME type, and optional filename"
+        );
+    }
+
+    #[test]
+    fn frontend_event_accepts_terminal_image_paste_without_filename() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": "tab-1::agent-1",
+            "data_base64": "d2VicC1ieXRlcw==",
+            "mime_type": "image/webp"
+        }))
+        .expect("deserialize image paste event without filename");
+
+        assert!(
+            matches!(event, FrontendEvent::PasteImage { filename: None, .. }),
+            "clipboard images may not have a source filename"
         );
     }
 
