@@ -269,6 +269,7 @@
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
       let branchCleanupWindowId = null;
+      const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
       let windowListOpen = false;
       let windowListEntries = [];
       let titlebarClickState = null;
@@ -1068,6 +1069,41 @@
         workspaceOverviewFocusReturn = null;
       }
 
+      function workspaceCleanupEntry(candidate) {
+        return {
+          name: candidate.branch,
+          cleanup_ready: true,
+          cleanup: {
+            availability: "safe",
+            upstream: candidate.remote_delete_available
+              ? `origin/${candidate.branch}`
+              : null,
+            merge_target: { kind: "workspace", reference: "Workspace complete" },
+            execution_branch: candidate.branch,
+            risks: [],
+          },
+        };
+      }
+
+      function openWorkspaceCleanup() {
+        const candidate = activeWorkProjection?.cleanup_candidate;
+        if (!candidate?.branch) return;
+        const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
+        state.entries = [workspaceCleanupEntry(candidate)];
+        state.cleanupSelected = new Set([candidate.branch]);
+        state.notice = "";
+        state.cleanupModal = {
+          open: true,
+          stage: "confirm",
+          // Workspace cleanup is local-only by default even when
+          // cleanup_candidate.default_delete_remote is present on the wire.
+          deleteRemote: false,
+          results: [],
+        };
+        branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
+        renderBranchCleanupModal();
+      }
+
       function renderWorkspaceOverview() {
         const titleEl = document.getElementById("workspace-overview-title");
         const body = document.getElementById("workspace-overview-body");
@@ -1103,6 +1139,27 @@
           );
         }
         body.appendChild(summaryCard);
+
+        const cleanupCandidate = projection.cleanup_candidate;
+        if (cleanupCandidate?.branch) {
+          const cleanupSection = createNode("section", "workspace-overview-section");
+          cleanupSection.appendChild(
+            createNode("div", "workspace-overview-heading", "Workspace Cleanup"),
+          );
+          const cleanupCopy = createNode(
+            "div",
+            "workspace-overview-summary",
+            `Local workspace ${cleanupCandidate.branch} is ready for cleanup.`,
+          );
+          cleanupSection.appendChild(cleanupCopy);
+          const cleanupActions = createNode("div", "op-work-actions");
+          const cleanupButton = createNode("button", "op-work-action", "Review Cleanup");
+          cleanupButton.type = "button";
+          cleanupButton.addEventListener("click", openWorkspaceCleanup);
+          cleanupActions.appendChild(cleanupButton);
+          cleanupSection.appendChild(cleanupActions);
+          body.appendChild(cleanupSection);
+        }
 
         const agents = Array.isArray(projection.agents) ? projection.agents : [];
         const agentSection = createNode("section", "workspace-overview-section");
@@ -6109,6 +6166,14 @@
         state.cleanupModal.stage = "running";
         state.cleanupModal.results = [];
         renderBranchCleanupModal();
+        if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
+          send({
+            kind: "run_workspace_cleanup",
+            branch: branches[0],
+            delete_remote: state.cleanupModal.deleteRemote,
+          });
+          return;
+        }
         send({
           kind: "run_branch_cleanup",
           id: windowId,
@@ -7711,6 +7776,11 @@
             state.cleanupModal.stage = "result";
             state.cleanupModal.results = event.results || [];
             branchCleanupWindowId = event.id;
+            if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+              frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
+              renderWorkspaceOverview();
+              break;
+            }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
             break;
           }
@@ -7721,6 +7791,10 @@
             state.loading = false;
             if (state.cleanupModal.stage === "running") {
               failRunningBranchCleanup(event.id, event.message);
+              if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
+                frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
+                break;
+              }
               frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
               break;
             }
