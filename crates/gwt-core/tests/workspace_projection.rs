@@ -42,6 +42,8 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
             base_branch: Some("origin/develop".to_string()),
             pr_number: None,
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
         }),

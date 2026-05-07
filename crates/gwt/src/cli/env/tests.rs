@@ -23,6 +23,7 @@ fn sample_pr_status() -> PrStatus {
         title: "Enforce coverage".to_string(),
         state: gwt_git::pr_status::PrState::Open,
         url: "https://github.com/akiojin/gwt/pull/128".to_string(),
+        created_at: None,
         ci_status: "SUCCESS".to_string(),
         mergeable: "MERGEABLE".to_string(),
         merge_state_status: "CLEAN".to_string(),

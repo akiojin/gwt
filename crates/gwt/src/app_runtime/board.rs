@@ -222,7 +222,9 @@ impl AppRuntime {
         let tab = self.tab(tab_id)?;
         let projection = self.active_work_projection_for_tab(tab_id, tab)?;
         Some(OutboundEvent::broadcast(
-            BackendEvent::ActiveWorkProjection { projection },
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
         ))
     }
 

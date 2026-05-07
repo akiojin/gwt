@@ -1411,6 +1411,7 @@ dependencies = [
 name = "gwt-git"
 version = "9.22.0"
 dependencies = [
+ "chrono",
  "dirs",
  "gwt-core",
  "libc",

@@ -414,6 +414,9 @@ pub struct ActiveWorkProjectionView {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub pr_state: Option<String>,
+    pub pr_created_at: Option<String>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
@@ -427,7 +430,7 @@ pub enum BackendEvent {
         workspace: AppStateView,
     },
     ActiveWorkProjection {
-        projection: ActiveWorkProjectionView,
+        projection: Box<ActiveWorkProjectionView>,
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
@@ -801,7 +804,7 @@ mod tests {
     #[test]
     fn active_work_projection_uses_distinct_wire_event_from_canvas_workspace_state() {
         let event = BackendEvent::ActiveWorkProjection {
-            projection: super::ActiveWorkProjectionView {
+            projection: Box::new(super::ActiveWorkProjectionView {
                 id: "work-1".to_string(),
                 title: "Implement Start Work".to_string(),
                 status_category: "active".to_string(),
@@ -813,7 +816,10 @@ mod tests {
                 blocked_agents: 0,
                 branch: Some("work/20260504-1200".to_string()),
                 worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
-                pr_number: None,
+                pr_number: Some(2538),
+                pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
+                pr_state: Some("OPEN".to_string()),
+                pr_created_at: Some("2026-05-07T08:20:00+00:00".to_string()),
                 board_refs: vec!["board-1".to_string()],
                 journal_entries: vec![super::WorkspaceJournalEntryView {
                     id: "journal-1".to_string(),
@@ -850,7 +856,7 @@ mod tests {
                     coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
                 }],
-            },
+            }),
         };
 
         let value = serde_json::to_value(&event).expect("serialize active work projection");
@@ -884,6 +890,16 @@ mod tests {
                 .pointer("/projection/agents/0/coordination_scope")
                 .and_then(Value::as_str),
             Some("SPEC-2359 / start-work")
+        );
+        assert_eq!(
+            value.pointer("/projection/pr_url").and_then(Value::as_str),
+            Some("https://github.com/akiojin/gwt/pull/2538")
+        );
+        assert_eq!(
+            value
+                .pointer("/projection/pr_state")
+                .and_then(Value::as_str),
+            Some("OPEN")
         );
         assert_eq!(
             value

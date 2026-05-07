@@ -88,7 +88,10 @@ pub(super) fn run<E: CliEnv>(
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
-                Some(pr) => render_pr(out, &pr),
+                Some(pr) => {
+                    sync_workspace_pr_metadata(env, &pr, None);
+                    render_pr(out, &pr);
+                }
                 None => out.push_str("no current pull request\n"),
             }
             0
@@ -105,6 +108,7 @@ pub(super) fn run<E: CliEnv>(
             let pr = env
                 .create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
                 .map_err(super::io_as_api_error)?;
+            sync_workspace_pr_metadata(env, &pr, head.as_deref());
             out.push_str("created pull request\n");
             render_pr(out, &pr);
             0
@@ -171,6 +175,90 @@ pub(super) fn run<E: CliEnv>(
         }
     };
     Ok(code)
+}
+
+fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
+    let Ok(Some(mut projection)) =
+        gwt_core::workspace_projection::load_workspace_projection(env.repo_path())
+    else {
+        return;
+    };
+    let stored_branch = projection
+        .git_details
+        .as_ref()
+        .and_then(|details| details.branch.as_deref());
+    if !should_sync_workspace_pr_metadata(env.repo_path(), stored_branch, requested_head) {
+        return;
+    }
+
+    let Some(details) = projection.git_details.as_mut() else {
+        return;
+    };
+    details.pr_number = Some(pr.number);
+    details.pr_state = Some(pr.state.to_string());
+    details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
+    details.pr_created_at = pr.created_at;
+    projection.updated_at = chrono::Utc::now();
+    let _ = gwt_core::workspace_projection::save_workspace_projection(env.repo_path(), &projection);
+}
+
+fn should_sync_workspace_pr_metadata(
+    repo_path: &std::path::Path,
+    stored_branch: Option<&str>,
+    requested_head: Option<&str>,
+) -> bool {
+    let current_branch = current_branch_name(repo_path);
+    if let Some(requested_head) = requested_head {
+        return requested_head_matches_workspace_branch(
+            repo_path,
+            requested_head,
+            stored_branch,
+            current_branch.as_deref(),
+        );
+    }
+    if let (Some(current_branch), Some(stored_branch)) = (current_branch.as_deref(), stored_branch)
+    {
+        return current_branch == stored_branch;
+    }
+    true
+}
+
+fn requested_head_matches_workspace_branch(
+    repo_path: &std::path::Path,
+    requested_head: &str,
+    stored_branch: Option<&str>,
+    current_branch: Option<&str>,
+) -> bool {
+    let (requested_owner, requested_branch) = split_head_owner_and_branch(requested_head);
+    if let Some(requested_owner) = requested_owner {
+        let Some((repo_owner, _repo_name)) = gh::github_remote_owner_and_repo(repo_path) else {
+            return false;
+        };
+        if !requested_owner.eq_ignore_ascii_case(&repo_owner) {
+            return false;
+        }
+    }
+    stored_branch == Some(requested_branch) || current_branch == Some(requested_branch)
+}
+
+fn split_head_owner_and_branch(head: &str) -> (Option<&str>, &str) {
+    match head.split_once(':') {
+        Some((owner, branch)) if !owner.is_empty() && !branch.is_empty() => (Some(owner), branch),
+        _ => (None, head),
+    }
+}
+
+fn current_branch_name(repo_path: &std::path::Path) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["branch", "--show-current"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
 }
 
 fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
@@ -374,6 +462,7 @@ mod tests {
             title: "CLI family split".to_string(),
             state: gwt_git::pr_status::PrState::Open,
             url: "https://example.com/pr/7".to_string(),
+            created_at: None,
             ci_status: "SUCCESS".to_string(),
             mergeable: "MERGEABLE".to_string(),
             merge_state_status: "CLEAN".to_string(),
@@ -402,12 +491,204 @@ mod tests {
         assert!(env.client.call_log().is_empty());
     }
 
+    #[test]
+    fn pr_family_current_persists_workspace_pr_metadata() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
+        env.repo_path = repo.clone();
+        env.seed_current_pr(Some(gwt_git::PrStatus {
+            number: 2538,
+            title: "Active Work title".to_string(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://github.com/akiojin/gwt/pull/2538".to_string(),
+            created_at: Some("2026-05-07T08:20:00Z".parse().expect("created_at")),
+            ci_status: "PENDING".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: "UNKNOWN".to_string(),
+            review_status: "REVIEW_REQUIRED".to_string(),
+        }));
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260507-0808".to_string()),
+            worktree_path: Some(repo.join("work/20260507-0808")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Current, &mut out).expect("run pr current");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("#2538 [OPEN] Active Work title"));
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let details = projection.git_details.expect("git details");
+        assert_eq!(details.branch.as_deref(), Some("work/20260507-0808"));
+        assert_eq!(details.base_branch.as_deref(), Some("origin/develop"));
+        assert_eq!(details.pr_number, Some(2538));
+        assert_eq!(details.pr_state.as_deref(), Some("OPEN"));
+        assert_eq!(
+            details.pr_url.as_deref(),
+            Some("https://github.com/akiojin/gwt/pull/2538")
+        );
+        assert_eq!(
+            details.pr_created_at.expect("pr_created_at").to_rfc3339(),
+            "2026-05-07T08:20:00+00:00"
+        );
+    }
+
+    #[test]
+    fn pr_family_create_skips_workspace_pr_metadata_for_non_current_head() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
+        env.repo_path = repo.clone();
+        env.files.insert("body.md".to_string(), "Body".to_string());
+        env.seed_created_pr(gwt_git::PrStatus {
+            number: 2540,
+            title: "Other branch PR".to_string(),
+            state: gwt_git::pr_status::PrState::Open,
+            url: "https://github.com/akiojin/gwt/pull/2540".to_string(),
+            created_at: Some("2026-05-07T08:30:00Z".parse().expect("created_at")),
+            ci_status: "PENDING".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: "UNKNOWN".to_string(),
+            review_status: "REVIEW_REQUIRED".to_string(),
+        });
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260507-0808".to_string()),
+            worktree_path: Some(repo.join("work/20260507-0808")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::Create {
+                base: "develop".to_string(),
+                head: Some("feature/other".to_string()),
+                title: "Other branch PR".to_string(),
+                file: "body.md".to_string(),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run pr create");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("#2540 [OPEN] Other branch PR"));
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let details = projection.git_details.expect("git details");
+        assert_eq!(details.branch.as_deref(), Some("work/20260507-0808"));
+        assert_eq!(details.pr_number, None);
+        assert_eq!(details.pr_state, None);
+        assert_eq!(details.pr_url, None);
+        assert_eq!(details.pr_created_at, None);
+    }
+
+    fn init_fake_current_branch_repo(repo_path: &std::path::Path) {
+        let init = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo_path)
+            .status()
+            .expect("git init");
+        assert!(init.success());
+        let remote = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/akiojin/gwt.git",
+            ])
+            .current_dir(repo_path)
+            .status()
+            .expect("git remote add");
+        assert!(remote.success());
+        let checkout = std::process::Command::new("git")
+            .args(["checkout", "-b", "work/20260507-0808"])
+            .current_dir(repo_path)
+            .status()
+            .expect("git checkout");
+        assert!(checkout.success());
+    }
+
+    #[test]
+    fn fetch_current_pr_via_gh_chooses_newest_pr_for_current_branch() {
+        with_fake_gh("multi-pr-current", |repo_path| {
+            init_fake_current_branch_repo(repo_path);
+
+            let pr = fetch_current_pr_via_gh(repo_path)
+                .expect("fetch current pr")
+                .expect("current branch pr");
+
+            assert_eq!(pr.number, 2538);
+            assert_eq!(pr.title, "Newer PR");
+            assert_eq!(
+                pr.created_at.expect("created_at").to_rfc3339(),
+                "2026-05-07T08:20:00+00:00"
+            );
+        });
+    }
+
+    #[test]
+    fn fetch_current_pr_via_gh_ignores_same_branch_prs_from_other_repositories() {
+        with_fake_gh("multi-pr-cross-fork-current", |repo_path| {
+            init_fake_current_branch_repo(repo_path);
+
+            let pr = fetch_current_pr_via_gh(repo_path)
+                .expect("fetch current pr")
+                .expect("current branch pr");
+
+            assert_eq!(pr.number, 2538);
+            assert_eq!(pr.title, "Current repo PR");
+            assert_eq!(
+                pr.created_at.expect("created_at").to_rfc3339(),
+                "2026-05-07T08:20:00+00:00"
+            );
+        });
+    }
+
     // -------------------------------------------------------------------
     // SPEC-1942 SC-025 follow-up: PR-family helper tests relocated from
     // cli.rs. Shared fake-gh harness lives in cli/test_support.rs.
     // -------------------------------------------------------------------
 
-    use crate::cli::test_support::{sample_thread, with_fake_gh};
+    use crate::cli::test_support::{sample_thread, with_fake_gh, ScopedEnvVar};
     use crate::cli::PrCreateCall;
     use std::io;
 

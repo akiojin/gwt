@@ -630,7 +630,7 @@ fn active_work_projection_from_saved_with_journal(
     let status_category =
         workspace_status_category_wire(projection.effective_status_category()).to_string();
     let git_details = projection.git_details;
-    let (branch, worktree_path, pr_number) = match git_details {
+    let (branch, worktree_path, pr_number, pr_url, pr_state, pr_created_at) = match git_details {
         Some(details) => (
             details.branch.or(agent_branch),
             details
@@ -638,8 +638,13 @@ fn active_work_projection_from_saved_with_journal(
                 .map(|path| path.display().to_string())
                 .or(agent_worktree),
             details.pr_number,
+            details.pr_url,
+            details.pr_state,
+            details
+                .pr_created_at
+                .map(|created_at| created_at.to_rfc3339()),
         ),
-        None => (agent_branch, agent_worktree, None),
+        None => (agent_branch, agent_worktree, None, None, None, None),
     };
     let mut agents = projection
         .agents
@@ -666,6 +671,9 @@ fn active_work_projection_from_saved_with_journal(
         branch,
         worktree_path,
         pr_number,
+        pr_url,
+        pr_state,
+        pr_created_at,
         board_refs: projection.board_refs,
         journal_entries,
         cleanup_candidate,
@@ -1011,6 +1019,8 @@ fn save_start_work_workspace_projection(
         base_branch: Some(base_branch.to_string()),
         pr_number: None,
         pr_state: None,
+        pr_url: None,
+        pr_created_at: None,
         created_by_start_work: true,
         created_at: now,
     });
@@ -1681,7 +1691,9 @@ impl AppRuntime {
         let projection = self.active_work_projection_for_tab(tab_id, tab)?;
         Some(OutboundEvent::reply(
             client_id,
-            BackendEvent::ActiveWorkProjection { projection },
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
         ))
     }
 
@@ -1690,7 +1702,9 @@ impl AppRuntime {
         let tab = self.tab(tab_id)?;
         let projection = self.active_work_projection_for_tab(tab_id, tab)?;
         Some(OutboundEvent::broadcast(
-            BackendEvent::ActiveWorkProjection { projection },
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
         ))
     }
 
@@ -1772,6 +1786,9 @@ impl AppRuntime {
             branch: Some(first.branch_name.clone()),
             worktree_path: Some(first.worktree_path.display().to_string()),
             pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            pr_created_at: None,
             board_refs: Vec::new(),
             journal_entries: Vec::new(),
             cleanup_candidate: None,
@@ -3048,11 +3065,11 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     .collect::<Vec<_>>();
     Some(OutboundEvent::broadcast(
         BackendEvent::ActiveWorkProjection {
-            projection: active_work_projection_from_saved_with_journal(
+            projection: Box::new(active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
                 None,
-            ),
+            )),
         },
     ))
 }
@@ -3334,7 +3351,9 @@ impl AppRuntime {
                                     self.active_work_projection_for_tab(&tab_id, tab)
                                 {
                                     events.push(OutboundEvent::broadcast(
-                                        BackendEvent::ActiveWorkProjection { projection },
+                                        BackendEvent::ActiveWorkProjection {
+                                            projection: Box::new(projection),
+                                        },
                                     ));
                                 }
                             }
@@ -6632,6 +6651,8 @@ exit 0
             base_branch: Some("origin/develop".to_string()),
             pr_number: Some(2525),
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
@@ -6808,6 +6829,8 @@ exit 0
             base_branch: Some("origin/main".to_string()),
             pr_number: Some(2525),
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
@@ -6824,6 +6847,53 @@ exit 0
         assert_eq!(candidate.branch, "work/20260507-0200");
         assert_eq!(candidate.reason, "workspace_done");
         assert!(!candidate.default_delete_remote);
+    }
+
+    #[test]
+    fn app_runtime_active_work_projection_exposes_saved_pr_metadata_without_live_agents() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.title = "Active Work PR display".to_string();
+        projection.status_text = "No active work".to_string();
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260507-0808".to_string()),
+            worktree_path: Some(repo.join("work/20260507-0808")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(2538),
+            pr_state: Some("OPEN".to_string()),
+            pr_url: Some("https://github.com/akiojin/gwt/pull/2538".to_string()),
+            pr_created_at: Some("2026-05-07T08:20:00Z".parse().expect("pr created_at")),
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_agents, 0);
+        assert_eq!(view.pr_number, Some(2538));
+        assert_eq!(view.pr_state.as_deref(), Some("OPEN"));
+        assert_eq!(
+            view.pr_url.as_deref(),
+            Some("https://github.com/akiojin/gwt/pull/2538")
+        );
+        assert_eq!(
+            view.pr_created_at.as_deref(),
+            Some("2026-05-07T08:20:00+00:00")
+        );
     }
 
     #[test]
@@ -6852,6 +6922,8 @@ exit 0
             base_branch: Some("origin/main".to_string()),
             pr_number: Some(2525),
             pr_state: Some("merged".to_string()),
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
@@ -8675,6 +8747,8 @@ exit 0
             base_branch: Some("origin/develop".to_string()),
             pr_number: None,
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
@@ -8722,6 +8796,8 @@ exit 0
             base_branch: Some("origin/develop".to_string()),
             pr_number: Some(2525),
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
