@@ -1919,16 +1919,14 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
-/* SPEC-2356 Phase 9 (FR-022): Window controls primary + add groups auto-hide
+/* SPEC-2356 Phase 9 (FR-022): Window controls action group auto-hides
    until [data-op-window-controls="revealed"] is set by the hover-reveal state
    machine. Palette and Zoom controls remain in the toolbar regardless. */
-:root[data-theme] #floating-window-controls-primary,
-:root[data-theme] #floating-window-controls-add {
+:root[data-theme] #floating-window-controls-actions {
   display: none;
 }
 
-:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-primary,
-:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-add {
+:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-actions {
   display: flex;
 }
 
