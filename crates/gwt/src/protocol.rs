@@ -2,7 +2,6 @@ use gwt_agent::{ClaudeCodeOpenaiCompatInput, CustomCodingAgent, PresetDefinition
 use gwt_core::{
     coordination::{BoardEntry, BoardEntryKind},
     logging::LogEvent,
-    notes::MemoNote,
 };
 use serde::{Deserialize, Serialize};
 
@@ -128,9 +127,6 @@ pub enum FrontendEvent {
     LoadProfile {
         id: String,
     },
-    LoadMemo {
-        id: String,
-    },
     LoadLogs {
         id: String,
     },
@@ -192,23 +188,6 @@ pub enum FrontendEvent {
         targets: Vec<String>,
         #[serde(default)]
         mentions: Vec<gwt_core::coordination::BoardMention>,
-    },
-    CreateMemoNote {
-        id: String,
-        title: String,
-        body: String,
-        pinned: bool,
-    },
-    UpdateMemoNote {
-        id: String,
-        note_id: String,
-        title: String,
-        body: String,
-        pinned: bool,
-    },
-    DeleteMemoNote {
-        id: String,
-        note_id: String,
     },
     SelectProfile {
         id: String,
@@ -494,11 +473,6 @@ pub enum BackendEvent {
         id: String,
         snapshot: ProfileSnapshotView,
     },
-    MemoNotes {
-        id: String,
-        notes: Vec<MemoNote>,
-        selected_note_id: Option<String>,
-    },
     LogEntries {
         id: String,
         entries: Vec<LogEvent>,
@@ -562,10 +536,6 @@ pub enum BackendEvent {
         message: String,
     },
     ProfileError {
-        id: String,
-        message: String,
-    },
-    MemoError {
         id: String,
         message: String,
     },
@@ -723,7 +693,6 @@ mod tests {
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
         },
         logging::{LogEvent, LogLevel},
-        notes::MemoNote,
     };
     use serde_json::Value;
 
@@ -1134,36 +1103,26 @@ mod tests {
     }
 
     #[test]
-    fn memo_notes_serializes_snapshot_contract() {
-        let event = BackendEvent::MemoNotes {
-            id: "memo-1".to_string(),
-            notes: vec![MemoNote {
-                id: "note-1".to_string(),
-                title: "Pinned note".to_string(),
-                body: "Remember to verify the cache contract".to_string(),
-                pinned: true,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }],
-            selected_note_id: Some("note-1".to_string()),
-        };
-
-        let value = serde_json::to_value(&event).expect("serialize memo notes");
-        assert_eq!(
-            value.get("kind"),
-            Some(&Value::String("memo_notes".to_string()))
-        );
-        assert_eq!(value.get("id"), Some(&Value::String("memo-1".to_string())));
-        assert_eq!(
-            value["notes"][0]["pinned"],
-            Value::Bool(true),
-            "expected memo snapshot payload to keep pin ordering data on the wire",
-        );
-        assert_eq!(
-            value["selected_note_id"],
-            Value::String("note-1".to_string()),
-            "expected memo snapshot payload to carry the preferred editor selection",
-        );
+    fn removed_memo_frontend_events_are_not_part_of_the_wire_contract() {
+        for kind in [
+            "load_memo",
+            "create_memo_note",
+            "update_memo_note",
+            "delete_memo_note",
+        ] {
+            let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": kind,
+                "id": "memo-1",
+                "note_id": "note-1",
+                "title": "Note",
+                "body": "Body",
+                "pinned": false
+            }));
+            assert!(
+                event.is_err(),
+                "removed Memo frontend event `{kind}` must not deserialize"
+            );
+        }
     }
 
     #[test]

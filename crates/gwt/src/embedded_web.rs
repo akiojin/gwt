@@ -879,7 +879,6 @@ mod tests {
             "File Tree",
             "Branches",
             "Settings",
-            "Memo",
             "Profile",
             "Logs",
             "Issue",
@@ -1125,7 +1124,7 @@ mod tests {
         let branches_block = html
             .split("if (surface === \"branches\")")
             .nth(1)
-            .and_then(|tail| tail.split("if (surface === \"memo\")").next())
+            .and_then(|tail| tail.split("if (surface === \"profile\")").next())
             .expect("branches render block");
 
         assert!(
@@ -1596,26 +1595,27 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_memo_surface_uses_repo_scoped_notes_contract() {
+    fn embedded_web_does_not_expose_removed_memo_surface() {
         let html = frontend_bundle_source();
 
         assert!(
-            html.contains("memo-root"),
-            "expected Memo root scaffold in embedded html",
+            !html.contains("data-preset=\"memo\""),
+            "Memo must not be offered from Add window",
         );
         assert!(
-            html.contains("load_memo"),
-            "expected Memo load event in embedded html",
+            !html.contains("memo-root"),
+            "Memo root scaffold should be removed from embedded html",
         );
         assert!(
-            html.contains("create_memo_note")
-                && html.contains("update_memo_note")
-                && html.contains("delete_memo_note"),
-            "expected Memo surface to expose create/update/delete note events",
+            !html.contains("load_memo")
+                && !html.contains("create_memo_note")
+                && !html.contains("update_memo_note")
+                && !html.contains("delete_memo_note"),
+            "Memo protocol events should be removed from the frontend bundle",
         );
         assert!(
-            html.contains("Pinned notes stay at the top of the repo-scoped list."),
-            "expected Memo surface to explain the repo-scoped pin ordering contract",
+            !html.contains("memoSurface,"),
+            "frontend unit registry should not expose a removed Memo surface",
         );
     }
 
@@ -1811,12 +1811,11 @@ mod tests {
                 && html.contains("terminalHost,")
                 && html.contains("launchWizardSurface,")
                 && html.contains("branchesFileTreeSurface,")
-                && html.contains("memoSurface,")
                 && html.contains("profileSurface,")
                 && html.contains("boardSurface,")
                 && html.contains("logsSurface,")
                 && html.contains("knowledgeSettingsSurface,"),
-            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Memo, Profile, Board, Logs, and knowledge/settings surfaces",
+            "expected frontend unit registry to expose the extracted transport, workspace, terminal, wizard, tree, Profile, Board, Logs, and knowledge/settings surfaces",
         );
         assert!(
             !html.contains("window.__POC__"),
@@ -1930,7 +1929,7 @@ mod tests {
     /// - `.surface-* .titlebar` — the chrome at the top of the window
     /// - `.surface-* .window-body` — the panel content surface
     ///
-    /// `.surface-memo`, `.surface-profile`, and `.surface-knowledge` had been
+    /// `.surface-profile`, and `.surface-knowledge` had been
     /// missing from one or more of these rules, which left those panels
     /// partially transparent and visually distinct from the rest.
     #[test]
@@ -1944,7 +1943,6 @@ mod tests {
             ".surface-logs",
             ".surface-knowledge",
             ".surface-mock",
-            ".surface-memo",
             ".surface-profile",
         ];
 
@@ -2041,7 +2039,7 @@ mod tests {
     /// SPEC-2008 FR-034: every panel surface must adopt the shared layout
     /// primitives in its rendered HTML so paddings, scrollbars, and splits
     /// stay in lockstep. The toolbar misnomer `.knowledge-toolbar` (which was
-    /// reused by Memo/Profile/Logs/Board as the generic toolbar block) is
+    /// reused by Profile/Logs/Board as the generic toolbar block) is
     /// retired in favour of `.workspace-toolbar`. Stacked toolbars (multi-row
     /// content with search and filter chips) opt into the
     /// `.workspace-toolbar.is-stacked` modifier rather than carrying a
@@ -2065,8 +2063,8 @@ mod tests {
         // layered alongside (e.g. `.branch-toolbar`).
         let toolbar_count = js.matches("class=\"workspace-toolbar").count();
         assert!(
-            toolbar_count >= 7,
-            "expected at least 7 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
+            toolbar_count >= 6,
+            "expected at least 6 panel surfaces to mount with the `.workspace-toolbar` primitive, found {toolbar_count}",
         );
 
         // Stacked modifier replaces the old `.knowledge-toolbar` override.
@@ -2077,7 +2075,6 @@ mod tests {
 
         let split_adopters = [
             "knowledge-split workspace-split",
-            "memo-layout workspace-split",
             "profile-layout workspace-split",
             "logs-layout workspace-split",
         ];
@@ -2190,7 +2187,6 @@ mod tests {
             (WindowSurface::Terminal, "terminal"),
             (WindowSurface::FileTree, "file-tree"),
             (WindowSurface::Branches, "branches"),
-            (WindowSurface::Memo, "memo"),
             (WindowSurface::Profile, "profile"),
             (WindowSurface::Board, "board"),
             (WindowSurface::Logs, "logs"),
