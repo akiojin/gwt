@@ -47,6 +47,7 @@ pub enum ProjectIndexStatusState {
     Skipped,
     Error,
     RepairRequired,
+    Repairing,
 }
 
 impl ProjectIndexStatusState {
@@ -56,6 +57,7 @@ impl ProjectIndexStatusState {
             Self::Skipped => "skipped",
             Self::Error => "error",
             Self::RepairRequired => "repair_required",
+            Self::Repairing => "repairing",
         }
     }
 }
@@ -66,19 +68,37 @@ impl fmt::Display for ProjectIndexStatusState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RebuildProgress {
+    pub scopes_done: u32,
+    pub scopes_total: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectIndexStatusView {
     pub state: ProjectIndexStatusState,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<RebuildProgress>,
+}
+
+impl ProjectIndexStatusView {
+    pub fn new(state: ProjectIndexStatusState, detail: impl Into<String>) -> Self {
+        Self {
+            state,
+            detail: detail.into(),
+            repair_started_at: None,
+            progress: None,
+        }
+    }
 }
 
 pub fn project_index_status_for_path(project_root: &Path) -> ProjectIndexStatusView {
     match project_index_status_for_path_inner(project_root) {
         Ok(status) => status,
-        Err(error) => ProjectIndexStatusView {
-            state: ProjectIndexStatusState::Error,
-            detail: error,
-        },
+        Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
     }
 }
 
@@ -86,16 +106,16 @@ fn project_index_status_for_path_inner(
     project_root: &Path,
 ) -> Result<ProjectIndexStatusView, String> {
     let Some(repo_root) = resolve_git_worktree_root(project_root) else {
-        return Ok(ProjectIndexStatusView {
-            state: ProjectIndexStatusState::Skipped,
-            detail: "No git worktree detected".to_string(),
-        });
+        return Ok(ProjectIndexStatusView::new(
+            ProjectIndexStatusState::Skipped,
+            "No git worktree detected",
+        ));
     };
     let Some(repo_hash) = detect_repo_hash(&repo_root) else {
-        return Ok(ProjectIndexStatusView {
-            state: ProjectIndexStatusState::Skipped,
-            detail: "No origin remote configured".to_string(),
-        });
+        return Ok(ProjectIndexStatusView::new(
+            ProjectIndexStatusState::Skipped,
+            "No origin remote configured",
+        ));
     };
     let worktree_hash =
         compute_worktree_hash(&repo_root).map_err(|err| format!("compute worktree hash: {err}"))?;
@@ -131,10 +151,10 @@ fn project_index_status_for_path_inner(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Ok(ProjectIndexStatusView {
-            state: ProjectIndexStatusState::Error,
-            detail: format!("runner exit {}: {detail}", output.status),
-        });
+        return Ok(ProjectIndexStatusView::new(
+            ProjectIndexStatusState::Error,
+            format!("runner exit {}: {detail}", output.status),
+        ));
     }
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|err| format!("parse project index status: {err}"))?;
@@ -154,15 +174,15 @@ fn project_index_status_for_path_inner(
         })
         .unwrap_or(0);
     if unhealthy == 0 {
-        Ok(ProjectIndexStatusView {
-            state: ProjectIndexStatusState::Ready,
-            detail: format!("Runtime ready; asset {}", report.runner_hash),
-        })
+        Ok(ProjectIndexStatusView::new(
+            ProjectIndexStatusState::Ready,
+            format!("Runtime ready; asset {}", report.runner_hash),
+        ))
     } else {
-        Ok(ProjectIndexStatusView {
-            state: ProjectIndexStatusState::RepairRequired,
-            detail: format!("{unhealthy} index scope(s) require repair"),
-        })
+        Ok(ProjectIndexStatusView::new(
+            ProjectIndexStatusState::RepairRequired,
+            format!("{unhealthy} index scope(s) require repair"),
+        ))
     }
 }
 
@@ -298,14 +318,95 @@ mod tests {
 
     #[test]
     fn project_index_status_state_serializes_stable_protocol_values() {
-        let status = ProjectIndexStatusView {
-            state: ProjectIndexStatusState::RepairRequired,
-            detail: "1 scope requires repair".to_string(),
-        };
+        let status = ProjectIndexStatusView::new(
+            ProjectIndexStatusState::RepairRequired,
+            "1 scope requires repair",
+        );
 
         let payload = serde_json::to_value(status).expect("serialize status");
 
         assert_eq!(payload["state"], "repair_required");
         assert_eq!(payload["detail"], "1 scope requires repair");
+    }
+
+    #[test]
+    fn project_index_status_state_serializes_repairing_variant() {
+        let status = ProjectIndexStatusView::new(
+            ProjectIndexStatusState::Repairing,
+            "rebuilding 1/4: issues",
+        );
+
+        let payload = serde_json::to_value(&status).expect("serialize status");
+
+        assert_eq!(payload["state"], "repairing");
+        assert_eq!(payload["detail"], "rebuilding 1/4: issues");
+        assert_eq!(ProjectIndexStatusState::Repairing.as_str(), "repairing");
+        assert_eq!(
+            format!("{}", ProjectIndexStatusState::Repairing),
+            "repairing"
+        );
+    }
+
+    #[test]
+    fn project_index_status_view_omits_repair_progress_when_absent() {
+        let view = ProjectIndexStatusView {
+            state: ProjectIndexStatusState::Ready,
+            detail: "Runtime ready".to_string(),
+            repair_started_at: None,
+            progress: None,
+        };
+
+        let payload = serde_json::to_value(&view).expect("serialize ready view");
+
+        assert_eq!(payload["state"], "ready");
+        assert!(
+            payload.get("repair_started_at").is_none(),
+            "repair_started_at should be omitted when None: {payload:?}"
+        );
+        assert!(
+            payload.get("progress").is_none(),
+            "progress should be omitted when None: {payload:?}"
+        );
+    }
+
+    #[test]
+    fn project_index_status_view_emits_repair_progress_when_present() {
+        let started = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            chrono::NaiveDateTime::parse_from_str("2026-05-07T01:23:45", "%Y-%m-%dT%H:%M:%S")
+                .expect("parse fixed timestamp"),
+            chrono::Utc,
+        );
+        let view = ProjectIndexStatusView {
+            state: ProjectIndexStatusState::Repairing,
+            detail: "rebuilding 1/4: issues".to_string(),
+            repair_started_at: Some(started),
+            progress: Some(RebuildProgress {
+                scopes_done: 1,
+                scopes_total: 4,
+            }),
+        };
+
+        let payload = serde_json::to_value(&view).expect("serialize repairing view");
+
+        assert_eq!(payload["state"], "repairing");
+        assert_eq!(payload["repair_started_at"], "2026-05-07T01:23:45Z");
+        assert_eq!(payload["progress"]["scopes_done"], 1);
+        assert_eq!(payload["progress"]["scopes_total"], 4);
+    }
+
+    #[test]
+    fn project_index_status_state_variant_set_is_complete() {
+        let variants = [
+            ProjectIndexStatusState::Ready,
+            ProjectIndexStatusState::Skipped,
+            ProjectIndexStatusState::Error,
+            ProjectIndexStatusState::RepairRequired,
+            ProjectIndexStatusState::Repairing,
+        ];
+        let serialized: Vec<&'static str> = variants.iter().map(|state| state.as_str()).collect();
+        assert_eq!(
+            serialized,
+            vec!["ready", "skipped", "error", "repair_required", "repairing",]
+        );
     }
 }
