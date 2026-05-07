@@ -30,6 +30,7 @@ pub mod hook;
 mod index;
 mod issue;
 mod issue_spec;
+mod pane;
 mod plan;
 mod pr;
 mod skill_state_runtime;
@@ -127,7 +128,7 @@ pub struct PrEditCall {
 }
 
 /// Top-level argv parse result for the CLI. SPEC-1942 FR-088〜092: each top
-/// verb maps to one family-typed inner enum, so the parent enum stays at 10
+/// verb maps to one family-typed inner enum, so the parent enum stays compact
 /// variants and dispatch becomes a nested match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -155,6 +156,8 @@ pub enum CliCommand {
     Daemon(DaemonCommand),
     /// `gwtd workspace ...` — Workspace projection and summary updates.
     Workspace(WorkspaceCommand),
+    /// `gwtd pane ...` — inspect and control live agent panes.
+    Pane(PaneCommand),
 }
 
 /// SPEC-2077 family enum for `gwtd daemon ...`.
@@ -356,6 +359,18 @@ pub type PlanCommand = SkillStateAction;
 /// SPEC-1942 family enum for `gwtd build ...`. Backed by [`SkillStateAction`].
 pub type BuildCommand = SkillStateAction;
 
+/// SPEC-1935 / Issue #2529: canonical CLI surface for `gwt-agent` pane
+/// inspection and lifecycle operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneCommand {
+    /// `gwtd pane list`.
+    List,
+    /// `gwtd pane read <id> [--lines <n>]`.
+    Read { id: String, lines: usize },
+    /// `gwtd pane close <id>` / `gwtd pane stop <id>`.
+    Close { id: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexScope {
     All,
@@ -397,7 +412,7 @@ impl std::fmt::Display for CliParseError {
         match self {
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd workspace update [--title-summary <text>] [fields] | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
+                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* | gwtd workspace update [--title-summary <text>] [fields] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|files|files-docs]"
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -411,7 +426,7 @@ impl std::error::Error for CliParseError {}
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with
 /// a supported top-level CLI verb such as `issue`, `pr`, `actions`, `board`,
-/// `hook`, `discuss`, `plan`, `build`, `update`, or `__internal`. The GUI
+/// `hook`, `discuss`, `plan`, `build`, `pane`, `update`, or `__internal`. The GUI
 /// launcher keeps its legacy behaviour (positional repo path) for any other
 /// shape.
 pub fn should_dispatch_cli(args: &[String]) -> bool {
@@ -432,6 +447,7 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "build"
                     | "daemon"
                     | "workspace"
+                    | "pane"
             )
         })
         .unwrap_or(false)
@@ -472,6 +488,11 @@ pub fn parse_daemon_args(args: &[String]) -> Result<CliCommand, CliParseError> {
 /// Parse an argv slice into a `gwtd workspace ...` [`CliCommand`].
 pub fn parse_workspace_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     workspace::parse(args).map(CliCommand::Workspace)
+}
+
+/// Parse an argv slice into a `gwtd pane ...` [`CliCommand`].
+pub fn parse_pane_args(args: &[String]) -> Result<CliCommand, CliParseError> {
+    pane::parse(args).map(CliCommand::Pane)
 }
 
 fn expect_flag(arg: Option<&String>, expected: &'static str) -> Result<(), CliParseError> {
@@ -635,6 +656,7 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         }
         CliCommand::Daemon(inner) => daemon::run(env, inner, &mut out)?,
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
+        CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
     };
     let _ = env.stdout().write_all(out.as_bytes());
     Ok(code)
@@ -864,7 +886,7 @@ mod tests {
     fn cli_command_family_split_round_trip_parses() {
         use crate::cli::{
             ActionsCommand, BoardCommand, CliCommand, DiscussCommand, HookCommand, IndexCommand,
-            IssueCommand, PrCommand, UpdateCommand, WorkspaceCommand,
+            IssueCommand, PaneCommand, PrCommand, UpdateCommand, WorkspaceCommand,
         };
 
         fn s(value: &str) -> String {
@@ -1000,6 +1022,26 @@ mod tests {
                 agent_session: Some("session-1".to_string()),
                 current_focus: Some("Writing RED tests".to_string()),
                 title_summary: None,
+            })
+        );
+
+        // gwtd pane list / read / close
+        let cmd = parse_pane_args(&[s("list")]).expect("parse pane list");
+        assert_eq!(cmd, CliCommand::Pane(PaneCommand::List));
+        let cmd = parse_pane_args(&[s("read"), s("tab-1::agent-1"), s("--lines"), s("25")])
+            .expect("parse pane read");
+        assert_eq!(
+            cmd,
+            CliCommand::Pane(PaneCommand::Read {
+                id: "tab-1::agent-1".to_string(),
+                lines: 25,
+            })
+        );
+        let cmd = parse_pane_args(&[s("close"), s("tab-1::agent-1")]).expect("parse pane close");
+        assert_eq!(
+            cmd,
+            CliCommand::Pane(PaneCommand::Close {
+                id: "tab-1::agent-1".to_string(),
             })
         );
 
