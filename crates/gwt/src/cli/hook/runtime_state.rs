@@ -12,10 +12,13 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
-use gwt_agent::{persist_agent_session_id, PendingDiscussionResume, Session, GWT_SESSION_ID_ENV};
+use gwt_agent::{persist_agent_session_id, PendingDiscussionResume, Session};
 use serde::Serialize;
 
-use super::{HookError, HookSessionId, RawHookEvent};
+use super::{
+    resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookError, HookSessionId,
+    RawHookEvent,
+};
 use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
 
@@ -91,10 +94,17 @@ fn pending_discussion_for_session(
 }
 
 fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> {
-    let Some(session_id) = std::env::var_os(GWT_SESSION_ID_ENV) else {
+    let Some(session_id) = GwtSessionId::from_env() else {
         return Ok(None);
     };
-    let path = sessions_dir.join(format!("{}.toml", session_id.to_string_lossy()));
+    current_session_for_id(sessions_dir, &session_id)
+}
+
+fn current_session_for_id(
+    sessions_dir: &Path,
+    gwt_session_id: &GwtSessionId,
+) -> io::Result<Option<Session>> {
+    let path = sessions_dir.join(format!("{}.toml", gwt_session_id.as_str()));
     if !path.exists() {
         return Ok(None);
     }
@@ -103,44 +113,40 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
 
 fn sync_agent_session_id(
     sessions_dir: &Path,
-    gwt_session_id: Option<&str>,
+    gwt_session_id: &GwtSessionId,
     agent_session_id: &HookSessionId,
 ) -> io::Result<()> {
-    let Some(gwt_session_id) = gwt_session_id.map(str::trim).filter(|id| !id.is_empty()) else {
-        return Ok(());
-    };
-    persist_agent_session_id(sessions_dir, gwt_session_id, agent_session_id.as_str())
+    persist_agent_session_id(
+        sessions_dir,
+        gwt_session_id.as_str(),
+        agent_session_id.as_str(),
+    )
 }
 
 fn validated_hook_agent_session_id(
     event: &str,
-    gwt_session_id: Option<&str>,
+    gwt_session_id: &GwtSessionId,
     session: Option<&Session>,
     hook_event: Option<&RawHookEvent>,
 ) -> Result<Option<HookSessionId>, HookError> {
-    let agent_session_id = hook_event.and_then(RawHookEvent::session_id);
-
-    if agent_session_id.is_none() && session.map(is_codex_session).unwrap_or(false) {
-        log_missing_codex_hook_session_id(event, gwt_session_id, session, hook_event);
-        return Err(HookError::InvalidEvent(format!(
-            "missing session_id for Codex hook event {event}"
-        )));
+    match resolve_hook_agent_session_id(session, hook_event) {
+        HookAgentSessionId::Provided(session_id) => Ok(Some(session_id)),
+        HookAgentSessionId::MissingRequiredForCodex => {
+            log_missing_codex_hook_session_id(event, gwt_session_id, session, hook_event);
+            Err(HookError::InvalidEvent(format!(
+                "missing session_id for Codex hook event {event}"
+            )))
+        }
+        HookAgentSessionId::MissingOptional => Ok(None),
     }
-
-    Ok(agent_session_id)
-}
-
-fn is_codex_session(session: &Session) -> bool {
-    matches!(&session.agent_id, gwt_agent::AgentId::Codex)
 }
 
 fn log_missing_codex_hook_session_id(
     event: &str,
-    gwt_session_id: Option<&str>,
+    gwt_session_id: &GwtSessionId,
     session: Option<&Session>,
     hook_event: Option<&RawHookEvent>,
 ) {
-    let gwt_session_id = gwt_session_id.unwrap_or("-");
     let persisted_agent_session_id = session
         .and_then(|session| session.agent_session_id.as_deref())
         .map(str::trim)
@@ -148,7 +154,8 @@ fn log_missing_codex_hook_session_id(
         .unwrap_or("-");
     let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
     eprintln!(
-        "gwtd hook runtime-state: missing Codex hook session_id event={event} gwt_session_id={gwt_session_id} persisted_agent_session_id={persisted_agent_session_id} tool_name={tool_name}"
+        "gwtd hook runtime-state: missing Codex hook session_id event={event} gwt_session_id={} persisted_agent_session_id={persisted_agent_session_id} tool_name={tool_name}",
+        gwt_session_id.as_str()
     );
 }
 
@@ -178,16 +185,16 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
         RawHookEvent::read_from_str(input)?
     };
     let sessions_dir = sessions_dir_for_current_runtime();
-    let gwt_session_id = std::env::var(GWT_SESSION_ID_ENV).ok();
-    let session = current_session_from_env(&sessions_dir)?;
+    let gwt_session_id = GwtSessionId::required_from_env(event)?;
+    let session = current_session_for_id(&sessions_dir, &gwt_session_id)?;
     let agent_session_id = validated_hook_agent_session_id(
         event,
-        gwt_session_id.as_deref(),
+        &gwt_session_id,
         session.as_ref(),
         hook_event.as_ref(),
     )?;
     if let Some(agent_session_id) = agent_session_id.as_ref() {
-        sync_agent_session_id(&sessions_dir, gwt_session_id.as_deref(), agent_session_id)?;
+        sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)?;
     }
 
     let Some(path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
@@ -208,7 +215,7 @@ fn sessions_dir_for_current_runtime() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use gwt_agent::{AgentId, Session};
+    use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::coordination::{coordination_events_segments_dir, load_snapshot};
     use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
@@ -238,6 +245,13 @@ mod tests {
                 self.saved.push((key, std::env::var_os(key)));
             }
             std::env::set_var(key, value.into());
+        }
+
+        fn unset(&mut self, key: &'static str) {
+            if !self.saved.iter().any(|(saved, _)| *saved == key) {
+                self.saved.push((key, std::env::var_os(key)));
+            }
+            std::env::remove_var(key);
         }
     }
 
@@ -387,18 +401,22 @@ mod tests {
 
     #[test]
     fn sync_agent_session_id_persists_value_into_session_toml() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join(".gwt").join("sessions");
         let session = Session::new(dir.path(), "feature/demo", AgentId::Codex);
         let session_id = session.id.clone();
         session.save(&sessions_dir).unwrap();
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        let gwt_session_id = GwtSessionId::from_env().unwrap();
 
         let agent_session_id = RawHookEvent::read_from_str(r#"{"session_id":"agent-123"}"#)
             .unwrap()
             .unwrap()
             .session_id()
             .unwrap();
-        sync_agent_session_id(&sessions_dir, Some(&session_id), &agent_session_id).unwrap();
+        sync_agent_session_id(&sessions_dir, &gwt_session_id, &agent_session_id).unwrap();
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
@@ -417,9 +435,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .session_id();
-        if let Some(agent_session_id) = parsed.as_ref() {
-            sync_agent_session_id(&sessions_dir, Some(&session_id), agent_session_id).unwrap();
-        }
+        assert!(parsed.is_none());
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-existing"));
@@ -490,6 +506,34 @@ mod tests {
             }
             other => panic!("expected InvalidEvent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn managed_runtime_state_rejects_missing_gwt_session_id() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "missing-gwt-session");
+        env.unset(GWT_SESSION_ID_ENV);
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        let err = handle_with_input("PreToolUse", r#"{"session_id":"agent-123"}"#)
+            .expect_err("managed hooks must include GWT_SESSION_ID");
+
+        match err {
+            HookError::InvalidEvent(message) => {
+                assert!(message.contains("missing GWT_SESSION_ID"), "{message}");
+            }
+            other => panic!("expected InvalidEvent, got {other:?}"),
+        }
+        assert!(
+            !runtime_path.exists(),
+            "invalid managed identity must not write state"
+        );
     }
 
     #[test]

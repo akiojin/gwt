@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod forward;
+mod identity;
 pub mod runtime_state;
 pub mod segments;
 pub mod skill_build_spec_stop_check;
@@ -35,6 +36,9 @@ use std::io::{self, Read};
 use serde::Deserialize;
 
 pub use envelope::{HookOutput, IntentBoundaryEvent};
+pub(crate) use identity::{
+    resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookSessionId, RawHookEvent,
+};
 
 /// Every hook name exposed via `gwtd hook <name>`.
 ///
@@ -109,70 +113,6 @@ impl HookEvent {
     /// Convenience accessor for `tool_input.command` (Bash tool payloads).
     pub fn command(&self) -> Option<&str> {
         self.tool_input.as_ref()?.get("command")?.as_str()
-    }
-}
-
-/// Non-empty provider session id extracted from a raw hook payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HookSessionId(String);
-
-impl HookSessionId {
-    fn parse(value: Option<&str>) -> Option<Self> {
-        value
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(|id| Self(id.to_string()))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
-}
-
-/// Raw Claude Code / Codex hook payload. Fields are optional only at this
-/// boundary so malformed provider payloads can still be parsed and logged.
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RawHookEvent {
-    tool_name: Option<String>,
-    tool_input: Option<serde_json::Value>,
-    session_id: Option<String>,
-    transcript_path: Option<String>,
-    cwd: Option<String>,
-}
-
-impl RawHookEvent {
-    pub(crate) fn read_from_str(input: &str) -> Result<Option<Self>, HookError> {
-        if input.trim().is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(serde_json::from_str(input)?))
-    }
-
-    pub(crate) fn session_id(&self) -> Option<HookSessionId> {
-        HookSessionId::parse(self.session_id.as_deref())
-    }
-
-    pub(crate) fn tool_name(&self) -> Option<&str> {
-        self.tool_name.as_deref()
-    }
-
-    pub(crate) fn cwd(&self) -> Option<&str> {
-        self.cwd.as_deref()
-    }
-}
-
-impl From<RawHookEvent> for HookEvent {
-    fn from(raw: RawHookEvent) -> Self {
-        Self {
-            tool_name: raw.tool_name,
-            tool_input: raw.tool_input,
-            transcript_path: raw.transcript_path,
-            cwd: raw.cwd,
-        }
     }
 }
 
