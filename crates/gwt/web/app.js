@@ -1546,6 +1546,23 @@
         runtime.terminal.refresh(0, runtime.terminal.rows - 1);
       }
 
+      function scheduleTerminalFocusActivation(windowId) {
+        const runtime = terminalMap.get(windowId);
+        if (!runtime || runtime.activationFrame !== null) {
+          return;
+        }
+        runtime.activationFrame = requestAnimationFrame(() => {
+          runtime.activationFrame = null;
+          const activeRuntime = terminalMap.get(windowId);
+          if (!activeRuntime || !canRefreshTerminalViewport(windowId)) {
+            return;
+          }
+          fitTerminal(windowId, false);
+          scheduleTerminalViewportRefresh(windowId);
+          activeRuntime.terminal.focus();
+        });
+      }
+
       function sendGeometry(windowId, cols, rows) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -2316,7 +2333,13 @@
           });
           send({ kind: "terminal_input", id: windowId, data });
         });
-        const runtime = { terminal, fitAddon, cleanup, viewportRefreshFrame: null };
+        const runtime = {
+          terminal,
+          fitAddon,
+          cleanup,
+          viewportRefreshFrame: null,
+          activationFrame: null,
+        };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
         requestAnimationFrame(() => fitTerminal(windowId, true));
@@ -7399,6 +7422,9 @@
           if (runtime && runtime.viewportRefreshFrame !== null) {
             cancelAnimationFrame(runtime.viewportRefreshFrame);
           }
+          if (runtime && runtime.activationFrame !== null) {
+            cancelAnimationFrame(runtime.activationFrame);
+          }
           runtime?.cleanup?.();
           runtime?.terminal.dispose();
           terminalMap.delete(windowId);
@@ -7438,10 +7464,7 @@
         const topmostId = topmostWindowId(workspace);
         if (topmostId && ids.has(topmostId)) {
           focusWindowLocally(topmostId);
-          const runtime = terminalMap.get(topmostId);
-          if (runtime) {
-            runtime.terminal.focus();
-          }
+          scheduleTerminalFocusActivation(topmostId);
         } else {
           focusedId = null;
         }

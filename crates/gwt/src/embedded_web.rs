@@ -933,6 +933,32 @@ mod tests {
     }
 
     #[test]
+    fn embedded_web_programmatic_terminal_focus_reactivates_xterm_after_render() {
+        let js = app_js();
+        let render_activation = regex::Regex::new(
+            r#"(?s)const topmostId = topmostWindowId\(workspace\);.*?focusWindowLocally\(topmostId\);.*?scheduleTerminalFocusActivation\(topmostId\);"#,
+        )
+        .expect("valid regex");
+        let activation_helper = regex::Regex::new(
+            r#"(?s)function scheduleTerminalFocusActivation\(windowId\)\s*\{.*?requestAnimationFrame\(\(\) => \{.*?const activeRuntime = terminalMap\.get\(windowId\);.*?fitTerminal\(windowId,\s*false\);.*?scheduleTerminalViewportRefresh\(windowId\);.*?activeRuntime\.terminal\.focus\(\);"#,
+        )
+        .expect("valid regex");
+
+        assert!(
+            js.contains("function scheduleTerminalFocusActivation(windowId)"),
+            "expected a shared xterm activation helper for programmatic window focus",
+        );
+        assert!(
+            activation_helper.is_match(js),
+            "expected programmatic terminal activation to refit, refresh, and focus xterm after render",
+        );
+        assert!(
+            render_activation.is_match(js),
+            "expected workspace render to reactivate the topmost terminal for cycle focus, window list, command palette, and tab activation",
+        );
+    }
+
+    #[test]
     fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
         let html = frontend_bundle_source();
 
