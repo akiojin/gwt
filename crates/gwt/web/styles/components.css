@@ -711,6 +711,7 @@ body::after {
    / Windows) and add (+) groups are auto-hidden until pointer hover /
    keyboard focus / pointer tap on the peek 帯. */
 .op-window-controls-peek {
+  order: 2;
   width: 32px;
   height: 24px;
   border-radius: var(--radius-md);
@@ -1923,6 +1924,7 @@ kbd.op-kbd {
    until [data-op-window-controls="revealed"] is set by the hover-reveal state
    machine. Palette and Zoom controls remain in the toolbar regardless. */
 :root[data-theme] #floating-window-controls-actions {
+  order: 1;
   display: none;
 }
 
