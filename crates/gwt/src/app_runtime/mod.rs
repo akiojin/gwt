@@ -139,12 +139,13 @@ pub type AgentLaunchCompletion = (
     gwt_agent::AgentId,
     Option<u64>,
     Option<String>,
+    gwt_agent::LaunchRuntimeTarget,
+    String,
 );
 
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
 mod board;
-mod memory;
 mod migration;
 mod profile;
 mod window;
@@ -176,7 +177,152 @@ pub struct ActiveAgentSession {
     pub(crate) branch_name: String,
     pub(crate) display_name: String,
     pub(crate) worktree_path: PathBuf,
+    pub(crate) agent_project_root: String,
+    pub(crate) runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub(crate) tab_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImagePasteFile {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) storage_path: PathBuf,
+    pub(crate) agent_path: String,
+    pub(crate) prompt_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImagePasteError {
+    UnsupportedMimeType(String),
+    EmptyPayload,
+    InvalidBase64(String),
+    WriteFailed(String),
+}
+
+impl std::fmt::Display for ImagePasteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedMimeType(mime_type) => {
+                write!(formatter, "unsupported image MIME type: {mime_type}")
+            }
+            Self::EmptyPayload => formatter.write_str("image paste payload is empty"),
+            Self::InvalidBase64(error) => write!(formatter, "invalid image paste payload: {error}"),
+            Self::WriteFailed(error) => write!(formatter, "failed to save pasted image: {error}"),
+        }
+    }
+}
+
+const IMAGE_PASTE_RELATIVE_DIR: &str = ".gwt/paste-images";
+const IMAGE_PASTE_PROMPT_PREFIX: &str = "Image file: ";
+static IMAGE_PASTE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn image_extension_for_mime(mime_type: &str) -> Option<&'static str> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn sanitize_image_paste_stem(filename: Option<&str>) -> String {
+    let raw_stem = filename
+        .and_then(|name| Path::new(name).file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("image");
+    let mut sanitized = String::new();
+    let mut previous_dash = false;
+    for character in raw_stem.chars().flat_map(char::to_lowercase) {
+        if character.is_ascii_alphanumeric() {
+            sanitized.push(character);
+            previous_dash = false;
+        } else if !previous_dash {
+            sanitized.push('-');
+            previous_dash = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches('-');
+    if sanitized.is_empty() {
+        "image".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn join_agent_visible_path(agent_project_root: &str, relative_path: &str) -> String {
+    let root = agent_project_root.trim();
+    if root.is_empty() {
+        return relative_path.to_string();
+    }
+    if root.contains('\\') && !root.contains('/') {
+        format!(
+            "{}\\{}",
+            root.trim_end_matches('\\'),
+            relative_path.replace('/', "\\")
+        )
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), relative_path)
+    }
+}
+
+pub(crate) fn prepare_image_paste_file(
+    worktree_path: &Path,
+    agent_project_root: &str,
+    data_base64: &str,
+    mime_type: &str,
+    filename: Option<&str>,
+    unique_token: &str,
+) -> Result<ImagePasteFile, ImagePasteError> {
+    let extension = image_extension_for_mime(mime_type)
+        .ok_or_else(|| ImagePasteError::UnsupportedMimeType(mime_type.to_string()))?;
+    if data_base64.trim().is_empty() {
+        return Err(ImagePasteError::EmptyPayload);
+    }
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        data_base64.trim(),
+    )
+    .map_err(|error| ImagePasteError::InvalidBase64(error.to_string()))?;
+    if bytes.is_empty() {
+        return Err(ImagePasteError::EmptyPayload);
+    }
+
+    let stem = sanitize_image_paste_stem(filename);
+    let file_name = format!("{unique_token}-{stem}.{extension}");
+    let storage_path = worktree_path
+        .join(".gwt")
+        .join("paste-images")
+        .join(&file_name);
+    let relative_path = format!("{IMAGE_PASTE_RELATIVE_DIR}/{file_name}");
+    let agent_path = join_agent_visible_path(agent_project_root, &relative_path);
+    let prompt_text = format!("{IMAGE_PASTE_PROMPT_PREFIX}{agent_path}");
+
+    Ok(ImagePasteFile {
+        bytes,
+        storage_path,
+        agent_path,
+        prompt_text,
+    })
+}
+
+fn image_paste_unique_token() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let sequence = IMAGE_PASTE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{millis}-{sequence}")
+}
+
+fn save_image_paste_file(image: &ImagePasteFile) -> Result<(), ImagePasteError> {
+    let Some(parent) = image.storage_path.parent() else {
+        return Err(ImagePasteError::WriteFailed(
+            "pasted image path has no parent directory".to_string(),
+        ));
+    };
+    std::fs::create_dir_all(parent)
+        .map_err(|error| ImagePasteError::WriteFailed(error.to_string()))?;
+    std::fs::write(&image.storage_path, &image.bytes)
+        .map_err(|error| ImagePasteError::WriteFailed(error.to_string()))
 }
 
 #[derive(Debug, Clone)]
@@ -1127,6 +1273,12 @@ impl AppRuntime {
             } => self.update_window_geometry_events(&id, geometry, cols, rows),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
+            FrontendEvent::PasteImage {
+                id,
+                data_base64,
+                mime_type,
+                filename,
+            } => self.paste_image_events(&id, &data_base64, &mime_type, filename.as_deref()),
             FrontendEvent::LoadFileTree { id, path } => {
                 let path = path.unwrap_or_default();
                 vec![OutboundEvent::reply(
@@ -1142,7 +1294,6 @@ impl AppRuntime {
                 limit,
             } => self.load_board_history_events(&client_id, &id, before_entry_id.as_deref(), limit),
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
-            FrontendEvent::LoadMemo { id } => self.load_memo_events(&client_id, &id),
             FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
@@ -1240,22 +1391,6 @@ impl AppRuntime {
                     mentions,
                 },
             ),
-            FrontendEvent::CreateMemoNote {
-                id,
-                title,
-                body,
-                pinned,
-            } => self.create_memo_note_events(&client_id, &id, title, body, pinned),
-            FrontendEvent::UpdateMemoNote {
-                id,
-                note_id,
-                title,
-                body,
-                pinned,
-            } => self.update_memo_note_events(&client_id, &id, &note_id, title, body, pinned),
-            FrontendEvent::DeleteMemoNote { id, note_id } => {
-                self.delete_memo_note_events(&client_id, &id, &note_id)
-            }
             FrontendEvent::SelectProfile { id, profile_name } => {
                 self.select_profile_events(&client_id, &id, &profile_name)
             }
@@ -1830,6 +1965,67 @@ impl AppRuntime {
                 self.handle_runtime_status(id.to_string(), WindowProcessStatus::Error, Some(error))
             }
         }
+    }
+
+    pub(crate) fn paste_image_events(
+        &mut self,
+        id: &str,
+        data_base64: &str,
+        mime_type: &str,
+        filename: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            tracing::debug!(window_id = %id, "image paste dropped: window not found");
+            return Vec::new();
+        };
+        if self.tab(&address.tab_id).is_none() {
+            tracing::debug!(window_id = %id, "image paste dropped: project tab not found");
+            return Vec::new();
+        }
+        let Some(session) = self.active_agent_sessions.get(id) else {
+            tracing::debug!(window_id = %id, "image paste dropped: active agent session not found");
+            return Vec::new();
+        };
+        let worktree_path = session.worktree_path.clone();
+        let agent_project_root = session.agent_project_root.clone();
+        let runtime_target = session.runtime_target;
+
+        let image = match prepare_image_paste_file(
+            &worktree_path,
+            &agent_project_root,
+            data_base64,
+            mime_type,
+            filename,
+            &image_paste_unique_token(),
+        ) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::debug!(
+                    window_id = %id,
+                    mime_type,
+                    error = %error,
+                    "image paste dropped"
+                );
+                return Vec::new();
+            }
+        };
+
+        if let Err(error) = save_image_paste_file(&image) {
+            return self.handle_runtime_status(
+                id.to_string(),
+                WindowProcessStatus::Error,
+                Some(error.to_string()),
+            );
+        }
+
+        tracing::debug!(
+            window_id = %id,
+            runtime_target = ?runtime_target,
+            path = %image.storage_path.display(),
+            agent_path = %image.agent_path,
+            "saved pasted image"
+        );
+        self.terminal_input_events(id, &image.prompt_text)
     }
 
     pub(crate) fn load_file_tree_event(&self, id: &str, path: &str) -> BackendEvent {
@@ -3006,6 +3202,8 @@ impl AppRuntime {
                 agent_id,
                 linked_issue_number,
                 base_branch,
+                runtime_target,
+                agent_project_root,
             )) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
                     return self.launch_error_events(window_id, "Window not found".to_string());
@@ -3030,6 +3228,8 @@ impl AppRuntime {
                         branch_name,
                         display_name,
                         worktree_path: worktree_path.clone(),
+                        agent_project_root,
+                        runtime_target,
                         tab_id: tab_id.clone(),
                     },
                 );
@@ -3431,6 +3631,17 @@ impl AppRuntime {
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
             finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
+            let runtime_target = config.runtime_target;
+            let agent_project_root = if runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+                resolve_docker_launch_plan(&worktree_path, config.docker_service.as_deref())?
+                    .container_cwd
+            } else {
+                config
+                    .env_vars
+                    .get("GWT_PROJECT_ROOT")
+                    .cloned()
+                    .unwrap_or_else(|| worktree_path.display().to_string())
+            };
 
             session
                 .save(&sessions_dir)
@@ -3456,6 +3667,8 @@ impl AppRuntime {
                 agent_id,
                 config.linked_issue_number,
                 config.base_branch.clone(),
+                runtime_target,
+                agent_project_root,
             ))
         })();
 
@@ -3469,6 +3682,8 @@ impl AppRuntime {
                 agent_id,
                 linked_issue_number,
                 base_branch,
+                runtime_target,
+                agent_project_root,
             )) => {
                 dispatch_agent_launch_success(
                     proxy,
@@ -3482,6 +3697,8 @@ impl AppRuntime {
                         agent_id,
                         linked_issue_number,
                         base_branch,
+                        runtime_target,
+                        agent_project_root,
                     ),
                     |proxy, project_index_root| {
                         crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
@@ -4297,9 +4514,6 @@ mod tests {
             BoardMentionTargetKind,
         },
         logging::{current_log_file, LogEvent, LogLevel},
-        notes::{
-            create_note as create_memo_note, load_snapshot as load_memo_snapshot, MemoNoteDraft,
-        },
         paths::gwt_cache_dir,
         repo_hash::detect_repo_hash,
     };
@@ -4701,6 +4915,27 @@ exit 0
         }
     }
 
+    #[test]
+    fn app_runtime_rejects_removed_legacy_memo_window_creation() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.create_window_events(WindowPreset::Memo, canvas_bounds());
+
+        assert!(events.is_empty());
+        assert!(runtime.window_lookup.is_empty());
+        assert!(runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty());
+    }
+
     fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
         ActiveAgentSession {
             window_id: window_id.to_string(),
@@ -4709,8 +4944,198 @@ exit 0
             branch_name: "feature/test".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            agent_project_root: "E:/gwt/test-repo".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: tab_id.to_string(),
         }
+    }
+
+    #[test]
+    fn image_paste_prepare_uses_host_absolute_path_reference() {
+        let temp = tempdir().expect("tempdir");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"image-bytes");
+        let agent_root = temp.path().display().to_string();
+
+        let prepared = super::prepare_image_paste_file(
+            temp.path(),
+            &agent_root,
+            &payload,
+            "image/png",
+            Some("../Screen Shot.png"),
+            "20260507-160000",
+        )
+        .expect("prepare image paste");
+        let expected_path = temp
+            .path()
+            .join(".gwt")
+            .join("paste-images")
+            .join("20260507-160000-screen-shot.png");
+
+        assert_eq!(prepared.bytes, b"image-bytes");
+        assert_eq!(prepared.storage_path, expected_path);
+        assert_eq!(prepared.agent_path, expected_path.display().to_string());
+        assert_eq!(
+            prepared.prompt_text,
+            format!("Image file: {}", expected_path.display())
+        );
+    }
+
+    #[test]
+    fn image_paste_prepare_uses_docker_project_root_reference() {
+        let temp = tempdir().expect("tempdir");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"jpeg-bytes");
+
+        let prepared = super::prepare_image_paste_file(
+            temp.path(),
+            "/workspace/project",
+            &payload,
+            "image/jpeg",
+            Some("Clipboard Image"),
+            "20260507-160001",
+        )
+        .expect("prepare docker image paste");
+
+        assert_eq!(
+            prepared.storage_path,
+            temp.path()
+                .join(".gwt")
+                .join("paste-images")
+                .join("20260507-160001-clipboard-image.jpg")
+        );
+        assert_eq!(
+            prepared.agent_path,
+            "/workspace/project/.gwt/paste-images/20260507-160001-clipboard-image.jpg"
+        );
+        assert_eq!(
+            prepared.prompt_text,
+            "Image file: /workspace/project/.gwt/paste-images/20260507-160001-clipboard-image.jpg"
+        );
+    }
+
+    #[test]
+    fn image_paste_prepare_rejects_unsupported_mime_and_empty_payload() {
+        let temp = tempdir().expect("tempdir");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"gif-bytes");
+
+        let unsupported = super::prepare_image_paste_file(
+            temp.path(),
+            "/workspace/project",
+            &payload,
+            "image/gif",
+            Some("unsupported.gif"),
+            "20260507-160002",
+        );
+        assert!(matches!(
+            unsupported,
+            Err(super::ImagePasteError::UnsupportedMimeType(mime)) if mime == "image/gif"
+        ));
+
+        let empty = super::prepare_image_paste_file(
+            temp.path(),
+            "/workspace/project",
+            "",
+            "image/png",
+            None,
+            "20260507-160003",
+        );
+        assert!(matches!(empty, Err(super::ImagePasteError::EmptyPayload)));
+    }
+
+    #[test]
+    fn image_paste_event_saves_file_under_worktree() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "agent-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "feature/image-paste".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: worktree.clone(),
+                agent_project_root: worktree.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: tab_id.to_string(),
+            },
+        );
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"webp-bytes");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": window_id,
+            "data_base64": payload,
+            "mime_type": "image/webp",
+            "filename": "capture.webp"
+        }))
+        .expect("deserialize paste image event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        let paste_dir = worktree.join(".gwt").join("paste-images");
+        let files = fs::read_dir(&paste_dir)
+            .expect("read paste dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect paste files");
+        assert_eq!(files.len(), 1, "expected one saved image");
+        let saved_path = files[0].path();
+        assert_eq!(
+            saved_path.extension().and_then(|ext| ext.to_str()),
+            Some("webp")
+        );
+        assert_eq!(
+            fs::read(saved_path).expect("read saved image"),
+            b"webp-bytes"
+        );
+    }
+
+    #[test]
+    fn image_paste_event_ignores_non_agent_terminal_window() {
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let tab_id = "tab-1";
+        let raw_window_id = "shell-1";
+        let window_id = combined_window_id(tab_id, raw_window_id);
+        let tab = sample_project_tab_with_window_at(
+            tab_id,
+            raw_window_id,
+            worktree.clone(),
+            WindowPreset::Shell,
+            WindowProcessStatus::Running,
+        );
+        let (mut runtime, _events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"png-bytes");
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "paste_image",
+            "id": window_id,
+            "data_base64": payload,
+            "mime_type": "image/png",
+            "filename": "capture.png"
+        }))
+        .expect("deserialize paste image event");
+
+        let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+        assert!(events.is_empty());
+        assert!(
+            !worktree.join(".gwt").join("paste-images").exists(),
+            "non-agent terminal paste must not create image files"
+        );
     }
 
     fn runtime_hook_state(status: &str, session_id: &str) -> gwt::RuntimeHookEvent {
@@ -4888,6 +5313,8 @@ exit 0
             gwt_agent::AgentId::Codex,
             None,
             None,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            temp.path().display().to_string(),
         );
 
         dispatch_agent_launch_success(
@@ -5220,6 +5647,11 @@ exit 0
                 branch_name: "work/20260504-1234".to_string(),
                 display_name: "Codex".to_string(),
                 worktree_path: repo.join("../repo-work-20260504-1234"),
+                agent_project_root: repo
+                    .join("../repo-work-20260504-1234")
+                    .display()
+                    .to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );
@@ -5465,6 +5897,11 @@ exit 0
                 branch_name: "work/20260504-1234".to_string(),
                 display_name: "Codex".to_string(),
                 worktree_path: repo.join("../repo-work-20260504-1234"),
+                agent_project_root: repo
+                    .join("../repo-work-20260504-1234")
+                    .display()
+                    .to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );
@@ -5808,6 +6245,8 @@ exit 0
                 gwt_agent::AgentId::Codex,
                 None,
                 Some("origin/main".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                worktree.display().to_string(),
             )),
         );
 
@@ -5894,10 +6333,12 @@ exit 0
                 "session-1".to_string(),
                 "work/20260504-1234".to_string(),
                 "Codex 1".to_string(),
-                worktree_one,
+                worktree_one.clone(),
                 gwt_agent::AgentId::Codex,
                 None,
                 Some("origin/main".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                worktree_one.display().to_string(),
             )),
         );
         let second_events = runtime.handle_launch_complete(
@@ -5907,10 +6348,12 @@ exit 0
                 "session-2".to_string(),
                 "work/20260504-1235".to_string(),
                 "Codex 2".to_string(),
-                worktree_two,
+                worktree_two.clone(),
                 gwt_agent::AgentId::Codex,
                 None,
                 Some("origin/main".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                worktree_two.display().to_string(),
             )),
         );
 
@@ -6182,6 +6625,8 @@ exit 0
                 branch_name: "work/20260507-0200".to_string(),
                 display_name: "Codex".to_string(),
                 worktree_path: repo.join("work/20260507-0200"),
+                agent_project_root: repo.join("work/20260507-0200").display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );
@@ -6219,6 +6664,8 @@ exit 0
             branch_name: "work/20260506-1652".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: temp.path().join("work/20260506-1652"),
+            agent_project_root: temp.path().join("work/20260506-1652").display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: "tab-1".to_string(),
         };
         runtime
@@ -7223,55 +7670,6 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
-        let _env_lock = env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        create_memo_note(
-            &repo,
-            MemoNoteDraft::new("Pinned note", "Verify repo-scoped storage", true),
-        )
-        .expect("seed memo snapshot");
-        let tab = sample_project_tab_with_window_at(
-            "tab-1",
-            "memo-1",
-            repo,
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let window_id = combined_window_id("tab-1", "memo-1");
-
-        let events = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            FrontendEvent::LoadMemo {
-                id: window_id.clone(),
-            },
-        );
-
-        assert!(matches!(
-            &events[..],
-            [OutboundEvent {
-                target: DispatchTarget::Client(client_id),
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id,
-                },
-            }] if client_id == "client-1"
-                && id == &window_id
-                && notes.len() == 1
-                && notes[0].title == "Pinned note"
-                && selected_note_id.is_none()
-        ));
-    }
-
-    #[test]
     fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("profile-config.toml");
@@ -7418,139 +7816,6 @@ exit 0
                 && entries[0].message == "runtime stalled"
                 && matches!(entries[0].severity, LogLevel::Warn)
         ));
-    }
-
-    #[test]
-    fn app_runtime_create_memo_note_broadcasts_repo_scoped_snapshot_to_memo_windows() {
-        let _env_lock = env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        let mut persisted = empty_workspace_state();
-        persisted.windows.push(sample_window(
-            "memo-1",
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        ));
-        persisted.windows.push(sample_window(
-            "memo-2",
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        ));
-        persisted.next_z_index = 3;
-        let tab = ProjectTabRuntime {
-            id: "tab-1".to_string(),
-            title: "Repo".to_string(),
-            project_root: repo.clone(),
-            kind: ProjectKind::Git,
-            workspace: WorkspaceState::from_persisted(persisted),
-            migration_pending: false,
-        };
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let current_window_id = combined_window_id("tab-1", "memo-1");
-        let sibling_window_id = combined_window_id("tab-1", "memo-2");
-
-        let events = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            FrontendEvent::CreateMemoNote {
-                id: current_window_id.clone(),
-                title: String::new(),
-                body: String::new(),
-                pinned: false,
-            },
-        );
-
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id: Some(selected_note_id),
-                },
-            } if id == &current_window_id
-                && notes.len() == 1
-                && selected_note_id == &notes[0].id
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id: None,
-                },
-            } if id == &sibling_window_id && notes.len() == 1
-        )));
-
-        let snapshot = load_memo_snapshot(&repo).expect("load memo snapshot");
-        assert_eq!(snapshot.notes.len(), 1);
-    }
-
-    #[test]
-    fn app_runtime_update_memo_note_persists_repo_scoped_edits() {
-        let _env_lock = env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        let created = create_memo_note(&repo, MemoNoteDraft::new("Draft", "Initial note", false))
-            .expect("seed memo snapshot");
-        let tab = sample_project_tab_with_window_at(
-            "tab-1",
-            "memo-1",
-            repo.clone(),
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let window_id = combined_window_id("tab-1", "memo-1");
-
-        let events = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            FrontendEvent::UpdateMemoNote {
-                id: window_id.clone(),
-                note_id: created.id.clone(),
-                title: "Pinned note".to_string(),
-                body: "Updated note".to_string(),
-                pinned: true,
-            },
-        );
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id: Some(selected_note_id),
-                },
-            } if id == &window_id
-                && selected_note_id == &created.id
-                && notes.iter().any(|note|
-                    note.id == created.id
-                        && note.title == "Pinned note"
-                        && note.body == "Updated note"
-                        && note.pinned
-                )
-        )));
-
-        let snapshot = load_memo_snapshot(&repo).expect("load memo snapshot");
-        assert!(snapshot.notes.iter().any(|note| note.id == created.id
-            && note.title == "Pinned note"
-            && note.body == "Updated note"
-            && note.pinned));
     }
 
     #[test]
@@ -7798,6 +8063,8 @@ exit 0
             branch_name: "work/20260504-1234".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: worktree.clone(),
+            agent_project_root: worktree.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: "tab-1".to_string(),
         };
         runtime
@@ -7919,6 +8186,8 @@ exit 0
             branch_name: "work/20260504-1234".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: worktree.clone(),
+            agent_project_root: worktree.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: "tab-1".to_string(),
         };
         runtime
@@ -7995,6 +8264,8 @@ exit 0
             branch_name: "work/20260504-1234".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: worktree.clone(),
+            agent_project_root: worktree.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: "tab-1".to_string(),
         };
         runtime
@@ -8221,6 +8492,8 @@ exit 0
                 branch_name: "work/20260506-0736".to_string(),
                 display_name: "Codex".to_string(),
                 worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );
@@ -8233,6 +8506,8 @@ exit 0
                 branch_name: "work/20260506-0737".to_string(),
                 display_name: "Claude".to_string(),
                 worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );
@@ -8325,6 +8600,8 @@ exit 0
                 branch_name: "work/20260507-0227".to_string(),
                 display_name: "Codex".to_string(),
                 worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );
@@ -8414,6 +8691,8 @@ exit 0
                 branch_name: "work/20260507-0227".to_string(),
                 display_name: "Codex".to_string(),
                 worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 tab_id: "tab-1".to_string(),
             },
         );

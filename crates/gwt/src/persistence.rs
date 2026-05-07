@@ -231,6 +231,20 @@ pub fn pause_process_windows_for_restore(state: &mut PersistedWorkspaceState) {
     }
 }
 
+fn normalize_loaded_workspace_state(state: &mut PersistedWorkspaceState) {
+    state
+        .windows
+        .retain(|window| !window.preset.is_removed_legacy());
+    let next_z_index = state
+        .windows
+        .iter()
+        .map(|window| window.z_index)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    state.next_z_index = state.next_z_index.max(next_z_index);
+}
+
 fn default_persist_window() -> bool {
     true
 }
@@ -276,7 +290,9 @@ pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWorkspaceSt
         }
         Err(error) => return Err(error),
     };
-    serde_json::from_str(&content).map_err(Into::into)
+    let mut workspace: PersistedWorkspaceState = serde_json::from_str(&content)?;
+    normalize_loaded_workspace_state(&mut workspace);
+    Ok(workspace)
 }
 
 pub fn load_restored_workspace_state(
@@ -354,11 +370,12 @@ pub fn migrate_legacy_workspace_state(
         )
     };
 
-    for (project_root, workspace) in workspaces {
+    for (project_root, mut workspace) in workspaces {
         let path = workspace_state_path(&project_root);
         if path.exists() {
             continue;
         }
+        normalize_loaded_workspace_state(&mut workspace);
         save_workspace_state(&path, &workspace)?;
     }
 
@@ -573,6 +590,45 @@ mod tests {
         assert!(loaded.windows[0].agent_color.is_none());
         assert!(loaded.windows[0].tab_group_id.is_none());
         assert!(!loaded.windows[0].tab_group_active);
+    }
+
+    #[test]
+    fn load_workspace_state_drops_legacy_memo_windows_without_failing_restore() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "memo-1",
+      "title": "Memo",
+      "preset": "memo",
+      "geometry": { "x": 10.0, "y": 20.0, "width": 560.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "running",
+      "persist": true
+    },
+    {
+      "id": "board-1",
+      "title": "Board",
+      "preset": "board",
+      "geometry": { "x": 40.0, "y": 60.0, "width": 520.0, "height": 480.0 },
+      "z_index": 2,
+      "status": "running",
+      "persist": true
+    }
+  ],
+  "next_z_index": 3
+}"#,
+        )
+        .expect("legacy memo workspace write");
+
+        let loaded = load_workspace_state(&path).expect("legacy memo load should not fail");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "board-1");
+        assert_eq!(loaded.windows[0].preset, WindowPreset::Board);
+        assert_eq!(loaded.next_z_index, 3);
     }
 
     #[test]
