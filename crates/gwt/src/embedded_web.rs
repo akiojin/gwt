@@ -382,7 +382,11 @@ mod tests {
             "expected terminal viewport refresh to skip minimized windows",
         );
         assert!(
-            !html.contains("fitTerminal(windowId, false);"),
+            !html.contains(
+                "runtime.terminal.write(decoder.decode(decodeBase64(base64), { stream: true }), () => {\n          fitTerminal(windowId, false);"
+            ) && !html.contains(
+                "runtime.terminal.write(decoder.decode(decodeBase64(base64)), () => {\n          fitTerminal(windowId, false);"
+            ),
             "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
         assert!(
@@ -394,6 +398,33 @@ mod tests {
                 && html.contains("fitTerminal(windowData.id, shouldPersistTerminalGeometry)"),
             "expected terminals to persist fitted geometry to backend on \
              restore-from-minimized OR window resize (Tile/Stack/Align)",
+        );
+    }
+
+    #[test]
+    fn embedded_web_terminal_resize_coalesces_fit_and_restores_focus_on_release() {
+        let html = frontend_bundle_source();
+        let direct_pointermove_fit = regex::Regex::new(
+            r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
+        )
+        .expect("valid regex");
+        let release_resize_block = regex::Regex::new(
+            r"if \(resizeState && resizeState\.pointerId === event\.pointerId\) \{(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+        )
+        .expect("valid regex");
+
+        assert!(
+            html.contains("function scheduleTerminalResizeFit(windowId)")
+                && html.contains("function cancelTerminalResizeFit()"),
+            "expected terminal resize fits to be requestAnimationFrame-coalesced",
+        );
+        assert!(
+            !direct_pointermove_fit.is_match(html),
+            "expected pointermove resize to avoid direct terminal fit/geometry churn",
+        );
+        assert!(
+            release_resize_block.is_match(html),
+            "expected pointer release to cancel pending fit, sync once, and restore terminal focus",
         );
     }
 

@@ -1188,6 +1188,27 @@
         sendGeometry(windowId, runtime.terminal.cols, runtime.terminal.rows);
       }
 
+      function scheduleTerminalResizeFit(windowId) {
+        if (!resizeState || resizeState.id !== windowId || resizeState.fitFrame !== null) {
+          return;
+        }
+        resizeState.fitFrame = requestAnimationFrame(() => {
+          if (!resizeState || resizeState.id !== windowId) {
+            return;
+          }
+          resizeState.fitFrame = null;
+          fitTerminal(windowId, false);
+        });
+      }
+
+      function cancelTerminalResizeFit() {
+        if (!resizeState || resizeState.fitFrame === null) {
+          return;
+        }
+        cancelAnimationFrame(resizeState.fitFrame);
+        resizeState.fitFrame = null;
+      }
+
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
         if (
@@ -6705,6 +6726,7 @@
               startY: event.clientY,
               width: parseNumber(element.style.width),
               height: parseNumber(element.style.height),
+              fitFrame: null,
             };
             resizeHandle.setPointerCapture(event.pointerId);
           });
@@ -7692,7 +7714,7 @@
             resizeState.height + (event.clientY - resizeState.startY) / viewport.zoom,
             260,
           )}px`;
-          fitTerminal(resizeState.id, false);
+          scheduleTerminalResizeFit(resizeState.id);
         }
       });
 
@@ -7722,12 +7744,14 @@
 
         if (resizeState && resizeState.pointerId === event.pointerId) {
           const runtime = terminalMap.get(resizeState.id);
+          cancelTerminalResizeFit();
           fitTerminal(resizeState.id, false);
           sendGeometry(
             resizeState.id,
             runtime?.terminal.cols || 80,
             runtime?.terminal.rows || 24,
           );
+          runtime?.terminal.focus();
           resizeState = null;
         }
       });
