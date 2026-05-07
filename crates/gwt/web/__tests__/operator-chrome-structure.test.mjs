@@ -333,19 +333,27 @@ test("Branches remains a branch browser, not a planning workspace", () => {
   );
 });
 
-test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc plus the layout toggle", () => {
+test("hotkey overlay lists ⌘P/⌘B/⌘G/⌘L/⌘?/Esc (sidebar toggle hotkey is removed in Phase 9)", () => {
   const overlay = document.getElementById("op-hotkey-overlay");
   assert.ok(overlay, "hotkey overlay missing");
   const text = overlay.textContent.replace(/\s+/g, " ");
-  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "⌘ \\", "Esc"]) {
+  for (const phrase of ["⌘ P", "⌘ B", "⌘ G", "⌘ L", "⌘ K", "⌘ ?", "Esc"]) {
     assert.ok(text.includes(phrase), `expected ${phrase} in hotkey overlay`);
   }
+  // SPEC-2356 Phase 9 (FR-021/FR-032): the Layout group + "Toggle sidebar / ⌘\\"
+  // row are removed in favor of the hover-reveal peek 帯.
+  assert.ok(!text.includes("⌘ \\"), "Cmd+\\\\ must not appear in the hotkey overlay");
+  assert.ok(
+    !text.toLowerCase().includes("toggle sidebar"),
+    "Toggle sidebar row must not appear in the hotkey overlay",
+  );
   const groups = Array.from(overlay.querySelectorAll(".op-hotkey-card__group-title")).map((el) =>
     el.textContent?.trim().toLowerCase(),
   );
-  for (const expected of ["navigation", "layout", "help"]) {
+  for (const expected of ["navigation", "help"]) {
     assert.ok(groups.includes(expected), `expected hotkey overlay group "${expected}", got ${groups.join("/")}`);
   }
+  assert.ok(!groups.includes("layout"), "Layout group is removed in Phase 9");
 });
 
 test("head loads tokens, typography, components, and Operator modules", () => {
@@ -443,7 +451,10 @@ test("Command Palette trigger button declares aria-keyshortcuts", () => {
   assert.ok(shortcut.includes("Meta+P"), "trigger must declare Meta+P");
 });
 
-test("chrome visibility uses edge handles instead of Project Bar text toggles", () => {
+test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () => {
+  // SPEC-2356 Phase 9 (FR-021/FR-022): the chip-style toggles and Project Bar
+  // text toggles are removed; auto-hide chrome is summoned via the peek 帯
+  // (`.op-sidebar-peek` / `.op-window-controls-peek`).
   assert.equal(
     document.getElementById("op-sidebar-toggle"),
     null,
@@ -454,29 +465,43 @@ test("chrome visibility uses edge handles instead of Project Bar text toggles", 
     null,
     "Project Bar must not expose a WINDOWS text toggle",
   );
-
-  const sidebarToggle = document.getElementById("op-sidebar-edge-toggle");
-  const windowControlsToggle = document.getElementById("op-window-controls-edge-toggle");
-  assert.ok(sidebarToggle, "expected sidebar edge visibility handle");
-  assert.ok(windowControlsToggle, "expected bottom window controls edge visibility handle");
-  assert.equal(sidebarToggle.textContent.trim(), "<<");
-  assert.equal(windowControlsToggle.textContent.trim(), "vv");
-  assert.equal(sidebarToggle.getAttribute("aria-controls"), "op-sidebar");
   assert.equal(
-    windowControlsToggle.getAttribute("aria-controls"),
+    document.getElementById("op-sidebar-edge-toggle"),
+    null,
+    "<< chip toggle is removed in Phase 9",
+  );
+  assert.equal(
+    document.getElementById("op-window-controls-edge-toggle"),
+    null,
+    "vv chip toggle is removed in Phase 9",
+  );
+
+  const sidebarPeek = document.querySelector(".op-sidebar-peek");
+  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
+  assert.ok(sidebarPeek, "expected .op-sidebar-peek hover trigger");
+  assert.ok(windowControlsPeek, "expected .op-window-controls-peek hover trigger");
+  assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
+  assert.equal(
+    windowControlsPeek.getAttribute("aria-controls"),
     "floating-window-controls-primary floating-window-controls-add",
   );
-  assert.equal(sidebarToggle.getAttribute("aria-expanded"), "true");
-  assert.equal(windowControlsToggle.getAttribute("aria-expanded"), "true");
-  assert.match(sidebarToggle.getAttribute("aria-label") ?? "", /hide sidebar/i);
-  assert.match(windowControlsToggle.getAttribute("aria-label") ?? "", /hide window controls/i);
+  assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
+  assert.match(windowControlsPeek.getAttribute("aria-label") ?? "", /show window controls/i);
+  assert.equal(sidebarPeek.getAttribute("tabindex"), "0", "sidebar peek 帯 must be keyboard-focusable");
+  assert.equal(
+    windowControlsPeek.getAttribute("tabindex"),
+    "0",
+    "window controls peek 帯 must be keyboard-focusable",
+  );
+  assert.equal(sidebarPeek.getAttribute("role"), "button");
+  assert.equal(windowControlsPeek.getAttribute("role"), "button");
 });
 
-test("window controls edge handle targets only collapsible control groups", () => {
-  const windowControlsToggle = document.getElementById("op-window-controls-edge-toggle");
-  assert.ok(windowControlsToggle, "expected bottom window controls edge visibility handle");
+test("window controls peek 帯 targets only collapsible control groups", () => {
+  const windowControlsPeek = document.querySelector(".op-window-controls-peek");
+  assert.ok(windowControlsPeek, "expected window controls peek 帯");
 
-  const controlledIds = (windowControlsToggle.getAttribute("aria-controls") ?? "")
+  const controlledIds = (windowControlsPeek.getAttribute("aria-controls") ?? "")
     .split(/\s+/)
     .filter(Boolean);
   assert.deepEqual(controlledIds, [
@@ -639,19 +664,25 @@ test("xterm developer readability defaults use larger font metrics", () => {
   assert.ok(terminalOptionNumber("lineHeight") >= 1.25, "xterm lineHeight must be at least 1.25");
 });
 
-test("operator-shell wires sidebar collapse hotkey and Mission Briefing early dismiss", () => {
+test("operator-shell wires hover-reveal chrome and Mission Briefing early dismiss", () => {
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  // The source contains `cmd+\\\\` (escaped backslash in JS source).
+  // SPEC-2356 Phase 9 (FR-021/FR-022/FR-031): hover-reveal state machine sets
+  // root.dataset.opSidebar = "revealed" / opWindowControls = "revealed" rather
+  // than "collapsed", and Cmd+\\ hotkey is removed.
   assert.ok(
-    operatorShell.includes('hotkey.register("cmd+\\\\"'),
-    "expected Cmd+backslash hotkey registration for sidebar collapse",
+    !operatorShell.includes('hotkey.register("cmd+\\\\"'),
+    "Cmd+backslash hotkey must be removed in Phase 9",
+  );
+  assert.doesNotMatch(
+    operatorShell,
+    /toggleSidebar\s*:/,
+    "Phase 9 hover-reveal controller must not expose a toggleSidebar entrypoint",
   );
   assert.match(
     operatorShell,
-    /toggleSidebar/,
-    "expected Cmd+backslash to route through the persistent sidebar visibility controller",
+    /root\.dataset\[datasetKey\]\s*=\s*"revealed"/,
+    "expected hover-reveal state machine to write data-op-* = \"revealed\"",
   );
-  assert.match(operatorShell, /root\.dataset\.opSidebar\s*=\s*"collapsed"/);
   assert.match(
     operatorShell,
     /earlyDismiss/,
@@ -672,13 +703,25 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
   );
 });
 
-test("components.css hides only marked floating window controls", () => {
+test("components.css hover-reveals only the marked floating window control groups", () => {
+  // SPEC-2356 Phase 9 (FR-022): primary + add groups auto-hide by default and
+  // are revealed only when [data-op-window-controls="revealed"] is set.
+  // Palette and Zoom controls remain in the toolbar regardless.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+#floating-window-controls-primary/);
-  assert.match(css, /\[data-op-window-controls="hidden"\][\s\S]+#floating-window-controls-add/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+\.floating-actions \[data-window-control="true"\]/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#op-palette-button/);
-  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\][\s\S]+#zoom-reset-button/);
+  assert.match(css, /#floating-window-controls-primary[\s\S]*?display:\s*none/);
+  assert.match(
+    css,
+    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-primary[\s\S]*?display:\s*flex/,
+  );
+  assert.match(
+    css,
+    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-add[\s\S]*?display:\s*flex/,
+  );
+  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#op-palette-button/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#zoom-reset-button/);
+  assert.doesNotMatch(css, /\[data-op-window-controls="hidden"\]/);
+  assert.match(css, /\.op-window-controls-peek\s*\{/);
+  assert.match(css, /\.op-sidebar-peek\s*\{/);
 });
 
 test("floating actions expose Align without resizing windows", () => {
@@ -692,16 +735,23 @@ test("floating actions expose Align without resizing windows", () => {
   );
 });
 
-test("operator-shell persists sidebar and window controls visibility independently", () => {
+test("operator-shell migrates legacy chrome keys and wires hover-reveal independently", () => {
+  // SPEC-2356 Phase 9 (FR-032): legacy localStorage keys are removed on boot
+  // and the chip-style toggles (and their Project Bar text counterparts) must
+  // not be referenced anywhere in operator-shell.
   const operatorShell = readFileSync(resolve(here, "../operator-shell.js"), "utf8");
-  assert.match(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
-  assert.match(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
-  assert.match(operatorShell, /opWindowControls/);
-  assert.match(operatorShell, /window-controls-changed/);
-  assert.match(operatorShell, /op-sidebar-edge-toggle/);
-  assert.match(operatorShell, /op-window-controls-edge-toggle/);
+  assert.doesNotMatch(operatorShell, /SIDEBAR_COLLAPSED_KEY\s*=\s*"gwt:ui:sidebar-collapsed"/);
+  assert.doesNotMatch(operatorShell, /WINDOW_CONTROLS_KEY\s*=\s*"gwt:ui:window-controls"/);
+  assert.doesNotMatch(operatorShell, /op-sidebar-edge-toggle/);
+  assert.doesNotMatch(operatorShell, /op-window-controls-edge-toggle/);
   assert.doesNotMatch(operatorShell, /op-sidebar-toggle/);
   assert.doesNotMatch(operatorShell, /op-window-controls-toggle/);
+  assert.match(operatorShell, /removeItem\("gwt:ui:sidebar-collapsed"\)/);
+  assert.match(operatorShell, /removeItem\("gwt:ui:window-controls"\)/);
+  assert.match(operatorShell, /op:chrome-visibility-changed/);
+  assert.match(operatorShell, /op:window-controls-changed/);
+  assert.match(operatorShell, /\.op-sidebar-peek/);
+  assert.match(operatorShell, /\.op-window-controls-peek/);
 });
 
 test("components.css declares Status Strip BLOCKED pulse + live indicator", () => {
