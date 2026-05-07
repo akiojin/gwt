@@ -471,7 +471,6 @@
       .workspace-window.surface-logs,
       .workspace-window.surface-mock,
       .workspace-window.surface-knowledge,
-      .workspace-window.surface-memo,
       .workspace-window.surface-profile {
         background: var(--color-surface);
       }
@@ -500,7 +499,6 @@
       .surface-logs .titlebar,
       .surface-mock .titlebar,
       .surface-knowledge .titlebar,
-      .surface-memo .titlebar,
       .surface-profile .titlebar {
         background: var(--color-surface-elevated);
         color: var(--color-text);
@@ -566,6 +564,10 @@
         font-family: var(--font-mono);
         font-size: var(--type-xs);
         letter-spacing: var(--tracking-mono);
+      }
+
+      .status-chip[hidden] {
+        display: none;
       }
 
       .surface-terminal .status-chip {
@@ -657,6 +659,30 @@
           0 0 0 2px var(--color-focus-ring);
       }
 
+      .workspace-window.dock-target {
+        outline: 2px solid var(--color-state-active);
+        outline-offset: 3px;
+        box-shadow:
+          0 0 0 5px color-mix(in oklab, var(--color-state-active) 20%, transparent),
+          var(--shadow-window);
+      }
+
+      .workspace-window.dock-target .titlebar {
+        position: relative;
+      }
+
+      .workspace-window.dock-target .titlebar::after {
+        content: "";
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: -2px;
+        height: 3px;
+        border-radius: 999px;
+        background: var(--color-state-active);
+        box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, transparent);
+      }
+
       .window-tab-strip {
         display: none;
         align-items: center;
@@ -666,6 +692,20 @@
         border-bottom: 1px solid var(--color-border);
         background: var(--color-surface);
         overflow-x: auto;
+      }
+
+      .workspace-window.dock-target .window-tab-strip {
+        position: relative;
+      }
+
+      .workspace-window.dock-target .window-tab-strip::before {
+        content: "";
+        flex: 0 0 3px;
+        align-self: stretch;
+        margin: 5px 2px 5px 0;
+        border-radius: 999px;
+        background: var(--color-state-active);
+        box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, transparent);
       }
 
       .workspace-window.tabbed .window-tab-strip {
@@ -743,7 +783,6 @@
       .surface-logs .window-body,
       .surface-knowledge .window-body,
       .surface-mock .window-body,
-      .surface-memo .window-body,
       .surface-profile .window-body {
         background: var(--color-surface);
       }
@@ -1231,159 +1270,6 @@
         color: var(--color-text);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
-      }
-
-      .memo-layout {
-        flex: 1;
-        min-height: 0;
-        display: grid;
-        grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.1fr);
-      }
-
-      .memo-note-list,
-      .memo-editor-pane {
-        min-width: 0;
-        min-height: 0;
-      }
-
-      .memo-note-list {
-        overflow: auto;
-        padding: 8px 0;
-        border-right: 1px solid var(--color-border);
-      }
-
-      .memo-editor-pane {
-        overflow: auto;
-        padding: 12px;
-        display: grid;
-        align-content: start;
-        gap: 10px;
-      }
-
-      .memo-status {
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-text-muted);
-      }
-
-      .memo-status.info {
-        color: var(--color-state-active);
-      }
-
-      .memo-status.error {
-        color: var(--color-state-blocked);
-      }
-
-      .memo-note-row {
-        display: grid;
-        gap: 6px;
-        width: 100%;
-        padding: 12px;
-        border: none;
-        border-bottom: 1px solid var(--color-border);
-        background: transparent;
-        color: var(--color-text);
-        text-align: left;
-        cursor: pointer;
-      }
-
-      .memo-note-row:hover {
-        background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
-      }
-
-      .memo-note-row.selected {
-        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-      }
-
-      .memo-note-header,
-      .memo-editor-controls {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .memo-note-title {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-family: var(--font-body);
-        font-size: var(--type-sm);
-        font-weight: 600;
-        color: var(--color-text-strong);
-      }
-
-      .memo-note-chip {
-        padding: 4px 8px;
-        border-radius: var(--radius-pill);
-        background: color-mix(in oklab, var(--agent-claude) 18%, transparent);
-        color: var(--agent-claude);
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-      }
-
-      .memo-note-time,
-      .memo-note-preview,
-      .memo-empty-copy,
-      .memo-editor-meta,
-      .memo-pin-toggle {
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-text-muted);
-      }
-
-      .memo-note-preview {
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-      }
-
-      .memo-empty {
-        display: grid;
-        gap: 10px;
-        padding: 16px 12px;
-      }
-
-      .memo-pin-toggle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-
-      .memo-title-input,
-      .memo-body-input {
-        width: 100%;
-        padding: 10px;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--color-border-strong);
-        background: var(--color-surface);
-        font: inherit;
-        font-family: var(--font-body);
-        color: var(--color-text);
-      }
-      .memo-title-input::placeholder,
-      .memo-body-input::placeholder {
-        color: var(--color-text-muted);
-      }
-      .memo-title-input:focus,
-      .memo-body-input:focus {
-        outline: none;
-        border-color: var(--color-focus-ring);
-      }
-
-      .memo-title-input {
-        min-height: 36px;
-        font-size: var(--type-md);
-        font-weight: 600;
-      }
-
-      .memo-body-input {
-        min-height: 220px;
-        resize: vertical;
-        line-height: 1.5;
       }
 
       .profile-root {
@@ -3131,66 +3017,6 @@
         white-space: nowrap;
       }
 
-      .update-toast {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9999;
-        transition: opacity 0.3s;
-      }
-
-      .update-toast:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      /* SPEC-2041 FR-036: persistent "Update available" button. Stays at
-         the bottom-right after the initial 8s toast fades, until the user
-         applies the update or restarts. The textContent is rewritten when
-         a strictly newer `latest` arrives via the 5min poll loop. */
-      .update-button {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9998;
-        transition: bottom 0.3s, background 0.2s;
-      }
-
-      .update-button.has-toast {
-        /* While the toast is still visible (initial 8s window), float the
-           button above it so the two surfaces do not overlap. */
-        bottom: 76px;
-      }
-
-      .update-button:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      .update-button:focus-visible {
-        outline: 2px solid var(--color-focus-ring);
-        outline-offset: 2px;
-      }
     </style>
   </head>
   <body>
@@ -3346,14 +3172,6 @@
             </div>
           </div>
           <div class="floating-actions" id="floating-window-controls">
-            <div
-              class="op-window-controls-peek"
-              role="button"
-              tabindex="0"
-              aria-label="Show window controls"
-              aria-controls="floating-window-controls-primary floating-window-controls-add"
-              data-hover-reveal="window-controls"
-            ></div>
             <button
               class="arrange-button op-palette-trigger"
               id="op-palette-button"
@@ -3364,28 +3182,38 @@
               <span class="op-palette-trigger__label">⌘K</span>
               <span class="op-palette-trigger__hint">Palette</span>
             </button>
-            <div class="floating-window-controls-group" id="floating-window-controls-primary">
-              <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
-              <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
-              <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
-              <div class="window-list-shell" data-window-control="true">
-                <button
-                  class="arrange-button"
-                  id="window-list-button"
-                  aria-label="List windows"
-                  aria-expanded="false"
-                  data-window-control="true"
-                >
-                  Windows
-                </button>
-                <div class="window-list-panel" id="window-list-panel" hidden></div>
-              </div>
-            </div>
             <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-            <div class="floating-window-controls-group" id="floating-window-controls-add">
-              <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+            <div
+              class="op-window-controls-peek"
+              role="button"
+              tabindex="0"
+              aria-label="Show window controls"
+              aria-controls="floating-window-controls-actions"
+              data-hover-reveal="window-controls"
+            ></div>
+            <div class="floating-window-controls-group" id="floating-window-controls-actions">
+              <div class="floating-window-controls-group" id="floating-window-controls-primary">
+                <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
+                <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
+                <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
+                <div class="window-list-shell" data-window-control="true">
+                  <button
+                    class="arrange-button"
+                    id="window-list-button"
+                    aria-label="List windows"
+                    aria-expanded="false"
+                    data-window-control="true"
+                  >
+                    Windows
+                  </button>
+                  <div class="window-list-panel" id="window-list-panel" hidden></div>
+                </div>
+              </div>
+              <div class="floating-window-controls-group" id="floating-window-controls-add">
+                <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+              </div>
             </div>
           </div>
           <div
@@ -3548,10 +3376,6 @@
               <button class="preset-button" data-preset="settings">
                 <strong>Settings</strong>
                 <span>Manage custom agents and launch presets</span>
-              </button>
-              <button class="preset-button" data-preset="memo">
-                <strong>Memo</strong>
-                <span>Open a notes surface</span>
               </button>
               <button class="preset-button" data-preset="profile">
                 <strong>Profile</strong>

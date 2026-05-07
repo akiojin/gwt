@@ -5,8 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 3] =
-    ["origin/develop", "origin/main", "origin/master"];
+pub const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 4] = [
+    "origin/develop",
+    START_WORK_REMOTE_HEAD_REF,
+    "origin/main",
+    "origin/master",
+];
 pub const START_WORK_REMOTE_HEAD_REF: &str = "origin/HEAD";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartWorkError {
@@ -18,7 +22,7 @@ impl std::fmt::Display for StartWorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingBaseBranch => f.write_str(
-                "No default base branch found (origin/HEAD, origin/develop, origin/main, origin/master)",
+                "No default base branch found (origin/develop, origin/HEAD, origin/main, origin/master)",
             ),
             Self::ReservationIo(error) => {
                 write!(f, "Failed to reserve Start Work branch name: {error}")
@@ -32,15 +36,42 @@ impl std::error::Error for StartWorkError {}
 pub fn resolve_start_work_base_branch_with(
     mut remote_branch_exists: impl FnMut(&str) -> bool,
 ) -> Result<String, StartWorkError> {
-    if remote_branch_exists(START_WORK_REMOTE_HEAD_REF) {
-        return Ok(START_WORK_REMOTE_HEAD_REF.to_string());
-    }
     START_WORK_BASE_BRANCH_CANDIDATES
         .iter()
         .copied()
         .find(|candidate| remote_branch_exists(candidate))
         .map(str::to_string)
         .ok_or(StartWorkError::MissingBaseBranch)
+}
+
+pub fn refallback_start_work_base_branch_with<E>(
+    branch_name: &str,
+    selected_base_branch: &str,
+    mut remote_branch_exists: impl FnMut(&str) -> Result<bool, E>,
+) -> Result<Option<String>, E> {
+    if !is_start_work_branch_name(branch_name)
+        || !START_WORK_BASE_BRANCH_CANDIDATES.contains(&selected_base_branch)
+    {
+        return Ok(None);
+    }
+    if remote_branch_exists(selected_base_branch)? {
+        return Ok(Some(selected_base_branch.to_string()));
+    }
+    for candidate in START_WORK_BASE_BRANCH_CANDIDATES {
+        if candidate == selected_base_branch {
+            continue;
+        }
+        if remote_branch_exists(candidate)? {
+            return Ok(Some(candidate.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn is_start_work_branch_name(branch_name: &str) -> bool {
+    branch_name
+        .strip_prefix("work/")
+        .is_some_and(|name| !name.is_empty())
 }
 
 pub fn resolve_start_work_base_branch(repo_path: &Path) -> Result<String, StartWorkError> {
@@ -159,13 +190,13 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::{
-        remote_tracking_ref, reserve_start_work_branch_name_with,
-        reserve_start_work_branch_name_with_reservations, resolve_start_work_base_branch_with,
-        StartWorkError,
+        refallback_start_work_base_branch_with, remote_tracking_ref,
+        reserve_start_work_branch_name_with, reserve_start_work_branch_name_with_reservations,
+        resolve_start_work_base_branch_with, StartWorkError,
     };
 
     #[test]
-    fn start_work_base_branch_prefers_remote_head_before_named_fallbacks() {
+    fn start_work_base_branch_prefers_develop_before_remote_head() {
         let existing = HashSet::from([
             "origin/HEAD".to_string(),
             "origin/develop".to_string(),
@@ -175,7 +206,43 @@ mod tests {
             resolve_start_work_base_branch_with(|candidate| existing.contains(candidate))
                 .expect("resolve base branch");
 
+        assert_eq!(resolved, "origin/develop");
+    }
+
+    #[test]
+    fn start_work_base_branch_uses_remote_head_when_develop_is_missing() {
+        let existing = HashSet::from(["origin/HEAD".to_string(), "origin/main".to_string()]);
+        let resolved =
+            resolve_start_work_base_branch_with(|candidate| existing.contains(candidate))
+                .expect("resolve base branch");
+
         assert_eq!(resolved, "origin/HEAD");
+    }
+
+    #[test]
+    fn start_work_base_branch_refalls_back_after_selected_develop_is_pruned() {
+        let existing = HashSet::from(["origin/HEAD".to_string(), "origin/main".to_string()]);
+        let resolved = refallback_start_work_base_branch_with(
+            "work/20260507-0734",
+            "origin/develop",
+            |candidate| Ok::<_, std::convert::Infallible>(existing.contains(candidate)),
+        )
+        .expect("refallback")
+        .expect("fallback base");
+
+        assert_eq!(resolved, "origin/HEAD");
+    }
+
+    #[test]
+    fn start_work_base_branch_refallback_preserves_non_start_work_base_errors() {
+        let existing = HashSet::from(["origin/HEAD".to_string(), "origin/main".to_string()]);
+        let resolved =
+            refallback_start_work_base_branch_with("feature/demo", "origin/develop", |candidate| {
+                Ok::<_, std::convert::Infallible>(existing.contains(candidate))
+            })
+            .expect("refallback");
+
+        assert!(resolved.is_none());
     }
 
     #[test]

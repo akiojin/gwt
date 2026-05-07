@@ -135,6 +135,81 @@ body::after {
   font-weight: 500;
 }
 
+/* SPEC-2041 — unified update CTA. A single actionable surface replaces the
+   earlier split toast + persistent button flow. */
+.update-cta {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 10px 16px;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(8px);
+  font-family: var(--font-mono);
+  font-size: var(--type-sm);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-state-active);
+  cursor: pointer;
+  z-index: 9999;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.update-cta:hover {
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
+}
+
+.update-cta.is-applying {
+  color: var(--color-state-idle);
+  cursor: progress;
+}
+
+.update-cta.is-error {
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.update-cta:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.terminal-context-menu {
+  position: fixed;
+  min-width: 136px;
+  padding: 4px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+  z-index: 10000;
+}
+
+.terminal-context-menu[hidden] {
+  display: none;
+}
+
+.terminal-context-menu__item {
+  width: 100%;
+  border: 0;
+  border-radius: calc(var(--radius-md) - 2px);
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.terminal-context-menu__item:hover,
+.terminal-context-menu__item:focus-visible {
+  outline: none;
+  background: color-mix(in oklab, var(--color-state-active) 14%, transparent);
+  color: var(--color-text-strong);
+}
+
 /* SPEC-2356 FR-024 — segmented theme toggle (AUTO / DARK / LIGHT). Replaces
    the prior single-cycle button so AUTO is reachable in one interaction. */
 .op-theme-toggle {
@@ -345,6 +420,10 @@ body::after {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+.op-active-work[hidden] {
+  display: none;
 }
 
 .op-work-summary,
@@ -604,6 +683,24 @@ body::after {
   letter-spacing: var(--tracking-mono);
 }
 
+.workspace-pr-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.workspace-pr-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.workspace-pr-link:hover,
+.workspace-pr-link:focus-visible {
+  color: var(--color-text);
+}
+
 .workspace-overview-list {
   display: flex;
   flex-direction: column;
@@ -711,6 +808,7 @@ body::after {
    / Windows) and add (+) groups are auto-hidden until pointer hover /
    keyboard focus / pointer tap on the peek 帯. */
 .op-window-controls-peek {
+  order: 2;
   width: 32px;
   height: 24px;
   border-radius: var(--radius-md);
@@ -1919,16 +2017,15 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
-/* SPEC-2356 Phase 9 (FR-022): Window controls primary + add groups auto-hide
+/* SPEC-2356 Phase 9 (FR-022): Window controls action group auto-hides
    until [data-op-window-controls="revealed"] is set by the hover-reveal state
    machine. Palette and Zoom controls remain in the toolbar regardless. */
-:root[data-theme] #floating-window-controls-primary,
-:root[data-theme] #floating-window-controls-add {
+:root[data-theme] #floating-window-controls-actions {
+  order: 1;
   display: none;
 }
 
-:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-primary,
-:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-add {
+:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-actions {
   display: flex;
 }
 

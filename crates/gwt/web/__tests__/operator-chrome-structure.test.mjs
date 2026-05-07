@@ -172,9 +172,32 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     "expected non-terminal panels to hide the runtime status chip",
   );
   assert.match(
+    inlineStyle,
+    /\.status-chip\[hidden\]\s*\{[\s\S]*display:\s*none/,
+    "hidden runtime chips must stay hidden even though .status-chip uses inline-flex",
+  );
+  assert.match(
     appSource,
     /window-list-role/,
     "expected window list rows to include a role badge",
+  );
+});
+
+test("Memo is not exposed as a workspace window feature", () => {
+  assert.equal(
+    document.querySelector('.preset-button[data-preset="memo"]'),
+    null,
+    "Add window must not expose the unusable Memo surface",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /memoSurface|memo-root|load_memo|create_memo_note|update_memo_note|delete_memo_note/,
+    "Memo frontend state, renderer, and protocol events should be removed",
+  );
+  assert.doesNotMatch(
+    inlineStyle,
+    /surface-memo|memo-layout|memo-note|memo-editor|memo-status/,
+    "Memo-specific CSS should be removed with the surface",
   );
 });
 
@@ -256,6 +279,24 @@ test("Workspace active work overview behaves like a command center", () => {
   );
 });
 
+test("Active Work title prefers concrete work context over Start Work workflow label", () => {
+  assert.match(
+    appSource,
+    /function\s+activeWorkDisplayTitle\(projection,\s*agents\)[\s\S]+agent\.title_summary[\s\S]+projection\?\.summary[\s\S]+projection\?\.owner[\s\S]+projection\?\.title[\s\S]+Start Work[\s\S]+Active Work/,
+    "expected Active Work title resolution to prefer Agent/Workspace work context and treat Start Work as a fallback-only workflow label",
+  );
+  assert.match(
+    appSource,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkDisplayTitle\(activeWorkProjection,\s*agents\)\)/,
+    "expected Active Work summary title to use the display-title helper",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /createNode\("div",\s*"op-work-title",\s*activeWorkProjection\.title\s*\|\|\s*"Active Work"\)/,
+    "Active Work must not render the saved Start Work workflow title directly",
+  );
+});
+
 test("Active Work sidebar only renders while live Agent windows are focusable", () => {
   assert.match(
     appSource,
@@ -331,6 +372,34 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     appSource,
     /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
     "expected Project Bar Workspace Overview button to open the same overview",
+  );
+});
+
+test("Active Work and Workspace Overview render PR metadata as links", () => {
+  assert.match(
+    appSource,
+    /function\s+createWorkspacePrMeta\(/,
+    "expected a shared PR metadata renderer instead of duplicating string-only PR labels",
+  );
+  assert.match(
+    appSource,
+    /createWorkspacePrMeta\(projection\)/,
+    "expected Workspace Overview to render the saved PR link/state from the projection",
+  );
+  assert.match(
+    appSource,
+    /createWorkspacePrMeta\(activeWorkProjection\)/,
+    "expected Active Work sidebar to render the live PR link/state from the projection",
+  );
+  assert.match(
+    appSource,
+    /pr_url[\s\S]+href[\s\S]+PR #/,
+    "expected PR metadata to use the backend-provided URL for the link target",
+  );
+  assert.match(
+    appSource,
+    /pr_state[\s\S]+appendMeta/,
+    "expected PR state to be displayed next to the PR link",
   );
 });
 
@@ -536,7 +605,7 @@ test("chrome visibility uses peek 帯 hover-reveal instead of click chips", () =
   assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
   assert.equal(
     windowControlsPeek.getAttribute("aria-controls"),
-    "floating-window-controls-primary floating-window-controls-add",
+    "floating-window-controls-actions",
   );
   assert.match(sidebarPeek.getAttribute("aria-label") ?? "", /show sidebar/i);
   assert.match(windowControlsPeek.getAttribute("aria-label") ?? "", /show window controls/i);
@@ -557,32 +626,43 @@ test("window controls peek 帯 targets only collapsible control groups", () => {
   const controlledIds = (windowControlsPeek.getAttribute("aria-controls") ?? "")
     .split(/\s+/)
     .filter(Boolean);
-  assert.deepEqual(controlledIds, [
-    "floating-window-controls-primary",
-    "floating-window-controls-add",
-  ]);
+  assert.deepEqual(controlledIds, ["floating-window-controls-actions"]);
   assert.ok(!controlledIds.includes("floating-window-controls"));
 
+  const actionsGroup = document.getElementById("floating-window-controls-actions");
   const primaryGroup = document.getElementById("floating-window-controls-primary");
   const addGroup = document.getElementById("floating-window-controls-add");
+  assert.ok(actionsGroup, "expected continuous window controls actions group");
   assert.ok(primaryGroup, "expected primary window controls group");
   assert.ok(addGroup, "expected add-window control group");
+
+  const floatingControls = document.getElementById("floating-window-controls");
+  assert.ok(floatingControls, "expected floating window controls root");
+  const toolbarChildren = Array.from(floatingControls.children);
+  assert.ok(
+    toolbarChildren.indexOf(windowControlsPeek) < toolbarChildren.indexOf(actionsGroup),
+    "peek must precede actions in DOM order so forward Tab enters the revealed controls",
+  );
+
+  assert.ok(actionsGroup.contains(primaryGroup), "primary controls must stay inside the continuous actions group");
+  assert.ok(actionsGroup.contains(addGroup), "add controls must stay inside the continuous actions group");
 
   for (const id of ["tile-button", "stack-button", "align-button", "window-list-button"]) {
     const control = document.getElementById(id);
     assert.ok(control, `expected ${id}`);
-    assert.ok(primaryGroup.contains(control), `${id} must be inside the primary controlled group`);
+    assert.ok(actionsGroup.contains(control), `${id} must be inside the continuous actions group`);
   }
 
   const addButton = document.getElementById("add-button");
   assert.ok(addButton, "expected add-button");
   assert.ok(addGroup.contains(addButton), "add-button must be inside the add controlled group");
+  assert.ok(actionsGroup.contains(addButton), "add-button must be reachable through the continuous actions group");
 
   for (const id of ["op-palette-button", "zoom-out-button", "zoom-reset-button", "zoom-in-button"]) {
     const control = document.getElementById(id);
     assert.ok(control, `expected ${id}`);
     assert.equal(
-      primaryGroup.contains(control) || addGroup.contains(control),
+      actionsGroup.contains(control),
       false,
       `${id} must remain outside collapsible window controls groups`,
     );
@@ -657,6 +737,16 @@ test("workspace windows expose draggable tab docking affordances", () => {
     html,
     /\.workspace-window\.dock-target\s+\.titlebar/,
     "expected dockable titlebar targets to have a visible preview state",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s*\{/,
+    "expected dockable targets to outline the whole window, not just the titlebar",
+  );
+  assert.match(
+    html,
+    /\.workspace-window\.dock-target\s+\.window-tab-strip::before/,
+    "expected dockable targets to expose a tab insertion indicator",
   );
 });
 
@@ -757,18 +847,16 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
 });
 
 test("components.css hover-reveals only the marked floating window control groups", () => {
-  // SPEC-2356 Phase 9 (FR-022): primary + add groups auto-hide by default and
+  // SPEC-2356 Phase 9 (FR-022): the continuous actions group auto-hides by default and
   // are revealed only when [data-op-window-controls="revealed"] is set.
   // Palette and Zoom controls remain in the toolbar regardless.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(css, /#floating-window-controls-primary[\s\S]*?display:\s*none/);
+  assert.match(css, /#floating-window-controls-actions[\s\S]*?display:\s*none/);
+  assert.match(css, /#floating-window-controls-actions\s*\{[^}]*order:\s*1/);
+  assert.match(css, /\.op-window-controls-peek\s*\{[^}]*order:\s*2/);
   assert.match(
     css,
-    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-primary[\s\S]*?display:\s*flex/,
-  );
-  assert.match(
-    css,
-    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-add[\s\S]*?display:\s*flex/,
+    /\[data-op-window-controls="revealed"\][\s\S]+?#floating-window-controls-actions[\s\S]*?display:\s*flex/,
   );
   assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#op-palette-button/);
   assert.doesNotMatch(css, /\[data-op-window-controls="revealed"\][\s\S]+#zoom-reset-button/);
@@ -1059,12 +1147,11 @@ test("Launch wizard separates launch settings from runtime controls", () => {
 test("Selected list rows mark active item with aria-current", () => {
   // Same pattern as project tabs (PR #2455): list-style buttons with a
   // selected state need aria-current to announce which row is active.
-  // Coverage: knowledge-row, memo-note-row, profile-row, logs-entry.
+  // Coverage: knowledge-row, profile-row, logs-entry.
   // The set/remove pair is required so a previously-selected row
   // doesn't retain the marker after the user picks a different row.
   for (const desc of [
     "knowledge",
-    "memo note",
     "profile",
     "logs entry",
   ]) {
@@ -1073,18 +1160,17 @@ test("Selected list rows mark active item with aria-current", () => {
     // setAttribute and removeAttribute calls exist somewhere in app.js.
     // The descriptive label is just for the failure message.
   }
-  // Count occurrences — should be at least 5 set + 5 remove for the
-  // five list-with-selection surfaces (knowledge / memo / profile /
-  // logs / file-tree) plus the project-tabs case from PR #2455.
+  // Count occurrences: knowledge, profile, logs, file-tree, plus the
+  // project-tabs case from PR #2455.
   const setMatches = appSource.match(/setAttribute\("aria-current",\s*"(true|page)"\)/g) || [];
   const removeMatches = appSource.match(/removeAttribute\("aria-current"\)/g) || [];
   assert.ok(
-    setMatches.length >= 6,
-    `expected >= 6 aria-current set calls (project tab + 5 row types), got ${setMatches.length}`,
+    setMatches.length >= 5,
+    `expected >= 5 aria-current set calls (project tab + 4 row types), got ${setMatches.length}`,
   );
   assert.ok(
-    removeMatches.length >= 6,
-    `expected >= 6 aria-current remove calls (one per set call), got ${removeMatches.length}`,
+    removeMatches.length >= 5,
+    `expected >= 5 aria-current remove calls (one per set call), got ${removeMatches.length}`,
   );
 });
 
@@ -1195,12 +1281,10 @@ test("Dynamically-created form fields without surrounding <label> have aria-labe
   // Form fields that aren't wrapped in a <label> element need aria-label
   // so screen readers announce their purpose instead of just "edit text"
   // (input/textarea) or the first option (select). This audit covers
-  // the launch wizard, memo editor, and profile editor surfaces.
+  // the launch wizard and profile editor surfaces.
   const expected = [
     { selector: 'input\\.setAttribute\\("aria-label", "Branch name"\\)', desc: "wizard branch name" },
     { selector: 'input\\.setAttribute\\("aria-label", "Issue number"\\)', desc: "wizard issue number" },
-    { selector: 'titleInput\\.setAttribute\\("aria-label", "Note title"\\)', desc: "memo note title" },
-    { selector: 'bodyInput\\.setAttribute\\("aria-label", "Note body"\\)', desc: "memo note body" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Env var key, row ', desc: "env var key" },
     { selector: 'valueInput\\.setAttribute\\("aria-label", `Env var value, row ', desc: "env var value" },
     { selector: 'keyInput\\.setAttribute\\("aria-label", `Disabled env key, row ', desc: "disabled env key" },
@@ -1580,11 +1664,11 @@ test("terminal surface body stays on the dark Operator canvas across themes (FR-
 
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
-  // Logs / File Tree / Branches / Knowledge / Mock / Memo / Profile) must
+  // Logs / File Tree / Branches / Knowledge / Mock / Profile) must
   // keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|memo|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     html,
     otherSurfaceRule,

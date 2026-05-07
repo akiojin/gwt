@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use chrono::{DateTime, Utc};
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,7 @@ pub struct PrStatus {
     pub title: String,
     pub state: PrState,
     pub url: String,
+    pub created_at: Option<DateTime<Utc>>,
     /// Overall CI status: "SUCCESS", "FAILURE", "PENDING", or "UNKNOWN".
     pub ci_status: String,
     /// Raw `mergeable` field from GitHub: "MERGEABLE", "CONFLICTING", "UNKNOWN".
@@ -63,7 +65,7 @@ pub fn fetch_pr_status(repo_slug: &str, number: u64) -> Result<PrStatus> {
             "--repo",
             repo_slug,
             "--json",
-            "number,title,state,url,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+            "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
         ])
         .output()
         .map_err(|e| GwtError::Git(format!("gh pr view: {e}")))?;
@@ -91,6 +93,7 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
         _ => PrState::Open,
     };
     let url = v["url"].as_str().unwrap_or("").to_string();
+    let created_at = parse_github_timestamp(v.get("createdAt").and_then(|value| value.as_str()));
     let mergeable = v["mergeable"].as_str().unwrap_or("UNKNOWN").to_string();
     let merge_state_status = v["mergeStateStatus"]
         .as_str()
@@ -133,10 +136,25 @@ pub fn parse_pr_status_json(json: &str) -> Result<PrStatus> {
         title,
         state,
         url,
+        created_at,
         ci_status,
         mergeable,
         merge_state_status,
         review_status,
+    })
+}
+
+fn parse_github_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+pub fn latest_pr_by_created_at(prs: impl IntoIterator<Item = PrStatus>) -> Option<PrStatus> {
+    prs.into_iter().max_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.number.cmp(&right.number))
     })
 }
 
@@ -155,7 +173,7 @@ fn effective_merge_status_label<'a>(mergeable: &'a str, merge_state_status: &'a 
     }
 }
 
-/// Fetch a list of open PRs for the repository at `repo_path`.
+/// Fetch a list of PRs for the repository at `repo_path`.
 ///
 /// Uses the GitHub CLI's `pr list --json` surface as the primary path and
 /// falls back to the REST pulls endpoint when that surface is unavailable.
@@ -194,7 +212,9 @@ where
             "pr",
             "list",
             "--json",
-            "number,title,state,url,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
+            "number,title,state,url,createdAt,statusCheckRollup,mergeable,mergeStateStatus,reviewDecision",
+            "--state",
+            "all",
             "--limit",
             "20",
         ],
@@ -210,7 +230,7 @@ where
 
     let rest = run_gh(
         repo_path,
-        &["api", "repos/{owner}/{repo}/pulls?state=open&per_page=20"],
+        &["api", "repos/{owner}/{repo}/pulls?state=all&per_page=20"],
     )?;
     if !rest.success {
         return Err(GwtError::Git(format!(
@@ -242,10 +262,18 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
     Ok(arr
         .into_iter()
         .map(|v| {
-            let state = match v.get("state").and_then(|s| s.as_str()).unwrap_or("open") {
-                "closed" => PrState::Closed,
-                "merged" => PrState::Merged,
-                _ => PrState::Open,
+            let state = if v
+                .get("merged_at")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                PrState::Merged
+            } else {
+                match v.get("state").and_then(|s| s.as_str()).unwrap_or("open") {
+                    "closed" => PrState::Closed,
+                    "merged" => PrState::Merged,
+                    _ => PrState::Open,
+                }
             };
             PrStatus {
                 number: v
@@ -264,6 +292,9 @@ fn parse_rest_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
                     .and_then(|u| u.as_str())
                     .unwrap_or("")
                     .to_string(),
+                created_at: parse_github_timestamp(
+                    v.get("created_at").and_then(|value| value.as_str()),
+                ),
                 ci_status: "UNKNOWN".to_string(),
                 mergeable: "UNKNOWN".to_string(),
                 merge_state_status: "UNKNOWN".to_string(),
@@ -635,6 +666,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_pr_status_records_created_at() {
+        let json = r#"{
+            "number": 2538,
+            "title": "Active Work title",
+            "state": "OPEN",
+            "url": "https://github.com/akiojin/gwt/pull/2538",
+            "createdAt": "2026-05-07T08:12:00Z",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [],
+            "reviewDecision": "APPROVED"
+        }"#;
+
+        let pr = parse_pr_status_json(json).expect("parse pr");
+
+        assert_eq!(
+            pr.created_at.expect("created_at").to_rfc3339(),
+            "2026-05-07T08:12:00+00:00"
+        );
+    }
+
+    #[test]
+    fn latest_pr_by_created_at_prefers_newest_pr() {
+        let older = PrStatus {
+            number: 2537,
+            title: "Older PR".to_string(),
+            state: PrState::Closed,
+            url: "https://github.com/akiojin/gwt/pull/2537".to_string(),
+            created_at: Some("2026-05-07T08:05:00Z".parse().expect("older time")),
+            ci_status: "SUCCESS".to_string(),
+            mergeable: "MERGEABLE".to_string(),
+            merge_state_status: "CLEAN".to_string(),
+            review_status: "APPROVED".to_string(),
+        };
+        let newer = PrStatus {
+            number: 2538,
+            title: "Newer PR".to_string(),
+            state: PrState::Open,
+            url: "https://github.com/akiojin/gwt/pull/2538".to_string(),
+            created_at: Some("2026-05-07T08:20:00Z".parse().expect("newer time")),
+            ci_status: "PENDING".to_string(),
+            mergeable: "UNKNOWN".to_string(),
+            merge_state_status: "UNKNOWN".to_string(),
+            review_status: "REVIEW_REQUIRED".to_string(),
+        };
+
+        let latest = latest_pr_by_created_at(vec![older, newer]).expect("latest pr");
+
+        assert_eq!(latest.number, 2538);
+        assert_eq!(latest.title, "Newer PR");
+    }
+
+    #[test]
     fn parse_pr_list_invalid_json() {
         assert!(parse_pr_list_json("not json").is_err());
     }
@@ -713,7 +797,7 @@ mod tests {
                     stdout: String::new(),
                     stderr: "pr list unavailable".to_string(),
                 }),
-                ["api", "repos/{owner}/{repo}/pulls?state=open&per_page=20"] => Ok(GhCliOutput {
+                ["api", "repos/{owner}/{repo}/pulls?state=all&per_page=20"] => Ok(GhCliOutput {
                     success: true,
                     stdout: r#"[
                         {
@@ -735,7 +819,7 @@ mod tests {
             calls,
             vec![
                 "pr list",
-                "api repos/{owner}/{repo}/pulls?state=open&per_page=20"
+                "api repos/{owner}/{repo}/pulls?state=all&per_page=20"
             ]
         );
         assert_eq!(prs.len(), 1);

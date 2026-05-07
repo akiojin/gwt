@@ -33,6 +33,10 @@ pub struct GitDetails {
     pub base_branch: Option<String>,
     pub pr_number: Option<u64>,
     pub pr_state: Option<String>,
+    #[serde(default)]
+    pub pr_url: Option<String>,
+    #[serde(default)]
+    pub pr_created_at: Option<DateTime<Utc>>,
     pub created_by_start_work: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -692,6 +696,8 @@ mod tests {
             base_branch: Some("origin/main".to_string()),
             pr_number: Some(2525),
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at,
         });
@@ -731,6 +737,8 @@ mod tests {
             base_branch: Some("origin/main".to_string()),
             pr_number: None,
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at,
         });
