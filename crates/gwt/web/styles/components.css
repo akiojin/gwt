@@ -2350,3 +2350,165 @@ kbd.op-kbd {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ============================================================
+   SPEC-1933 Phase: System Settings (Output Language)
+   Settings surface: tab strip + System tab content.
+   Reuses Operator Design System tokens — no new visual primitives.
+   ============================================================ */
+
+:root[data-theme] .settings-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-family: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+:root[data-theme] .settings-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+:root[data-theme] .settings-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--type-md);
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-strong);
+}
+
+:root[data-theme] .settings-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+:root[data-theme] .settings-tab {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+:root[data-theme] .settings-tab:hover:not([aria-selected="true"]) {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface-elevated));
+}
+
+:root[data-theme] .settings-tab[aria-selected="true"] {
+  background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface-elevated));
+  color: var(--color-text-strong);
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .settings-tab:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+:root[data-theme] .settings-body {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-4);
+}
+
+:root[data-theme] .settings-panel.hidden {
+  display: none;
+}
+
+:root[data-theme] .settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  max-width: 520px;
+}
+
+:root[data-theme] .settings-section + .settings-section {
+  margin-top: var(--space-3);
+}
+
+:root[data-theme] .settings-label {
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+:root[data-theme] .settings-select {
+  appearance: none;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 1px),
+    calc(100% - 9px) calc(50% - 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
+:root[data-theme] .settings-select:hover {
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .settings-select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .settings-help {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+:root[data-theme] .settings-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+:root[data-theme] .settings-status[data-kind="success"] {
+  color: color-mix(in oklab, var(--color-state-positive) 80%, var(--color-text));
+}
+
+:root[data-theme] .settings-status[data-kind="error"] {
+  color: var(--color-state-negative);
+}

@@ -1282,7 +1282,53 @@ impl AppRuntime {
             FrontendEvent::StartMigration { tab_id } => self.start_migration_events(&tab_id),
             FrontendEvent::SkipMigration { tab_id } => self.skip_migration_events(&tab_id),
             FrontendEvent::QuitMigration { tab_id } => self.quit_migration_events(&tab_id),
+            FrontendEvent::GetSystemSettings => self.system_settings_get_events(client_id),
+            FrontendEvent::UpdateSystemSettings { language } => {
+                self.system_settings_update_events(client_id, language)
+            }
         }
+    }
+
+    fn system_settings_get_events(&self, client_id: ClientId) -> Vec<OutboundEvent> {
+        let path = match gwt_config::Settings::global_config_path() {
+            Some(p) => p,
+            None => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::SystemSettingsError {
+                        message: "unable to resolve home directory (`~/.gwt/config.toml`)"
+                            .to_string(),
+                    },
+                )];
+            }
+        };
+        vec![OutboundEvent::reply(
+            client_id,
+            gwt::system_settings::get_event(&path),
+        )]
+    }
+
+    fn system_settings_update_events(
+        &self,
+        client_id: ClientId,
+        language: String,
+    ) -> Vec<OutboundEvent> {
+        let path = match gwt_config::Settings::global_config_path() {
+            Some(p) => p,
+            None => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::SystemSettingsError {
+                        message: "unable to resolve home directory (`~/.gwt/config.toml`)"
+                            .to_string(),
+                    },
+                )];
+            }
+        };
+        vec![OutboundEvent::reply(
+            client_id,
+            gwt::system_settings::update_event(&path, language),
+        )]
     }
 
     fn custom_agent_reply_with_cache_refresh(

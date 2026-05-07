@@ -10,6 +10,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     agent_config::AgentConfig,
+    ai_settings::AISettings,
     atomic::write_atomic,
     error::{ConfigError, Result},
     profile::ProfilesConfig,
@@ -38,6 +39,11 @@ pub struct Settings {
     pub voice: VoiceConfig,
     /// Agent configuration.
     pub agent: AgentConfig,
+    /// Global AI provider defaults (SPEC-1933 FR-006). The active profile may
+    /// override individual fields via [`crate::profile::Profile::ai_settings`].
+    /// Currently the only reader is [`AISettings::effective_language`] for
+    /// narrative output language resolution (SPEC-1933 FR-009 / FR-010).
+    pub ai: AISettings,
 }
 
 impl Default for Settings {
@@ -55,6 +61,7 @@ impl Default for Settings {
             profiles: ProfilesConfig::default(),
             voice: VoiceConfig::default(),
             agent: AgentConfig::default(),
+            ai: AISettings::default(),
         }
     }
 }
