@@ -6583,6 +6583,8 @@ exit 0
             base_branch: Some("origin/develop".to_string()),
             pr_number: Some(2525),
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
@@ -8677,6 +8679,8 @@ exit 0
             base_branch: Some("origin/develop".to_string()),
             pr_number: None,
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
@@ -8724,6 +8728,8 @@ exit 0
             base_branch: Some("origin/develop".to_string()),
             pr_number: Some(2525),
             pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
             created_by_start_work: true,
             created_at: chrono::Utc::now(),
         });
