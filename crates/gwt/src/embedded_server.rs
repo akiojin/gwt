@@ -111,85 +111,65 @@ impl EmbeddedServer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let hook_forward_token = Uuid::new_v4().to_string();
 
-        let app = Router::new()
-            .route("/", get(embedded_web::index_handler))
-            .route("/app.js", get(embedded_web::app_js_handler))
-            .route(
-                "/branch-cleanup-modal.js",
-                get(embedded_web::branch_cleanup_modal_js_handler),
-            )
-            .route(
-                "/migration-modal.js",
-                get(embedded_web::migration_modal_js_handler),
-            )
-            .route(
-                "/assets/xterm/xterm.mjs",
-                get(embedded_web::xterm_js_handler),
-            )
-            .route(
-                "/assets/xterm/addon-fit.mjs",
-                get(embedded_web::xterm_fit_js_handler),
-            )
-            .route(
-                "/assets/xterm/xterm.css",
-                get(embedded_web::xterm_css_handler),
-            )
-            // SPEC-2356 Operator Design System — module + styles + fonts.
-            .route(
-                "/theme-manager.js",
-                get(embedded_web::theme_manager_js_handler),
-            )
-            .route(
-                "/theme-toggle.js",
-                get(embedded_web::theme_toggle_js_handler),
-            )
-            .route("/hotkey.js", get(embedded_web::hotkey_js_handler))
-            .route(
-                "/operator-shell.js",
-                get(embedded_web::operator_shell_js_handler),
-            )
-            .route("/focus-trap.js", get(embedded_web::focus_trap_js_handler))
-            .route(
-                "/styles/tokens.css",
-                get(embedded_web::styles_tokens_css_handler),
-            )
-            .route(
-                "/styles/typography.css",
-                get(embedded_web::styles_typography_css_handler),
-            )
-            .route(
-                "/styles/components.css",
-                get(embedded_web::styles_components_css_handler),
-            )
-            .route(
-                "/assets/fonts/MonaSans.woff2",
-                get(embedded_web::font_mona_sans_handler),
-            )
-            .route(
-                "/assets/fonts/HubotSans-Regular.woff2",
-                get(embedded_web::font_hubot_regular_handler),
-            )
-            .route(
-                "/assets/fonts/HubotSans-Bold.woff2",
-                get(embedded_web::font_hubot_bold_handler),
-            )
-            .route(
-                "/assets/fonts/HubotSansCondensed-Bold.woff2",
-                get(embedded_web::font_hubot_condensed_bold_handler),
-            )
-            .route(
-                "/assets/fonts/JetBrainsMono.woff2",
-                get(embedded_web::font_jetbrains_mono_handler),
-            )
-            .route("/healthz", get(health_handler))
-            .route("/internal/hook-live", post(hook_live_handler))
-            .route("/ws", get(websocket_handler))
-            .with_state(ServerState {
-                proxy,
-                clients,
-                hook_forward_token: hook_forward_token.clone(),
-                pty_writers,
-            });
+        let app = route_root_js_modules(
+            Router::new()
+                .route("/", get(embedded_web::index_handler))
+                .route("/app.js", get(embedded_web::app_js_handler)),
+        )
+        .route(
+            "/assets/xterm/xterm.mjs",
+            get(embedded_web::xterm_js_handler),
+        )
+        .route(
+            "/assets/xterm/addon-fit.mjs",
+            get(embedded_web::xterm_fit_js_handler),
+        )
+        .route(
+            "/assets/xterm/xterm.css",
+            get(embedded_web::xterm_css_handler),
+        )
+        // SPEC-2356 Operator Design System — styles + fonts.
+        .route(
+            "/styles/tokens.css",
+            get(embedded_web::styles_tokens_css_handler),
+        )
+        .route(
+            "/styles/typography.css",
+            get(embedded_web::styles_typography_css_handler),
+        )
+        .route(
+            "/styles/components.css",
+            get(embedded_web::styles_components_css_handler),
+        )
+        .route(
+            "/assets/fonts/MonaSans.woff2",
+            get(embedded_web::font_mona_sans_handler),
+        )
+        .route(
+            "/assets/fonts/HubotSans-Regular.woff2",
+            get(embedded_web::font_hubot_regular_handler),
+        )
+        .route(
+            "/assets/fonts/HubotSans-Bold.woff2",
+            get(embedded_web::font_hubot_bold_handler),
+        )
+        .route(
+            "/assets/fonts/HubotSansCondensed-Bold.woff2",
+            get(embedded_web::font_hubot_condensed_bold_handler),
+        )
+        .route(
+            "/assets/fonts/JetBrainsMono.woff2",
+            get(embedded_web::font_jetbrains_mono_handler),
+        )
+        .route("/healthz", get(health_handler))
+        .route("/internal/hook-live", post(hook_live_handler))
+        .route("/ws", get(websocket_handler))
+        .with_state(ServerState {
+            proxy,
+            clients,
+            hook_forward_token: hook_forward_token.clone(),
+            pty_writers,
+        });
 
         runtime.spawn(async move {
             let server = axum::serve(listener, app).with_graceful_shutdown(async {
@@ -223,6 +203,17 @@ impl EmbeddedServer {
             token: self.hook_forward_token.clone(),
         }
     }
+}
+
+fn route_root_js_modules(mut router: Router<ServerState>) -> Router<ServerState> {
+    for asset in embedded_web::root_js_module_assets() {
+        let asset = *asset;
+        router = router.route(
+            asset.path,
+            get(move || async move { embedded_web::root_js_module_response(asset) }),
+        );
+    }
+    router
 }
 
 pub async fn health_handler() -> &'static str {

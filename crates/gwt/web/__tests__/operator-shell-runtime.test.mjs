@@ -33,6 +33,85 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
   assert.equal(briefing.hidden, true, "Mission Briefing must not block app startup");
 });
 
+test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal triggers", async () => {
+  // SPEC-2356 Phase 9 (FR-021/FR-022/FR-032): chrome visibility runs through
+  // the hover-reveal state machine driven by the peek 帯, with no chip
+  // toggles, no localStorage persistence, and a one-shot legacy migration.
+  const { initOperatorShell } = await importOperatorShell();
+  const { document, window } = parseHTML(html);
+  const storage = memoryStorage();
+  storage.setItem("gwt:ui:sidebar-collapsed", "true");
+  storage.setItem("gwt:ui:window-controls", "hidden");
+  const testWindow = {
+    ...window,
+    localStorage: storage,
+    sessionStorage: memoryStorage(),
+    matchMedia: () => ({
+      matches: false,
+      media: "",
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      onchange: null,
+      dispatchEvent: () => false,
+    }),
+  };
+
+  const originalWarn = console.warn;
+  const originalCustomEvent = globalThis.CustomEvent;
+  console.warn = () => {};
+  globalThis.CustomEvent = window.CustomEvent;
+  try {
+    initOperatorShell({ document, window: testWindow });
+
+    assert.equal(
+      document.getElementById("op-sidebar-edge-toggle"),
+      null,
+      "<< chip toggle must not exist after Phase 9",
+    );
+    assert.equal(
+      document.getElementById("op-window-controls-edge-toggle"),
+      null,
+      "vv chip toggle must not exist after Phase 9",
+    );
+
+    const sidebarPeek = document.querySelector(".op-sidebar-peek");
+    const windowControlsPeek = document.querySelector(".op-window-controls-peek");
+    assert.ok(sidebarPeek, "fixture must include sidebar peek 帯");
+    assert.ok(windowControlsPeek, "fixture must include window controls peek 帯");
+    assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
+    assert.equal(
+      windowControlsPeek.getAttribute("aria-controls"),
+      "floating-window-controls-actions",
+    );
+
+    // FR-032: legacy keys must be removed on init.
+    assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
+    assert.equal(storage.getItem("gwt:ui:window-controls"), null);
+
+    // Default state: no data-op-* attributes (auto-hidden).
+    assert.equal(document.documentElement.dataset.opSidebar, undefined);
+    assert.equal(document.documentElement.dataset.opWindowControls, undefined);
+
+    // Hover the sidebar peek 帯 → revealed; window controls remain hidden.
+    sidebarPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
+    assert.equal(document.documentElement.dataset.opSidebar, "revealed");
+    assert.equal(document.documentElement.dataset.opWindowControls, undefined);
+
+    // Hover the window controls peek 帯 → revealed independently.
+    windowControlsPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
+    assert.equal(document.documentElement.dataset.opWindowControls, "revealed");
+
+    // Storage must remain untouched by hover reveal (no persistence in Phase 9).
+    assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
+    assert.equal(storage.getItem("gwt:ui:window-controls"), null);
+  } finally {
+    console.warn = originalWarn;
+    globalThis.CustomEvent = originalCustomEvent;
+  }
+});
+
 function throwingStorage() {
   return {
     getItem() {
@@ -43,6 +122,21 @@ function throwingStorage() {
     },
     removeItem() {
       throw new Error("storage unavailable");
+    },
+  };
+}
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
     },
   };
 }

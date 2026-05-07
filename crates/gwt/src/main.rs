@@ -92,7 +92,7 @@ pub(crate) use runtime_support::{
 pub(crate) use runtime_support::{
     parse_github_remote_url, spawn_env, suffixed_worktree_path, worktree_path_is_occupied,
 };
-pub(crate) use update_front_door::{apply_update_and_exit, spawn_startup_update_check};
+pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
 pub(crate) use update_front_door::{classify_startup_update_state, StartupUpdateAction};
 
@@ -137,20 +137,30 @@ fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<Use
                 gwt::index_worker::project_index_status_for_path(&path)
             })
             .await
-            .unwrap_or_else(|err| gwt::ProjectIndexStatusView {
-                state: gwt::ProjectIndexStatusState::Error,
-                detail: format!("Project index status task failed: {err}"),
+            .unwrap_or_else(|err| {
+                gwt::ProjectIndexStatusView::new(
+                    gwt::ProjectIndexStatusState::Error,
+                    format!("Project index status task failed: {err}"),
+                )
             }),
-            None => gwt::ProjectIndexStatusView {
-                state: gwt::ProjectIndexStatusState::Skipped,
-                detail: "No current directory".to_string(),
-            },
+            None => gwt::ProjectIndexStatusView::new(
+                gwt::ProjectIndexStatusState::Skipped,
+                "No current directory",
+            ),
         };
         let _ = proxy.send_event(UserEvent::ProjectIndexStatus {
             project_root: project_root_label,
             status,
         });
     }));
+}
+
+fn record_update_available(
+    app: &mut AppRuntime,
+    state: gwt_core::update::UpdateState,
+) -> Vec<OutboundEvent> {
+    app.pending_update = Some(state.clone());
+    vec![OutboundEvent::broadcast(BackendEvent::UpdateState(state))]
 }
 
 fn board_projection_watch_key(project_root: &Path) -> PathBuf {
@@ -482,6 +492,10 @@ enum UserEvent {
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
     UpdateAvailable(gwt_core::update::UpdateState),
+    ApplyUpdate {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
     /// [`gwt::BackendEvent::MigrationProgress`].
@@ -592,6 +606,7 @@ mod tests {
                 topics: Vec::new(),
                 owners: Vec::new(),
                 targets: Vec::new(),
+                mentions: Vec::new(),
             }
         ));
     }
@@ -729,6 +744,7 @@ mod tests {
             persist: true,
             purpose_title: None,
             dynamic_title: None,
+            dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
             tab_group_id: None,
@@ -1016,6 +1032,8 @@ mod tests {
             branch_name: "feature/test".to_string(),
             display_name: "Codex".to_string(),
             worktree_path: PathBuf::from("E:/gwt/test-repo"),
+            agent_project_root: "E:/gwt/test-repo".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: tab_id.to_string(),
         }
     }
@@ -1312,6 +1330,48 @@ mod tests {
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
+    }
+
+    #[test]
+    fn update_available_event_records_pending_update_before_broadcast() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            temp.path().join("repo"),
+            ProjectKind::Git,
+            &[WindowPreset::Shell],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let state = gwt_core::update::UpdateState::Available {
+            current: "9.20.1".to_string(),
+            latest: "9.20.2".to_string(),
+            release_url: "https://example.invalid/releases/v9.20.2".to_string(),
+            asset_url: Some("https://example.invalid/gwt-macos-universal.dmg".to_string()),
+            checked_at: Utc::now(),
+        };
+
+        let events = super::record_update_available(&mut runtime, state);
+
+        assert!(matches!(
+            runtime.pending_update,
+            Some(gwt_core::update::UpdateState::Available {
+                ref latest,
+                asset_url: Some(_),
+                ..
+            }) if latest == "9.20.2"
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::UpdateState(gwt_core::update::UpdateState::Available {
+                    latest,
+                    asset_url: Some(_),
+                    ..
+                }),
+            }] if latest == "9.20.2"
+        ));
     }
 
     #[test]
@@ -1771,7 +1831,7 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 3);
+        assert_eq!(error_events.len(), 4);
         assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
         assert_eq!(
             runtime
@@ -1782,11 +1842,16 @@ mod tests {
         );
         assert!(matches!(
             error_events[1].event,
+            BackendEvent::ActiveWorkProjection { ref projection }
+                if projection.active_agents == 1 && projection.agents.len() == 1
+        ));
+        assert!(matches!(
+            error_events[2].event,
             BackendEvent::WindowState { ref window_id, state }
                 if window_id == &claude_one_id && state == WindowProcessStatus::Error
         ));
         assert!(matches!(
-            error_events[2].event,
+            error_events[3].event,
             BackendEvent::TerminalStatus { ref status, ref detail, .. }
                 if *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("boom")
@@ -1829,10 +1894,12 @@ mod tests {
                 "session-3".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo,
+                repo.clone(),
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -2648,6 +2715,8 @@ mod tests {
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -2682,10 +2751,12 @@ mod tests {
                 "session-2".to_string(),
                 "feature/demo".to_string(),
                 "Codex".to_string(),
-                repo,
+                repo.clone(),
                 AgentId::Codex,
                 None,
                 None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
             )),
         );
         assert!(matches!(
@@ -3705,10 +3776,11 @@ mod tests {
 
         let mut working_dir = None;
         let mut env_vars = HashMap::new();
+        let mut base_branch = None;
         super::resolve_launch_worktree_request(
             temp.path(),
             None,
-            None,
+            &mut base_branch,
             &mut working_dir,
             &mut env_vars,
         )
@@ -3718,10 +3790,11 @@ mod tests {
 
         let scratch = temp.path().join("scratch");
         fs::create_dir_all(&scratch).expect("create scratch");
+        let mut base_branch = None;
         super::resolve_launch_worktree_request(
             &scratch,
             Some("feature/demo"),
-            None,
+            &mut base_branch,
             &mut working_dir,
             &mut env_vars,
         )
@@ -3735,12 +3808,15 @@ mod tests {
             .expect("detach head");
         assert!(detach.success(), "git checkout --detach failed");
 
+        let mut base_branch = None;
+        let mut detached_dir = None;
+        let mut detached_env = HashMap::new();
         let err = super::resolve_launch_worktree_request(
             &repo,
             Some("feature/detached"),
-            None,
-            &mut None,
-            &mut HashMap::new(),
+            &mut base_branch,
+            &mut detached_dir,
+            &mut detached_env,
         )
         .expect_err("repo branch resolution failure should not silently skip");
         assert!(err.contains("git branch --show-current"));
@@ -3754,10 +3830,11 @@ mod tests {
 
         let mut current_dir = None;
         let mut current_env = HashMap::new();
+        let mut base_branch = None;
         super::resolve_launch_worktree_request(
             &repo,
             Some("develop"),
-            None,
+            &mut base_branch,
             &mut current_dir,
             &mut current_env,
         )
@@ -3770,10 +3847,11 @@ mod tests {
         let preset = temp.path().join("preset");
         let mut preset_dir = Some(preset.clone());
         let mut preset_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/ignored"),
-            Some("develop"),
+            &mut base_branch,
             &mut preset_dir,
             &mut preset_env,
         )
@@ -3799,10 +3877,11 @@ mod tests {
 
         let mut existing_dir = None;
         let mut existing_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/existing"),
-            Some("develop"),
+            &mut base_branch,
             &mut existing_dir,
             &mut existing_env,
         )
@@ -3814,22 +3893,26 @@ mod tests {
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &existing_worktree)));
 
+        let mut base_branch = Some("release".to_string());
+        let mut missing_base_dir = None;
+        let mut missing_base_env = HashMap::new();
         let err = super::resolve_launch_worktree_request(
             &repo,
             Some("feature/missing-base"),
-            Some("release"),
-            &mut None,
-            &mut HashMap::new(),
+            &mut base_branch,
+            &mut missing_base_dir,
+            &mut missing_base_env,
         )
         .expect_err("missing base branch");
         assert!(err.contains("remote base branch does not exist"));
 
         let mut created_dir = None;
         let mut created_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/created"),
-            Some("develop"),
+            &mut base_branch,
             &mut created_dir,
             &mut created_env,
         )
@@ -3863,10 +3946,11 @@ mod tests {
 
         let mut local_only_dir = None;
         let mut local_only_env = HashMap::new();
+        let mut base_branch = Some("develop".to_string());
         super::resolve_launch_worktree_request(
             &repo,
             Some("feature/local-only"),
-            Some("develop"),
+            &mut base_branch,
             &mut local_only_dir,
             &mut local_only_env,
         )
@@ -3921,6 +4005,69 @@ mod tests {
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_refalls_back_when_start_work_develop_ref_is_stale() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let origin = init_git_clone_with_origin(&repo);
+
+        let main = gwt_core::process::hidden_command("git")
+            .args(["checkout", "-qb", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git checkout main");
+        assert!(main.success(), "git checkout main failed");
+        let push_main = gwt_core::process::hidden_command("git")
+            .args(["push", "origin", "main"])
+            .current_dir(&repo)
+            .status()
+            .expect("git push main");
+        assert!(push_main.success(), "git push main failed");
+        let set_head = gwt_core::process::hidden_command("git")
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .current_dir(&origin)
+            .status()
+            .expect("set origin head");
+        assert!(set_head.success(), "set origin head failed");
+        let checkout_develop = gwt_core::process::hidden_command("git")
+            .args(["checkout", "develop"])
+            .current_dir(&repo)
+            .status()
+            .expect("git checkout develop");
+        assert!(checkout_develop.success(), "git checkout develop failed");
+        let refresh_head = gwt_core::process::hidden_command("git")
+            .args(["remote", "set-head", "origin", "-a"])
+            .current_dir(&repo)
+            .status()
+            .expect("refresh origin head");
+        assert!(refresh_head.success(), "refresh origin head failed");
+        let delete_develop = gwt_core::process::hidden_command("git")
+            .args(["branch", "-D", "develop"])
+            .current_dir(&origin)
+            .status()
+            .expect("delete origin develop");
+        assert!(delete_develop.success(), "delete origin develop failed");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let mut base_branch = Some("origin/develop".to_string());
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("work/stale-develop"),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("stale Start Work base should refallback after fetch");
+
+        let worktree = working_dir.expect("materialized worktree");
+        assert_eq!(base_branch.as_deref(), Some("origin/HEAD"));
+        assert!(worktree.exists());
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &worktree)));
     }
 
     #[test]
@@ -4641,7 +4788,20 @@ fn main() -> wry::Result<()> {
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
-                app.pending_update = Some(state);
+                clients.dispatch(record_update_available(&mut app, state));
+            }
+            Event::UserEvent(UserEvent::ApplyUpdate { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    if let Err(message) = apply_update_state_and_exit(state) {
+                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError { message },
+                            ),
+                        ]));
+                    }
+                });
             }
             Event::UserEvent(UserEvent::MigrationProgress {
                 tab_id,

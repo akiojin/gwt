@@ -166,6 +166,63 @@ for (const themeName of ["dark", "light"]) {
   }
 }
 
+// SPEC-2356 follow-up — Light Operator must be readable beyond the bare
+// WCAG text pairs. The previous light palette technically passed text
+// contrast, but white / bone surfaces and very faint borders made controls
+// difficult to distinguish. Lock the surface stack and chrome separators to
+// minimum practical visual separation so the regression is caught by unit
+// tests instead of only by manual review.
+test("[light] surface stack has visible separation between canvas, elevated, and surface", () => {
+  const surfaceOnCanvas = contrastRatio(light["--color-surface"], light["--color-canvas"]);
+  const elevatedOnSurface = contrastRatio(light["--color-surface-elevated"], light["--color-surface"]);
+  const elevatedOnCanvas = contrastRatio(light["--color-surface-elevated"], light["--color-canvas"]);
+
+  assert.ok(
+    surfaceOnCanvas >= 1.15,
+    `surface on canvas separation ${surfaceOnCanvas.toFixed(2)} < 1.15`,
+  );
+  assert.ok(
+    elevatedOnSurface >= 1.08,
+    `surface-elevated on surface separation ${elevatedOnSurface.toFixed(2)} < 1.08`,
+  );
+  assert.ok(
+    elevatedOnCanvas >= 1.08,
+    `surface-elevated on canvas separation ${elevatedOnCanvas.toFixed(2)} < 1.08`,
+  );
+});
+
+test("[light] chrome borders remain visible on light surfaces", () => {
+  const bgTokens = ["--color-surface", "--color-surface-elevated"];
+  for (const bgToken of bgTokens) {
+    const bg = parseColor(light[bgToken]);
+    const border = compositeColor(parseColor(light["--color-border"]), bg);
+    const strong = compositeColor(parseColor(light["--color-border-strong"]), bg);
+    const borderRatio = contrastRatioRgb(border, bg);
+    const strongRatio = contrastRatioRgb(strong, bg);
+
+    assert.ok(
+      borderRatio >= 1.4,
+      `regular border on ${bgToken}: ${borderRatio.toFixed(2)} < 1.4`,
+    );
+    assert.ok(
+      strongRatio >= 2.0,
+      `strong border on ${bgToken}: ${strongRatio.toFixed(2)} < 2.0`,
+    );
+  }
+});
+
+test("[light] active tint is visible on light surfaces", () => {
+  for (const bgToken of ["--color-surface", "--color-surface-elevated"]) {
+    const bg = parseColor(light[bgToken]);
+    const tint = mixRgb(parseColor(light["--color-state-active"]), bg, 0.14);
+    const ratio = contrastRatioRgb(tint, bg);
+    assert.ok(
+      ratio >= 1.18,
+      `active tint on ${bgToken}: ${ratio.toFixed(2)} < 1.18`,
+    );
+  }
+});
+
 test("dark and light token sets define identical semantic keys", () => {
   const darkKeys = Object.keys(dark).sort();
   const lightKeys = Object.keys(light).sort();
@@ -271,6 +328,9 @@ function parseColor(value) {
   if ((m = v.match(/^rgb\(\s*(\d+)\s*[\s,]\s*(\d+)\s*[\s,]\s*(\d+)\s*\)$/))) {
     return [Number(m[1]), Number(m[2]), Number(m[3])];
   }
+  if ((m = v.match(/^rgba\(\s*(\d+)\s*[\s,]\s*(\d+)\s*[\s,]\s*(\d+)\s*[\s,]\s*([\d.]+)\s*\)$/))) {
+    return [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
+  }
   if ((m = v.match(/^hsl\(\s*([\d.]+)(?:deg)?\s*[\s,]\s*([\d.]+)%\s*[\s,]\s*([\d.]+)%\s*\)$/))) {
     return hslToRgb(Number(m[1]), Number(m[2]), Number(m[3]));
   }
@@ -316,6 +376,23 @@ function oklchToRgb(L, C, h) {
   return [Math.round(toSrgb(lr) * 255), Math.round(toSrgb(lg) * 255), Math.round(toSrgb(lb) * 255)];
 }
 
+function compositeColor(fg, bg) {
+  const alpha = fg.length > 3 ? fg[3] : 1;
+  return [
+    Math.round(fg[0] * alpha + bg[0] * (1 - alpha)),
+    Math.round(fg[1] * alpha + bg[1] * (1 - alpha)),
+    Math.round(fg[2] * alpha + bg[2] * (1 - alpha)),
+  ];
+}
+
+function mixRgb(fg, bg, fgWeight) {
+  return [
+    Math.round(fg[0] * fgWeight + bg[0] * (1 - fgWeight)),
+    Math.round(fg[1] * fgWeight + bg[1] * (1 - fgWeight)),
+    Math.round(fg[2] * fgWeight + bg[2] * (1 - fgWeight)),
+  ];
+}
+
 function relativeLuminance([r, g, b]) {
   const lin = (c) => {
     const cs = c / 255;
@@ -324,10 +401,14 @@ function relativeLuminance([r, g, b]) {
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
-function contrastRatio(fg, bg) {
-  const L1 = relativeLuminance(parseColor(fg));
-  const L2 = relativeLuminance(parseColor(bg));
+function contrastRatioRgb(fg, bg) {
+  const L1 = relativeLuminance(fg);
+  const L2 = relativeLuminance(bg);
   const a = Math.max(L1, L2);
   const b = Math.min(L1, L2);
   return (a + 0.05) / (b + 0.05);
+}
+
+function contrastRatio(fg, bg) {
+  return contrastRatioRgb(parseColor(fg), parseColor(bg));
 }

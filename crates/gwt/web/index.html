@@ -213,19 +213,31 @@
         inset: 0;
         overflow: hidden;
         cursor: grab;
+        background: var(--color-canvas);
       }
 
       .canvas.panning {
         cursor: grabbing;
       }
 
+      .canvas-world-grid {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
+          linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px),
+          linear-gradient(to right, var(--color-border) 1px, transparent 1px),
+          linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
+        background-size: 32px 32px, 32px 32px, 128px 128px, 128px 128px;
+        background-position: 0 0;
+        opacity: 0.9;
+      }
+
       .canvas-stage {
         position: absolute;
         inset: 0;
         transform-origin: 0 0;
-        /* SPEC-2356 — body::before already paints the Operator scan grid,
-           so the legacy 24px slate grid here only doubled the noise.
-           Leaving the stage transparent lets the Operator backdrop show. */
         background: transparent;
       }
 
@@ -262,6 +274,12 @@
         position: absolute;
         right: 18px;
         bottom: 18px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .floating-window-controls-group {
         display: flex;
         align-items: center;
         gap: 8px;
@@ -453,7 +471,6 @@
       .workspace-window.surface-logs,
       .workspace-window.surface-mock,
       .workspace-window.surface-knowledge,
-      .workspace-window.surface-memo,
       .workspace-window.surface-profile {
         background: var(--color-surface);
       }
@@ -464,6 +481,7 @@
         justify-content: space-between;
         gap: 12px;
         height: 38px;
+        min-width: 0;
         padding: 0 12px;
         user-select: none;
         cursor: grab;
@@ -481,7 +499,6 @@
       .surface-logs .titlebar,
       .surface-mock .titlebar,
       .surface-knowledge .titlebar,
-      .surface-memo .titlebar,
       .surface-profile .titlebar {
         background: var(--color-surface-elevated);
         color: var(--color-text);
@@ -499,11 +516,17 @@
       .title {
         display: flex;
         align-items: center;
+        flex: 1 1 auto;
         gap: 10px;
         min-width: 0;
+        overflow: hidden;
       }
 
       .title-text {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         font-size: var(--type-sm);
         font-weight: 600;
         white-space: nowrap;
@@ -512,6 +535,7 @@
       .window-role-badge {
         display: inline-flex;
         align-items: center;
+        flex-shrink: 0;
         min-height: 20px;
         padding: 2px 7px;
         border: 1px solid var(--color-border);
@@ -532,6 +556,7 @@
       .status-chip {
         display: inline-flex;
         align-items: center;
+        flex-shrink: 0;
         gap: 6px;
         padding: 4px 8px;
         border-radius: var(--radius-pill);
@@ -539,6 +564,10 @@
         font-family: var(--font-mono);
         font-size: var(--type-xs);
         letter-spacing: var(--tracking-mono);
+      }
+
+      .status-chip[hidden] {
+        display: none;
       }
 
       .surface-terminal .status-chip {
@@ -580,6 +609,7 @@
       .window-actions {
         display: flex;
         align-items: center;
+        flex-shrink: 0;
         gap: 8px;
       }
 
@@ -622,6 +652,37 @@
         top: 70px;
       }
 
+      .workspace-window.dock-target .titlebar {
+        border-bottom-color: var(--color-state-active);
+        box-shadow:
+          inset 0 -2px 0 var(--color-state-active),
+          0 0 0 2px var(--color-focus-ring);
+      }
+
+      .workspace-window.dock-target {
+        outline: 2px solid var(--color-state-active);
+        outline-offset: 3px;
+        box-shadow:
+          0 0 0 5px color-mix(in oklab, var(--color-state-active) 20%, transparent),
+          var(--shadow-window);
+      }
+
+      .workspace-window.dock-target .titlebar {
+        position: relative;
+      }
+
+      .workspace-window.dock-target .titlebar::after {
+        content: "";
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: -2px;
+        height: 3px;
+        border-radius: 999px;
+        background: var(--color-state-active);
+        box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, transparent);
+      }
+
       .window-tab-strip {
         display: none;
         align-items: center;
@@ -631,6 +692,20 @@
         border-bottom: 1px solid var(--color-border);
         background: var(--color-surface);
         overflow-x: auto;
+      }
+
+      .workspace-window.dock-target .window-tab-strip {
+        position: relative;
+      }
+
+      .workspace-window.dock-target .window-tab-strip::before {
+        content: "";
+        flex: 0 0 3px;
+        align-self: stretch;
+        margin: 5px 2px 5px 0;
+        border-radius: 999px;
+        background: var(--color-state-active);
+        box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-active) 20%, transparent);
       }
 
       .workspace-window.tabbed .window-tab-strip {
@@ -692,8 +767,14 @@
         display: none;
       }
 
+      /* SPEC-2356 FR-013 (revised): the terminal surface body must stay
+         continuous with the xterm Dark Operator background (#0a0d12). If
+         Light theme leaks var(--color-canvas) here, the xterm region picks
+         up a pale gray frame around the dark terminal and the window looks
+         double-framed. Chrome (titlebar / tab strip) still follows the
+         overall theme; this override is scoped to the body only. */
       .surface-terminal .window-body {
-        background: var(--color-canvas);
+        background: #0a0d12;
       }
 
       .surface-file-tree .window-body,
@@ -702,7 +783,6 @@
       .surface-logs .window-body,
       .surface-knowledge .window-body,
       .surface-mock .window-body,
-      .surface-memo .window-body,
       .surface-profile .window-body {
         background: var(--color-surface);
       }
@@ -1192,159 +1272,6 @@
         overflow-wrap: anywhere;
       }
 
-      .memo-layout {
-        flex: 1;
-        min-height: 0;
-        display: grid;
-        grid-template-columns: minmax(220px, 0.9fr) minmax(0, 1.1fr);
-      }
-
-      .memo-note-list,
-      .memo-editor-pane {
-        min-width: 0;
-        min-height: 0;
-      }
-
-      .memo-note-list {
-        overflow: auto;
-        padding: 8px 0;
-        border-right: 1px solid var(--color-border);
-      }
-
-      .memo-editor-pane {
-        overflow: auto;
-        padding: 12px;
-        display: grid;
-        align-content: start;
-        gap: 10px;
-      }
-
-      .memo-status {
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-text-muted);
-      }
-
-      .memo-status.info {
-        color: var(--color-state-active);
-      }
-
-      .memo-status.error {
-        color: var(--color-state-blocked);
-      }
-
-      .memo-note-row {
-        display: grid;
-        gap: 6px;
-        width: 100%;
-        padding: 12px;
-        border: none;
-        border-bottom: 1px solid var(--color-border);
-        background: transparent;
-        color: var(--color-text);
-        text-align: left;
-        cursor: pointer;
-      }
-
-      .memo-note-row:hover {
-        background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
-      }
-
-      .memo-note-row.selected {
-        background: color-mix(in oklab, var(--color-state-active) 18%, transparent);
-      }
-
-      .memo-note-header,
-      .memo-editor-controls {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .memo-note-title {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-family: var(--font-body);
-        font-size: var(--type-sm);
-        font-weight: 600;
-        color: var(--color-text-strong);
-      }
-
-      .memo-note-chip {
-        padding: 4px 8px;
-        border-radius: var(--radius-pill);
-        background: color-mix(in oklab, var(--agent-claude) 18%, transparent);
-        color: var(--agent-claude);
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-      }
-
-      .memo-note-time,
-      .memo-note-preview,
-      .memo-empty-copy,
-      .memo-editor-meta,
-      .memo-pin-toggle {
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-text-muted);
-      }
-
-      .memo-note-preview {
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-      }
-
-      .memo-empty {
-        display: grid;
-        gap: 10px;
-        padding: 16px 12px;
-      }
-
-      .memo-pin-toggle {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-
-      .memo-title-input,
-      .memo-body-input {
-        width: 100%;
-        padding: 10px;
-        border-radius: var(--radius-md);
-        border: 1px solid var(--color-border-strong);
-        background: var(--color-surface);
-        font: inherit;
-        font-family: var(--font-body);
-        color: var(--color-text);
-      }
-      .memo-title-input::placeholder,
-      .memo-body-input::placeholder {
-        color: var(--color-text-muted);
-      }
-      .memo-title-input:focus,
-      .memo-body-input:focus {
-        outline: none;
-        border-color: var(--color-focus-ring);
-      }
-
-      .memo-title-input {
-        min-height: 36px;
-        font-size: var(--type-md);
-        font-weight: 600;
-      }
-
-      .memo-body-input {
-        min-height: 220px;
-        resize: vertical;
-        line-height: 1.5;
-      }
-
       .profile-root {
         flex: 1;
         min-height: 0;
@@ -1673,14 +1600,59 @@
         box-shadow: 0 0 0 1px var(--color-focus-ring), var(--shadow-2);
       }
 
+      .board-message.for-you {
+        border-color: color-mix(in oklab, var(--color-state-active) 62%, var(--color-border));
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-state-active) 42%, transparent), var(--shadow-2);
+      }
+
       .board-message-meta {
         display: inline-flex;
         align-items: center;
         gap: 6px;
+        flex-wrap: wrap;
         font-family: var(--font-mono);
         font-size: var(--type-xs);
         letter-spacing: var(--tracking-mono);
         color: var(--color-text-muted);
+      }
+
+      .board-audience-badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 18px;
+        padding: 2px 6px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-surface);
+        color: var(--color-text-muted);
+        font-family: var(--font-mono);
+        font-size: var(--type-2xs);
+        letter-spacing: var(--tracking-mono);
+      }
+
+      .board-audience-badge.for-you {
+        border-color: color-mix(in oklab, var(--color-state-active) 56%, var(--color-border));
+        color: var(--color-text);
+        background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface-elevated));
+      }
+
+      .board-reply-quote {
+        width: 100%;
+        border: 1px solid var(--color-border);
+        border-left: 3px solid var(--color-state-active);
+        border-radius: var(--radius-sm);
+        padding: 7px 9px;
+        text-align: left;
+        color: var(--color-text-muted);
+        background: color-mix(in oklab, var(--color-surface) 82%, transparent);
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        cursor: pointer;
+      }
+
+      .board-reply-quote:hover {
+        color: var(--color-text);
+        border-color: var(--color-focus-ring);
       }
 
       .board-message-body {
@@ -1690,6 +1662,51 @@
         color: var(--color-text);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+      }
+
+      .board-message-actions {
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .board-reply-button {
+        min-height: 26px;
+        padding: 4px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-muted);
+        background: var(--color-surface);
+        font-family: var(--font-mono);
+        font-size: var(--type-xs);
+        cursor: pointer;
+      }
+
+      .board-reply-button:hover {
+        color: var(--color-text);
+        border-color: var(--color-focus-ring);
+      }
+
+      .board-reply-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--color-border);
+        border-left: 3px solid var(--color-state-active);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+      }
+
+      .board-reply-banner-text {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--color-text-muted);
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
       }
 
       .board-textarea {
@@ -1718,6 +1735,31 @@
         justify-content: flex-end;
         gap: 8px;
         margin-top: 8px;
+      }
+
+      .board-for-you-filter.active {
+        border-color: var(--color-focus-ring);
+        color: var(--color-text);
+        background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface));
+      }
+
+      .board-mention-toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 1000;
+        max-width: min(420px, calc(100vw - 36px));
+        min-height: 38px;
+        padding: 10px 12px;
+        border: 1px solid var(--color-focus-ring);
+        border-radius: var(--radius-md);
+        color: var(--color-text);
+        background: var(--color-surface-elevated);
+        box-shadow: var(--shadow-3);
+        font-family: var(--font-body);
+        font-size: var(--type-sm);
+        text-align: left;
+        cursor: pointer;
       }
 
       .logs-filter-bar {
@@ -2975,66 +3017,6 @@
         white-space: nowrap;
       }
 
-      .update-toast {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9999;
-        transition: opacity 0.3s;
-      }
-
-      .update-toast:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      /* SPEC-2041 FR-036: persistent "Update available" button. Stays at
-         the bottom-right after the initial 8s toast fades, until the user
-         applies the update or restarts. The textContent is rewritten when
-         a strictly newer `latest` arrives via the 5min poll loop. */
-      .update-button {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        padding: 10px 16px;
-        background: var(--color-surface-elevated);
-        border: 1px solid var(--color-focus-ring);
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow-2);
-        backdrop-filter: blur(8px);
-        font-family: var(--font-mono);
-        font-size: var(--type-sm);
-        letter-spacing: var(--tracking-mono);
-        color: var(--color-state-active);
-        cursor: pointer;
-        z-index: 9998;
-        transition: bottom 0.3s, background 0.2s;
-      }
-
-      .update-button.has-toast {
-        /* While the toast is still visible (initial 8s window), float the
-           button above it so the two surfaces do not overlap. */
-        bottom: 76px;
-      }
-
-      .update-button:hover {
-        background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
-      }
-
-      .update-button:focus-visible {
-        outline: 2px solid var(--color-focus-ring);
-        outline-offset: 2px;
-      }
     </style>
   </head>
   <body>
@@ -3045,26 +3027,11 @@
           <div class="project-actions">
             <span class="index-status" id="index-status" hidden></span>
             <span class="app-version" id="app-version" hidden></span>
+            <button class="arrange-button" id="project-workspace-overview-button" aria-label="Workspace overview">
+              Workspace
+            </button>
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
-            </button>
-            <button
-              class="op-chrome-toggle"
-              id="op-sidebar-toggle"
-              type="button"
-              aria-label="Hide sidebar"
-              aria-pressed="true"
-            >
-              Sidebar
-            </button>
-            <button
-              class="op-chrome-toggle"
-              id="op-window-controls-toggle"
-              type="button"
-              aria-label="Hide window controls"
-              aria-pressed="true"
-            >
-              Windows
             </button>
             <div
               class="op-theme-toggle"
@@ -3137,6 +3104,11 @@
               <span class="op-layer__label">Start Work</span>
               <kbd class="op-layer__kbd">GO</kbd>
             </button>
+            <button class="op-layer" type="button" id="op-workspace-overview-entry" aria-label="Workspace overview">
+              <span class="op-layer__indicator"></span>
+              <span class="op-layer__label">Workspace Overview</span>
+              <kbd class="op-layer__kbd">INFO</kbd>
+            </button>
             <button class="op-layer" type="button" data-cmd="open-board" aria-label="Open Board (Cmd+B)" aria-keyshortcuts="Meta+B">
               <span class="op-layer__indicator"></span>
               <span class="op-layer__label">Board</span>
@@ -3153,7 +3125,7 @@
               <kbd class="op-layer__kbd">⌘ L</kbd>
             </button>
           </div>
-          <div class="op-sidebar__section op-active-work" id="op-active-work" aria-live="polite">
+          <div class="op-sidebar__section op-active-work" id="op-active-work" aria-live="polite" hidden>
             <h3 class="op-sidebar__heading">
               <span>Active Work</span>
               <span class="op-sidebar__count" id="op-active-work-count">0</span>
@@ -3171,6 +3143,7 @@
             <span class="hint__copy">Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom</span>
           </div>
           <div class="canvas" id="canvas">
+            <div class="canvas-world-grid" id="canvas-world-grid" aria-hidden="true"></div>
             <div class="canvas-stage" id="canvas-stage"></div>
           </div>
           <div class="project-picker" id="project-picker">
@@ -3198,7 +3171,7 @@
               </button>
             </div>
           </div>
-          <div class="floating-actions">
+          <div class="floating-actions" id="floating-window-controls">
             <button
               class="arrange-button op-palette-trigger"
               id="op-palette-button"
@@ -3209,26 +3182,48 @@
               <span class="op-palette-trigger__label">⌘K</span>
               <span class="op-palette-trigger__hint">Palette</span>
             </button>
-            <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
-            <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
-            <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
-            <div class="window-list-shell" data-window-control="true">
-              <button
-                class="arrange-button"
-                id="window-list-button"
-                aria-label="List windows"
-                aria-expanded="false"
-                data-window-control="true"
-              >
-                Windows
-              </button>
-              <div class="window-list-panel" id="window-list-panel" hidden></div>
-            </div>
             <button class="arrange-button" id="zoom-out-button" aria-label="Zoom out">-</button>
             <button class="arrange-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
             <button class="arrange-button" id="zoom-in-button" aria-label="Zoom in">+</button>
-            <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+            <div
+              class="op-window-controls-peek"
+              role="button"
+              tabindex="0"
+              aria-label="Show window controls"
+              aria-controls="floating-window-controls-actions"
+              data-hover-reveal="window-controls"
+            ></div>
+            <div class="floating-window-controls-group" id="floating-window-controls-actions">
+              <div class="floating-window-controls-group" id="floating-window-controls-primary">
+                <button class="arrange-button" id="tile-button" aria-label="Tile windows" data-window-control="true">Tile</button>
+                <button class="arrange-button" id="stack-button" aria-label="Stack windows" data-window-control="true">Stack</button>
+                <button class="arrange-button" id="align-button" aria-label="Align windows without resizing" data-window-control="true">Align</button>
+                <div class="window-list-shell" data-window-control="true">
+                  <button
+                    class="arrange-button"
+                    id="window-list-button"
+                    aria-label="List windows"
+                    aria-expanded="false"
+                    data-window-control="true"
+                  >
+                    Windows
+                  </button>
+                  <div class="window-list-panel" id="window-list-panel" hidden></div>
+                </div>
+              </div>
+              <div class="floating-window-controls-group" id="floating-window-controls-add">
+                <button class="add-button" id="add-button" aria-label="Add window" data-window-control="true">+</button>
+              </div>
+            </div>
           </div>
+          <div
+            class="op-sidebar-peek"
+            role="button"
+            tabindex="0"
+            aria-label="Show sidebar"
+            aria-controls="op-sidebar"
+            data-hover-reveal="sidebar"
+          ></div>
         </div>
         <footer
           class="op-status-strip"
@@ -3346,13 +3341,6 @@
             </div>
           </div>
           <div class="op-hotkey-card__group">
-            <h3 class="op-hotkey-card__group-title">Layout</h3>
-            <div class="op-hotkey-card__row">
-              <span>Toggle sidebar</span>
-              <kbd class="op-kbd">⌘ \</kbd>
-            </div>
-          </div>
-          <div class="op-hotkey-card__group">
             <h3 class="op-hotkey-card__group-title">Help</h3>
             <div class="op-hotkey-card__row">
               <span>This card</span>
@@ -3388,10 +3376,6 @@
               <button class="preset-button" data-preset="settings">
                 <strong>Settings</strong>
                 <span>Manage custom agents and launch presets</span>
-              </button>
-              <button class="preset-button" data-preset="memo">
-                <strong>Memo</strong>
-                <span>Open a notes surface</span>
               </button>
               <button class="preset-button" data-preset="profile">
                 <strong>Profile</strong>
@@ -3519,6 +3503,37 @@
         </header>
         <div class="op-drawer__body" id="kanban-drawer-body"></div>
         <footer class="op-drawer__footer" id="kanban-drawer-footer"></footer>
+      </aside>
+      <div
+        class="op-drawer-backdrop"
+        id="workspace-overview-drawer-backdrop"
+        data-open="false"
+        hidden
+      ></div>
+      <aside
+        class="op-drawer workspace-overview-drawer"
+        id="workspace-overview-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-overview-title"
+        data-open="false"
+        hidden
+        tabindex="-1"
+      >
+        <header class="op-drawer__header">
+          <h2
+            class="op-drawer__title"
+            id="workspace-overview-title"
+          >Workspace Overview</h2>
+          <button
+            type="button"
+            class="op-drawer__close"
+            id="workspace-overview-close"
+            aria-label="Close Workspace Overview"
+          >×</button>
+        </header>
+        <div class="op-drawer__body" id="workspace-overview-body"></div>
+        <footer class="op-drawer__footer" id="workspace-overview-footer"></footer>
       </aside>
     </div>
 

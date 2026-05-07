@@ -114,12 +114,12 @@ impl ProjectIndexBootstrapService {
                         );
                         proxy.send(UserEvent::ProjectIndexStatus {
                             project_root: project_root_label,
-                            status: gwt::ProjectIndexStatusView {
-                                state: gwt::ProjectIndexStatusState::Error,
-                                detail: format!(
+                            status: gwt::ProjectIndexStatusView::new(
+                                gwt::ProjectIndexStatusState::Error,
+                                format!(
                                     "Project index bootstrap failed after {elapsed_ms} ms: {error}"
                                 ),
-                            },
+                            ),
                         });
                     }
                 }
@@ -222,9 +222,8 @@ mod tests {
                     .expect("release bootstrap");
                 Ok(())
             },
-            |_project_root| gwt::ProjectIndexStatusView {
-                state: gwt::ProjectIndexStatusState::Ready,
-                detail: "ready".to_string(),
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready")
             },
         );
         started_rx
@@ -282,9 +281,11 @@ mod tests {
                 proxy.clone(),
                 temp.path().to_path_buf(),
                 |_project_root: &Path| Ok(()),
-                |_project_root| gwt::ProjectIndexStatusView {
-                    state: gwt::ProjectIndexStatusState::Ready,
-                    detail: "retry ready".to_string(),
+                |_project_root| {
+                    gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        "retry ready",
+                    )
                 },
             );
             if retry == super::ProjectIndexBootstrapRequest::Spawned {

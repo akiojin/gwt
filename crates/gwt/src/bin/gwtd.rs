@@ -67,6 +67,8 @@ fn print_help() {
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
+    println!("  pane        Inspect and control live agent panes");
+    println!("  workspace   Update Workspace current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
 }
@@ -84,10 +86,35 @@ fn family_help(family: &str) -> Option<String> {
         "discuss" => Some(format_discuss_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
+        "pane" => Some(format_pane_help()),
+        "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
         _ => None,
     }
+}
+
+fn format_workspace_help() -> String {
+    [
+        "gwtd workspace — Update Workspace current projection and summary journal.",
+        "",
+        "Usage: gwtd workspace update [fields]",
+        "",
+        "Fields:",
+        "  --title <text>                         Current work title",
+        "  --status <active|idle|blocked|done|unknown>",
+        "                                          Stable Workspace status category",
+        "  --status-text <text>                   User-facing current status",
+        "  --summary <text>                       LLM-authored work summary",
+        "  --next-action <text>                   Next visible action or handoff",
+        "  --owner <text>                         Linked owner such as SPEC-2359",
+        "  --agent-session <id> --current-focus <text>",
+        "                                          Update one Agent focus summary",
+        "  --agent-session <id> --title-summary <text>",
+        "                                          Update the short Agent/window title",
+        "",
+    ]
+    .join("\n")
 }
 
 fn format_daemon_help() -> String {
@@ -193,7 +220,8 @@ fn format_board_help() -> String {
         "Subcommands:",
         "  show [--json]                           Print the Board snapshot",
         "  post --kind <kind> (--body <text> | -f <file>)",
-        "       [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]*",
+        "       [--title-summary <text>] [--parent <id>] [--topic <t>]*",
+        "       [--owner <n>]* [--target <id>]*",
         "                                          Append a Board entry",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
@@ -284,6 +312,26 @@ fn format_build_help() -> String {
         "  phase --spec <n> --label <stage>       Mark a phase milestone (red/green/...)",
         "  complete --spec <n>                    Mark build-spec complete",
         "  abort --spec <n> [--reason <text>]     Abort build-spec",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_pane_help() -> String {
+    [
+        "gwtd pane — Inspect and control live agent panes.",
+        "",
+        "Usage: gwtd pane <action> [args]",
+        "",
+        "Actions:",
+        "  list                                   List active agent panes",
+        "  read <id> [--lines <n>]                Read recent pane output (default: 50 lines)",
+        "  close <id>                             Stop and close a pane",
+        "  stop <id>                              Alias for close",
+        "",
+        "Notes:",
+        "  - Intended for gwt-launched agent panes with GWT_HOOK_FORWARD_URL set.",
+        "  - GWT_PANE_WS_URL can override the derived WebSocket endpoint for tests.",
         "",
     ]
     .join("\n")

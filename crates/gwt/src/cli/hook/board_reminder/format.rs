@@ -6,9 +6,14 @@
 //! so that the entry-line prefix and reminder body never share verbatim
 //! substrings.
 
-use gwt_core::coordination::BoardEntry;
+use gwt_core::coordination::{self, BoardEntry};
 
-use super::texts::{FOR_YOU_MARKER, INJECTION_HEADER, SESSION_START_HEADER, USER_PROMPT_REMINDER};
+use super::texts::{
+    injection_header, no_recent_posts_line, session_start_header, user_prompt_reminder,
+    ReminderLanguage, FOR_YOU_MARKER,
+};
+
+const ENTRY_BODY_CONTEXT_CHAR_LIMIT: usize = 1_200;
 
 pub(super) fn filter_and_cap_latest(
     mut entries: Vec<BoardEntry>,
@@ -23,34 +28,38 @@ pub(super) fn filter_and_cap_latest(
     entries
 }
 
-pub(super) fn injection_text(entries: &[BoardEntry], match_keys: &[String]) -> String {
-    let mut out = String::from(INJECTION_HEADER);
+pub(super) fn injection_text_with_language(
+    entries: &[BoardEntry],
+    match_keys: &[String],
+    language: ReminderLanguage,
+) -> String {
+    let mut out = String::from(injection_header(language));
     for entry in entries {
         out.push_str(&format_entry_line(entry, match_keys));
     }
     out
 }
 
-pub(super) fn session_start_text(entries: &[BoardEntry], match_keys: &[String]) -> String {
-    let mut out = String::from(SESSION_START_HEADER);
+pub(super) fn session_start_text_with_language(
+    entries: &[BoardEntry],
+    match_keys: &[String],
+    language: ReminderLanguage,
+) -> String {
+    let mut out = String::from(session_start_header(language));
     if entries.is_empty() {
-        out.push_str("- (no recent posts from other Agents)\n");
+        out.push_str(no_recent_posts_line(language));
     } else {
         for entry in entries {
             out.push_str(&format_entry_line(entry, match_keys));
         }
     }
     out.push('\n');
-    out.push_str(USER_PROMPT_REMINDER);
+    out.push_str(user_prompt_reminder(language, false));
     out
 }
 
 pub(super) fn entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
-    !entry.target_owners.is_empty()
-        && entry
-            .target_owners
-            .iter()
-            .any(|t| match_keys.iter().any(|k| k == t))
+    coordination::board_entry_targets_self(entry, match_keys)
 }
 
 pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> String {
@@ -61,21 +70,46 @@ pub(super) fn format_entry_line(entry: &BoardEntry, match_keys: &[String]) -> St
     } else {
         ""
     };
-    format!(
-        "- {prefix}[{author} @ {branch} / {session}] ({kind}) {body}\n",
+    let mut out = format!(
+        "- {prefix}[{author} @ {branch} / {session}] ({kind})\n",
         prefix = prefix,
         author = entry.author,
         branch = branch,
         session = session_id,
         kind = entry.kind.as_str(),
-        body = entry.body,
-    )
+    );
+    append_indented_body(
+        &mut out,
+        &truncate_body_for_context(&entry.body, ENTRY_BODY_CONTEXT_CHAR_LIMIT),
+        "  ",
+    );
+    out
+}
+
+fn append_indented_body(out: &mut String, body: &str, indent: &str) {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.split('\n') {
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn truncate_body_for_context(body: &str, limit: usize) -> String {
+    if body.chars().count() <= limit {
+        return body.to_string();
+    }
+    let mut truncated: String = body.chars().take(limit).collect();
+    truncated.push_str("\n[truncated]");
+    truncated
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind};
+    use gwt_core::coordination::{
+        AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
+    };
 
     use super::*;
 
@@ -124,6 +158,21 @@ mod tests {
         let entry = make_entry(vec!["sess-1".into()]);
         assert!(entry_targets_self(&entry, &["sess-1".into()]));
         assert!(!entry_targets_self(&entry, &["sess-other".into()]));
+    }
+
+    #[test]
+    fn entry_targets_self_or_match_with_typed_session_mention() {
+        let entry = make_entry(vec![])
+            .with_mention(BoardMention::new(BoardMentionTargetKind::Session, "sess-1"));
+        assert!(entry_targets_self(&entry, &["session:sess-1".into()]));
+        assert!(!entry_targets_self(&entry, &["session:sess-other".into()]));
+    }
+
+    #[test]
+    fn entry_targets_self_or_match_with_typed_agent_mention() {
+        let entry = make_entry(vec![])
+            .with_mention(BoardMention::new(BoardMentionTargetKind::Agent, "codex"));
+        assert!(entry_targets_self(&entry, &["agent:codex".into()]));
     }
 
     #[test]
@@ -179,14 +228,69 @@ mod tests {
     #[test]
     fn injection_text_starts_with_header_and_renders_lines() {
         let entry = make_entry(vec![]);
-        let text = injection_text(&[entry], &[]);
+        let text = injection_text_with_language(&[entry], &[], ReminderLanguage::En);
         assert!(text.starts_with("# Recent Board updates"));
         assert!(text.contains("[OtherAgent @ feature/other / sess-other]"));
     }
 
     #[test]
+    fn format_entry_line_preserves_multiline_body_as_readable_block() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "OtherAgent",
+            BoardEntryKind::Handoff,
+            "Current state: phase 1 is complete.\n\nNext: pick up phase 2.\nRisk: verify Windows CI.",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_branch("feature/other")
+        .with_origin_session_id("sess-other");
+
+        let line = format_entry_line(&entry, &[]);
+
+        assert!(
+            line.starts_with("- [OtherAgent @ feature/other / sess-other] (handoff)\n"),
+            "expected metadata header to be separate from body, got:\n{line}"
+        );
+        assert!(
+            line.contains("  Current state: phase 1 is complete.\n  \n  Next: pick up phase 2.\n  Risk: verify Windows CI.\n"),
+            "expected body block with preserved blank lines, got:\n{line}"
+        );
+    }
+
+    #[test]
+    fn format_entry_line_truncates_very_long_body_for_context_injection() {
+        let long_body = format!("{}END", "a".repeat(1_600));
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "OtherAgent",
+            BoardEntryKind::Status,
+            long_body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_branch("feature/other")
+        .with_origin_session_id("sess-other");
+
+        let line = format_entry_line(&entry, &[]);
+
+        assert!(
+            line.contains("[truncated]"),
+            "expected long body to be explicitly truncated, got:\n{line}"
+        );
+        assert!(
+            !line.contains("END"),
+            "expected tail beyond the context cap to be omitted, got:\n{line}"
+        );
+    }
+
+    #[test]
     fn session_start_text_appends_user_prompt_reminder() {
-        let text = session_start_text(&[], &[]);
+        let text = session_start_text_with_language(&[], &[], ReminderLanguage::En);
         assert!(text.contains("(no recent posts from other Agents)"));
         assert!(text.contains("Board Post Reminder"));
     }

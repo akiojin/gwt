@@ -77,10 +77,21 @@ pub fn gwt_workspace_projection_path(repo_hash: &RepoHash) -> PathBuf {
     gwt_project_dir(repo_hash).join("workspace/current.json")
 }
 
+/// Return the Workspace summary journal path for a repository hash.
+pub fn gwt_workspace_journal_path(repo_hash: &RepoHash) -> PathBuf {
+    gwt_project_dir(repo_hash).join("workspace/journal.jsonl")
+}
+
 /// Return the Workspace current projection path for a repository path.
 pub fn gwt_workspace_projection_path_for_repo_path(repo_path: &Path) -> PathBuf {
     let repo_hash = project_scope_hash(repo_path);
     gwt_workspace_projection_path(&repo_hash)
+}
+
+/// Return the Workspace summary journal path for a repository path.
+pub fn gwt_workspace_journal_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    let repo_hash = project_scope_hash(repo_path);
+    gwt_workspace_journal_path(&repo_hash)
 }
 
 /// Return the repo-scoped notes root (`~/.gwt/notes/`).

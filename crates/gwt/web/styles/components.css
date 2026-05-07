@@ -59,12 +59,14 @@ body::after {
   z-index: 1;
   height: 100%;
   display: grid;
-  grid-template-columns: minmax(220px, 240px) 1fr;
+  /* SPEC-2356 Phase 9 (FR-021): canvas takes full width; sidebar is an
+     auto-hide overlay positioned outside of the grid flow. */
+  grid-template-columns: 1fr;
   grid-template-rows: 44px 1fr 28px;
   grid-template-areas:
-    "projectbar projectbar"
-    "sidebar    canvas"
-    "strip      strip";
+    "projectbar"
+    "canvas"
+    "strip";
   background: var(--bg-depth-glow), transparent;
 }
 
@@ -133,37 +135,79 @@ body::after {
   font-weight: 500;
 }
 
-/* Project Bar trailing chrome buttons */
-.op-chrome-toggle {
-  appearance: none;
-  background: transparent;
-  border: 1px solid var(--color-border-strong);
-  color: var(--color-text);
-  height: 26px;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-pill);
-  font: inherit;
+/* SPEC-2041 — unified update CTA. A single actionable surface replaces the
+   earlier split toast + persistent button flow. */
+.update-cta {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 10px 16px;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(8px);
   font-family: var(--font-mono);
-  font-size: var(--type-xs);
+  font-size: var(--type-sm);
   letter-spacing: var(--tracking-mono);
-  text-transform: uppercase;
+  color: var(--color-state-active);
   cursor: pointer;
-  transition: border-color var(--motion-fast) var(--motion-curve),
-              color var(--motion-fast) var(--motion-curve),
-              background var(--motion-fast) var(--motion-curve);
+  z-index: 9999;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
 
-.op-chrome-toggle:hover,
-.op-chrome-toggle:focus-visible {
+.update-cta:hover {
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
+}
+
+.update-cta.is-applying {
+  color: var(--color-state-idle);
+  cursor: progress;
+}
+
+.update-cta.is-error {
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
+.update-cta:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.terminal-context-menu {
+  position: fixed;
+  min-width: 136px;
+  padding: 4px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+  z-index: 10000;
+}
+
+.terminal-context-menu[hidden] {
+  display: none;
+}
+
+.terminal-context-menu__item {
+  width: 100%;
+  border: 0;
+  border-radius: calc(var(--radius-md) - 2px);
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.terminal-context-menu__item:hover,
+.terminal-context-menu__item:focus-visible {
   outline: none;
-  border-color: var(--color-focus-ring);
-  color: var(--color-focus-ring);
-}
-
-.op-chrome-toggle[aria-pressed="false"] {
-  color: var(--color-text-muted);
-  border-color: var(--color-border);
-  background: color-mix(in oklab, var(--color-text-muted) 10%, transparent);
+  background: color-mix(in oklab, var(--color-state-active) 14%, transparent);
+  color: var(--color-text-strong);
 }
 
 /* SPEC-2356 FR-024 — segmented theme toggle (AUTO / DARK / LIGHT). Replaces
@@ -230,13 +274,73 @@ body::after {
    ============================================================ */
 
 .op-sidebar {
-  grid-area: sidebar;
+  /* SPEC-2356 Phase 9 (FR-021/FR-031): sidebar lives outside the grid as an
+     auto-hide overlay. Default state slides off-screen to the left and
+     re-enters when [data-op-sidebar="revealed"] is set on the document
+     element by the hover-reveal state machine. */
+  position: absolute;
+  top: 44px;
+  left: 0;
+  bottom: 28px;
+  width: 240px;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  z-index: 9;
+  z-index: 30;
+  transform: translateX(-100%);
+  transition: transform var(--motion-medium) var(--motion-curve);
+  pointer-events: none;
+  box-shadow: 4px 0 16px color-mix(in oklab, var(--color-shadow, #000) 30%, transparent);
+}
+
+:root[data-op-sidebar="revealed"] .op-sidebar {
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+/* SPEC-2356 Phase 9 (FR-021): the always-visible peek 帯 on the left edge
+   acts as the hover/focus/tap target that summons the sidebar overlay. */
+.op-sidebar-peek {
+  position: absolute;
+  top: 44px;
+  left: 0;
+  bottom: 28px;
+  width: 6px;
+  z-index: 31;
+  cursor: pointer;
+  background: linear-gradient(
+    to right,
+    color-mix(in oklab, var(--color-state-active) 70%, transparent) 0%,
+    color-mix(in oklab, var(--color-state-active) 18%, transparent) 100%
+  );
+  border-right: 1px solid color-mix(in oklab, var(--color-border-strong) 55%, transparent);
+  transition: background var(--motion-fast) var(--motion-curve), width var(--motion-fast) var(--motion-curve);
+}
+
+.op-sidebar-peek:hover,
+.op-sidebar-peek:focus-visible {
+  background: linear-gradient(
+    to right,
+    var(--color-state-active) 0%,
+    color-mix(in oklab, var(--color-state-active) 50%, transparent) 100%
+  );
+  width: 8px;
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-sidebar,
+  .op-sidebar-peek {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .op-sidebar-peek {
+    background: Highlight;
+  }
 }
 
 .op-sidebar__section {
@@ -277,6 +381,13 @@ body::after {
   font-family: var(--font-body);
   font-size: var(--type-sm);
   color: var(--color-text);
+  /* SPEC-2356 FR-030: WebView2 / Chromium の <button> UA chrome (border +
+     grey background) を解除し、状態は indicator dot + label color + token
+     focus ring のみで表現する。macOS WebKit では UA default が控えめだが
+     Windows で灰色枠が出ていたのを統一して消す。 */
+  appearance: none;
+  border: 0;
+  background: transparent;
 }
 
 .op-layer__indicator {
@@ -309,6 +420,10 @@ body::after {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+.op-active-work[hidden] {
+  display: none;
 }
 
 .op-work-summary,
@@ -465,6 +580,10 @@ body::after {
   color: var(--agent-codex);
 }
 
+.op-agent-state {
+  text-transform: none;
+}
+
 .op-agent-card[data-state="blocked"] .op-agent-state {
   border-color: var(--color-state-blocked);
   color: var(--color-state-blocked);
@@ -496,6 +615,83 @@ body::after {
   font-size: var(--type-sm);
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.workspace-overview-drawer .op-drawer__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.workspace-overview-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-overview-heading {
+  color: var(--color-text-muted);
+  font-family: var(--font-display);
+  font-size: var(--type-xs);
+  font-stretch: 80%;
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+}
+
+.workspace-overview-card,
+.workspace-journal-entry {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  padding: var(--space-3);
+}
+
+.workspace-overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-overview-title {
+  color: var(--color-text-strong);
+  font-family: var(--font-display);
+  font-size: var(--type-md);
+  font-stretch: 80%;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.workspace-overview-summary,
+.workspace-overview-next,
+.workspace-journal-summary {
+  color: var(--color-text);
+  font-size: var(--type-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workspace-overview-meta,
+.workspace-journal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+}
+
+.workspace-overview-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.workspace-overview-empty {
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
 }
 
 /* ============================================================
@@ -586,7 +782,69 @@ body::after {
 }
 
 .canvas {
-  background: transparent;
+  background: var(--color-canvas);
+}
+
+/* SPEC-2356 Phase 9 (FR-022): peek 帯 for the bottom Window controls. The
+   palette + zoom controls always render in the toolbar; primary (Tile / Stack
+   / Windows) and add (+) groups are auto-hidden until pointer hover /
+   keyboard focus / pointer tap on the peek 帯. */
+.op-window-controls-peek {
+  order: 2;
+  width: 32px;
+  height: 24px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in oklab, var(--color-border-strong) 55%, transparent);
+  background: linear-gradient(
+    to top,
+    color-mix(in oklab, var(--color-state-active) 60%, transparent) 0%,
+    color-mix(in oklab, var(--color-state-active) 18%, transparent) 100%
+  );
+  cursor: pointer;
+  z-index: 31;
+  transition: background var(--motion-fast) var(--motion-curve), border-color var(--motion-fast) var(--motion-curve);
+}
+
+.op-window-controls-peek:hover,
+.op-window-controls-peek:focus-visible {
+  background: var(--color-state-active);
+  border-color: var(--color-focus-ring);
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .op-window-controls-peek {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .op-window-controls-peek {
+    background: Highlight;
+    border-color: Highlight;
+  }
+}
+
+/* SPEC-2356 Phase 9 (T-136): while a floating window resize is in flight,
+   peek 帯 hits are suppressed so the pointer cannot steal focus from the
+   resize handle if the user crosses the screen edge mid-drag. */
+:root[data-op-resize-active] .op-sidebar-peek,
+:root[data-op-resize-active] .op-window-controls-peek {
+  pointer-events: none;
+}
+
+.canvas-world-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px),
+    linear-gradient(to right, var(--color-border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--color-border) 1px, transparent 1px);
+  background-size: 32px 32px, 32px 32px, 128px 128px, 128px 128px;
+  background-position: 0 0;
+  opacity: 0.9;
 }
 
 /* Existing floating actions become Operator-styled */
@@ -1391,6 +1649,7 @@ kbd.op-kbd {
 :root[data-theme] .recent-project-row:focus-visible,
 :root[data-theme] .live-session-button:focus-visible,
 :root[data-theme] .launch-choice-button:focus-visible,
+:root[data-theme] .op-edge-handle:focus-visible,
 /* SPEC-2356 — keyboard-navigable row patterns added in PRs #2464/#2465.
    Without these focus-visible rules, keyboard users couldn't see which
    row currently has focus when Tab'ing through the file tree or
@@ -1740,32 +1999,16 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
-/* SPEC-2356 — Cmd+\ collapses Sidebar Layers; the grid template tightens
-   to push canvas-area against the project bar's left edge. */
-:root[data-theme][data-op-sidebar="collapsed"] #app {
-  grid-template-columns: 0 1fr;
-}
-
-:root[data-theme][data-op-sidebar="collapsed"] .op-sidebar {
+/* SPEC-2356 Phase 9 (FR-022): Window controls action group auto-hides
+   until [data-op-window-controls="revealed"] is set by the hover-reveal state
+   machine. Palette and Zoom controls remain in the toolbar regardless. */
+:root[data-theme] #floating-window-controls-actions {
+  order: 1;
   display: none;
 }
 
-:root[data-theme][data-op-window-controls="hidden"] .floating-actions [data-window-control="true"] {
-  display: none;
-}
-
-/* SPEC-2356 — smooth Sidebar collapse transition.
-   When user toggles ⌘\, the grid template columns animate from
-   240px ↔ 0 instead of snapping. reduced-motion env keeps the
-   instant snap behaviour. */
-:root[data-theme] #app {
-  transition: grid-template-columns var(--motion-medium) var(--motion-curve);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  :root[data-theme] #app {
-    transition: none;
-  }
+:root[data-theme][data-op-window-controls="revealed"] #floating-window-controls-actions {
+  display: flex;
 }
 
 /* SPEC-2356 — micro motion on hover for the few row-style buttons that
@@ -1777,6 +2020,7 @@ kbd.op-kbd {
 :root[data-theme] .launch-choice-button,
 :root[data-theme] .arrange-button,
 :root[data-theme] .add-button,
+:root[data-theme] .op-edge-handle,
 :root[data-theme] .wizard-button {
   transition: background var(--motion-fast) var(--motion-curve),
               border-color var(--motion-fast) var(--motion-curve),
@@ -1790,6 +2034,7 @@ kbd.op-kbd {
   :root[data-theme] .launch-choice-button,
   :root[data-theme] .arrange-button,
   :root[data-theme] .add-button,
+  :root[data-theme] .op-edge-handle,
   :root[data-theme] .wizard-button {
     transition: none;
   }
@@ -1823,25 +2068,9 @@ kbd.op-kbd {
   }
 }
 
-/* SPEC-2356 — when sidebar is collapsed, the chrome should hint the
-   "expand" affordance via a small accent strip on the left edge of the
-   project bar, so users with no kbd shortcut memory still notice the
-   sidebar can come back. */
-:root[data-theme][data-op-sidebar="collapsed"] .project-bar {
-  box-shadow: inset 3px 0 0 var(--color-state-active);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
-    box-shadow: inset 3px 0 0 var(--color-state-active);
-  }
-}
-
-@media (forced-colors: active) {
-  :root[data-theme][data-op-sidebar="collapsed"] .project-bar {
-    box-shadow: inset 3px 0 0 Highlight;
-  }
-}
+/* SPEC-2356 Phase 9: the previous "collapsed" sidebar accent stripe on
+   .project-bar is removed — the always-visible peek 帯 (`.op-sidebar-peek`)
+   provides the discoverability cue for the hover-reveal sidebar instead. */
 
 /* SPEC-2356 — Project Tab active-state subtle accent strip on the bottom
    so the active project reads as "currently selected" with the same
@@ -2199,4 +2428,166 @@ kbd.op-kbd {
   color: var(--color-text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* ============================================================
+   SPEC-1933 Phase: System Settings (Output Language)
+   Settings surface: tab strip + System tab content.
+   Reuses Operator Design System tokens — no new visual primitives.
+   ============================================================ */
+
+:root[data-theme] .settings-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-family: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+:root[data-theme] .settings-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+:root[data-theme] .settings-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--type-md);
+  font-weight: 700;
+  letter-spacing: var(--tracking-display);
+  text-transform: uppercase;
+  color: var(--color-text-strong);
+}
+
+:root[data-theme] .settings-tabs {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+:root[data-theme] .settings-tab {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  cursor: pointer;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+:root[data-theme] .settings-tab:hover:not([aria-selected="true"]) {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface-elevated));
+}
+
+:root[data-theme] .settings-tab[aria-selected="true"] {
+  background: color-mix(in oklab, var(--color-state-active) 22%, var(--color-surface-elevated));
+  color: var(--color-text-strong);
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .settings-tab:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+:root[data-theme] .settings-body {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-4);
+}
+
+:root[data-theme] .settings-panel.hidden {
+  display: none;
+}
+
+:root[data-theme] .settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  max-width: 520px;
+}
+
+:root[data-theme] .settings-section + .settings-section {
+  margin-top: var(--space-3);
+}
+
+:root[data-theme] .settings-label {
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+:root[data-theme] .settings-select {
+  appearance: none;
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 1px),
+    calc(100% - 9px) calc(50% - 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
+:root[data-theme] .settings-select:hover {
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .settings-select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .settings-help {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+:root[data-theme] .settings-status {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+:root[data-theme] .settings-status[data-kind="success"] {
+  color: color-mix(in oklab, var(--color-state-positive) 80%, var(--color-text));
+}
+
+:root[data-theme] .settings-status[data-kind="error"] {
+  color: var(--color-state-negative);
 }

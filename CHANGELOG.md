@@ -1,6 +1,129 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.22.0] - 2026-05-07
+
+### Bug Fixes
+
+- **board:** Board投稿の改行を読みやすく保持
+- **gui:** Use short summaries for agent window titles
+- **docs:** Rustdoc broken intra-doc link を Self:: で修正
+
+### Features
+
+- **index:** Repairing 状態と RebuildProgress を ProjectIndexStatusView に追加 (SPEC-1939 Phase 12)
+- **gui:** SPEC-2356 Phase 9 でサイドバーとウィンドウ操作パネルを hover-reveal 化
+- **settings:** SPEC-1933 で narrative 出力の言語選択を追加
+
+### Miscellaneous Tasks
+
+- Merge origin/develop for title summary branch
+- Merge develop for readable board posts
+
+## [9.21.1] - 2026-05-07
+
+### Bug Fixes
+
+- **gui:** Terminal resize後の入力停止を防ぐ
+- **gui:** Resizeキャンセル後の固着を防ぐ
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into resize fix
+- Sync develop after resize fix
+- Sync develop release metadata
+
+## [9.21.0] - 2026-05-07
+
+### Bug Fixes
+
+- **gui:** Enable initial window tab docking
+- **ui:** 開発時のフォント可読性を改善
+- **gui:** Reflect Board post focus in agent titles
+- **gui:** Surface update apply worker failures
+- **workspace:** Satisfy newer clippy sort lint
+- **gui:** Preserve grouped titlebar drag
+- **gui:** Harden titlebar dock targeting
+- **gui:** ターミナル本体の二重枠とサイドバーボタンUA枠を解消
+
+### Documentation
+
+- **tasks:** Record frontend module check lesson
+
+### Features
+
+- Add Board mentions and reply navigation
+- Persist workspace summaries
+- Add workspace overview surface
+
+### Miscellaneous Tasks
+
+- Origin/developをマージ
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge develop into board architecture follow-up
+
+### Refactor
+
+- **board:** Consolidate mention audience helpers
+
+### Testing
+
+- **frontend:** Check board surface bundle module
+
+## [9.20.4] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Launch Agentの設定復元を保持
+
+## [9.20.3] - 2026-05-06
+
+### Bug Fixes
+
+- **ui:** Improve light theme readability
+- **gui:** Apply pending update from toast
+- **gui:** Regroup launch agent settings
+
+### Miscellaneous Tasks
+
+- Merge origin/develop into work branch
+- Merge develop into work branch
+
+## [9.20.2] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Align without overlap and persist arrange resize to terminal backend
+
+## [9.20.1] - 2026-05-06
+
+### Bug Fixes
+
+- Make active work sidebar actionable
+- **gui:** Replace chrome text toggles with edge handles
+- **gui:** Align window controls aria target
+- Show owner purpose in agent window titles
+
+### Miscellaneous Tasks
+
+- Merge develop into work branch
+
+## [9.20.0] - 2026-05-06
+
+### Bug Fixes
+
+- **gui:** Sync canvas grid with viewport
+
+### Features
+
+- Support workspace home without default worktree
+
+### Miscellaneous Tasks
+
+- Merge develop into workspace home work
+
 ## [9.19.2] - 2026-05-06
 
 ### Bug Fixes

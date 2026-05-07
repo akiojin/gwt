@@ -81,18 +81,24 @@ fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> 
 }
 
 /// Build the OR-match key list for self-targeted entry detection
-/// (SPEC-1974 FR-041). Includes the session id, the active branch, and
-/// the agent display name when each is non-empty.
+/// (SPEC-1974 FR-041). Includes legacy raw target keys and typed
+/// mention keys so `target_owners` and `mentions` stay backward-compatible.
 fn build_self_match_keys(session: &Session) -> Vec<String> {
-    let mut keys = Vec::with_capacity(3);
+    let mut keys = Vec::with_capacity(6);
     if !session.id.trim().is_empty() {
         keys.push(session.id.clone());
+        keys.push(format!("session:{}", session.id));
     }
     if !session.branch.trim().is_empty() {
         keys.push(session.branch.clone());
+        keys.push(format!("branch:{}", session.branch));
     }
     if !session.display_name.trim().is_empty() {
         keys.push(session.display_name.clone());
+    }
+    let agent_command = session.agent_id.command();
+    if !agent_command.trim().is_empty() {
+        keys.push(format!("agent:{agent_command}"));
     }
     keys
 }
@@ -133,6 +139,7 @@ pub fn compute_plan(
     )?;
 
     let self_match_keys = build_self_match_keys(session);
+    let language = resolve_narrative_language();
 
     Ok(Some(plan_reminder(ReminderInputs {
         event: intent_event,
@@ -143,7 +150,17 @@ pub fn compute_plan(
         recent_entries,
         reminders,
         has_recent_own_status,
+        language,
     })))
+}
+
+/// Resolve the narrative-output language from the global gwt config
+/// (SPEC-1933 FR-009 / FR-010). Falls back to `"en"` when settings
+/// cannot be loaded.
+fn resolve_narrative_language() -> String {
+    gwt_config::Settings::load()
+        .map(|settings| settings.ai.effective_language().to_string())
+        .unwrap_or_else(|_| "en".to_string())
 }
 
 #[cfg(test)]
@@ -238,6 +255,18 @@ mod tests {
         assert!(keys.iter().any(|k| k == &session.id), "session id missing");
         assert!(keys.iter().any(|k| k == "feature/me"), "branch missing");
         assert!(keys.iter().any(|k| k == "Codex"), "display name missing");
+        assert!(
+            keys.iter().any(|k| k == &format!("session:{}", session.id)),
+            "typed session mention key missing"
+        );
+        assert!(
+            keys.iter().any(|k| k == "branch:feature/me"),
+            "typed branch mention key missing"
+        );
+        assert!(
+            keys.iter().any(|k| k == "agent:codex"),
+            "typed agent mention key missing"
+        );
     }
 
     #[test]
@@ -246,9 +275,12 @@ mod tests {
         let mut session = Session::new(dir.path(), "", AgentId::Codex);
         session.display_name = String::new();
         let keys = build_self_match_keys(&session);
-        // Only the session id (always non-empty after Session::new) survives.
-        assert_eq!(keys.len(), 1);
+        // Raw and typed session id survive; typed agent identity survives even
+        // when optional branch/display fields are empty.
+        assert_eq!(keys.len(), 3);
         assert_eq!(keys[0], session.id);
+        assert_eq!(keys[1], format!("session:{}", session.id));
+        assert_eq!(keys[2], "agent:codex");
     }
 
     #[test]
@@ -334,7 +366,10 @@ mod tests {
         let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
             .unwrap()
             .unwrap();
-        assert!(additional_context(&plan.output).contains("posted to the Board recently"));
+        let text = additional_context(&plan.output);
+        assert!(
+            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
+        );
     }
 
     #[test]
@@ -351,7 +386,10 @@ mod tests {
         );
 
         let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
-        assert!(system_message(&plan.output).contains("posted to the Board recently"));
+        let text = system_message(&plan.output);
+        assert!(
+            text.contains("posted to the Board recently") || text.contains("最近 Board に投稿済み")
+        );
     }
 
     #[test]

@@ -2,12 +2,14 @@ use std::io;
 
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
-    coordination::{load_snapshot, post_entry, AuthorKind, BoardEntry},
+    coordination::{
+        load_snapshot, normalize_board_mentions, post_entry, AuthorKind, BoardEntry, BoardMention,
+    },
     paths::gwt_sessions_dir,
 };
 use gwt_github::SpecOpsError;
 
-use crate::cli::{BoardCommand, CliEnv, CliParseError};
+use crate::cli::{BoardCommand, BoardPostCommand, CliEnv, CliParseError};
 
 pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     let mut it = args.iter().peekable();
@@ -46,15 +48,18 @@ pub(super) fn run<E: CliEnv>(
             }
             0
         }
-        BoardCommand::Post {
-            kind,
-            body,
-            file,
-            parent,
-            topics,
-            owners,
-            targets,
-        } => {
+        BoardCommand::Post(command) => {
+            let BoardPostCommand {
+                kind,
+                body,
+                file,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+            } = *command;
             let body = match (body, file) {
                 (Some(body), None) => body,
                 (None, Some(file)) => env.read_file(&file).map_err(io_as_spec_ops_error)?,
@@ -64,8 +69,11 @@ pub(super) fn run<E: CliEnv>(
                     )));
                 }
             };
-            let (author_kind, author) =
-                current_author_from_env().unwrap_or((AuthorKind::User, "user".to_string()));
+            let current_session = current_session_from_env().ok().flatten();
+            let (author_kind, author) = current_session
+                .as_ref()
+                .map(|session| (AuthorKind::Agent, session.display_name.clone()))
+                .unwrap_or((AuthorKind::User, "user".to_string()));
             let mut entry = BoardEntry::new(
                 author_kind,
                 author,
@@ -76,8 +84,26 @@ pub(super) fn run<E: CliEnv>(
                 topics,
                 owners,
             );
+            if let Some(title_summary) = title_summary {
+                entry = entry.with_title_summary(title_summary);
+            }
+            if let Some(session) = current_session.as_ref() {
+                if !session.branch.trim().is_empty() {
+                    entry = entry.with_origin_branch(session.branch.clone());
+                }
+                if !session.id.trim().is_empty() {
+                    entry = entry.with_origin_session_id(session.id.clone());
+                }
+                if !session.display_name.trim().is_empty() {
+                    entry = entry.with_origin_agent_id(session.display_name.clone());
+                }
+            }
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
+            }
+            let mentions = parse_mentions(&mentions).map_err(gwt_error_to_spec_ops_error)?;
+            if !mentions.is_empty() {
+                entry = entry.with_mentions(mentions);
             }
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
@@ -133,10 +159,12 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut kind: Option<String> = None;
     let mut body: Option<String> = None;
     let mut file: Option<String> = None;
+    let mut title_summary: Option<String> = None;
     let mut parent: Option<String> = None;
     let mut topics = Vec::new();
     let mut owners = Vec::new();
     let mut targets = Vec::new();
+    let mut mentions = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
@@ -161,6 +189,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                     return Err(CliParseError::MissingFlag("-f"));
                 }
                 file = Some(args[i].clone());
+            }
+            "--title-summary" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--title-summary"));
+                }
+                title_summary = Some(args[i].clone());
             }
             "--parent" => {
                 i += 1;
@@ -190,25 +225,37 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                 }
                 targets.push(args[i].clone());
             }
+            "--mention" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--mention"));
+                }
+                mentions.push(args[i].clone());
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
     }
 
-    Ok(BoardCommand::Post {
+    Ok(BoardCommand::Post(Box::new(BoardPostCommand {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
+        title_summary,
         parent,
         topics,
         owners,
         targets,
-    })
+        mentions,
+    })))
 }
 
-fn current_author_from_env() -> Option<(AuthorKind, String)> {
-    let session = current_session_from_env().ok().flatten()?;
-    Some((AuthorKind::Agent, session.display_name))
+fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
+    let mut mentions = Vec::new();
+    for value in values {
+        mentions.push(value.parse::<BoardMention>()?);
+    }
+    Ok(normalize_board_mentions(&mentions))
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {
@@ -229,13 +276,22 @@ fn render_snapshot(out: &mut String, snapshot: &gwt_core::coordination::Coordina
     } else {
         for entry in &snapshot.board.entries {
             out.push_str(&format!(
-                "- [{}] {}: {} ({})\n",
+                "- [{}] {} ({})\n",
                 entry.kind.as_str(),
                 format_author(entry),
-                entry.body,
                 entry.id
             ));
+            append_indented_body(out, &entry.body, "  ");
         }
+    }
+}
+
+fn append_indented_body(out: &mut String, body: &str, indent: &str) {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    for line in normalized.split('\n') {
+        out.push_str(indent);
+        out.push_str(line);
+        out.push('\n');
     }
 }
 
@@ -273,7 +329,10 @@ fn gwt_error_to_spec_ops_error(err: gwt_core::GwtError) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::coordination::BoardEntryKind;
+
+    use crate::cli::test_support::{fake_gh_test_lock, ScopedEnvVar};
 
     use super::*;
 
@@ -301,15 +360,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             cmd,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "request".into(),
                 body: Some("hello".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec!["coordination".into()],
                 owners: vec![],
                 targets: vec![],
-            }
+                mentions: vec![],
+            }))
         );
     }
 
@@ -329,15 +390,79 @@ mod tests {
         .unwrap();
         assert_eq!(
             cmd,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "claim".into(),
                 body: Some("I claim feature/foo".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/foo".into()],
-            }
+                mentions: vec![],
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_collects_typed_mentions() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("question"),
+            s("--body"),
+            s("Can you confirm this?"),
+            s("--mention"),
+            s("user:akiojin"),
+            s("--mention"),
+            s("agent:codex"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "question".into(),
+                body: Some("Can you confirm this?".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_accepts_title_summary() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("Implementing the title-summary contract across several subsystems"),
+            s("--title-summary"),
+            s("Title summary contract"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some(
+                    "Implementing the title-summary contract across several subsystems".into()
+                ),
+                file: None,
+                title_summary: Some("Title summary contract".into()),
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+            }))
         );
     }
 
@@ -349,15 +474,17 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "claim".into(),
                 body: Some("taking the migration".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec![],
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/x".into()],
-            },
+                mentions: vec![],
+            })),
             &mut out,
         )
         .unwrap();
@@ -369,6 +496,92 @@ mod tests {
             snapshot.board.entries[0].target_owners,
             vec!["sess-a3f2".to_string(), "feature/x".to_string()]
         );
+    }
+
+    #[test]
+    fn board_family_run_post_persists_typed_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "question".into(),
+                body: Some("Can you confirm this?".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].mentions.len(), 2);
+        assert_eq!(
+            snapshot.board.entries[0].mentions[0].typed_key(),
+            "user:akiojin"
+        );
+        assert_eq!(
+            snapshot.board.entries[0].mentions[1].typed_key(),
+            "agent:codex"
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_attaches_current_session_origin_metadata() {
+        let _env_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("Implement current focus title sync".into()),
+                file: None,
+                title_summary: Some("Current focus title sync".into()),
+                parent: None,
+                topics: vec![],
+                owners: vec!["2359".into()],
+                targets: vec![],
+                mentions: vec![],
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+        assert_eq!(entry.author_kind, AuthorKind::Agent);
+        assert_eq!(entry.author, "Codex");
+        assert_eq!(
+            entry.title_summary.as_deref(),
+            Some("Current focus title sync")
+        );
+        assert_eq!(
+            entry.origin_session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(entry.origin_branch.as_deref(), Some("work/20260506-1706"));
+        assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
     }
 
     #[test]
@@ -385,15 +598,17 @@ mod tests {
         let mut out = String::new();
         let code = run(
             &mut env,
-            BoardCommand::Post {
+            BoardCommand::Post(Box::new(BoardPostCommand {
                 kind: "request".into(),
                 body: Some("Need a board".into()),
                 file: None,
+                title_summary: None,
                 parent: None,
                 topics: vec!["coordination".into()],
                 owners: vec!["1974".into()],
                 targets: vec![],
-            },
+                mentions: vec![],
+            })),
             &mut out,
         )
         .unwrap();
@@ -459,7 +674,8 @@ mod tests {
         let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
 
         assert_eq!(code, 0);
-        assert!(out.contains("user: legacy entry"));
+        assert!(out.contains("- [request] user ("));
+        assert!(out.contains("  legacy entry"));
         assert!(!out.contains(" @ "));
         assert!(!out.contains(" / "));
     }
@@ -491,5 +707,44 @@ mod tests {
         assert!(out.contains("Need a board"));
         assert!(!out.contains("== Cards =="));
         assert!(!out.contains("no agent cards"));
+    }
+
+    #[test]
+    fn board_family_run_show_renders_multiline_body_as_indented_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        post_entry(
+            tmp.path(),
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Decision,
+                "Current state: Board posts are too dense.\n\nDecision: Keep body canonical.\nNext: Update rendering.",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_branch("work/readable-board")
+            .with_origin_session_id("sess-readable"),
+        )
+        .unwrap();
+
+        let mut out = String::new();
+        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("- [decision] Codex @ work/readable-board / sess-readable ("),
+            "expected metadata header without inline body, got:\n{out}"
+        );
+        assert!(
+            out.contains("  Current state: Board posts are too dense.\n  \n  Decision: Keep body canonical.\n  Next: Update rendering."),
+            "expected body lines to be indented while preserving blank lines, got:\n{out}"
+        );
+        assert!(
+            !out.contains("Codex @ work/readable-board / sess-readable: Current state"),
+            "body must not be collapsed into the header, got:\n{out}"
+        );
     }
 }
