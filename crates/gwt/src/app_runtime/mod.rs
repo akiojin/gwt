@@ -146,7 +146,6 @@ pub type AgentLaunchCompletion = (
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
 mod board;
-mod memory;
 mod migration;
 mod profile;
 mod window;
@@ -899,17 +898,9 @@ fn retain_live_workspace_agents(
         .iter()
         .map(|session| session.session_id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    let live_window_ids = sessions
-        .iter()
-        .map(|session| session.window_id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    projection.agents.retain(|agent| {
-        live_session_ids.contains(agent.session_id.as_str())
-            || agent
-                .window_id
-                .as_deref()
-                .is_some_and(|window_id| live_window_ids.contains(window_id))
-    });
+    projection
+        .agents
+        .retain(|agent| live_session_ids.contains(agent.session_id.as_str()));
     if !projection.agents.iter().any(|agent| {
         matches!(
             agent.status_category,
@@ -1339,7 +1330,6 @@ impl AppRuntime {
                 limit,
             } => self.load_board_history_events(&client_id, &id, before_entry_id.as_deref(), limit),
             FrontendEvent::LoadProfile { id } => self.load_profile_events(&client_id, &id),
-            FrontendEvent::LoadMemo { id } => self.load_memo_events(&client_id, &id),
             FrontendEvent::LoadLogs { id } => self.load_logs_events(&client_id, &id),
             FrontendEvent::LoadKnowledgeBridge {
                 id,
@@ -1437,22 +1427,6 @@ impl AppRuntime {
                     mentions,
                 },
             ),
-            FrontendEvent::CreateMemoNote {
-                id,
-                title,
-                body,
-                pinned,
-            } => self.create_memo_note_events(&client_id, &id, title, body, pinned),
-            FrontendEvent::UpdateMemoNote {
-                id,
-                note_id,
-                title,
-                body,
-                pinned,
-            } => self.update_memo_note_events(&client_id, &id, &note_id, title, body, pinned),
-            FrontendEvent::DeleteMemoNote { id, note_id } => {
-                self.delete_memo_note_events(&client_id, &id, &note_id)
-            }
             FrontendEvent::SelectProfile { id, profile_name } => {
                 self.select_profile_events(&client_id, &id, &profile_name)
             }
@@ -4581,9 +4555,6 @@ mod tests {
             BoardMentionTargetKind,
         },
         logging::{current_log_file, LogEvent, LogLevel},
-        notes::{
-            create_note as create_memo_note, load_snapshot as load_memo_snapshot, MemoNoteDraft,
-        },
         paths::gwt_cache_dir,
         repo_hash::detect_repo_hash,
     };
@@ -4983,6 +4954,27 @@ exit 0
             workspace,
             migration_pending: false,
         }
+    }
+
+    #[test]
+    fn app_runtime_rejects_removed_legacy_memo_window_creation() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.create_window_events(WindowPreset::Memo, canvas_bounds());
+
+        assert!(events.is_empty());
+        assert!(runtime.window_lookup.is_empty());
+        assert!(runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .is_empty());
     }
 
     fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
@@ -6614,6 +6606,73 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_active_work_projection_filters_stale_agent_when_window_id_is_reused() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let window_id = "tab-1::agent-1";
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection.status_text = "Old agent is running".to_string();
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "stale-session".to_string(),
+                window_id: Some(window_id.to_string()),
+                agent_id: "codex".to_string(),
+                display_name: "Old Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Old focus".to_string()),
+                title_summary: Some("Old title".to_string()),
+                worktree_path: None,
+                branch: Some("work/old".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save stale projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.active_agent_sessions.insert(
+            window_id.to_string(),
+            ActiveAgentSession {
+                window_id: window_id.to_string(),
+                session_id: "live-session".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/live".to_string(),
+                display_name: "Live Codex".to_string(),
+                worktree_path: repo.join("../repo-work-live"),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.active_agents, 1);
+        assert_eq!(view.blocked_agents, 0);
+        assert_eq!(view.agents.len(), 1);
+        assert_eq!(view.agents[0].session_id, "live-session");
+        assert_eq!(view.agents[0].display_name, "Live Codex");
+        assert!(!view
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "stale-session"));
+    }
+
+    #[test]
     fn app_runtime_active_work_projection_includes_recent_workspace_journal_entries() {
         let _env_lock = env_test_lock()
             .lock()
@@ -7786,55 +7845,6 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_load_memo_replies_with_repo_scoped_snapshot() {
-        let _env_lock = env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        create_memo_note(
-            &repo,
-            MemoNoteDraft::new("Pinned note", "Verify repo-scoped storage", true),
-        )
-        .expect("seed memo snapshot");
-        let tab = sample_project_tab_with_window_at(
-            "tab-1",
-            "memo-1",
-            repo,
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let window_id = combined_window_id("tab-1", "memo-1");
-
-        let events = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            FrontendEvent::LoadMemo {
-                id: window_id.clone(),
-            },
-        );
-
-        assert!(matches!(
-            &events[..],
-            [OutboundEvent {
-                target: DispatchTarget::Client(client_id),
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id,
-                },
-            }] if client_id == "client-1"
-                && id == &window_id
-                && notes.len() == 1
-                && notes[0].title == "Pinned note"
-                && selected_note_id.is_none()
-        ));
-    }
-
-    #[test]
     fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("profile-config.toml");
@@ -7981,139 +7991,6 @@ exit 0
                 && entries[0].message == "runtime stalled"
                 && matches!(entries[0].severity, LogLevel::Warn)
         ));
-    }
-
-    #[test]
-    fn app_runtime_create_memo_note_broadcasts_repo_scoped_snapshot_to_memo_windows() {
-        let _env_lock = env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        let mut persisted = empty_workspace_state();
-        persisted.windows.push(sample_window(
-            "memo-1",
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        ));
-        persisted.windows.push(sample_window(
-            "memo-2",
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        ));
-        persisted.next_z_index = 3;
-        let tab = ProjectTabRuntime {
-            id: "tab-1".to_string(),
-            title: "Repo".to_string(),
-            project_root: repo.clone(),
-            kind: ProjectKind::Git,
-            workspace: WorkspaceState::from_persisted(persisted),
-            migration_pending: false,
-        };
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let current_window_id = combined_window_id("tab-1", "memo-1");
-        let sibling_window_id = combined_window_id("tab-1", "memo-2");
-
-        let events = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            FrontendEvent::CreateMemoNote {
-                id: current_window_id.clone(),
-                title: String::new(),
-                body: String::new(),
-                pinned: false,
-            },
-        );
-
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id: Some(selected_note_id),
-                },
-            } if id == &current_window_id
-                && notes.len() == 1
-                && selected_note_id == &notes[0].id
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id: None,
-                },
-            } if id == &sibling_window_id && notes.len() == 1
-        )));
-
-        let snapshot = load_memo_snapshot(&repo).expect("load memo snapshot");
-        assert_eq!(snapshot.notes.len(), 1);
-    }
-
-    #[test]
-    fn app_runtime_update_memo_note_persists_repo_scoped_edits() {
-        let _env_lock = env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempdir().expect("tempdir");
-        let _home = ScopedEnvVar::set("HOME", temp.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo");
-        let created = create_memo_note(&repo, MemoNoteDraft::new("Draft", "Initial note", false))
-            .expect("seed memo snapshot");
-        let tab = sample_project_tab_with_window_at(
-            "tab-1",
-            "memo-1",
-            repo.clone(),
-            WindowPreset::Memo,
-            WindowProcessStatus::Ready,
-        );
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let window_id = combined_window_id("tab-1", "memo-1");
-
-        let events = runtime.handle_frontend_event(
-            "client-1".to_string(),
-            FrontendEvent::UpdateMemoNote {
-                id: window_id.clone(),
-                note_id: created.id.clone(),
-                title: "Pinned note".to_string(),
-                body: "Updated note".to_string(),
-                pinned: true,
-            },
-        );
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            OutboundEvent {
-                target: DispatchTarget::Broadcast,
-                event: BackendEvent::MemoNotes {
-                    id,
-                    notes,
-                    selected_note_id: Some(selected_note_id),
-                },
-            } if id == &window_id
-                && selected_note_id == &created.id
-                && notes.iter().any(|note|
-                    note.id == created.id
-                        && note.title == "Pinned note"
-                        && note.body == "Updated note"
-                        && note.pinned
-                )
-        )));
-
-        let snapshot = load_memo_snapshot(&repo).expect("load memo snapshot");
-        assert!(snapshot.notes.iter().any(|note| note.id == created.id
-            && note.title == "Pinned note"
-            && note.body == "Updated note"
-            && note.pinned));
     }
 
     #[test]
