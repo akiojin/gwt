@@ -56,8 +56,13 @@ fn main() -> ExitCode {
         [pr, list, ..] if pr == "pr" && list == "list" => {
             if mode == "multi-pr-current" {
                 println!("{}", r#"[
-{"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN"},
-{"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED"}
+{"number":2537,"title":"Older PR","state":"CLOSED","url":"https://github.com/akiojin/gwt/pull/2537","createdAt":"2026-05-07T08:05:00Z","mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"UNKNOWN","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}},
+{"number":2538,"title":"Newer PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}}
+]"#);
+            } else if mode == "multi-pr-cross-fork-current" {
+                println!("{}", r#"[
+{"number":2538,"title":"Current repo PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2538","createdAt":"2026-05-07T08:20:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"akiojin"},"headRepository":{"name":"gwt"}},
+{"number":2539,"title":"Fork PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/2539","createdAt":"2026-05-07T08:25:00Z","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED","headRefName":"work/20260507-0808","headRepositoryOwner":{"login":"other-user"},"headRepository":{"name":"gwt"}}
 ]"#);
             } else {
                 println!("[{}]", pr_json("12", "Current PR"));

@@ -16,8 +16,13 @@ use crate::cli::{
     PrCheckItem, PrChecksSummary, PrCreateCall, PrReview, PrReviewThread, PrReviewThreadComment,
 };
 
+const PR_STATUS_FIELDS: &str =
+    "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision";
+const PR_LIST_FIELDS: &str = "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,headRefName,headRepository,headRepositoryOwner";
+
 pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option<PrStatus>> {
     if let Some(branch) = current_branch_name(repo_path)? {
+        let repo = github_remote_owner_and_repo(repo_path);
         let output = gwt_core::process::hidden_command("gh")
             .args([
                 "pr",
@@ -27,7 +32,7 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
                 "--state",
                 "all",
                 "--json",
-                "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
+                PR_LIST_FIELDS,
                 "--limit",
                 "100",
             ])
@@ -36,19 +41,21 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let prs = gwt_git::pr_status::parse_pr_list_json(&stdout)
-                .map_err(|err| io::Error::other(err.to_string()))?;
-            return Ok(gwt_git::pr_status::latest_pr_by_created_at(prs));
+            let pr_values = filter_current_repo_head_prs(&stdout, &branch, repo.as_ref())?;
+            if !pr_values.is_empty() {
+                let filtered_stdout = serde_json::to_string(&pr_values)
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                let prs = gwt_git::pr_status::parse_pr_list_json(&filtered_stdout)
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                if let Some(pr) = gwt_git::pr_status::latest_pr_by_created_at(prs) {
+                    return Ok(Some(pr));
+                }
+            }
         }
     }
 
     let output = gwt_core::process::hidden_command("gh")
-        .args([
-            "pr",
-            "view",
-            "--json",
-            "number,title,state,url,createdAt,mergeable,mergeStateStatus,statusCheckRollup,reviewDecision",
-        ])
+        .args(["pr", "view", "--json", PR_STATUS_FIELDS])
         .current_dir(repo_path)
         .output()?;
 
@@ -71,6 +78,59 @@ pub fn fetch_current_pr_via_gh(repo_path: &std::path::Path) -> io::Result<Option
     Ok(Some(pr))
 }
 
+fn filter_current_repo_head_prs(
+    stdout: &str,
+    branch: &str,
+    repo: Option<&(String, String)>,
+) -> io::Result<Vec<serde_json::Value>> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(stdout)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    Ok(values
+        .into_iter()
+        .filter(|value| pr_value_matches_current_repo_head(value, branch, repo))
+        .collect())
+}
+
+fn pr_value_matches_current_repo_head(
+    value: &serde_json::Value,
+    branch: &str,
+    repo: Option<&(String, String)>,
+) -> bool {
+    if value.get("headRefName").and_then(serde_json::Value::as_str) != Some(branch) {
+        return false;
+    }
+    let Some((owner, repo_name)) = repo else {
+        return false;
+    };
+    let Some(head_owner) = pr_head_owner_login(value) else {
+        return false;
+    };
+    let Some(head_repo_name) = pr_head_repository_name(value) else {
+        return false;
+    };
+    head_owner.eq_ignore_ascii_case(owner) && head_repo_name.eq_ignore_ascii_case(repo_name)
+}
+
+fn pr_head_owner_login(value: &serde_json::Value) -> Option<&str> {
+    let owner = value.get("headRepositoryOwner")?;
+    owner.as_str().or_else(|| {
+        owner
+            .get("login")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| owner.get("name").and_then(serde_json::Value::as_str))
+    })
+}
+
+fn pr_head_repository_name(value: &serde_json::Value) -> Option<&str> {
+    let repository = value.get("headRepository")?;
+    repository.as_str().or_else(|| {
+        repository
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| repository.get("repo").and_then(serde_json::Value::as_str))
+    })
+}
+
 fn current_branch_name(repo_path: &std::path::Path) -> io::Result<Option<String>> {
     let output = gwt_core::process::hidden_command("git")
         .args(["branch", "--show-current"])
@@ -81,6 +141,35 @@ fn current_branch_name(repo_path: &std::path::Path) -> io::Result<Option<String>
     }
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok((!branch.is_empty()).then_some(branch))
+}
+
+pub(super) fn github_remote_owner_and_repo(
+    repo_path: &std::path::Path,
+) -> Option<(String, String)> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let remote_url = String::from_utf8_lossy(&output.stdout);
+    parse_github_remote_url(remote_url.trim())
+}
+
+fn parse_github_remote_url(remote_url: &str) -> Option<(String, String)> {
+    let path = remote_url
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote_url.strip_prefix("http://github.com/"))
+        .or_else(|| remote_url.strip_prefix("git@github.com:"))
+        .or_else(|| remote_url.strip_prefix("ssh://git@github.com/"))?;
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
 }
 
 pub fn create_pr_via_gh(
