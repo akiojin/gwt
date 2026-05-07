@@ -408,8 +408,8 @@ mod tests {
             r"element\.style\.height = `\$\{clamp\((?s:.*?)\)\}px`;\s*fitTerminal\(resizeState\.id,\s*false\);",
         )
         .expect("valid regex");
-        let release_resize_block = regex::Regex::new(
-            r"if \(resizeState && resizeState\.pointerId === event\.pointerId\) \{(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
+        let resize_finalizer = regex::Regex::new(
+            r"function finishWindowResize\(pointerId\) \{(?s:.*?)cancelTerminalResizeFit\(\);(?s:.*?)fitTerminal\(resizeState\.id,\s*false\);(?s:.*?)sendGeometry\((?s:.*?)runtime\?\.terminal\.focus\(\);(?s:.*?)resizeState = null;",
         )
         .expect("valid regex");
 
@@ -423,8 +423,36 @@ mod tests {
             "expected pointermove resize to avoid direct terminal fit/geometry churn",
         );
         assert!(
-            release_resize_block.is_match(html),
-            "expected pointer release to cancel pending fit, sync once, and restore terminal focus",
+            resize_finalizer.is_match(html),
+            "expected resize finalizer to cancel pending fit, sync once, and restore terminal focus",
+        );
+    }
+
+    #[test]
+    fn embedded_web_window_resize_cancellation_uses_shared_finalizer() {
+        let html = frontend_bundle_source();
+
+        assert!(
+            html.contains("function finishWindowResize(pointerId)"),
+            "expected all floating window resize completion paths to share one finalizer",
+        );
+        assert!(
+            html.contains("finishWindowResize(event.pointerId);"),
+            "expected pointerup resize path to use the shared finalizer",
+        );
+        assert!(
+            html.contains("window.addEventListener(\"pointercancel\", (event) => {")
+                && html.contains("finishWindowResize(event.pointerId);"),
+            "expected pointercancel to finalize resize state",
+        );
+        assert!(
+            html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
+                && html.contains("finishWindowResize(event.pointerId);"),
+            "expected lost pointer capture to finalize resize state",
+        );
+        assert!(
+            html.contains("if (!terminalMap.has(windowId)) {\n          return;\n        }"),
+            "expected terminal resize fit scheduling to skip non-terminal panel windows",
         );
     }
 

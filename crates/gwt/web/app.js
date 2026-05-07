@@ -1189,6 +1189,9 @@
       }
 
       function scheduleTerminalResizeFit(windowId) {
+        if (!terminalMap.has(windowId)) {
+          return;
+        }
         if (!resizeState || resizeState.id !== windowId || resizeState.fitFrame !== null) {
           return;
         }
@@ -1207,6 +1210,22 @@
         }
         cancelAnimationFrame(resizeState.fitFrame);
         resizeState.fitFrame = null;
+      }
+
+      function finishWindowResize(pointerId) {
+        if (!resizeState || resizeState.pointerId !== pointerId) {
+          return;
+        }
+        const runtime = terminalMap.get(resizeState.id);
+        cancelTerminalResizeFit();
+        fitTerminal(resizeState.id, false);
+        sendGeometry(
+          resizeState.id,
+          runtime?.terminal.cols || 80,
+          runtime?.terminal.rows || 24,
+        );
+        runtime?.terminal.focus();
+        resizeState = null;
       }
 
       function scheduleTerminalViewportRefresh(windowId) {
@@ -6730,6 +6749,9 @@
             };
             resizeHandle.setPointerCapture(event.pointerId);
           });
+          resizeHandle.addEventListener("lostpointercapture", (event) => {
+            finishWindowResize(event.pointerId);
+          });
         }
 
         if (!element.dataset.preset || element.dataset.preset !== windowData.preset) {
@@ -7743,17 +7765,12 @@
         }
 
         if (resizeState && resizeState.pointerId === event.pointerId) {
-          const runtime = terminalMap.get(resizeState.id);
-          cancelTerminalResizeFit();
-          fitTerminal(resizeState.id, false);
-          sendGeometry(
-            resizeState.id,
-            runtime?.terminal.cols || 80,
-            runtime?.terminal.rows || 24,
-          );
-          runtime?.terminal.focus();
-          resizeState = null;
+          finishWindowResize(event.pointerId);
         }
+      });
+
+      window.addEventListener("pointercancel", (event) => {
+        finishWindowResize(event.pointerId);
       });
 
       canvas.addEventListener("contextmenu", (event) => {
