@@ -201,17 +201,34 @@ impl AppRuntime {
         if address.tab_id != target_address.tab_id {
             return Vec::new();
         }
-        let updated = {
+        let resize_window_ids = {
             let Some(tab) = self.tab_mut(&address.tab_id) else {
                 return Vec::new();
             };
-            tab.workspace
+            if !tab
+                .workspace
                 .dock_window_tab(&address.raw_id, &target_address.raw_id)
+            {
+                return Vec::new();
+            }
+            tab.workspace
+                .window(&address.raw_id)
+                .and_then(|window| window.tab_group_id.clone())
+                .map(|group_id| {
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .filter(|window| window.tab_group_id.as_deref() == Some(group_id.as_str()))
+                        .map(|window| combined_window_id(&address.tab_id, &window.id))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec![id.to_string(), target_id.to_string()])
         };
-        if !updated {
-            return Vec::new();
-        }
         let _ = self.set_active_tab(address.tab_id);
+        for window_id in resize_window_ids {
+            self.resize_runtime_to_window(&window_id);
+        }
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }
