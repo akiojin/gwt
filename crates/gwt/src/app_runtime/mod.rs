@@ -788,7 +788,7 @@ fn agent_launch_purpose_title(
             linked_issue_number_for_branch(project_root, branch_name, issue_link_cache_dir)
                 .and_then(|issue_number| issue_title_from_cache(project_root, issue_number))
         })
-        .or_else(|| workspace_projection_owner_title(project_root))
+        .or_else(|| workspace_projection_owner_title(project_root, branch_name))
 }
 
 fn issue_title_from_cache(project_root: &Path, issue_number: u64) -> Option<String> {
@@ -820,10 +820,21 @@ fn linked_issue_number_for_branch(
     store.branches.get(branch_name).copied()
 }
 
-fn workspace_projection_owner_title(project_root: &Path) -> Option<String> {
+fn workspace_projection_owner_title(
+    project_root: &Path,
+    branch_name: Option<&str>,
+) -> Option<String> {
+    let branch_name = branch_name?.trim();
+    if branch_name.is_empty() {
+        return None;
+    }
     let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
         .ok()
         .flatten()?;
+    let projection_branch = projection.git_details.as_ref()?.branch.as_deref()?.trim();
+    if projection_branch != branch_name {
+        return None;
+    }
     let owner = projection.owner?.trim().to_string();
     (!owner.is_empty()).then_some(owner)
 }
@@ -911,6 +922,39 @@ fn retain_live_workspace_agents(
         projection.next_action = None;
         projection.updated_at = updated_at;
     }
+}
+
+fn workspace_projection_has_current_agents(
+    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+) -> bool {
+    projection.agents.iter().any(|agent| {
+        matches!(
+            agent.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+                | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
+        )
+    })
+}
+
+fn reset_idle_workspace_current_identity(
+    projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
+    tab_title: &str,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) {
+    let title = tab_title.trim();
+    projection.title = if title.is_empty() {
+        "Project workspace".to_string()
+    } else {
+        format!("{title} workspace")
+    };
+    projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
+    projection.status_text = "No active work".to_string();
+    projection.summary = None;
+    projection.owner = None;
+    projection.next_action = None;
+    projection.git_details = None;
+    projection.board_refs.clear();
+    projection.updated_at = updated_at;
 }
 
 fn workspace_cleanup_candidate_for_projection(
@@ -1690,6 +1734,7 @@ impl AppRuntime {
             gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
         {
             let mut projection = projection;
+            let had_saved_agents = !projection.agents.is_empty();
             let cleanup_candidate = workspace_cleanup_candidate_for_projection(
                 &tab.project_root,
                 &projection,
@@ -1700,7 +1745,11 @@ impl AppRuntime {
                 sessions.iter().copied(),
                 chrono::Utc::now(),
             );
-            retain_live_workspace_agents(&mut projection, &sessions, chrono::Utc::now());
+            let updated_at = chrono::Utc::now();
+            retain_live_workspace_agents(&mut projection, &sessions, updated_at);
+            if had_saved_agents && !workspace_projection_has_current_agents(&projection) {
+                reset_idle_workspace_current_identity(&mut projection, &tab.title, updated_at);
+            }
             let journal_entries =
                 gwt_core::workspace_projection::load_recent_workspace_journal_entries(
                     &tab.project_root,
@@ -6465,6 +6514,73 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_active_work_projection_resets_stale_current_identity_when_no_agent_is_live() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.title = "PR-2525".to_string();
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection.status_text = "Old PR is active".to_string();
+        projection.summary = Some("Old PR summary".to_string());
+        projection.owner = Some("PR-2525".to_string());
+        projection.next_action = Some("Review old PR".to_string());
+        projection.board_refs = vec!["board-old".to_string()];
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/old".to_string()),
+            worktree_path: Some(repo.join("work-old")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(2525),
+            pr_state: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "stale-session".to_string(),
+                window_id: Some("tab-1::agent-1".to_string()),
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Old focus".to_string()),
+                title_summary: Some("Old title".to_string()),
+                worktree_path: None,
+                branch: Some("work/old".to_string()),
+                last_board_entry_id: Some("board-old".to_string()),
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save stale projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        let view = runtime
+            .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+            .expect("projection view");
+
+        assert_eq!(view.title, "Repo workspace");
+        assert_eq!(view.status_category, "idle");
+        assert_eq!(view.status_text, "No active work");
+        assert_eq!(view.summary, None);
+        assert_eq!(view.owner, None);
+        assert_eq!(view.next_action, None);
+        assert_eq!(view.branch, None);
+        assert_eq!(view.worktree_path, None);
+        assert_eq!(view.pr_number, None);
+        assert!(view.board_refs.is_empty());
+    }
+
+    #[test]
     fn app_runtime_active_work_projection_includes_recent_workspace_journal_entries() {
         let _env_lock = env_test_lock()
             .lock()
@@ -8575,6 +8691,15 @@ exit 0
         let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.owner = Some("SPEC-2008".to_string());
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/20260506-1257".to_string()),
+            worktree_path: Some(repo.join("work/20260506-1257")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
         let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -8596,6 +8721,53 @@ exit 0
             .find(|window| window.preset == WindowPreset::Agent)
             .expect("agent window");
         assert_eq!(agent_window.purpose_title.as_deref(), Some("SPEC-2008"));
+        assert_eq!(agent_window.title, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_branch() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        init_repo(&repo);
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.owner = Some("PR-2525".to_string());
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some("work/old".to_string()),
+            worktree_path: Some(repo.join("work-old")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: Some(2525),
+            pr_state: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/20260507-0714")
+            .build();
+
+        runtime
+            .spawn_agent_window("tab-1", config, canvas_bounds())
+            .expect("spawn agent window");
+
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .find(|window| window.preset == WindowPreset::Agent)
+            .expect("agent window");
+        assert_eq!(agent_window.purpose_title, None);
         assert_eq!(agent_window.title, "Codex");
     }
 
