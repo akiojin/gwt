@@ -33,17 +33,29 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
   assert.equal(briefing.hidden, true, "Mission Briefing must not block app startup");
 });
 
-test("Operator shell toggles chrome visibility through edge handles", async () => {
+test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal triggers", async () => {
+  // SPEC-2356 Phase 9 (FR-021/FR-022/FR-032): chrome visibility runs through
+  // the hover-reveal state machine driven by the peek 帯, with no chip
+  // toggles, no localStorage persistence, and a one-shot legacy migration.
   const { initOperatorShell } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const storage = memoryStorage();
+  storage.setItem("gwt:ui:sidebar-collapsed", "true");
+  storage.setItem("gwt:ui:window-controls", "hidden");
   const testWindow = {
     ...window,
     localStorage: storage,
     sessionStorage: memoryStorage(),
-    matchMedia: () => {
-      throw new Error("skip animated shell loops in runtime fixture");
-    },
+    matchMedia: () => ({
+      matches: false,
+      media: "",
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      onchange: null,
+      dispatchEvent: () => false,
+    }),
   };
 
   const originalWarn = console.warn;
@@ -53,28 +65,47 @@ test("Operator shell toggles chrome visibility through edge handles", async () =
   try {
     initOperatorShell({ document, window: testWindow });
 
-    const sidebarHandle = document.getElementById("op-sidebar-edge-toggle");
-    const windowControlsHandle = document.getElementById("op-window-controls-edge-toggle");
-    assert.ok(sidebarHandle, "fixture must include sidebar edge handle");
-    assert.ok(windowControlsHandle, "fixture must include window controls edge handle");
     assert.equal(
-      windowControlsHandle.getAttribute("aria-controls"),
+      document.getElementById("op-sidebar-edge-toggle"),
+      null,
+      "<< chip toggle must not exist after Phase 9",
+    );
+    assert.equal(
+      document.getElementById("op-window-controls-edge-toggle"),
+      null,
+      "vv chip toggle must not exist after Phase 9",
+    );
+
+    const sidebarPeek = document.querySelector(".op-sidebar-peek");
+    const windowControlsPeek = document.querySelector(".op-window-controls-peek");
+    assert.ok(sidebarPeek, "fixture must include sidebar peek 帯");
+    assert.ok(windowControlsPeek, "fixture must include window controls peek 帯");
+    assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
+    assert.equal(
+      windowControlsPeek.getAttribute("aria-controls"),
       "floating-window-controls-primary floating-window-controls-add",
     );
 
-    sidebarHandle.click();
-    assert.equal(document.documentElement.dataset.opSidebar, "collapsed");
-    assert.equal(sidebarHandle.textContent, ">>");
-    assert.equal(sidebarHandle.getAttribute("aria-expanded"), "false");
-    assert.equal(sidebarHandle.getAttribute("aria-label"), "Show sidebar");
-    assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), "true");
+    // FR-032: legacy keys must be removed on init.
+    assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
+    assert.equal(storage.getItem("gwt:ui:window-controls"), null);
 
-    windowControlsHandle.click();
-    assert.equal(document.documentElement.dataset.opWindowControls, "hidden");
-    assert.equal(windowControlsHandle.textContent, "^^");
-    assert.equal(windowControlsHandle.getAttribute("aria-expanded"), "false");
-    assert.equal(windowControlsHandle.getAttribute("aria-label"), "Show window controls");
-    assert.equal(storage.getItem("gwt:ui:window-controls"), "hidden");
+    // Default state: no data-op-* attributes (auto-hidden).
+    assert.equal(document.documentElement.dataset.opSidebar, undefined);
+    assert.equal(document.documentElement.dataset.opWindowControls, undefined);
+
+    // Hover the sidebar peek 帯 → revealed; window controls remain hidden.
+    sidebarPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
+    assert.equal(document.documentElement.dataset.opSidebar, "revealed");
+    assert.equal(document.documentElement.dataset.opWindowControls, undefined);
+
+    // Hover the window controls peek 帯 → revealed independently.
+    windowControlsPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
+    assert.equal(document.documentElement.dataset.opWindowControls, "revealed");
+
+    // Storage must remain untouched by hover reveal (no persistence in Phase 9).
+    assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
+    assert.equal(storage.getItem("gwt:ui:window-controls"), null);
   } finally {
     console.warn = originalWarn;
     globalThis.CustomEvent = originalCustomEvent;

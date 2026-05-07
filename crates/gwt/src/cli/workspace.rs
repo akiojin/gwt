@@ -22,6 +22,7 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     let mut owner = None;
     let mut agent_session = None;
     let mut current_focus = None;
+    let mut title_summary = None;
     let mut i = 0;
     while i < args.len() {
         let value = args.get(i + 1).ok_or(CliParseError::Usage)?.clone();
@@ -34,6 +35,7 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
             "--owner" => owner = Some(value),
             "--agent-session" => agent_session = Some(value),
             "--current-focus" => current_focus = Some(value),
+            "--title-summary" => title_summary = Some(value),
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 2;
@@ -47,6 +49,7 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         owner,
         agent_session,
         current_focus,
+        title_summary,
     })
 }
 
@@ -65,6 +68,7 @@ pub(super) fn run<E: CliEnv>(
             owner,
             agent_session,
             current_focus,
+            title_summary,
         } => {
             let update = WorkspaceProjectionUpdate {
                 title,
@@ -79,6 +83,7 @@ pub(super) fn run<E: CliEnv>(
                 summary,
                 agent_session_id: agent_session,
                 agent_current_focus: current_focus,
+                agent_title_summary: title_summary,
             };
             let entry = update_workspace_projection_with_journal(env.repo_path(), update)
                 .map_err(|error| string_error(error.to_string()))?;
@@ -135,6 +140,39 @@ mod tests {
                 owner: None,
                 agent_session: None,
                 current_focus: None,
+                title_summary: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_workspace_update_accepts_agent_title_summary() {
+        let parsed = parse(&[
+            s("update"),
+            s("--agent-session"),
+            s("session-1"),
+            s("--current-focus"),
+            s("Implementing the title-summary contract across Board and Workspace"),
+            s("--title-summary"),
+            s("Title summary contract"),
+        ])
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some("session-1".to_string()),
+                current_focus: Some(
+                    "Implementing the title-summary contract across Board and Workspace"
+                        .to_string()
+                ),
+                title_summary: Some("Title summary contract".to_string()),
             }
         );
     }

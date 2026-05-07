@@ -254,11 +254,23 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(window_id).cloned() else {
             return false;
         };
+        let Some(title_summary) = entry
+            .title_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            return false;
+        };
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return false;
         };
-        tab.workspace
-            .set_dynamic_title(&address.raw_id, Some(entry.body.clone()))
+        tab.workspace.set_dynamic_title_with_detail(
+            &address.raw_id,
+            Some(title_summary),
+            Some(entry.body.clone()),
+        )
     }
 }
 

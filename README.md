@@ -153,7 +153,12 @@ Common windows include:
 - `Memo` and `Profile` — repo-scoped notes and environment/profile management
 - `File Tree` — live read-only repository tree
 - `Branches` — branch inspection, filtering, cleanup, and Git details
-- `Settings` — application and agent configuration
+- `Settings` — application and agent configuration. The `System` tab lets
+  you choose the narrative output language (Auto / English / 日本語) used
+  for Workspace summaries and Board post bodies. `Auto` resolves against
+  the OS locale and falls back to English when the locale is `C` / `POSIX`
+  or unavailable. The setting is global and persisted under `[ai].language`
+  in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 

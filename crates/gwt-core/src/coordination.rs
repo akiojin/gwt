@@ -210,6 +210,8 @@ pub struct BoardEntry {
     pub author: String,
     pub kind: BoardEntryKind,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_summary: Option<String>,
     #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
@@ -245,6 +247,12 @@ impl BoardEntry {
 
     pub fn with_origin_agent_id(mut self, value: impl Into<String>) -> Self {
         self.origin_agent_id = Some(value.into());
+        self
+    }
+
+    pub fn with_title_summary(mut self, value: impl Into<String>) -> Self {
+        let value = value.into();
+        self.title_summary = (!value.trim().is_empty()).then_some(value);
         self
     }
 
@@ -286,6 +294,7 @@ impl BoardEntry {
             author: author.into(),
             kind,
             body: body.into(),
+            title_summary: None,
             state,
             parent_id,
             created_at: now,

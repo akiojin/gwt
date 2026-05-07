@@ -1780,9 +1780,15 @@ mod tests {
                 && html.contains("Reconnecting"),
             "expected shared frontend bundle to keep the browser and native user-facing copy on the English contract",
         );
+        // SPEC-1933 NFR-005 exception: the System Settings > Language select
+        // option label "日本語" is the only approved Japanese string in the
+        // embedded bundle. Strip the option text before scanning so the
+        // English-only contract still catches every other unintended copy.
+        let stripped = html.replace(r#"text: "日本語""#, r#"text: ""#);
         assert!(
-            !japanese_scripts.is_match(html),
-            "expected embedded bundle copy to stay English-only for both browser and native modes",
+            !japanese_scripts.is_match(&stripped),
+            "expected embedded bundle copy to stay English-only for both browser and native modes \
+             (SPEC-1933 NFR-005 only allows the Language select '日本語' option label)",
         );
         assert!(
             !html.contains("PoC"),

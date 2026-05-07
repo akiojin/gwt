@@ -691,6 +691,12 @@
         return "Window";
       }
 
+      function windowTitleTooltip(windowData) {
+        const detail = String(windowData?.dynamic_title_detail || "").trim();
+        if (detail) return detail;
+        return windowDisplayTitle(windowData);
+      }
+
       function escapeHtml(value) {
         return String(value || "")
           .replace(/&/g, "&amp;")
@@ -765,6 +771,8 @@
             </div>
             ${runtimeChip}
           `;
+          const windowListTitle = row.querySelector(".window-list-title");
+          if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
           row.addEventListener("click", () => {
             windowListOpen = false;
             renderWindowList();
@@ -1449,6 +1457,10 @@
         );
         runtime?.terminal.focus();
         resizeState = null;
+        // SPEC-2356 Phase 9 (T-136): release the hover-reveal peek strip lock
+        // so pointer events resume on the screen-edge triggers once resize
+        // ends.
+        delete document.documentElement.dataset.opResizeActive;
       }
 
       function scheduleTerminalViewportRefresh(windowId) {
@@ -6787,6 +6799,14 @@
         statusMessage: "",
         statusKind: "",
       };
+      // SPEC-1933 US-4: System tab state. `language` is the raw stored value
+      // (auto/en/ja); the backend `system_settings` reply seeds it.
+      const systemSettingsState = {
+        language: "auto",
+        loaded: false,
+        statusMessage: "",
+        statusKind: "",
+      };
       const settingsWindowBodies = new Set();
       let pendingAddFromPreset = null;
 
@@ -6802,35 +6822,188 @@
         }
       }
 
+      // SPEC-1933 Phase: System Settings (Output Language).
+      // Build a tabbed Settings surface (System | Custom Agents) using
+      // Operator Design tokens. Existing renderSettingsAgentList continues
+      // to populate the Custom Agents panel via [data-role='settings-scroll'].
       function renderSettingsWindow(body, windowData) {
         // Sweep detached bodies up-front so repeated open/close cycles do
         // not accumulate references.
         purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
-        const root = createDiv("mock-root");
-        const toolbar = createDiv("mock-toolbar");
-        const heading = createDiv("mock-heading");
-        heading.textContent = "Custom Agents";
-        const chip = document.createElement("span");
-        chip.className = "mock-chip";
-        chip.textContent = windowData.title || "Settings";
+
+        const root = createDiv("settings-root");
+
+        const toolbar = document.createElement("header");
+        toolbar.className = "settings-toolbar";
+        const heading = document.createElement("h2");
+        heading.className = "settings-heading";
+        heading.textContent = windowData.title || "Settings";
+
+        const tabs = document.createElement("nav");
+        tabs.className = "settings-tabs";
+        tabs.setAttribute("role", "tablist");
+        tabs.appendChild(buildSettingsTab("system", "System", true));
+        tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+
         toolbar.appendChild(heading);
-        toolbar.appendChild(chip);
-        const scroll = createDiv("mock-scroll");
-        scroll.dataset.role = "settings-scroll";
+        toolbar.appendChild(tabs);
+
+        const bodyEl = createDiv("settings-body");
+
+        const panelSystem = document.createElement("section");
+        panelSystem.className = "settings-panel";
+        panelSystem.setAttribute("role", "tabpanel");
+        panelSystem.dataset.settingsPanel = "system";
+
+        const panelAgents = document.createElement("section");
+        panelAgents.className = "settings-panel hidden";
+        panelAgents.setAttribute("role", "tabpanel");
+        panelAgents.dataset.settingsPanel = "custom-agents";
+        // Existing renderSettingsAgentList queries this attribute to inject
+        // the Add button and agent rows.
+        panelAgents.dataset.role = "settings-scroll";
+
+        bodyEl.appendChild(panelSystem);
+        bodyEl.appendChild(panelAgents);
+
         root.appendChild(toolbar);
-        root.appendChild(scroll);
+        root.appendChild(bodyEl);
         body.appendChild(root);
+
+        tabs.addEventListener("click", (e) => {
+          const btn = e.target.closest("[data-settings-tab]");
+          if (!btn) return;
+          switchSettingsTab(body, btn.dataset.settingsTab);
+        });
+        tabs.addEventListener("keydown", (e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          const btn = e.target.closest("[data-settings-tab]");
+          if (!btn) return;
+          e.preventDefault();
+          switchSettingsTab(body, btn.dataset.settingsTab);
+        });
 
         body.addEventListener("mousedown", () => {
           focusWindowLocally(windowData.id);
           send({ kind: "focus_window", id: windowData.id });
         });
         settingsWindowBodies.add(body);
+
+        renderSystemPanel(panelSystem);
+        // Always request fresh system settings on open so the dropdown
+        // reflects the on-disk config, even if the user changed it from a
+        // different gwt instance.
+        send({ kind: "get_system_settings" });
+
         renderSettingsAgentList();
         if (!customAgentsState.loading && customAgentsState.agents.length === 0) {
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
+        }
+      }
+
+      function buildSettingsTab(id, label, selected) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = selected ? "settings-tab active" : "settings-tab";
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", String(selected));
+        btn.dataset.settingsTab = id;
+        btn.textContent = label;
+        return btn;
+      }
+
+      function switchSettingsTab(body, target) {
+        const tabs = body.querySelectorAll(".settings-tab");
+        tabs.forEach((tab) => {
+          const isSelected = tab.dataset.settingsTab === target;
+          tab.setAttribute("aria-selected", String(isSelected));
+          tab.classList.toggle("active", isSelected);
+        });
+        const panels = body.querySelectorAll(".settings-panel");
+        panels.forEach((panel) => {
+          panel.classList.toggle(
+            "hidden",
+            panel.dataset.settingsPanel !== target,
+          );
+        });
+      }
+
+      function renderSystemPanel(panel) {
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+
+        const section = createDiv("settings-section");
+
+        const label = document.createElement("label");
+        label.className = "settings-label";
+        label.setAttribute("for", "settings-system-language");
+        label.textContent = "Output Language";
+        section.appendChild(label);
+
+        const select = document.createElement("select");
+        select.className = "settings-select";
+        select.id = "settings-system-language";
+        for (const opt of [
+          { value: "auto", text: "Auto (OS locale)" },
+          { value: "en", text: "English" },
+          { value: "ja", text: "日本語" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = opt.value;
+          option.textContent = opt.text;
+          select.appendChild(option);
+        }
+        select.value = systemSettingsState.language || "auto";
+        select.addEventListener("change", (e) => {
+          const next = e.target.value;
+          systemSettingsState.language = next;
+          systemSettingsState.statusMessage = "Saving…";
+          systemSettingsState.statusKind = "info";
+          renderSystemPanelStatus(panel);
+          send({ kind: "update_system_settings", language: next });
+        });
+        section.appendChild(select);
+
+        const help = document.createElement("p");
+        help.className = "settings-help";
+        help.textContent =
+          "Used for narrative outputs (Workspace summaries and Board post bodies). " +
+          "Settings UI text and gwtd subcommands stay English.";
+        section.appendChild(help);
+
+        const status = document.createElement("p");
+        status.className = "settings-status";
+        status.dataset.role = "system-settings-status";
+        section.appendChild(status);
+
+        panel.appendChild(section);
+        renderSystemPanelStatus(panel);
+      }
+
+      function renderSystemPanelStatus(panel) {
+        const status = panel.querySelector(
+          "[data-role='system-settings-status']",
+        );
+        if (!status) return;
+        status.textContent = systemSettingsState.statusMessage || "";
+        if (systemSettingsState.statusKind) {
+          status.dataset.kind = systemSettingsState.statusKind;
+        } else {
+          delete status.dataset.kind;
+        }
+      }
+
+      function renderSystemPanelInAllSettingsWindows() {
+        for (const body of Array.from(settingsWindowBodies)) {
+          if (!body.isConnected) {
+            settingsWindowBodies.delete(body);
+            continue;
+          }
+          const panel = body.querySelector(
+            "[data-settings-panel='system']",
+          );
+          if (panel) renderSystemPanel(panel);
         }
       }
 
@@ -7092,6 +7265,10 @@
               height: parseNumber(element.style.height),
               fitFrame: null,
             };
+            // SPEC-2356 Phase 9 (T-136): suppress hover-reveal peek strip
+            // hits while resize is active so pointer movements that cross
+            // the screen edge do not steal focus mid-resize.
+            document.documentElement.dataset.opResizeActive = "true";
             resizeHandle.setPointerCapture(event.pointerId);
           });
           resizeHandle.addEventListener("lostpointercapture", (event) => {
@@ -7105,6 +7282,8 @@
         }
 
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
+        const titleText = element.querySelector(".title-text");
+        titleText.title = windowTitleTooltip(windowData);
         element.querySelector(".window-role-badge").textContent = presetRoleLabel(windowData.preset);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
@@ -7919,6 +8098,29 @@
               (a) => a.id !== event.agent_id,
             );
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
+            break;
+          case "system_settings":
+            // SPEC-1933 US-4: backend echoed the on-disk language value.
+            systemSettingsState.language = event.language || "auto";
+            systemSettingsState.loaded = true;
+            // Don't clobber an in-flight "Saving…" status; only seed when no
+            // pending feedback is shown.
+            if (!systemSettingsState.statusMessage || systemSettingsState.statusKind === "info") {
+              systemSettingsState.statusMessage = "";
+              systemSettingsState.statusKind = "";
+            }
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          case "system_settings_updated":
+            systemSettingsState.language = event.language || systemSettingsState.language;
+            systemSettingsState.statusMessage = `Saved language: ${event.language}.`;
+            systemSettingsState.statusKind = "success";
+            renderSystemPanelInAllSettingsWindows();
+            break;
+          case "system_settings_error":
+            systemSettingsState.statusMessage = event.message || "Failed to update system settings.";
+            systemSettingsState.statusKind = "error";
+            renderSystemPanelInAllSettingsWindows();
             break;
           case "backend_connection_result":
             frontendUnits.knowledgeSettingsSurface.setSettingsStatus(
