@@ -1449,6 +1449,10 @@
         );
         runtime?.terminal.focus();
         resizeState = null;
+        // SPEC-2356 Phase 9 (T-136): release the hover-reveal peek strip lock
+        // so pointer events resume on the screen-edge triggers once resize
+        // ends.
+        delete document.documentElement.dataset.opResizeActive;
       }
 
       function scheduleTerminalViewportRefresh(windowId) {
@@ -7092,6 +7096,10 @@
               height: parseNumber(element.style.height),
               fitFrame: null,
             };
+            // SPEC-2356 Phase 9 (T-136): suppress hover-reveal peek strip
+            // hits while resize is active so pointer movements that cross
+            // the screen edge do not steal focus mid-resize.
+            document.documentElement.dataset.opResizeActive = "true";
             resizeHandle.setPointerCapture(event.pointerId);
           });
           resizeHandle.addEventListener("lostpointercapture", (event) => {
