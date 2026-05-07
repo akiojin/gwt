@@ -1,6 +1,45 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.21.0] - 2026-05-07
+
+### Bug Fixes
+
+- **gui:** Enable initial window tab docking
+- **ui:** 開発時のフォント可読性を改善
+- **gui:** Reflect Board post focus in agent titles
+- **gui:** Surface update apply worker failures
+- **workspace:** Satisfy newer clippy sort lint
+- **gui:** Preserve grouped titlebar drag
+- **gui:** Harden titlebar dock targeting
+- **gui:** ターミナル本体の二重枠とサイドバーボタンUA枠を解消
+
+### Documentation
+
+- **tasks:** Record frontend module check lesson
+
+### Features
+
+- Add Board mentions and reply navigation
+- Persist workspace summaries
+- Add workspace overview surface
+
+### Miscellaneous Tasks
+
+- Origin/developをマージ
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge develop into board architecture follow-up
+
+### Refactor
+
+- **board:** Consolidate mention audience helpers
+
+### Testing
+
+- **frontend:** Check board surface bundle module
+
 ## [9.20.4] - 2026-05-06
 
 ### Bug Fixes
