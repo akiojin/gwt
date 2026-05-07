@@ -6,8 +6,13 @@ export function findTitlebarDockTarget(
   sourceId,
   hitHeight = TITLEBAR_DOCK_HIT_HEIGHT,
 ) {
+  const windowList = windows || [];
+  const sourceWindow = windowList.find((windowData) => windowData?.id === sourceId);
+  if (sourceWindow?.tab_group_id) {
+    return null;
+  }
   return (
-    (windows || [])
+    windowList
       .filter((windowData) => windowData && windowData.id !== sourceId)
       .filter((windowData) => !windowData.tab_group_id || Boolean(windowData.tab_group_active))
       .slice()

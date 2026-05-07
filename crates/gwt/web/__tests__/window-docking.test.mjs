@@ -50,3 +50,26 @@ test("titlebar docking only targets another visible window titlebar", () => {
     "the dragged source window must not dock into itself",
   );
 });
+
+test("titlebar docking is only an entry point for ungrouped source windows", () => {
+  const windows = [
+    {
+      id: "source",
+      tab_group_id: "group-a",
+      tab_group_active: true,
+      geometry: { x: 40, y: 40, width: 200, height: 120 },
+      z_index: 5,
+    },
+    {
+      id: "target",
+      geometry: { x: 100, y: 100, width: 220, height: 140 },
+      z_index: 9,
+    },
+  ];
+
+  assert.equal(
+    findTitlebarDockTarget(windows, { x: 130, y: 112 }, "source"),
+    null,
+    "dragging a grouped window titlebar must keep moving the group, not redock the tab",
+  );
+});
