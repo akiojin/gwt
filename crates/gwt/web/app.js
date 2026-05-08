@@ -20,6 +20,7 @@
         mentionsForBoardSubmit,
         visibleBoardEntries,
       } from "/board-surface.js";
+      import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
 
@@ -385,6 +386,9 @@
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
         }
+        if (preset === "workspace") {
+          return "workspace";
+        }
         return "mock";
       }
 
@@ -630,6 +634,7 @@
           logs: "Logs",
           issue: "Issue",
           spec: "SPEC",
+          workspace: "Workspace",
           board: "Board",
           pr: "PR",
         };
@@ -994,8 +999,6 @@
       let kanbanDrawerFocusReturn = null;
       let kanbanDrawerFocusTrapRelease = null;
       let kanbanDrawerActiveContext = null;
-      let workspaceOverviewFocusReturn = null;
-      let workspaceOverviewFocusTrapRelease = null;
       function openKanbanDrawer(context) {
         const drawer = document.getElementById("kanban-drawer");
         const backdrop = document.getElementById("kanban-drawer-backdrop");
@@ -1042,44 +1045,7 @@
       }
 
       function openWorkspaceOverview() {
-        const drawer = document.getElementById("workspace-overview-drawer");
-        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
-        if (!drawer || !backdrop) return;
-        workspaceOverviewFocusReturn = document.activeElement;
-        backdrop.hidden = false;
-        backdrop.dataset.open = "true";
-        drawer.hidden = false;
-        drawer.dataset.open = "true";
-        renderWorkspaceOverview();
-        try { drawer.focus({ preventScroll: true }); }
-        catch { drawer.focus(); }
-        if (typeof workspaceOverviewFocusTrapRelease === "function") {
-          workspaceOverviewFocusTrapRelease();
-        }
-        workspaceOverviewFocusTrapRelease = createFocusTrap(drawer, { document });
-      }
-
-      function closeWorkspaceOverview() {
-        const drawer = document.getElementById("workspace-overview-drawer");
-        const backdrop = document.getElementById("workspace-overview-drawer-backdrop");
-        if (!drawer || !backdrop) return;
-        if (drawer.dataset.open !== "true") return;
-        drawer.dataset.open = "false";
-        backdrop.dataset.open = "false";
-        backdrop.hidden = true;
-        drawer.hidden = true;
-        if (typeof workspaceOverviewFocusTrapRelease === "function") {
-          workspaceOverviewFocusTrapRelease();
-          workspaceOverviewFocusTrapRelease = null;
-        }
-        if (
-          workspaceOverviewFocusReturn &&
-          typeof workspaceOverviewFocusReturn.focus === "function"
-        ) {
-          try { workspaceOverviewFocusReturn.focus({ preventScroll: true }); }
-          catch { workspaceOverviewFocusReturn.focus(); }
-        }
-        workspaceOverviewFocusReturn = null;
+        focusOrSpawnPreset("workspace");
       }
 
       function workspaceCleanupEntry(candidate) {
@@ -1115,143 +1081,6 @@
         };
         branchCleanupWindowId = WORKSPACE_CLEANUP_WINDOW_ID;
         renderBranchCleanupModal();
-      }
-
-      function renderWorkspaceOverview() {
-        const titleEl = document.getElementById("workspace-overview-title");
-        const body = document.getElementById("workspace-overview-body");
-        const footer = document.getElementById("workspace-overview-footer");
-        if (!body || !titleEl || !footer) return;
-
-        const projection = activeWorkProjection || {};
-        const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
-        titleEl.textContent = title;
-        body.innerHTML = "";
-        footer.innerHTML = "";
-
-        const summaryCard = createNode("section", "workspace-overview-card");
-        summaryCard.appendChild(createNode("div", "workspace-overview-title", title));
-        const meta = createNode("div", "workspace-overview-meta");
-        appendMeta(meta, projection.status_category ? agentStatusLabel(projection.status_category) : "");
-        appendMeta(meta, projection.owner);
-        const overviewPr = createWorkspacePrMeta(projection);
-        if (overviewPr) meta.appendChild(overviewPr);
-        const agentsTotal =
-          Number(projection.active_agents || 0) + Number(projection.blocked_agents || 0);
-        appendMeta(meta, agentsTotal ? `${agentsTotal} agent${agentsTotal === 1 ? "" : "s"}` : "");
-        summaryCard.appendChild(meta);
-        summaryCard.appendChild(
-          createNode(
-            "div",
-            "workspace-overview-summary",
-            projection.summary || projection.status_text || "No Workspace summary yet",
-          ),
-        );
-        if (projection.next_action) {
-          summaryCard.appendChild(
-            createNode("div", "workspace-overview-next", projection.next_action),
-          );
-        }
-        body.appendChild(summaryCard);
-
-        const cleanupCandidate = projection.cleanup_candidate;
-        if (cleanupCandidate?.branch) {
-          const cleanupSection = createNode("section", "workspace-overview-section");
-          cleanupSection.appendChild(
-            createNode("div", "workspace-overview-heading", "Workspace Cleanup"),
-          );
-          const cleanupCopy = createNode(
-            "div",
-            "workspace-overview-summary",
-            `Local workspace ${cleanupCandidate.branch} is ready for cleanup.`,
-          );
-          cleanupSection.appendChild(cleanupCopy);
-          const cleanupActions = createNode("div", "op-work-actions");
-          const cleanupButton = createNode("button", "op-work-action", "Review Cleanup");
-          cleanupButton.type = "button";
-          cleanupButton.addEventListener("click", openWorkspaceCleanup);
-          cleanupActions.appendChild(cleanupButton);
-          cleanupSection.appendChild(cleanupActions);
-          body.appendChild(cleanupSection);
-        }
-
-        const agents = Array.isArray(projection.agents) ? projection.agents : [];
-        const agentSection = createNode("section", "workspace-overview-section");
-        agentSection.appendChild(createNode("div", "workspace-overview-heading", "Current Agents"));
-        const agentList = createNode("div", "workspace-overview-list");
-        if (agents.length === 0) {
-          agentList.appendChild(createNode("div", "workspace-overview-empty", "No live Agents"));
-        } else {
-          for (const agent of agents) {
-            const item = createNode("article", "workspace-journal-entry");
-            item.appendChild(
-              createNode(
-                "div",
-                "workspace-journal-summary",
-                agent.current_focus || agent.display_name || agent.agent_id || "Agent",
-              ),
-            );
-            const itemMeta = createNode("div", "workspace-journal-meta");
-            appendMeta(itemMeta, agent.display_name || agent.agent_id);
-            appendMeta(itemMeta, agentStatusLabel(agent.status_category));
-            appendMeta(itemMeta, agent.coordination_scope);
-            item.appendChild(itemMeta);
-            agentList.appendChild(item);
-          }
-        }
-        agentSection.appendChild(agentList);
-        body.appendChild(agentSection);
-
-        const journalEntries = Array.isArray(projection.journal_entries)
-          ? projection.journal_entries
-          : [];
-        const journalSection = createNode("section", "workspace-overview-section");
-        journalSection.appendChild(createNode("div", "workspace-overview-heading", "Recent Summary"));
-        const journalList = createNode("div", "workspace-overview-list");
-        if (journalEntries.length === 0) {
-          journalList.appendChild(
-            createNode("div", "workspace-overview-empty", "No Workspace journal entries"),
-          );
-        } else {
-          for (const entry of journalEntries) {
-            const item = createNode("article", "workspace-journal-entry");
-            item.appendChild(
-              createNode(
-                "div",
-                "workspace-journal-summary",
-                entry.summary ||
-                  entry.status_text ||
-                  entry.next_action ||
-                  entry.title ||
-                  "Workspace update",
-              ),
-            );
-            const itemMeta = createNode("div", "workspace-journal-meta");
-            appendMeta(itemMeta, entry.updated_at);
-            appendMeta(itemMeta, entry.owner);
-            appendMeta(itemMeta, entry.next_action ? "Next action" : "");
-            item.appendChild(itemMeta);
-            journalList.appendChild(item);
-          }
-        }
-        journalSection.appendChild(journalList);
-        body.appendChild(journalSection);
-
-        const boardRefs = Array.isArray(projection.board_refs) ? projection.board_refs : [];
-        const latestBoardRef = boardRefs.length > 0 ? boardRefs[boardRefs.length - 1] : "";
-        if (latestBoardRef) {
-          const openBoard = createNode("button", "op-work-action", "Open Latest Board Entry");
-          openBoard.type = "button";
-          openBoard.addEventListener("click", () => focusBoardEntry(latestBoardRef));
-          footer.appendChild(openBoard);
-        }
-        const startWork = createNode("button", "op-work-action", "Start Work");
-        startWork.type = "button";
-        startWork.addEventListener("click", () => {
-          closeWorkspaceOverview();
-          send({ kind: "open_start_work" });
-        });
-        footer.appendChild(startWork);
       }
 
       function renderKanbanDrawerBody() {
@@ -3145,6 +2974,19 @@
         }
         return node;
       }
+
+      const workspaceKanbanSurface = createWorkspaceKanbanSurface({
+        activeWorkspace,
+        agentStatusLabel,
+        appendMeta,
+        createWorkspacePrMeta,
+        createNode,
+        getActiveWorkProjection: () => activeWorkProjection,
+        openWorkspaceCleanup,
+        send,
+        windowMap,
+        workspaceWindowById,
+      });
 
       function boardTimestampLabel(value) {
         if (!value) {
@@ -5570,14 +5412,11 @@
         }
 
         card.addEventListener("click", () => {
-          // SPEC-2017 US-9 — clicking a card opens the Drawer with the
-          // freshest detail. We always request detail (cheap; cache-
-          // backed) so reopening on the same card still pulls live
-          // comment / linked-branch updates, and we always (re)open
-          // the Drawer so a previously dismissed Drawer reappears.
+          // The selected card stays in the split-pane detail view. We
+          // always request detail (cheap; cache-backed) so selecting the
+          // same card still pulls live comment / linked-branch updates.
           requestKnowledgeDetail(windowId, state.kind, entry.number);
           renderKnowledgeBridge(windowId);
-          openKanbanDrawer({ windowId, kind: state.kind, number: entry.number });
         });
 
         // SPEC-2017 US-8 — D&D wire-up. Plain (is_spec=false) cards
@@ -6128,6 +5967,7 @@
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-workspace",
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
@@ -6457,6 +6297,14 @@
             frontendUnits.logsSurface.requestLogs(windowData.id);
           }
           frontendUnits.logsSurface.renderLogs(windowData.id);
+          return;
+        }
+
+        if (surface === "workspace") {
+          workspaceKanbanSurface.mount(body, windowData, {
+            focusWindowLocally,
+            sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
+          });
           return;
         }
 
@@ -7224,6 +7072,7 @@
           boardStateMap.delete(windowId);
           logStateMap.delete(windowId);
           clearKnowledgeBridgeState(windowId);
+          workspaceKanbanSurface.deleteState(windowId);
           if (branchCleanupWindowId === windowId) {
             branchCleanupWindowId = null;
             renderBranchCleanupModal();
@@ -7381,7 +7230,7 @@
           case "active_work_projection":
             activeWorkProjection = event.projection || null;
             renderActiveWorkOverview();
-            renderWorkspaceOverview();
+            workspaceKanbanSurface.renderWindows();
             recomputeOperatorTelemetry();
             break;
           case "window_list":
@@ -7724,7 +7573,7 @@
             branchCleanupWindowId = event.id;
             if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
               frontendUnits.branchesFileTreeSurface.renderBranchCleanupModal();
-              renderWorkspaceOverview();
+              workspaceKanbanSurface.renderWindows();
               break;
             }
             frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
@@ -8313,18 +8162,6 @@
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
-      const workspaceOverviewCloseButton = document.getElementById(
-        "workspace-overview-close",
-      );
-      if (workspaceOverviewCloseButton) {
-        workspaceOverviewCloseButton.addEventListener("click", closeWorkspaceOverview);
-      }
-      const workspaceOverviewBackdrop = document.getElementById(
-        "workspace-overview-drawer-backdrop",
-      );
-      if (workspaceOverviewBackdrop) {
-        workspaceOverviewBackdrop.addEventListener("click", closeWorkspaceOverview);
-      }
       if (workspaceOverviewEntry) {
         workspaceOverviewEntry.addEventListener("click", openWorkspaceOverview);
       }
@@ -8385,15 +8222,6 @@
           event.preventDefault();
           return;
         }
-        const workspaceOverviewDrawer = document.getElementById("workspace-overview-drawer");
-        if (
-          workspaceOverviewDrawer &&
-          workspaceOverviewDrawer.dataset.open === "true"
-        ) {
-          closeWorkspaceOverview();
-          event.preventDefault();
-          return;
-        }
         if (windowListOpen) {
           // Close the Windows dropdown and return focus to its trigger
           // button (matches the modal pattern of restoring focus to the
@@ -8440,23 +8268,32 @@
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
       // buttons use, so they share the legacy invariants.
+      function isAutoMaximizedKanbanPreset(preset) {
+        return preset === "issue" || preset === "spec" || preset === "workspace";
+      }
+
       function focusOrSpawnPreset(preset) {
         const allWindows = activeWorkspace().windows || [];
         const existing = allWindows.find(
           (w) => w.preset === preset && !w.minimized,
         );
         if (existing) {
-          frontendUnits.socketTransport.send({
+          const message = {
             kind: "focus_window",
             id: existing.id,
-          });
+          };
+          if (isAutoMaximizedKanbanPreset(preset)) {
+            message.bounds = visibleBounds();
+          }
+          frontendUnits.socketTransport.send(message);
           return;
         }
-        frontendUnits.socketTransport.send({
+        const message = {
           kind: "create_window",
           preset,
           bounds: visibleBounds(),
-        });
+        };
+        frontendUnits.socketTransport.send(message);
       }
 
       document.addEventListener("op:command", (event) => {

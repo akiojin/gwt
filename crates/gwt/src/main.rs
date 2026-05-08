@@ -1638,6 +1638,108 @@ mod tests {
     }
 
     #[test]
+    fn kanban_window_presets_open_and_focus_maximized() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[WindowPreset::Issue, WindowPreset::FileTree],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let bounds = canvas_bounds();
+
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
+        let issue_raw_id = runtime
+            .window_lookup
+            .get(&issue_id)
+            .expect("issue lookup")
+            .raw_id
+            .clone();
+        assert!(
+            !runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&issue_raw_id)
+                .expect("issue window")
+                .maximized,
+            "pre-existing Issue windows start as normal floating windows before focus",
+        );
+        assert_eq!(
+            runtime
+                .focus_window_events(&issue_id, Some(bounds.clone()))
+                .len(),
+            1
+        );
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&issue_raw_id)
+                .expect("issue window")
+                .maximized,
+            "focusing an Issue Kanban window should maximize it",
+        );
+
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Spec, bounds.clone())
+                .len(),
+            3
+        );
+        assert_eq!(
+            runtime
+                .create_window_events(WindowPreset::Workspace, bounds.clone())
+                .len(),
+            3
+        );
+        let spec_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Spec, 0);
+        let workspace_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Workspace, 0);
+        for id in [spec_id, workspace_id] {
+            let raw_id = runtime
+                .window_lookup
+                .get(&id)
+                .expect("window lookup")
+                .raw_id
+                .clone();
+            let window = runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&raw_id)
+                .expect("window");
+            assert!(window.maximized, "{id} should open maximized");
+            assert_eq!(window.geometry.x, 24.0);
+            assert_eq!(window.geometry.y, 24.0);
+            assert_eq!(window.geometry.width, 1352.0);
+            assert_eq!(window.geometry.height, 852.0);
+        }
+
+        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+        let file_tree_raw_id = runtime
+            .window_lookup
+            .get(&file_tree_id)
+            .expect("file tree lookup")
+            .raw_id
+            .clone();
+        assert!(
+            !runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&file_tree_raw_id)
+                .expect("file tree window")
+                .maximized,
+            "non-Kanban utility windows should keep their normal floating size",
+        );
+    }
+
+    #[test]
     fn loaders_and_wizard_entrypoints_cover_success_and_error_paths() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

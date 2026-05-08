@@ -1,9 +1,8 @@
-// SPEC-2017 US-9 Kanban Drawer — slide-over detail surface
+// SPEC-2017 US-9 Kanban legacy Drawer — secondary detail surface
 //
-// The Kanban view replaces the old right-pane detail with the
-// SPEC-2356 Drawer pattern (`.op-drawer` + `.op-drawer-backdrop`).
-// Card clicks open the Drawer with `role=dialog` + focus-trap; Esc /
-// backdrop click close it.
+// The Kanban view now keeps the primary selected item in the right-side
+// detail pane. The legacy Drawer scaffold may remain for compatibility,
+// but card clicks must not route the primary UX into a small Drawer.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -103,20 +102,18 @@ test("Drawer footer hosts a Launch Agent action when launch_issue_number is set"
   );
 });
 
-test("Card click opens the Drawer (replaces side-pane detail)", () => {
-  // The renderer wires .kanban-card click to open the Drawer with
-  // the entry's number. The previous behavior loaded detail into a
-  // right-side pane via requestKnowledgeDetail; we keep
-  // requestKnowledgeDetail for fetch but route the rendered output
-  // into the Drawer body.
+test("Card click no longer opens the Drawer as the primary detail UI", () => {
+  // The renderer wires .kanban-card click to request fresh detail and
+  // rerender the split-pane surface. The Drawer open function can
+  // remain available, but the click handler must not call it.
   assert.match(
     appSource,
     /openKnowledgeBridgeDrawer|openKanbanDrawer/,
-    "expected an open function for the Kanban Drawer",
+    "expected the legacy Kanban Drawer function to remain available",
   );
-  assert.match(
+  assert.doesNotMatch(
     appSource,
     /addEventListener\("click"[\s\S]{0,500}?(openKanbanDrawer|openKnowledgeBridgeDrawer)|kanban-card[\s\S]{0,500}?(openKanbanDrawer|openKnowledgeBridgeDrawer)/,
-    "expected card click to call the Drawer open function",
+    "card click must keep detail in the right pane, not open the Drawer",
   );
 });
