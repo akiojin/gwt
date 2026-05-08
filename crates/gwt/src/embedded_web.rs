@@ -36,6 +36,10 @@ pub fn board_surface_js() -> &'static str {
     include_str!("../web/board-surface.js")
 }
 
+pub fn workspace_kanban_surface_js() -> &'static str {
+    include_str!("../web/workspace-kanban-surface.js")
+}
+
 pub fn update_cta_js() -> &'static str {
     include_str!("../web/update-cta.js")
 }
@@ -97,6 +101,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/board-surface.js",
         source: board_surface_js,
         marker: "boardEntryMentionsSelf",
+    },
+    RootJsModuleAsset {
+        path: "/workspace-kanban-surface.js",
+        source: workspace_kanban_surface_js,
+        marker: "createWorkspaceKanbanSurface",
     },
     RootJsModuleAsset {
         path: "/update-cta.js",
@@ -272,6 +281,8 @@ mod tests {
             include_str!("../web/app.js"),
             "\n",
             include_str!("../web/board-surface.js"),
+            "\n",
+            include_str!("../web/workspace-kanban-surface.js"),
             "\n",
             include_str!("../web/update-cta.js"),
             "\n",
@@ -2322,6 +2333,7 @@ mod tests {
             (WindowSurface::Board, "board"),
             (WindowSurface::Logs, "logs"),
             (WindowSurface::Knowledge, "knowledge"),
+            (WindowSurface::Workspace, "workspace"),
             (WindowSurface::Mock, "mock"),
         ];
 

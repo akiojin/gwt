@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
@@ -13,6 +13,11 @@ const operatorShellSource = readFileSync(resolve(here, "../operator-shell.js"), 
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const branchCleanupSource = readFileSync(resolve(here, "../branch-cleanup-modal.js"), "utf8");
 const windowDockingSource = readFileSync(resolve(here, "../window-docking.js"), "utf8");
+const workspaceKanbanPath = resolve(here, "../workspace-kanban-surface.js");
+const workspaceKanbanSource = existsSync(workspaceKanbanPath)
+  ? readFileSync(workspaceKanbanPath, "utf8")
+  : "";
+const workspaceKanbanCombinedSource = `${appSource}\n${workspaceKanbanSource}`;
 const typographySource = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
 const inlineStyle = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || "";
 
@@ -349,10 +354,6 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     document.querySelector("#project-workspace-overview-button"),
     "expected Project Bar to expose Workspace Overview",
   );
-  assert.ok(
-    document.querySelector("#workspace-overview-drawer"),
-    "expected Workspace Overview to use a drawer surface",
-  );
   assert.match(
     appSource,
     /function\s+openWorkspaceOverview\(/,
@@ -360,8 +361,8 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
   assert.match(
     appSource,
-    /function\s+renderWorkspaceOverview\(\)[\s\S]+journal_entries/,
-    "expected Overview to render Workspace journal entries from active_work_projection",
+    /function\s+openWorkspaceOverview\(\)\s*\{[\s\S]{0,300}?focusOrSpawnPreset\("workspace"\)/,
+    "expected Workspace Overview to open the Workspace Kanban window instead of a drawer",
   );
   assert.match(
     appSource,
@@ -375,6 +376,81 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
 });
 
+test("Workspace Overview uses the shared full-window Kanban + detail layout", () => {
+  assert.ok(
+    workspaceKanbanSource.length > 0,
+    "expected Workspace Kanban renderer to live in workspace-kanban-surface.js",
+  );
+  assert.match(
+    appSource,
+    /from\s+"\/workspace-kanban-surface\.js"/,
+    "expected app.js to import the Workspace Kanban surface module",
+  );
+  assert.match(
+    appSource,
+    /presetSurface\(preset\)[\s\S]+preset\s*===\s*"workspace"[\s\S]+return\s+"workspace"/,
+    "expected Workspace to be a first-class window surface",
+  );
+  assert.match(
+    workspaceKanbanCombinedSource,
+    /workspace-kanban-root[\s\S]+workspace-split[\s\S]+kanban-shell/,
+    "expected Workspace Overview to share the split Kanban shell",
+  );
+  for (const column of ["Active", "Suspended", "Completed"]) {
+    assert.match(
+      workspaceKanbanCombinedSource,
+      new RegExp(`workspace-column-name">${column}`),
+      `expected Workspace Kanban to include ${column} column`,
+    );
+  }
+  assert.match(
+    workspaceKanbanCombinedSource,
+    /workspace-kanban-detail-pane/,
+    "expected Workspace Kanban to keep selected Workspace detail on the right",
+  );
+  assert.match(
+    workspaceKanbanSource,
+    /function\s+workspaceCardsFromProjection\([^)]*\)[\s\S]+journal_entries/,
+    "expected Workspace Kanban to render Workspace journal entries from active_work_projection",
+  );
+  assert.match(
+    workspaceKanbanSource,
+    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+open_active_work_launch_wizard[\s\S]+open_start_work/,
+    "expected every Workspace card Resume action to prefer branch resume and fall back to Start Work",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /function\s+(workspaceCardsFromProjection|renderWorkspaceKanbanCard|renderWorkspaceKanbanDetail)\(/,
+    "Workspace Kanban rendering internals should not remain in app.js",
+  );
+});
+
+test("Workspace Overview legacy drawer scaffold is retired", () => {
+  assert.doesNotMatch(
+    html,
+    /workspace-overview-drawer/,
+    "Workspace Overview should no longer ship an unused drawer scaffold",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /closeWorkspaceOverview|renderWorkspaceOverview|workspaceOverviewFocusTrapRelease/,
+    "Workspace Overview drawer lifecycle code should not remain in app.js",
+  );
+});
+
+test("SPEC Issue and Workspace Kanban presets open maximized", () => {
+  assert.match(
+    appSource,
+    /function\s+isAutoMaximizedKanbanPreset\([^)]*\)[\s\S]+issue[\s\S]+spec[\s\S]+workspace/,
+    "expected frontend focus/spawn path to identify Issue, SPEC, and Workspace as auto-maximized Kanban presets",
+  );
+  assert.match(
+    appSource,
+    /focusOrSpawnPreset\(preset\)[\s\S]+isAutoMaximizedKanbanPreset\(preset\)[\s\S]+bounds:\s*visibleBounds\(\)/,
+    "expected focusOrSpawnPreset to send viewport bounds for auto-maximized Kanban presets",
+  );
+});
+
 test("Active Work and Workspace Overview render PR metadata as links", () => {
   assert.match(
     appSource,
@@ -382,8 +458,8 @@ test("Active Work and Workspace Overview render PR metadata as links", () => {
     "expected a shared PR metadata renderer instead of duplicating string-only PR labels",
   );
   assert.match(
-    appSource,
-    /createWorkspacePrMeta\(projection\)/,
+    workspaceKanbanSource,
+    /createWorkspacePrMeta\?\.\(cardData\)/,
     "expected Workspace Overview to render the saved PR link/state from the projection",
   );
   assert.match(

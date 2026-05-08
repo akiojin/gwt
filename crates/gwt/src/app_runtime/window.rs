@@ -44,7 +44,13 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            tab.workspace.add_window(preset, bounds)
+            let window = tab.workspace.add_window(preset, bounds.clone());
+            if preset.opens_maximized_by_default() {
+                let _ = tab.workspace.maximize_window(&window.id, bounds.clone());
+                tab.workspace.window(&window.id).cloned().unwrap_or(window)
+            } else {
+                window
+            }
         };
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -65,8 +71,32 @@ impl AppRuntime {
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        if !tab.workspace.focus_window(&address.raw_id, bounds) {
+        let opens_maximized = tab
+            .workspace
+            .window(&address.raw_id)
+            .map(|window| window.preset.opens_maximized_by_default())
+            .unwrap_or(false);
+        if !tab.workspace.focus_window(
+            &address.raw_id,
+            if opens_maximized {
+                None
+            } else {
+                bounds.clone()
+            },
+        ) {
             return Vec::new();
+        }
+        if opens_maximized {
+            if let Some(bounds) = bounds {
+                let already_maximized = tab
+                    .workspace
+                    .window(&address.raw_id)
+                    .map(|window| window.maximized)
+                    .unwrap_or(false);
+                if !already_maximized {
+                    let _ = tab.workspace.maximize_window(&address.raw_id, bounds);
+                }
+            }
         }
         self.active_tab_id = Some(address.tab_id);
         let _ = self.persist();

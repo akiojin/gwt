@@ -8,7 +8,10 @@ use gwt_agent::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
-use crate::cli::hook::{coordination_event, forward, runtime_state, HookError, HookEvent};
+use crate::cli::hook::{
+    coordination_event, forward, resolve_hook_agent_session_id, runtime_state, HookAgentSessionId,
+    HookError, RawHookEvent,
+};
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
 
@@ -81,6 +84,9 @@ impl HookForwardTarget {
 }
 
 pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
+    if std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
+        return Ok(());
+    }
     runtime_state::handle_with_input(event, input)?;
     emit_live_event_fail_open(RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
@@ -126,31 +132,69 @@ impl RuntimeHookEvent {
         status: Option<String>,
         message: Option<String>,
         session: Option<Session>,
-        hook_event: Option<HookEvent>,
+        hook_event: Option<RawHookEvent>,
     ) -> Self {
         let project_root = session
             .as_ref()
             .map(|session| session.worktree_path.display().to_string())
-            .or_else(|| hook_event.as_ref().and_then(|event| event.cwd.clone()));
+            .or_else(|| {
+                hook_event
+                    .as_ref()
+                    .and_then(|event| event.cwd().map(str::to_string))
+            });
         let branch = session.as_ref().map(|session| session.branch.clone());
+        let agent_session_id =
+            live_event_agent_session_id(&kind, source_event, session.as_ref(), hook_event.as_ref());
 
         Self {
             kind,
             source_event: source_event.map(str::to_string),
             gwt_session_id: std::env::var(GWT_SESSION_ID_ENV).ok(),
-            agent_session_id: hook_event
-                .as_ref()
-                .and_then(|event| event.session_id.clone()),
+            agent_session_id,
             project_root,
             branch,
             status,
             tool_name: hook_event
                 .as_ref()
-                .and_then(|event| event.tool_name.clone()),
+                .and_then(|event| event.tool_name().map(str::to_string)),
             message,
             occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         }
     }
+}
+
+fn live_event_agent_session_id(
+    kind: &RuntimeHookEventKind,
+    source_event: Option<&str>,
+    session: Option<&Session>,
+    hook_event: Option<&RawHookEvent>,
+) -> Option<String> {
+    match resolve_hook_agent_session_id(session, hook_event) {
+        HookAgentSessionId::Provided(agent_session_id) => {
+            return Some(agent_session_id.into_string());
+        }
+        HookAgentSessionId::MissingRequiredForCodex => {
+            let gwt_session_id =
+                std::env::var(GWT_SESSION_ID_ENV).unwrap_or_else(|_| "-".to_string());
+            let persisted_agent_session_id = session
+                .and_then(|session| session.agent_session_id.as_deref())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .unwrap_or("-");
+            let source_event = source_event.unwrap_or("-");
+            let tool_name = hook_event.and_then(RawHookEvent::tool_name).unwrap_or("-");
+            eprintln!(
+                "gwtd hook live event: missing Codex hook session_id kind={kind:?} source_event={source_event} gwt_session_id={gwt_session_id} persisted_agent_session_id={persisted_agent_session_id} tool_name={tool_name}"
+            );
+        }
+        HookAgentSessionId::MissingOptional => {}
+    }
+
+    session
+        .and_then(|session| session.agent_session_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 fn emit_live_event_fail_open(event: RuntimeHookEvent) {
@@ -183,8 +227,8 @@ fn emit_live_event(event: &RuntimeHookEvent) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_hook_event_best_effort(input: &str) -> Option<HookEvent> {
-    HookEvent::read_from_str(input).ok().flatten()
+fn parse_hook_event_best_effort(input: &str) -> Option<RawHookEvent> {
+    RawHookEvent::read_from_str(input).ok().flatten()
 }
 
 fn current_session_from_env() -> io::Result<Option<Session>> {

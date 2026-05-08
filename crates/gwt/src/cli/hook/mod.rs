@@ -3,7 +3,7 @@
 //! This module defines the canonical vocabulary for hook dispatch:
 //!
 //! - [`HookKind`] — the enumerated hook name set.
-//! - [`HookEvent`] — the stdin JSON payload Claude Code / Codex send.
+//! - [`HookEvent`] — the stdin JSON payload fields hook policy evaluators use.
 //! - [`HookOutput`] — the stdout JSON envelope hooks write when they need
 //!   to deny a tool call, inject context, or show a system message.
 //! - [`HookError`] — the error enum every hook handler returns.
@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod forward;
+mod identity;
 pub mod runtime_state;
 pub mod segments;
 pub mod skill_build_spec_stop_check;
@@ -35,6 +36,9 @@ use std::io::{self, Read};
 use serde::Deserialize;
 
 pub use envelope::{HookOutput, IntentBoundaryEvent};
+pub(crate) use identity::{
+    resolve_hook_agent_session_id, GwtSessionId, HookAgentSessionId, HookSessionId, RawHookEvent,
+};
 
 /// Every hook name exposed via `gwtd hook <name>`.
 ///
@@ -76,14 +80,14 @@ impl HookKind {
     }
 }
 
-/// The Claude Code / Codex hook event payload. Every field is optional
-/// so that schema extensions on the Claude Code side do not break our
-/// parser.
+/// Hook event payload fields used by policy evaluators. Provider-owned
+/// session identity is intentionally kept out of this permissive event shape;
+/// managed hook paths must parse the raw payload and promote the raw
+/// `session_id` into a required session id type before using it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HookEvent {
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
-    pub session_id: Option<String>,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
 }
