@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.24.0] - 2026-05-08
+
+### Bug Fixes
+
+- Clarify update CTA action label
+- **gui:** Allow dismissing update CTA
+- Stabilize Codex resume quick start
+- Require typed Codex hook session id
+- Consolidate managed hook identity
+
+### Features
+
+- **workspace:** Add unified kanban overview
+
+### Miscellaneous Tasks
+
+- Merge origin develop
+- Merge origin develop
+
+### Refactor
+
+- **workspace:** Extract kanban surface
+
 ## [9.23.0] - 2026-05-07
 
 ### Bug Fixes
