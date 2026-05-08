@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-05-07 — Hook fixes must separate diagnostics from shipped behavior
+
+### 事象
+
+Codex hook の `session_id` 欠落有無を確認するために、一時的に
+`.codex/hooks.json` へ payload dump hook を追加した。その後の実装修正に
+入る前に、ユーザーから「今の hooks.json は戻してください」と明示された。
+また、CLI hook tests が実行中 Codex セッションの `GWT_SESSION_*` 環境変数
+を拾い、非 managed hook のテストが managed Codex hook として扱われた。
+
+### 原因
+
+診断用 hook は現象確認には有効だが、product behavior の修正とは責務が
+異なる。診断設定が残ったまま実装に進むと、実際の修正範囲と観測用の
+一時変更が混ざる。さらに hook 系のコードはプロセス環境変数に強く依存
+するため、テストが現在の Agent 実行環境を暗黙に継承すると期待と違う
+経路に入る。
+
+### 再発防止策
+
+1. Hook payload の観測用変更は、確認が終わった時点で必ず戻してから
+   product code に着手する。
+2. Hook / CLI tests では `GWT_SESSION_ID`、`GWT_SESSION_RUNTIME_PATH`、
+   forward URL/token などの runtime env を明示的に set/unset し、現在の
+   Agent セッションに依存しない形で検証する。
+3. Codex hook の必須フィールドを扱う修正では、欠落時に既存の persisted
+   session metadata を破壊しないことを regression test で固定する。
+
 ## 2026-05-07 — Window interaction features need behavior tests, not only source-string contracts
 
 ### 事象
