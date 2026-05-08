@@ -43,18 +43,28 @@ pub fn resolve_launch_worktree_request(
     let main_repo_path =
         gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let worktrees = manager.list().map_err(|err| err.to_string())?;
-    if let Some(existing_worktree) = worktrees
-        .iter()
-        .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
-        .map(|worktree| worktree.path.clone())
-    {
+    let mut worktrees = manager.list().map_err(|err| err.to_string())?;
+    if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
         *working_dir = Some(existing_worktree.clone());
         env_vars.insert(
             "GWT_PROJECT_ROOT".to_string(),
             existing_worktree.display().to_string(),
         );
         return Ok(());
+    }
+    if worktrees_have_stale_branch_entry(&worktrees, &branch_name) {
+        manager
+            .prune()
+            .map_err(|err| format!("failed to prune stale worktrees: {err}"))?;
+        worktrees = manager.list().map_err(|err| err.to_string())?;
+        if let Some(existing_worktree) = usable_worktree_path_for_branch(&worktrees, &branch_name) {
+            *working_dir = Some(existing_worktree.clone());
+            env_vars.insert(
+                "GWT_PROJECT_ROOT".to_string(),
+                existing_worktree.display().to_string(),
+            );
+            return Ok(());
+        }
     }
 
     let mut effective_base_branch = base_branch

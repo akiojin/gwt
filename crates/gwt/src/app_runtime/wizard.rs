@@ -42,9 +42,11 @@ use super::{
     branch_worktree_path, build_shell_process_launch, combined_window_id,
     detect_wizard_docker_context_and_status, knowledge_error_event, knowledge_kind_for_preset,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
-    resolve_shell_launch_worktree, synthetic_branch_entry, AppEventProxy, AppRuntime, BackendEvent,
-    IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent, WindowPreset,
-    WindowProcessStatus,
+    resolve_shell_launch_worktree, synthetic_branch_entry, workspace_resume_branch_exists,
+    workspace_resume_branch_from_journal_project_root, workspace_resume_context_from_journal,
+    workspace_resume_context_from_projection, workspace_resume_owner_issue_number, AppEventProxy,
+    AppRuntime, BackendEvent, IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 
 impl AppRuntime {
@@ -127,6 +129,25 @@ impl AppRuntime {
         linked_issue_number: Option<u64>,
         linked_issue_kind: Option<LinkedIssueKind>,
     ) -> Result<(), String> {
+        self.open_launch_wizard_for_branch_with_context(
+            tab_id,
+            project_root,
+            branch_name,
+            linked_issue_number,
+            linked_issue_kind,
+            None,
+        )
+    }
+
+    pub(crate) fn open_launch_wizard_for_branch_with_context(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        branch_name: &str,
+        linked_issue_number: Option<u64>,
+        linked_issue_kind: Option<LinkedIssueKind>,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+    ) -> Result<(), String> {
         let normalized_branch_name = normalize_branch_name(branch_name);
         let live_sessions = self.live_sessions_for_branch(tab_id, &normalized_branch_name);
         let worktree_path = branch_worktree_path(project_root, &normalized_branch_name);
@@ -160,6 +181,7 @@ impl AppRuntime {
                 quick_start_entries,
                 previous_profile,
             ),
+            workspace_resume_context,
         });
 
         Ok(())
@@ -227,10 +249,113 @@ impl AppRuntime {
         }
     }
 
+    pub(crate) fn resume_workspace_events(
+        &mut self,
+        source: gwt::WorkspaceResumeSource,
+        journal_id: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let error_event = |message: &str| {
+            vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
+                message: message.to_string(),
+            })]
+        };
+
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return error_event("Open a project before resuming work");
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return error_event("Project tab not found");
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return error_event("Resume Workspace requires a Git project");
+        }
+        let project_root = tab.project_root.clone();
+        let tab_title = tab.title.clone();
+
+        let (branch_candidate, context) = match source {
+            gwt::WorkspaceResumeSource::Current => {
+                let projection =
+                    gwt_core::workspace_projection::load_workspace_projection(&project_root)
+                        .ok()
+                        .flatten();
+                let branch = projection
+                    .as_ref()
+                    .and_then(|projection| projection.git_details.as_ref())
+                    .and_then(|details| details.branch.clone());
+                let context = projection
+                    .as_ref()
+                    .map(workspace_resume_context_from_projection)
+                    .unwrap_or_else(|| WorkspaceResumeContext {
+                        title: Some(format!("{tab_title} workspace")),
+                        owner: None,
+                        summary: None,
+                        next_action: None,
+                    });
+                (branch, context)
+            }
+            gwt::WorkspaceResumeSource::Journal => {
+                let Some(journal_id) = journal_id else {
+                    return error_event("Workspace journal id is required");
+                };
+                let Ok(entries) =
+                    gwt_core::workspace_projection::load_recent_workspace_journal_entries(
+                        &project_root,
+                        WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+                    )
+                else {
+                    return error_event("Workspace journal could not be loaded");
+                };
+                let Some(entry) = entries.into_iter().find(|entry| entry.id == journal_id) else {
+                    return error_event("Workspace journal entry not found");
+                };
+                (
+                    workspace_resume_branch_from_journal_project_root(&entry.project_root),
+                    workspace_resume_context_from_journal(&entry),
+                )
+            }
+        };
+
+        if let Some(branch_name) = branch_candidate
+            .as_deref()
+            .map(normalize_branch_name)
+            .filter(|branch| !branch.trim().is_empty())
+        {
+            if workspace_resume_branch_exists(&project_root, &branch_name) {
+                let linked_issue_number =
+                    workspace_resume_owner_issue_number(context.owner.as_deref());
+                return match self.open_launch_wizard_for_branch_with_context(
+                    &tab_id,
+                    &project_root,
+                    &branch_name,
+                    linked_issue_number,
+                    None,
+                    Some(context),
+                ) {
+                    Ok(()) => vec![self.launch_wizard_state_outbound()],
+                    Err(error) => error_event(&error),
+                };
+            }
+        }
+
+        match self.open_start_work_for_project_with_context(&tab_id, &project_root, Some(context)) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => error_event(&error),
+        }
+    }
+
     pub(crate) fn open_start_work_for_project(
         &mut self,
         tab_id: &str,
         project_root: &Path,
+    ) -> Result<(), String> {
+        self.open_start_work_for_project_with_context(tab_id, project_root, None)
+    }
+
+    pub(crate) fn open_start_work_for_project_with_context(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<(), String> {
         let base_branch = gwt::start_work::resolve_start_work_base_branch(project_root)
             .map_err(|error| error.to_string())?;
@@ -258,7 +383,9 @@ impl AppRuntime {
                     live_sessions: Vec::new(),
                     docker_context,
                     docker_service_status,
-                    linked_issue_number: None,
+                    linked_issue_number: workspace_resume_context.as_ref().and_then(|context| {
+                        workspace_resume_owner_issue_number(context.owner.as_deref())
+                    }),
                     linked_issue_kind: None,
                 },
                 base_branch,
@@ -266,6 +393,7 @@ impl AppRuntime {
                 quick_start_entries,
                 previous_profile,
             ),
+            workspace_resume_context,
         });
 
         Ok(())
@@ -499,7 +627,13 @@ impl AppRuntime {
                 };
                 match *config {
                     LaunchWizardLaunchRequest::Agent(config) => {
-                        match self.spawn_agent_window(&session.tab_id, *config, bounds) {
+                        let workspace_resume_context = session.workspace_resume_context.clone();
+                        match self.spawn_agent_window(
+                            &session.tab_id,
+                            *config,
+                            bounds,
+                            workspace_resume_context,
+                        ) {
                             Ok(mut events) => {
                                 events.push(self.launch_wizard_state_broadcast(None));
                                 events

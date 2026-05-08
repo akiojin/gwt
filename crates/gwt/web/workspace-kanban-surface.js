@@ -32,13 +32,6 @@ export function createWorkspaceKanbanSurface({
     return "suspended";
   }
 
-  function ownerIssueNumber(owner) {
-    const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
-    if (!match) return null;
-    const number = Number.parseInt(match[1] || match[2], 10);
-    return Number.isFinite(number) ? number : null;
-  }
-
   function workspaceCardsFromProjection(projection) {
     if (!projection) return [];
     const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
@@ -63,6 +56,8 @@ export function createWorkspaceKanbanSurface({
         agents: Array.isArray(projection.agents) ? projection.agents : [],
         cleanup_candidate: projection.cleanup_candidate || null,
         updated_at: projection.updated_at || "",
+        resume_source: "current",
+        journal_id: null,
         column: workspaceColumnForStatus(projection.status_category),
       },
     ];
@@ -87,8 +82,8 @@ export function createWorkspaceKanbanSurface({
           "Workspace update",
         owner: entry.owner || projection.owner || "",
         next_action: entry.next_action || "",
-        branch,
-        worktree_path: worktreePath,
+        branch: "",
+        worktree_path: "",
         pr_number: projection.pr_number || null,
         pr_url: projection.pr_url || "",
         pr_state: projection.pr_state || "",
@@ -96,6 +91,8 @@ export function createWorkspaceKanbanSurface({
         agents: [],
         cleanup_candidate: null,
         updated_at: entry.updated_at || "",
+        resume_source: "journal",
+        journal_id: entry.id || "",
         column: workspaceColumnForStatus(statusCategory),
       });
     }
@@ -104,17 +101,15 @@ export function createWorkspaceKanbanSurface({
   }
 
   function resumeWorkspaceCard(card) {
-    const projection = getActiveWorkProjection();
-    const branchName = card?.branch || projection?.branch || "";
-    if (branchName) {
+    if (card?.resume_source === "journal" && card?.journal_id) {
       send({
-        kind: "open_active_work_launch_wizard",
-        branch_name: branchName,
-        linked_issue_number: ownerIssueNumber(card?.owner || projection?.owner),
+        kind: "resume_workspace",
+        source: "journal",
+        journal_id: card.journal_id,
       });
       return;
     }
-    send({ kind: "open_start_work" });
+    send({ kind: "resume_workspace", source: "current" });
   }
 
   function renderWorkspaceKanbanCard(windowId, state, cardData) {
