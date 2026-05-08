@@ -11,6 +11,7 @@ use gwt_github::{
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     Cache, SectionName,
 };
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 
 fn s(v: &str) -> String {
@@ -19,6 +20,36 @@ fn s(v: &str) -> String {
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(std::string::ToString::to_string).collect()
+}
+
+fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnvVar {
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_ref() {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
 }
 
 // -----------------------------------------------------------------
@@ -149,19 +180,15 @@ fn dispatch_hook_runtime_state_without_env_is_silent_ok() {
     // and returned 0. The real handler now calls `runtime_state::handle`
     // in-process, which returns Ok(()) as a silent no-op when
     // `GWT_SESSION_RUNTIME_PATH` is unset. Same exit code, quieter stderr.
+    let _env_lock = env_test_lock();
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
-    let prev = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
-    std::env::remove_var("GWT_SESSION_RUNTIME_PATH");
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
 
     let code = dispatch(
         &mut env,
         &argv(&["gwt", "hook", "runtime-state", "PreToolUse"]),
     );
-
-    if let Some(v) = prev {
-        std::env::set_var("GWT_SESSION_RUNTIME_PATH", v);
-    }
 
     assert_eq!(code, 0, "runtime-state with no env var should exit 0");
     let err_text = String::from_utf8(env.stderr.clone()).unwrap();
@@ -203,8 +230,11 @@ fn dispatch_hook_runtime_state_missing_event_exits_2() {
 
 #[test]
 fn dispatch_hook_event_runs_in_process_without_stdout_noise() {
+    let _env_lock = env_test_lock();
     let tmp = TempDir::new().unwrap();
     let mut env = TestEnv::new(tmp.path().to_path_buf());
+    let _runtime_path = ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
+    let _session_id = ScopedEnvVar::unset("GWT_SESSION_ID");
     env.stdin = serde_json::json!({
         "tool_name": "Read",
         "tool_input": { "file_path": "Cargo.toml" }
