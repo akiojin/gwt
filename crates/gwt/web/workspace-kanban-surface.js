@@ -2,6 +2,7 @@ export function createWorkspaceKanbanSurface({
   activeWorkspace,
   agentStatusLabel,
   appendMeta,
+  createWorkspacePrMeta,
   createNode,
   getActiveWorkProjection,
   openWorkspaceCleanup,
@@ -56,6 +57,8 @@ export function createWorkspaceKanbanSurface({
         branch,
         worktree_path: worktreePath,
         pr_number: projection.pr_number || null,
+        pr_url: projection.pr_url || "",
+        pr_state: projection.pr_state || "",
         board_refs: Array.isArray(projection.board_refs) ? projection.board_refs : [],
         agents: Array.isArray(projection.agents) ? projection.agents : [],
         cleanup_candidate: projection.cleanup_candidate || null,
@@ -87,6 +90,8 @@ export function createWorkspaceKanbanSurface({
         branch,
         worktree_path: worktreePath,
         pr_number: projection.pr_number || null,
+        pr_url: projection.pr_url || "",
+        pr_state: projection.pr_state || "",
         board_refs: [],
         agents: [],
         cleanup_candidate: null,
@@ -150,7 +155,10 @@ export function createWorkspaceKanbanSurface({
     const meta = createNode("div", "kanban-card-meta");
     appendMeta(meta, cardData.owner);
     appendMeta(meta, cardData.branch);
-    appendMeta(meta, cardData.pr_number ? `PR #${cardData.pr_number}` : "");
+    const cardPr = createWorkspacePrMeta?.(cardData);
+    if (cardPr) {
+      meta.appendChild(cardPr);
+    }
     appendMeta(meta, cardData.updated_at);
     if (meta.childElementCount > 0) {
       selectButton.appendChild(meta);
@@ -190,13 +198,15 @@ export function createWorkspaceKanbanSurface({
       ),
     );
     head.appendChild(headRow);
-    const subtitle = [
-      cardData.owner,
-      cardData.branch,
-      cardData.pr_number ? `PR #${cardData.pr_number}` : "",
-    ].filter(Boolean).join(" · ");
-    if (subtitle) {
-      head.appendChild(createNode("div", "knowledge-detail-subtitle", subtitle));
+    const subtitle = createNode("div", "knowledge-detail-subtitle");
+    appendMeta(subtitle, cardData.owner);
+    appendMeta(subtitle, cardData.branch);
+    const detailPr = createWorkspacePrMeta?.(cardData);
+    if (detailPr) {
+      subtitle.appendChild(detailPr);
+    }
+    if (subtitle.childElementCount > 0) {
+      head.appendChild(subtitle);
     }
     header.appendChild(head);
 

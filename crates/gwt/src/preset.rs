@@ -12,6 +12,9 @@ pub enum WindowPreset {
     FileTree,
     Branches,
     Settings,
+    /// Legacy-only value accepted so old workspace files containing
+    /// `"preset": "memo"` can be restored without failing. It is not exposed
+    /// in [`WindowPreset::ALL`] and is dropped during workspace load.
     Memo,
     Profile,
     Logs,
@@ -27,7 +30,6 @@ pub enum WindowSurface {
     Terminal,
     FileTree,
     Branches,
-    Memo,
     Profile,
     Board,
     Logs,
@@ -46,7 +48,6 @@ impl WindowSurface {
             Self::Terminal => "terminal",
             Self::FileTree => "file-tree",
             Self::Branches => "branches",
-            Self::Memo => "memo",
             Self::Profile => "profile",
             Self::Board => "board",
             Self::Logs => "logs",
@@ -58,14 +59,13 @@ impl WindowSurface {
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 14] = [
+    pub const ALL: [WindowPreset; 13] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
         WindowPreset::FileTree,
         WindowPreset::Branches,
         WindowPreset::Settings,
-        WindowPreset::Memo,
         WindowPreset::Profile,
         WindowPreset::Logs,
         WindowPreset::Issue,
@@ -104,7 +104,7 @@ impl WindowPreset {
             Self::FileTree => "Browse repository files in a read-only tree",
             Self::Branches => "Browse repository branches and launch agents",
             Self::Settings => "Manage custom agents and launch presets",
-            Self::Memo => "Capture repo-scoped notes and pinned follow-ups",
+            Self::Memo => "Removed legacy memo surface",
             Self::Profile => "Manage env profiles, overrides, and merged preview",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
@@ -140,7 +140,7 @@ impl WindowPreset {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::FileTree => WindowSurface::FileTree,
             Self::Branches => WindowSurface::Branches,
-            Self::Memo => WindowSurface::Memo,
+            Self::Memo => WindowSurface::Mock,
             Self::Profile => WindowSurface::Profile,
             Self::Logs => WindowSurface::Logs,
             Self::Board => WindowSurface::Board,
@@ -161,7 +161,7 @@ impl WindowPreset {
             WindowSurface::Branches => (520.0, 420.0),
             WindowSurface::Knowledge => (560.0, 420.0),
             WindowSurface::Workspace => (1040.0, 680.0),
-            WindowSurface::Memo | WindowSurface::Profile | WindowSurface::Logs => (560.0, 420.0),
+            WindowSurface::Profile | WindowSurface::Logs => (560.0, 420.0),
             WindowSurface::Board => (520.0, 480.0),
             WindowSurface::Mock => (420.0, 300.0),
         }
@@ -189,6 +189,10 @@ impl WindowPreset {
             | Self::Board
             | Self::Pr => None,
         }
+    }
+
+    pub fn is_removed_legacy(self) -> bool {
+        matches!(self, Self::Memo)
     }
 }
 
@@ -446,7 +450,7 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 14);
+        assert_eq!(WindowPreset::ALL.len(), 13);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::Workspace.title(), "Workspace");
@@ -454,7 +458,6 @@ mod tests {
         assert_eq!(WindowPreset::Board.id_prefix(), "board");
         assert_eq!(WindowPreset::Workspace.id_prefix(), "workspace");
         assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
-        assert_eq!(WindowPreset::Memo.surface(), WindowSurface::Memo);
         assert_eq!(WindowPreset::Profile.surface(), WindowSurface::Profile);
         assert_eq!(WindowPreset::Board.surface(), WindowSurface::Board);
         assert_eq!(WindowPreset::Logs.surface(), WindowSurface::Logs);
@@ -566,11 +569,6 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
-                WindowPreset::Memo => {
-                    assert_eq!(preset.surface(), WindowSurface::Memo);
-                    assert!(!preset.requires_process());
-                    assert_eq!(preset.command_name(), None);
-                }
                 WindowPreset::Profile => {
                     assert_eq!(preset.surface(), WindowSurface::Profile);
                     assert!(!preset.requires_process());
@@ -597,6 +595,9 @@ mod tests {
                     assert_eq!(preset.command_name(), None);
                 }
                 WindowPreset::Agent => unreachable!("WindowPreset::ALL excludes Agent"),
+                other => {
+                    panic!("removed preset must not be exposed in WindowPreset::ALL: {other:?}")
+                }
             }
         }
 

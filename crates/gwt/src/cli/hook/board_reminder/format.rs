@@ -8,7 +8,10 @@
 
 use gwt_core::coordination::{self, BoardEntry};
 
-use super::texts::{FOR_YOU_MARKER, INJECTION_HEADER, SESSION_START_HEADER, USER_PROMPT_REMINDER};
+use super::texts::{
+    injection_header, no_recent_posts_line, session_start_header, user_prompt_reminder,
+    ReminderLanguage, FOR_YOU_MARKER,
+};
 
 const ENTRY_BODY_CONTEXT_CHAR_LIMIT: usize = 1_200;
 
@@ -25,25 +28,33 @@ pub(super) fn filter_and_cap_latest(
     entries
 }
 
-pub(super) fn injection_text(entries: &[BoardEntry], match_keys: &[String]) -> String {
-    let mut out = String::from(INJECTION_HEADER);
+pub(super) fn injection_text_with_language(
+    entries: &[BoardEntry],
+    match_keys: &[String],
+    language: ReminderLanguage,
+) -> String {
+    let mut out = String::from(injection_header(language));
     for entry in entries {
         out.push_str(&format_entry_line(entry, match_keys));
     }
     out
 }
 
-pub(super) fn session_start_text(entries: &[BoardEntry], match_keys: &[String]) -> String {
-    let mut out = String::from(SESSION_START_HEADER);
+pub(super) fn session_start_text_with_language(
+    entries: &[BoardEntry],
+    match_keys: &[String],
+    language: ReminderLanguage,
+) -> String {
+    let mut out = String::from(session_start_header(language));
     if entries.is_empty() {
-        out.push_str("- (no recent posts from other Agents)\n");
+        out.push_str(no_recent_posts_line(language));
     } else {
         for entry in entries {
             out.push_str(&format_entry_line(entry, match_keys));
         }
     }
     out.push('\n');
-    out.push_str(USER_PROMPT_REMINDER);
+    out.push_str(user_prompt_reminder(language, false));
     out
 }
 
@@ -217,7 +228,7 @@ mod tests {
     #[test]
     fn injection_text_starts_with_header_and_renders_lines() {
         let entry = make_entry(vec![]);
-        let text = injection_text(&[entry], &[]);
+        let text = injection_text_with_language(&[entry], &[], ReminderLanguage::En);
         assert!(text.starts_with("# Recent Board updates"));
         assert!(text.contains("[OtherAgent @ feature/other / sess-other]"));
     }
@@ -279,7 +290,7 @@ mod tests {
 
     #[test]
     fn session_start_text_appends_user_prompt_reminder() {
-        let text = session_start_text(&[], &[]);
+        let text = session_start_text_with_language(&[], &[], ReminderLanguage::En);
         assert!(text.contains("(no recent posts from other Agents)"));
         assert!(text.contains("Board Post Reminder"));
     }

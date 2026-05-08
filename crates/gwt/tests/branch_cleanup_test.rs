@@ -56,6 +56,52 @@ fn cleanup_selected_branches_deletes_local_and_remote_branch() {
 }
 
 #[test]
+fn cleanup_selected_branches_from_workspace_home_resolves_child_bare_repo() {
+    let temp = tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    let workspace_home = temp.path().join("workspace-home");
+    let bare = workspace_home.join("repo.git");
+
+    run_git(
+        temp.path(),
+        &["init", "-q", source.to_str().expect("source path")],
+    );
+    init_repo(&source);
+    run_git(&source, &["checkout", "-qb", "work/prune-me"]);
+    std::fs::write(source.join("work.txt"), "work\n").expect("write work");
+    run_git(&source, &["add", "work.txt"]);
+    run_git(&source, &["commit", "-qm", "feature"]);
+    run_git(&source, &["checkout", "main"]);
+
+    std::fs::create_dir_all(&workspace_home).expect("workspace home");
+    run_git(
+        temp.path(),
+        &[
+            "clone",
+            "--bare",
+            source.to_str().expect("source path"),
+            bare.to_str().expect("bare path"),
+        ],
+    );
+
+    let entries = list_branch_entries_with_active_sessions(&workspace_home, &HashSet::new())
+        .expect("entries");
+    let results = cleanup_selected_branches(
+        &workspace_home,
+        &entries,
+        &[String::from("work/prune-me")],
+        false,
+    );
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
+    assert!(
+        !branch_exists(&bare, "refs/heads/work/prune-me"),
+        "workspace cleanup should execute against the child bare repository"
+    );
+}
+
+#[test]
 fn cleanup_selected_branches_defaults_to_local_only_when_remote_delete_is_false() {
     let temp = tempdir().expect("tempdir");
     let remote = temp.path().join("origin.git");

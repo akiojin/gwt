@@ -1,118 +1,160 @@
-// SPEC-2041 Phase 13 — GUI 自動更新ポーリング刷新 (FR-035/036/037)
+// SPEC-2041 Phase 14 — unified GUI update CTA.
 //
-// 5min ポーリング中、Available 検出時に「初回はトースト + ボタン、以降は同一
-// latest をスキップしてボタン永続」という UI 状態遷移をフロントエンドが満たす
-// ことをソースレベルで検証する。kanban-structure.test.mjs と同じ手法で
-// renderer / handler を直接呼ばずに app.js / index.html の宣言を確認する。
+// The update notification must be one actionable bottom-right CTA, not a
+// transient toast plus a separate persistent button. These tests exercise the
+// CTA controller with DOM-like elements so regressions are caught by behavior,
+// not source-string proximity.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { parseHTML } from "linkedom";
+import { createUpdateCtaController } from "../update-cta.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
+const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 
-test("app.js tracks the first-seen latest version to dedup poll detections", () => {
-  // FR-036: 5min ポーリングで同一 latest を繰り返し受信してもトースト/ボタンを
-  // 二重表示しないよう、最後に表示した latest を保持する必要がある。
-  assert.match(
-    appSource,
-    /firstSeenUpdateVersion|firstSeenVersion|lastSeenUpdateLatest/,
-    "app.js must track the last-seen `latest` to avoid duplicate UI updates",
-  );
+test("update_state renders one reusable update CTA", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+
+  controller.handleUpdateState({
+    state: "available",
+    current: "9.22.0",
+    latest: "9.23.0",
+  });
+  controller.handleUpdateState({
+    state: "available",
+    current: "9.22.0",
+    latest: "9.23.0",
+  });
+
+  assert.equal(fixture.document.querySelectorAll("#update-cta").length, 1);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.textContent, "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.title, "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.getAttribute("aria-label"), "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.dataset.status, "available");
+  assert.equal(fixture.versionUpdates.length, 2);
 });
 
-test("app.js defines a showUpdateButton renderer", () => {
-  // FR-036: 初回トースト 8s が消えても永続的に残るボタンを描画する関数が必要。
-  assert.match(appSource, /showUpdateButton\s*\(/, "missing showUpdateButton");
+test("update CTA click cancel leaves it available and does not send apply_update", () => {
+  const fixture = createFixture({ confirmResult: false });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.23.0");
+
+  fixture.document.getElementById("update-cta").click();
+
+  assert.equal(fixture.confirmCalls.length, 1);
+  assert.deepEqual(fixture.sent, []);
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "available");
 });
 
-test("app.js update-button click handler runs window.confirm then apply_update", () => {
-  // FR-005 を踏襲しつつ FR-036 の永続ボタン経路にも適用する。
-  // ボタン作成箇所からほどなくして confirm → apply_update を発火する。
-  const buttonBlock = appSource.match(
-    /update-button[\s\S]{0,1200}?apply_update/,
-  );
-  assert.ok(
-    buttonBlock,
-    "expected update-button click path to reach apply_update",
-  );
-  assert.match(
-    buttonBlock[0],
-    /window\.confirm|confirm\s*\(/,
-    "update-button click must guard apply_update with window.confirm",
-  );
+test("update CTA click approve sends apply_update and shows applying state", () => {
+  const fixture = createFixture({ confirmResult: true });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.23.0");
+
+  fixture.document.getElementById("update-cta").click();
+
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update" }]);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "applying");
+  assert.equal(cta.disabled, true);
+  assert.equal(cta.textContent, "Applying update...");
 });
 
-test("app.js update toast click handler uses the same apply_update path", () => {
-  // トーストと永続ボタンで backend の適用入口を分岐させない。
-  const toastBlock = appSource.match(
-    /function showUpdateToast[\s\S]{0,1600}?apply_update/,
-  );
-  assert.ok(toastBlock, "expected update toast click path to reach apply_update");
-  assert.match(
-    toastBlock[0],
-    /window\.confirm|confirm\s*\(/,
-    "update toast click must guard apply_update with window.confirm",
-  );
+test("duplicate update_state does not reset an applying CTA", () => {
+  const fixture = createFixture({ confirmResult: true });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateState({
+    state: "available",
+    current: "9.22.0",
+    latest: "9.23.0",
+  });
+  fixture.document.getElementById("update-cta").click();
+
+  controller.handleUpdateState({
+    state: "available",
+    current: "9.22.0",
+    latest: "9.23.0",
+  });
+
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "applying");
+  assert.equal(cta.disabled, true);
+  assert.equal(cta.textContent, "Applying update...");
 });
 
-test("update_state handler delegates to showUpdateButton for persistence", () => {
-  // case "update_state" が新しいボタン renderer を呼ぶことで FR-036 の永続表示
-  // が成立する。トースト呼び出しは初回のみ条件分岐される必要がある。
-  const handlerSlice = appSource.match(
-    /case "update_state"[\s\S]{0,2500}/,
-  );
-  assert.ok(handlerSlice, "expected case \"update_state\" handler in app.js");
-  assert.match(
-    handlerSlice[0],
-    /showUpdateButton/,
-    "update_state handler must call showUpdateButton",
-  );
+test("update_apply_error reuses the same CTA and allows retry", () => {
+  const fixture = createFixture({ confirmResult: true });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.23.0");
+  fixture.document.getElementById("update-cta").click();
+
+  controller.showError("Failed to start the update.");
+  const cta = fixture.document.getElementById("update-cta");
+
+  assert.equal(fixture.document.querySelectorAll("#update-cta").length, 1);
+  assert.equal(cta.dataset.status, "error");
+  assert.equal(cta.disabled, false);
+  assert.match(cta.textContent, /Update failed/);
+  assert.match(cta.textContent, /Failed to start the update/);
+
+  cta.click();
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update" }, { kind: "apply_update" }]);
 });
 
-test("app.js surfaces backend update apply failures", () => {
-  const handlerSlice = appSource.match(
-    /case "update_apply_error"[\s\S]{0,500}/,
-  );
-  assert.ok(handlerSlice, "expected update_apply_error handler in app.js");
-  assert.match(
-    handlerSlice[0],
-    /alert\s*\(/,
-    "update apply failures must be visible to the user",
-  );
+test("app.js delegates update handling to the unified update CTA controller", () => {
+  assert.match(appSource, /createUpdateCtaController/);
+  assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
+  assert.match(appSource, /updateCtaController\.showError\(/);
 });
 
-test("index.html declares a fixed bottom-right .update-button style", () => {
-  // FR-036: 右下フローティングで永続表示。
-  const styleMatch = indexHtml.match(/\.update-button\s*\{[^}]+\}/);
-  assert.ok(styleMatch, "expected .update-button rule inside <style>");
-  assert.match(
-    styleMatch[0],
-    /position:\s*fixed/,
-    ".update-button must be position: fixed",
-  );
-  assert.match(
-    styleMatch[0],
-    /bottom:\s*\d+px/,
-    ".update-button must anchor to bottom",
-  );
-  assert.match(
-    styleMatch[0],
-    /right:\s*\d+px/,
-    ".update-button must anchor to right",
-  );
+test("legacy split update toast and button surfaces are removed", () => {
+  assert.doesNotMatch(appSource, /showUpdateToast/);
+  assert.doesNotMatch(appSource, /showUpdateButton/);
+  assert.doesNotMatch(indexHtml, /\.update-toast\b/);
+  assert.doesNotMatch(indexHtml, /\.update-button\b/);
 });
 
-test("index.html offsets .update-button while the toast is visible", () => {
-  // 初回トースト 8s 表示中は .has-toast クラスでボタンを上方向にずらし、
-  // 重なりを避けてからトースト消滅後に通常位置へ戻す。
-  assert.match(
-    indexHtml,
-    /\.update-button\.has-toast\s*\{[^}]*bottom:\s*\d+px/,
-    "expected .update-button.has-toast rule offsetting `bottom`",
-  );
+test("index.html declares a fixed bottom-right unified update CTA style", () => {
+  const styleMatch = componentsCss.match(/\.update-cta\s*\{[^}]+\}/);
+  assert.ok(styleMatch, "expected .update-cta rule inside components.css");
+  assert.match(styleMatch[0], /position:\s*fixed/);
+  assert.match(styleMatch[0], /bottom:\s*\d+px/);
+  assert.match(styleMatch[0], /right:\s*\d+px/);
+  assert.match(componentsCss, /\.update-cta\.is-applying\s*\{/);
+  assert.match(componentsCss, /\.update-cta\.is-error\s*\{/);
+  assert.doesNotMatch(indexHtml, /\.update-cta\s*\{/);
 });
+
+function createFixture({ confirmResult = true } = {}) {
+  const { document } = parseHTML("<!doctype html><html><body></body></html>");
+  const sent = [];
+  const confirmCalls = [];
+  const versionUpdates = [];
+  return {
+    document,
+    sent,
+    confirmCalls,
+    versionUpdates,
+    options: {
+      document,
+      send(message) {
+        sent.push(message);
+      },
+      confirmUpdate(version) {
+        confirmCalls.push(version);
+        return confirmResult;
+      },
+      setVersionState(current, latest) {
+        versionUpdates.push({ current, latest });
+      },
+    },
+  };
+}

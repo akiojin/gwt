@@ -67,6 +67,7 @@ fn print_help() {
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
     println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
     println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
+    println!("  pane        Inspect and control live agent panes");
     println!("  workspace   Update Workspace current projection and summary journal");
     println!("  update      Check / apply gwt updates");
     println!("  daemon      Long-running runtime daemon (SPEC-2077)");
@@ -85,6 +86,7 @@ fn family_help(family: &str) -> Option<String> {
         "discuss" => Some(format_discuss_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
+        "pane" => Some(format_pane_help()),
         "workspace" => Some(format_workspace_help()),
         "update" => Some(format_update_help()),
         "daemon" => Some(format_daemon_help()),
@@ -310,6 +312,26 @@ fn format_build_help() -> String {
         "  phase --spec <n> --label <stage>       Mark a phase milestone (red/green/...)",
         "  complete --spec <n>                    Mark build-spec complete",
         "  abort --spec <n> [--reason <text>]     Abort build-spec",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_pane_help() -> String {
+    [
+        "gwtd pane — Inspect and control live agent panes.",
+        "",
+        "Usage: gwtd pane <action> [args]",
+        "",
+        "Actions:",
+        "  list                                   List active agent panes",
+        "  read <id> [--lines <n>]                Read recent pane output (default: 50 lines)",
+        "  close <id>                             Stop and close a pane",
+        "  stop <id>                              Alias for close",
+        "",
+        "Notes:",
+        "  - Intended for gwt-launched agent panes with GWT_HOOK_FORWARD_URL set.",
+        "  - GWT_PANE_WS_URL can override the derived WebSocket endpoint for tests.",
         "",
     ]
     .join("\n")

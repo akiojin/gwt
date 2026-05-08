@@ -83,7 +83,7 @@ test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal trigger
     assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
     assert.equal(
       windowControlsPeek.getAttribute("aria-controls"),
-      "floating-window-controls-primary floating-window-controls-add",
+      "floating-window-controls-actions",
     );
 
     // FR-032: legacy keys must be removed on init.
