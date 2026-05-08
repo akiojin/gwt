@@ -40,16 +40,20 @@ export function createWorkspaceKanbanSurface({
     return "inactive";
   }
 
-  function normalizedWorkspaceText(value) {
-    return String(value || "").replace(/\s+/g, " ").trim();
+  function ownerIssueNumber(owner) {
+    const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
+    if (!match) return null;
+    const number = Number.parseInt(match[1] || match[2], 10);
+    return Number.isFinite(number) ? number : null;
   }
 
   function compactWorkspaceTitle(value) {
-    const text = normalizedWorkspaceText(value);
-    return text.length > 72 ? `${text.slice(0, 69)}...` : text;
+    const title = String(value || "").replace(/\s+/g, " ").trim();
+    if (!title) return "";
+    return title.length > 80 ? `${title.slice(0, 77)}...` : title;
   }
 
-  function workspaceJournalTitle(entry) {
+  function workspaceJournalCardTitle(entry) {
     for (const value of [
       entry.title,
       entry.agent_title_summary,
@@ -62,13 +66,6 @@ export function createWorkspaceKanbanSurface({
       if (title) return title;
     }
     return "Workspace update";
-  }
-
-  function ownerIssueNumber(owner) {
-    const match = String(owner || "").match(/(?:issue\s*)?#(\d+)|issue\s+(\d+)/i);
-    if (!match) return null;
-    const number = Number.parseInt(match[1] || match[2], 10);
-    return Number.isFinite(number) ? number : null;
   }
 
   function workspaceCardsFromProjection(projection) {
@@ -107,7 +104,7 @@ export function createWorkspaceKanbanSurface({
       cards.push({
         id: `journal-${entry.id || cards.length}`,
         kind: "journal",
-        title: workspaceJournalTitle(entry),
+        title: workspaceJournalCardTitle(entry),
         status_category: statusCategory,
         status_text: entry.status_text || projection.status_text || "",
         summary:

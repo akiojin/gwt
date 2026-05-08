@@ -3,82 +3,61 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
 
-function createNodeFactory(document) {
-  return (tag, className = "", text = null) => {
-    const element = document.createElement(tag);
-    if (className) {
-      element.className = className;
-    }
-    if (text !== null && text !== undefined) {
-      element.textContent = String(text);
-    }
-    return element;
+test("Workspace journal cards derive titles from each entry instead of the current Workspace title", () => {
+  const fixture = createFixture();
+  const projection = {
+    id: "current-workspace",
+    title: "Workspace Kanban Surface Extraction",
+    status_category: "active",
+    status_text: "Current work is active",
+    summary: "Current work summary",
+    owner: "SPEC-2359",
+    journal_entries: [
+      {
+        id: "journal-one",
+        status_category: "done",
+        summary: "Scroll fix details remain in the summary body",
+        agent_title_summary: "Kanban scroll PR",
+        updated_at: "2026-05-08T15:14:43Z",
+      },
+      {
+        id: "journal-two",
+        status_category: "active",
+        summary: "Update CTA dismiss PR",
+        updated_at: "2026-05-08T14:07:07Z",
+      },
+    ],
+    agents: [],
   };
-}
 
-function appendMeta(parent, value) {
-  const text = String(value || "").trim();
-  if (!text) return;
-  const meta = parent.ownerDocument.createElement("span");
-  meta.className = "kanban-card-chip";
-  meta.textContent = text;
-  parent.appendChild(meta);
-}
-
-function agentStatusLabel(state) {
-  switch (String(state || "").toLowerCase()) {
-    case "active":
-      return "Running";
-    case "blocked":
-      return "Blocked";
-    case "idle":
-      return "Idle";
-    case "done":
-      return "Done";
-    default:
-      return "Unknown";
-  }
-}
-
-function mountWorkspaceKanban(projection) {
-  const { document } = parseHTML("<!doctype html><html><body></body></html>");
-  const body = document.createElement("main");
-  const windowMap = new Map([["workspace-1", body]]);
-  const surface = createWorkspaceKanbanSurface({
-    activeWorkspace: () => ({ title: "Repo" }),
-    agentStatusLabel,
-    appendMeta,
-    createWorkspacePrMeta: () => null,
-    createNode: createNodeFactory(document),
-    getActiveWorkProjection: () => projection,
-    openWorkspaceCleanup: () => {},
-    send: () => {},
-    windowMap,
-    workspaceWindowById: (id) => (
-      id === "workspace-1" ? { id, preset: "workspace" } : null
-    ),
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
   });
 
-  surface.mount(body, { id: "workspace-1" }, {
-    focusWindowLocally: () => {},
-    sendFocus: () => {},
-  });
+  const titles = Array.from(
+    fixture.document.querySelectorAll(".workspace-kanban-card .kanban-card-title"),
+    (node) => node.textContent,
+  );
 
-  return { body };
-}
-
-function column(body, key) {
-  const element = body.querySelector(`[data-workspace-column="${key}"]`);
-  assert.ok(element, `missing Workspace Kanban column: ${key}`);
-  return element;
-}
-
-function cardTexts(columnElement) {
-  return Array.from(columnElement.querySelectorAll(".workspace-kanban-card"))
-    .map((card) => card.textContent.replace(/\s+/g, " ").trim());
-}
+  assert.equal(
+    titles.filter((title) => title === "Workspace Kanban Surface Extraction").length,
+    1,
+    "only the current card should use the current Workspace title",
+  );
+  assert.ok(
+    titles.includes("Kanban scroll PR"),
+    "journal cards should prefer agent_title_summary as their visible title",
+  );
+  assert.ok(
+    titles.includes("Update CTA dismiss PR"),
+    "journal cards without title_summary should derive a visible title from their own summary",
+  );
+});
 
 test("Workspace Kanban keeps journal history out of the Active column", () => {
+  const fixture = createFixture();
   const projection = {
     id: "current-work",
     title: "Current work",
@@ -112,10 +91,15 @@ test("Workspace Kanban keeps journal history out of the Active column", () => {
     ],
   };
 
-  const { body } = mountWorkspaceKanban(projection);
-  const activeTexts = cardTexts(column(body, "active"));
-  const inactiveTexts = cardTexts(column(body, "inactive"));
-  const completedTexts = cardTexts(column(body, "completed"));
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const activeTexts = cardTexts(column(fixture.body, "active"));
+  const inactiveTexts = cardTexts(column(fixture.body, "inactive"));
+  const completedTexts = cardTexts(column(fixture.body, "completed"));
 
   assert.equal(activeTexts.length, 1);
   assert.match(activeTexts[0], /Current work/);
@@ -128,14 +112,20 @@ test("Workspace Kanban keeps journal history out of the Active column", () => {
 });
 
 test("Workspace Kanban labels the non-current history column as Inactive", () => {
-  const { body } = mountWorkspaceKanban({
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
     id: "current-work",
     title: "Current work",
     status_category: "idle",
     journal_entries: [],
   });
 
-  const inactiveColumn = column(body, "inactive");
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const inactiveColumn = column(fixture.body, "inactive");
   assert.match(
     inactiveColumn.getAttribute("aria-label"),
     /Inactive Workspace column/,
@@ -145,3 +135,62 @@ test("Workspace Kanban labels the non-current history column as Inactive", () =>
     "Inactive",
   );
 });
+
+function createFixture() {
+  const { document } = parseHTML(`
+    <div id="workspace-window">
+      <div class="window-body"></div>
+    </div>
+  `);
+  const windowElement = document.getElementById("workspace-window");
+  const body = windowElement.querySelector(".window-body");
+  const windowData = { id: "workspace-1", preset: "workspace" };
+  return {
+    document,
+    body,
+    windowData,
+    windowMap: new Map([[windowData.id, windowElement]]),
+  };
+}
+
+function createSurface(fixture, projection) {
+  const workspace = {
+    title: "gwt",
+    windows: [fixture.windowData],
+  };
+  return createWorkspaceKanbanSurface({
+    activeWorkspace: () => workspace,
+    agentStatusLabel: (status) => String(status || "unknown"),
+    appendMeta(container, value) {
+      if (!value) return;
+      container.appendChild(createNode(fixture.document, "span", "", value));
+    },
+    createWorkspacePrMeta: () => null,
+    createNode: (tag, className, text) =>
+      createNode(fixture.document, tag, className, text),
+    getActiveWorkProjection: () => projection,
+    openWorkspaceCleanup() {},
+    send() {},
+    windowMap: fixture.windowMap,
+    workspaceWindowById: (windowId) =>
+      workspace.windows.find((window) => window.id === windowId) || null,
+  });
+}
+
+function createNode(document, tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function column(body, key) {
+  const element = body.querySelector(`[data-workspace-column="${key}"]`);
+  assert.ok(element, `missing Workspace Kanban column: ${key}`);
+  return element;
+}
+
+function cardTexts(columnElement) {
+  return Array.from(columnElement.querySelectorAll(".workspace-kanban-card"))
+    .map((card) => card.textContent.replace(/\s+/g, " ").trim());
+}
