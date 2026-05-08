@@ -10,15 +10,50 @@ export function createUpdateCtaController({
   function ensureCta() {
     let cta = document.getElementById("update-cta");
     if (!cta) {
-      cta = document.createElement("button");
+      cta = document.createElement("div");
       cta.id = "update-cta";
-      cta.type = "button";
       cta.className = "update-cta";
+      cta.setAttribute("role", "group");
       cta.setAttribute("aria-live", "polite");
       document.body.appendChild(cta);
     }
-    cta.onclick = handleClick;
     return cta;
+  }
+
+  function ensureAction(cta) {
+    let action = cta.querySelector("[data-update-cta-action]");
+    if (!action) {
+      action = document.createElement("button");
+      action.type = "button";
+      action.className = "update-cta__action";
+      action.dataset.updateCtaAction = "true";
+      cta.appendChild(action);
+    }
+    action.onclick = handleClick;
+    return action;
+  }
+
+  function ensureDismiss(cta) {
+    let dismiss = cta.querySelector("[data-update-cta-dismiss]");
+    if (!dismiss) {
+      dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "update-cta__dismiss";
+      dismiss.dataset.updateCtaDismiss = "true";
+      dismiss.textContent = "\u00d7";
+      dismiss.title = "Dismiss update notification";
+      dismiss.setAttribute("aria-label", "Dismiss update notification");
+      dismiss.onclick = dismissCta;
+      cta.appendChild(dismiss);
+    }
+    return dismiss;
+  }
+
+  function removeDismiss(cta) {
+    const dismiss = cta.querySelector("[data-update-cta-dismiss]");
+    if (dismiss) {
+      dismiss.remove();
+    }
   }
 
   function render(nextStatus, text) {
@@ -26,10 +61,18 @@ export function createUpdateCtaController({
     const cta = ensureCta();
     cta.dataset.status = nextStatus;
     cta.className = nextStatus === "available" ? "update-cta" : `update-cta is-${nextStatus}`;
-    cta.disabled = nextStatus === "applying";
-    cta.textContent = text;
     cta.title = text;
     cta.setAttribute("aria-label", text);
+    const action = ensureAction(cta);
+    action.disabled = nextStatus === "applying";
+    action.textContent = text;
+    action.title = text;
+    action.setAttribute("aria-label", text);
+    if (nextStatus === "applying") {
+      removeDismiss(cta);
+    } else {
+      ensureDismiss(cta);
+    }
     return cta;
   }
 
@@ -53,6 +96,15 @@ export function createUpdateCtaController({
       return;
     }
     showAvailable(event.latest);
+  }
+
+  function dismissCta(event) {
+    event?.stopPropagation();
+    const cta = document.getElementById("update-cta");
+    if (cta) {
+      cta.remove();
+    }
+    status = "dismissed";
   }
 
   function handleClick() {
