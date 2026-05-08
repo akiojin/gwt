@@ -39,6 +39,26 @@ export function createWorkspaceKanbanSurface({
     return Number.isFinite(number) ? number : null;
   }
 
+  function compactWorkspaceTitle(value) {
+    const title = String(value || "").replace(/\s+/g, " ").trim();
+    if (!title) return "";
+    return title.length > 80 ? `${title.slice(0, 77)}...` : title;
+  }
+
+  function workspaceJournalCardTitle(entry) {
+    for (const value of [
+      entry.title,
+      entry.agent_title_summary,
+      entry.summary,
+      entry.status_text,
+      entry.next_action,
+    ]) {
+      const title = compactWorkspaceTitle(value);
+      if (title) return title;
+    }
+    return "Workspace update";
+  }
+
   function workspaceCardsFromProjection(projection) {
     if (!projection) return [];
     const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
@@ -75,7 +95,7 @@ export function createWorkspaceKanbanSurface({
       cards.push({
         id: `journal-${entry.id || cards.length}`,
         kind: "journal",
-        title: entry.title || title,
+        title: workspaceJournalCardTitle(entry),
         status_category: statusCategory,
         status_text: entry.status_text || projection.status_text || "",
         summary:
