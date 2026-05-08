@@ -186,3 +186,21 @@ test("Closed Issue cards land in Done with the closed state chip class", () => {
     "expected the state chip class to be derived from entry.state",
   );
 });
+
+test("Kanban card click keeps the selected item in the right detail pane", () => {
+  assert.match(
+    appSource,
+    /knowledge-detail-pane/,
+    "expected Knowledge Bridge to retain the right-side detail pane",
+  );
+  assert.match(
+    appSource,
+    /addEventListener\("click"[\s\S]{0,500}?requestKnowledgeDetail[\s\S]{0,500}?renderKnowledgeBridge/,
+    "expected card click to refresh detail inside the split-pane Kanban surface",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /addEventListener\("click"[\s\S]{0,500}?openKanbanDrawer/,
+    "Kanban card click must not open a small Drawer as the primary detail UI",
+  );
+});
