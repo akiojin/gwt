@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.24.1] - 2026-05-08
+
+### Bug Fixes
+
+- **workspace:** Restore kanban vertical scroll
+
 ## [9.24.0] - 2026-05-08
 
 ### Bug Fixes
