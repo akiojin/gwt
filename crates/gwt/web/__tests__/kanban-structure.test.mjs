@@ -121,6 +121,31 @@ test("components.css declares the kanban-board grid layout", () => {
   );
 });
 
+test("Kanban shell lets column bodies own vertical scrolling", () => {
+  const listPaneRule = componentsCss.match(/\.kanban-shell\s+\.kanban-list-pane\s*\{[^}]+\}/);
+  assert.ok(
+    listPaneRule,
+    "expected .kanban-shell .kanban-list-pane rule to constrain the board viewport",
+  );
+  assert.match(listPaneRule[0], /display:\s*flex/);
+  assert.match(listPaneRule[0], /flex-direction:\s*column/);
+  assert.match(
+    listPaneRule[0],
+    /overflow:\s*hidden/,
+    "Kanban list pane should not own vertical scroll; column bodies should",
+  );
+
+  const boardRule = componentsCss.match(/\.kanban-board\s*\{[^}]+\}/);
+  assert.ok(boardRule, "expected .kanban-board { ... } rule in components.css");
+  assert.match(boardRule[0], /overflow-x:\s*auto/);
+  assert.match(boardRule[0], /overflow-y:\s*hidden/);
+
+  const columnBodyRule = componentsCss.match(/\.kanban-column-body\s*\{[^}]+\}/);
+  assert.ok(columnBodyRule, "expected .kanban-column-body { ... } rule");
+  assert.match(columnBodyRule[0], /overflow-y:\s*auto/);
+  assert.match(columnBodyRule[0], /min-height:\s*0/);
+});
+
 test("components.css declares column and card classes", () => {
   // Cards and columns need their own selectors so the renderer can style
   // them independently. Without these classes the renderer can't apply
