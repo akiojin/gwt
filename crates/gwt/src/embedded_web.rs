@@ -4,6 +4,7 @@ use axum::{
 };
 
 const JS_CONTENT_TYPE: &str = "text/javascript; charset=utf-8";
+const MUTABLE_CACHE_CONTROL: &str = "no-store, max-age=0";
 
 #[derive(Clone, Copy)]
 pub struct RootJsModuleAsset {
@@ -181,22 +182,35 @@ pub fn font_jetbrains_mono() -> &'static [u8] {
     include_bytes!("../web/fonts/JetBrainsMono.woff2")
 }
 
-pub async fn index_handler() -> Html<&'static str> {
-    Html(index_html())
+pub async fn index_handler() -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL)],
+        Html(index_html()),
+    )
 }
 
 pub async fn app_js_handler() -> impl IntoResponse {
-    js_response(app_js())
+    mutable_js_response(app_js())
 }
 
 fn js_response(source: &'static str) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, JS_CONTENT_TYPE)], source)
 }
 
+fn mutable_js_response(source: &'static str) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, JS_CONTENT_TYPE),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
+        source,
+    )
+}
+
 pub fn root_js_module_response(asset: RootJsModuleAsset) -> impl IntoResponse {
     let source = (asset.source)();
     debug_assert!(source.contains(asset.marker));
-    js_response(source)
+    mutable_js_response(source)
 }
 
 pub async fn xterm_js_handler() -> impl IntoResponse {
@@ -216,21 +230,30 @@ pub async fn xterm_css_handler() -> impl IntoResponse {
 
 pub async fn styles_tokens_css_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
         styles_tokens_css(),
     )
 }
 
 pub async fn styles_typography_css_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
         styles_typography_css(),
     )
 }
 
 pub async fn styles_components_css_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, MUTABLE_CACHE_CONTROL),
+        ],
         styles_components_css(),
     )
 }
@@ -271,7 +294,10 @@ mod tests {
         app_js, index_html, styles_components_css, terminal_context_menu_js, xterm_css,
         xterm_fit_js, xterm_js,
     };
-    use super::{app_js_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler};
+    use super::{
+        app_js_handler, index_handler, styles_components_css_handler, styles_tokens_css_handler,
+        styles_typography_css_handler, xterm_css_handler, xterm_fit_js_handler, xterm_js_handler,
+    };
     use super::{root_js_module_assets, root_js_module_response};
 
     fn frontend_bundle_source() -> &'static str {
@@ -693,6 +719,53 @@ mod tests {
                 .unwrap(),
             "text/css; charset=utf-8",
         );
+    }
+
+    #[tokio::test]
+    async fn embedded_web_mutable_assets_disable_stale_cache() {
+        use axum::{http::header, response::IntoResponse};
+
+        let expected = "no-store, max-age=0";
+        assert_eq!(
+            index_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap(),
+            expected,
+        );
+        assert_eq!(
+            app_js_handler()
+                .await
+                .into_response()
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap(),
+            expected,
+        );
+        for asset in root_js_module_assets() {
+            assert_eq!(
+                root_js_module_response(*asset)
+                    .into_response()
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .unwrap(),
+                expected,
+                "expected {} to avoid stale WebView cache",
+                asset.path,
+            );
+        }
+        for response in [
+            styles_tokens_css_handler().await.into_response(),
+            styles_typography_css_handler().await.into_response(),
+            styles_components_css_handler().await.into_response(),
+        ] {
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                expected,
+            );
+        }
     }
 
     #[test]
