@@ -425,6 +425,21 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
   );
 });
 
+test("Workspace Overview Kanban root participates in full-window layout", () => {
+  const fullWindowRootRule = inlineStyle.match(
+    /\.file-tree-root,[\s\S]*?\.mock-root\s*\{[^}]+\}/,
+  );
+  assert.ok(fullWindowRootRule, "expected shared full-window root layout rule");
+  assert.match(
+    fullWindowRootRule[0],
+    /\.workspace-kanban-root/,
+    "Workspace Kanban root must fill the window body so column bodies can scroll",
+  );
+  assert.match(fullWindowRootRule[0], /position:\s*absolute/);
+  assert.match(fullWindowRootRule[0], /display:\s*flex/);
+  assert.match(fullWindowRootRule[0], /flex-direction:\s*column/);
+});
+
 test("Workspace Overview legacy drawer scaffold is retired", () => {
   assert.doesNotMatch(
     html,

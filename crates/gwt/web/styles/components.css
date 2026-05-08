@@ -2182,6 +2182,13 @@ kbd.op-kbd {
   align-items: stretch;
 }
 
+.kanban-shell .kanban-list-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .kanban-board[data-hide-done="true"] .kanban-column[data-phase="done"] {
   display: none;
 }
