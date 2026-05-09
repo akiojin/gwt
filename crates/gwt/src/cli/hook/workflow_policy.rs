@@ -15,7 +15,10 @@ use gwt_agent::{
     session::{Session, GWT_SESSION_ID_ENV},
     types::WorkflowBypass,
 };
-use gwt_core::paths::{gwt_cache_dir, gwt_sessions_dir};
+use gwt_core::{
+    paths::{gwt_cache_dir, gwt_sessions_dir},
+    workspace_projection::load_workspace_projection,
+};
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
@@ -34,6 +37,7 @@ pub struct WorkflowContext {
     pub has_plan: bool,
     pub has_tasks: bool,
     pub bypass: Option<WorkflowBypass>,
+    pub title_summary_missing: bool,
 }
 
 impl WorkflowContext {
@@ -43,6 +47,7 @@ impl WorkflowContext {
             has_plan: false,
             has_tasks: false,
             bypass: None,
+            title_summary_missing: false,
         }
     }
 
@@ -52,6 +57,7 @@ impl WorkflowContext {
             has_plan: false,
             has_tasks: false,
             bypass: None,
+            title_summary_missing: false,
         }
     }
 
@@ -61,6 +67,7 @@ impl WorkflowContext {
             has_plan,
             has_tasks,
             bypass: None,
+            title_summary_missing: false,
         }
     }
 
@@ -70,7 +77,13 @@ impl WorkflowContext {
             has_plan: false,
             has_tasks: false,
             bypass: Some(bypass),
+            title_summary_missing: false,
         }
+    }
+
+    pub fn with_title_summary_missing(mut self, missing: bool) -> Self {
+        self.title_summary_missing = missing;
+        self
     }
 }
 
@@ -82,15 +95,20 @@ struct IssueBranchLinkStore {
 pub fn evaluate_with_context(
     event: &HookEvent,
     worktree_root: &Path,
-    _context: &WorkflowContext,
+    context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
     // Safety guardrails only: branch switching, worktree escape, direct gh CLI.
     // No owner gate — git push/commit and worktree-internal edits are always allowed.
-    block_bash_policy::evaluate(event, worktree_root)
+    let safety = block_bash_policy::evaluate(event, worktree_root)?;
+    if safety != HookOutput::Silent {
+        return Ok(safety);
+    }
+    evaluate_title_summary_guard(event, context.title_summary_missing)
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
-    let context = resolve_workflow_context(worktree_root);
+    let context = resolve_workflow_context(worktree_root)
+        .with_title_summary_missing(current_agent_title_summary_missing(worktree_root)?);
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -157,6 +175,235 @@ fn load_session_from_env() -> Option<Session> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV).ok()?;
     let session_path = gwt_sessions_dir().join(format!("{session_id}.toml"));
     Session::load_and_migrate(&session_path).ok()
+}
+
+fn current_agent_title_summary_missing(worktree_root: &Path) -> Result<bool, HookError> {
+    let Some(session) = load_session_from_env() else {
+        return Ok(false);
+    };
+    let projection_root = if session.worktree_path.exists() {
+        session.worktree_path.as_path()
+    } else {
+        worktree_root
+    };
+    let Some(projection) = load_workspace_projection(projection_root)? else {
+        return Ok(true);
+    };
+    let Some(agent) = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session.id)
+    else {
+        return Ok(true);
+    };
+    Ok(agent
+        .title_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none())
+}
+
+fn evaluate_title_summary_guard(
+    event: &HookEvent,
+    title_summary_missing: bool,
+) -> Result<HookOutput, HookError> {
+    if !title_summary_missing {
+        return Ok(HookOutput::Silent);
+    }
+
+    if is_title_summary_update_event(event) || is_read_only_exploration_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+
+    if is_title_sensitive_tool(event) {
+        return Ok(HookOutput::pre_tool_use_permission(
+            "Agent title-summary is required before work starts",
+            "Set a short work title before implementation or verification commands.\n\n\
+Required command shape:\n\
+  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<current work focus>' --title-summary '<short work title>'\n\n\
+Use the configured narrative language for the title-summary. Keep long detail in --current-focus, --summary, or Board --body.",
+        ));
+    }
+
+    Ok(HookOutput::Silent)
+}
+
+fn is_title_sensitive_tool(event: &HookEvent) -> bool {
+    match event.tool_name.as_deref() {
+        Some("Bash") => event.command().is_some(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
+        _ => false,
+    }
+}
+
+fn is_title_summary_update_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    let Some(command) = event.command() else {
+        return false;
+    };
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| is_title_summary_update_segment(segment))
+}
+
+fn is_title_summary_update_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+        return false;
+    };
+    if command_name != "gwtd" {
+        return false;
+    }
+    match tokens.as_slice() {
+        [_, "workspace", "update", rest @ ..] => {
+            rest.contains(&"--agent-session") && rest.contains(&"--title-summary")
+        }
+        [_, "board", "post", rest @ ..] => rest.contains(&"--title-summary"),
+        _ => false,
+    }
+}
+
+fn is_read_only_exploration_event(event: &HookEvent) -> bool {
+    if event.tool_name.as_deref() != Some("Bash") {
+        return false;
+    }
+    let Some(command) = event.command() else {
+        return false;
+    };
+    if command.contains('>') || command.contains(" tee ") || command.contains("|tee ") {
+        return false;
+    }
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty() && segments.iter().all(|segment| is_read_only_segment(segment))
+}
+
+fn is_read_only_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+        return true;
+    };
+    match command_name.as_str() {
+        "awk" | "cat" | "date" | "false" | "grep" | "head" | "jq" | "ls" | "nl" | "printenv"
+        | "pwd" | "rg" | "tail" | "test" | "true" | "wc" | "which" | "[" => true,
+        "find" => !tokens
+            .iter()
+            .any(|token| matches!(*token, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
+        "sed" => !tokens
+            .iter()
+            .any(|token| *token == "--in-place" || token.starts_with("-i")),
+        "command" => matches!(tokens.get(1).copied(), Some("-v")),
+        "env" => tokens
+            .get(1)
+            .is_none_or(|token| is_read_only_command_token(token)),
+        "git" => tokens
+            .get(1)
+            .copied()
+            .is_some_and(is_read_only_git_subcommand),
+        "gwtd" => is_read_only_gwtd_tokens(&tokens[1..]),
+        _ => false,
+    }
+}
+
+fn segment_tokens(segment: &str) -> Vec<&str> {
+    let raw = segment.split_whitespace().collect::<Vec<_>>();
+    let mut start = 0;
+    while raw
+        .get(start)
+        .is_some_and(|token| matches!(*token, "do" | "then"))
+    {
+        start += 1;
+    }
+    if raw.get(start) == Some(&"env") {
+        start += 1;
+    }
+    while start < raw.len() && is_env_assignment(raw[start]) {
+        start += 1;
+    }
+    raw[start..].to_vec()
+}
+
+fn is_read_only_command_token(token: &str) -> bool {
+    matches!(
+        normalize_command_name(token).as_str(),
+        "awk"
+            | "cat"
+            | "date"
+            | "false"
+            | "find"
+            | "grep"
+            | "head"
+            | "jq"
+            | "ls"
+            | "nl"
+            | "printenv"
+            | "pwd"
+            | "rg"
+            | "sed"
+            | "tail"
+            | "test"
+            | "true"
+            | "wc"
+            | "which"
+            | "["
+    )
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn normalize_command_name(token: &str) -> String {
+    let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
+    Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(token)
+        .to_string()
+}
+
+fn is_read_only_git_subcommand(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        "branch"
+            | "cat-file"
+            | "config"
+            | "diff"
+            | "log"
+            | "ls-files"
+            | "ls-tree"
+            | "remote"
+            | "rev-parse"
+            | "show"
+            | "status"
+    )
+}
+
+fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
+    match tokens {
+        ["board", "show", ..] => true,
+        ["issue", "view" | "comments" | "linked-prs", ..] => true,
+        ["issue", "spec", "list", ..] => true,
+        ["issue", "spec", ..] => !tokens.iter().any(|token| {
+            matches!(
+                *token,
+                "--edit" | "--rename" | "create" | "comment" | "view" | "comments" | "linked-prs"
+            )
+        }),
+        ["pane", "list" | "read", ..] => true,
+        ["index", "status", ..] => true,
+        _ => false,
+    }
 }
 
 fn resolve_issue_from_linkage_store(
@@ -320,6 +567,182 @@ Coverage requirements.
             handle_with_input("{not-json"),
             Err(HookError::Json(_))
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_work_before_agent_title_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "cargo test -p gwt"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        let output = evaluate_title_summary_guard(&event, true).expect("guard output");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = output else {
+            panic!("expected PreToolUsePermission");
+        };
+        assert!(detail.contains("gwtd workspace update"));
+        assert!(detail.contains("--title-summary"));
+        assert!(detail.contains("--agent-session"));
+    }
+
+    #[test]
+    fn evaluate_with_context_uses_explicit_title_summary_state() {
+        let repo = tempfile::tempdir().expect("repo");
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "cargo test -p gwt"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+
+        assert!(matches!(
+            evaluate_with_context(&event, repo.path(), &context).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_allows_title_update_command() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_installed_gwtd_title_update_command() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_chained_work_after_title_update() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility' && cargo test -p gwt"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_allows_read_only_exploration() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "rg -n title_summary crates/gwt/src"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_mutating_exploration_like_sed_in_place() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "sed -i '' 's/a/b/' README.md"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_mutating_find_delete() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "find target -name '*.tmp' -delete"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_board_posts_without_title_summary() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd board post --kind status --body 'Starting implementation'"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_is_silent_after_agent_title_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "crates/gwt/src/lib.rs"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, false).expect("guard output"),
+            HookOutput::Silent
+        );
     }
 
     #[test]

@@ -417,10 +417,14 @@ fn spawn_board_daemon_subscriber(
     Some(
         gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
             resolver,
-            vec!["board".to_string()],
+            vec!["board".to_string(), "workspace".to_string()],
             move |channel, _payload| {
                 if channel == "board" {
                     let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
+                        project_root: project_root_for_callback.clone(),
+                    });
+                } else if channel == "workspace" {
+                    let _ = proxy_for_callback.send_event(UserEvent::WorkspaceProjectionChanged {
                         project_root: project_root_for_callback.clone(),
                     });
                 }
@@ -471,6 +475,9 @@ enum UserEvent {
         detail: Option<String>,
     },
     BoardProjectionChanged {
+        project_root: PathBuf,
+    },
+    WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
@@ -4908,6 +4915,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
+                let events = app.handle_workspace_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {

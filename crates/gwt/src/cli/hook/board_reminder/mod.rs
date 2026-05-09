@@ -103,6 +103,45 @@ fn build_self_match_keys(session: &Session) -> Vec<String> {
     keys
 }
 
+fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
+    let Some(projection) =
+        gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)?
+    else {
+        return Ok(true);
+    };
+    let Some(agent) = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session.id)
+    else {
+        return Ok(true);
+    };
+    Ok(agent
+        .title_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none())
+}
+
+fn append_title_summary_required_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    missing: bool,
+    language: &str,
+) -> HookOutput {
+    if !missing || event == IntentBoundaryEvent::Stop {
+        return output;
+    }
+    let required = texts::title_summary_required_reminder(language);
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{required}"))
+        }
+        other => other,
+    }
+}
+
 /// IO wrapper: read Board state from disk, build [`ReminderInputs`], and
 /// call the pure [`plan_reminder`]. Used by [`handle_with_input`] and kept
 /// public so tests can exercise the IO boundary.
@@ -141,7 +180,7 @@ pub fn compute_plan(
     let self_match_keys = build_self_match_keys(session);
     let language = resolve_narrative_language();
 
-    Ok(Some(plan_reminder(ReminderInputs {
+    let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
         now,
         self_session_id: session.id.clone(),
@@ -150,8 +189,17 @@ pub fn compute_plan(
         recent_entries,
         reminders,
         has_recent_own_status,
-        language,
-    })))
+        language: language.clone(),
+    });
+
+    plan.output = append_title_summary_required_context(
+        plan.output,
+        intent_event,
+        agent_title_summary_missing(session)?,
+        &language,
+    );
+
+    Ok(Some(plan))
 }
 
 /// Resolve the narrative-output language from the global gwt config
@@ -200,6 +248,90 @@ mod tests {
         e.created_at = timestamp;
         e.updated_at = timestamp;
         e
+    }
+
+    #[test]
+    fn title_summary_guard_injects_japanese_required_update_when_missing() {
+        let output = HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::UserPromptSubmit,
+            "existing reminder",
+        );
+
+        let guarded = append_title_summary_required_context(
+            output,
+            IntentBoundaryEvent::UserPromptSubmit,
+            true,
+            "ja",
+        );
+
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = guarded else {
+            panic!("expected additional context");
+        };
+        assert!(text.contains("existing reminder"));
+        assert!(text.contains("title-summary"));
+        assert!(text.contains("gwtd workspace update"));
+        assert!(text.contains("--agent-session"));
+        assert!(text.contains("Use language: ja"));
+    }
+
+    #[test]
+    fn title_summary_guard_is_silent_when_agent_title_is_set() {
+        let output = HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::SessionStart,
+            "existing reminder",
+        );
+
+        let guarded = append_title_summary_required_context(
+            output,
+            IntentBoundaryEvent::SessionStart,
+            false,
+            "en",
+        );
+
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = guarded else {
+            panic!("expected additional context");
+        };
+        assert_eq!(text, "existing reminder");
+    }
+
+    #[test]
+    fn agent_title_summary_missing_reads_workspace_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/title", "Codex");
+
+        assert!(
+            agent_title_summary_missing(&session).expect("missing title check"),
+            "new sessions without a saved title_summary must require an update"
+        );
+
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: session.id.clone(),
+                window_id: None,
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some("Implement title-summary guard".to_string()),
+                title_summary: Some("Title summary guard".to_string()),
+                worktree_path: Some(repo.clone()),
+                branch: Some("work/title".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        assert!(
+            !agent_title_summary_missing(&session).expect("title check"),
+            "saved non-empty title_summary must satisfy the guard"
+        );
     }
 
     fn push_entry(

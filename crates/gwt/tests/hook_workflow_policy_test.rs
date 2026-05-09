@@ -5,9 +5,17 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use chrono::Utc;
 use gwt::cli::hook::{workflow_policy, HookEvent, HookOutput};
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
-use gwt_core::{paths::gwt_sessions_dir, repo_hash::compute_repo_hash};
+use gwt_core::{
+    paths::gwt_sessions_dir,
+    repo_hash::compute_repo_hash,
+    workspace_projection::{
+        save_workspace_projection, WorkspaceAgentSummary, WorkspaceProjection,
+        WorkspaceStatusCategory,
+    },
+};
 use gwt_github::{
     client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     Cache,
@@ -148,6 +156,26 @@ fn save_session(repo_path: &Path, branch: &str, linked_issue_number: Option<u64>
     session.linked_issue_number = linked_issue_number;
     session.save(&gwt_sessions_dir()).expect("save session");
     session.id
+}
+
+fn seed_workspace_agent_title(repo_path: &Path, session_id: &str) {
+    let mut projection = WorkspaceProjection::default_for_project(repo_path);
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: session_id.to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: Some("Testing workflow policy".to_string()),
+        title_summary: Some("Workflow policy test".to_string()),
+        worktree_path: Some(repo_path.to_path_buf()),
+        branch: Some("feature/workflow".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        updated_at: Utc::now(),
+    });
+    save_workspace_projection(repo_path, &projection).expect("save workspace projection");
 }
 
 fn seed_issue_linkage(repo_path: &Path, branch: &str, issue_number: u64) {
@@ -438,6 +466,7 @@ fn evaluate_resolves_spec_owner_from_session_cache() {
         let repo_path = init_repo(home);
         seed_issue_cache(&repo_path, 1935, vec!["gwt-spec"], "", "- [ ] T-001");
         let session_id = save_session(&repo_path, "feature/workflow", Some(1935));
+        seed_workspace_agent_title(&repo_path, &session_id);
         std::env::set_var(GWT_SESSION_ID_ENV, session_id);
 
         let event = event("Bash", json!({ "command": "git push" }));
@@ -456,6 +485,7 @@ fn evaluate_falls_back_to_issue_linkage_store_for_plain_issue_owner() {
         let repo_path = init_repo(home);
         seed_issue_cache(&repo_path, 1942, vec!["bug"], "n/a", "n/a");
         let session_id = save_session(&repo_path, "feature/workflow", None);
+        seed_workspace_agent_title(&repo_path, &session_id);
         seed_issue_linkage(&repo_path, "feature/workflow", 1942);
         std::env::set_var(GWT_SESSION_ID_ENV, session_id);
 
