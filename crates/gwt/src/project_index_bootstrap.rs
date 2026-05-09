@@ -8,6 +8,8 @@ use std::{
 
 use crate::{app_runtime::AppEventProxy, UserEvent};
 
+pub use gwt::IndexRebuildScope;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectIndexBootstrapRequest {
     Spawned,
@@ -15,9 +17,28 @@ pub enum ProjectIndexBootstrapRequest {
     SpawnFailed,
 }
 
+/// Identifies a unit of background work tracked by
+/// [`ProjectIndexBootstrapService::in_flight`].
+///
+/// `Bootstrap` covers project-wide bootstrap + status probe. `Rebuild`
+/// covers per-cell rebuilds keyed by `(project_root, scope, worktree_hash?)`
+/// so different scopes/worktrees can run in parallel while same-key
+/// duplicates are coalesced.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IndexInFlightKey {
+    Bootstrap {
+        project_root: PathBuf,
+    },
+    Rebuild {
+        project_root: PathBuf,
+        scope: IndexRebuildScope,
+        worktree_hash: Option<String>,
+    },
+}
+
 #[derive(Clone, Default)]
 pub struct ProjectIndexBootstrapService {
-    in_flight: Arc<Mutex<HashSet<PathBuf>>>,
+    in_flight: Arc<Mutex<HashSet<IndexInFlightKey>>>,
 }
 
 impl ProjectIndexBootstrapService {
@@ -40,7 +61,7 @@ impl ProjectIndexBootstrapService {
             proxy,
             project_root,
             gwt::index_worker::bootstrap_project_index_for_path,
-            gwt::index_worker::project_index_status_for_path,
+            cached_aggregate_status_probe,
         )
     }
 
@@ -57,29 +78,30 @@ impl ProjectIndexBootstrapService {
     {
         let project_key = normalize_project_root(&project_root);
         let project_root_label = project_key.display().to_string();
-        {
-            let mut in_flight = self.in_flight.lock().expect("project index in-flight set");
-            if !in_flight.insert(project_key.clone()) {
-                tracing::debug!(
-                    target: "gwt::index",
-                    worktree = %project_root_label,
-                    "project index bootstrap already running for worktree"
-                );
-                return ProjectIndexBootstrapRequest::AlreadyRunning;
-            }
+        let key = IndexInFlightKey::Bootstrap {
+            project_root: project_key.clone(),
+        };
+        if !self.try_reserve(key.clone()) {
+            tracing::debug!(
+                target: "gwt::index",
+                worktree = %project_root_label,
+                "project index bootstrap already running for worktree"
+            );
+            return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
 
         let in_flight = self.in_flight.clone();
-        let project_key_for_thread = project_key.clone();
+        let key_for_thread = key.clone();
+        let service_for_thread = self.clone();
         let spawn_result = thread::Builder::new()
             .name("gwt-index-bootstrap".to_string())
             .spawn(move || {
-                let _guard = InFlightBootstrapGuard {
+                let _guard = InFlightGuard {
                     in_flight,
-                    project_key: project_key_for_thread.clone(),
+                    key: key_for_thread,
                 };
                 let bootstrap_started = Instant::now();
-                match bootstrap(&project_key_for_thread) {
+                match bootstrap(&project_key) {
                     Ok(()) => {
                         let bootstrap_elapsed_ms = bootstrap_started.elapsed().as_millis() as u64;
                         tracing::info!(
@@ -90,7 +112,7 @@ impl ProjectIndexBootstrapService {
                         );
 
                         let status_started = Instant::now();
-                        let status = status_probe(&project_key_for_thread);
+                        let status = status_probe(&project_key);
                         tracing::info!(
                             target: "gwt::index",
                             worktree = %project_root_label,
@@ -98,10 +120,20 @@ impl ProjectIndexBootstrapService {
                             state = %status.state,
                             "project index status refreshed after background bootstrap"
                         );
+                        let kick_orchestrator =
+                            status.state == gwt::ProjectIndexStatusState::RepairRequired;
                         proxy.send(UserEvent::ProjectIndexStatus {
-                            project_root: project_root_label,
-                            status,
+                            project_root: project_root_label.clone(),
+                            status: status.clone(),
                         });
+                        if kick_orchestrator {
+                            trigger_auto_repair_for_project(
+                                service_for_thread,
+                                proxy.clone(),
+                                project_key.clone(),
+                                &status,
+                            );
+                        }
                     }
                     Err(error) => {
                         let elapsed_ms = bootstrap_started.elapsed().as_millis() as u64;
@@ -128,8 +160,7 @@ impl ProjectIndexBootstrapService {
         match spawn_result {
             Ok(_) => ProjectIndexBootstrapRequest::Spawned,
             Err(error) => {
-                let mut in_flight = self.in_flight.lock().expect("project index in-flight set");
-                in_flight.remove(&project_key);
+                self.release(&key);
                 tracing::warn!(
                     target: "gwt::index",
                     error = %error,
@@ -139,23 +170,300 @@ impl ProjectIndexBootstrapService {
             }
         }
     }
+
+    /// Spawn a background task that performs a single per-cell rebuild for
+    /// `(project_root, scope, worktree_hash?)`. The closure runs on the spawned
+    /// thread and is responsible for emitting any per-cell `ProjectIndexStatus`
+    /// events the caller needs (the service itself only handles deduplication).
+    ///
+    /// Returns `AlreadyRunning` if another rebuild for the same key is already
+    /// in flight; bootstrap and rebuild tasks for the same project but
+    /// different keys proceed in parallel.
+    pub(crate) fn spawn_rebuild_with<R>(
+        &self,
+        project_root: PathBuf,
+        scope: IndexRebuildScope,
+        worktree_hash: Option<String>,
+        rebuild: R,
+    ) -> ProjectIndexBootstrapRequest
+    where
+        R: FnOnce() + Send + 'static,
+    {
+        let project_key = normalize_project_root(&project_root);
+        let project_root_label = project_key.display().to_string();
+        let key = IndexInFlightKey::Rebuild {
+            project_root: project_key,
+            scope,
+            worktree_hash: worktree_hash.clone(),
+        };
+        if !self.try_reserve(key.clone()) {
+            tracing::debug!(
+                target: "gwt::index",
+                worktree = %project_root_label,
+                scope = scope.label(),
+                worktree_hash = ?worktree_hash,
+                "project index rebuild already running for cell"
+            );
+            return ProjectIndexBootstrapRequest::AlreadyRunning;
+        }
+
+        let in_flight = self.in_flight.clone();
+        let key_for_thread = key.clone();
+        let spawn_result = thread::Builder::new()
+            .name("gwt-index-rebuild".to_string())
+            .spawn(move || {
+                let _guard = InFlightGuard {
+                    in_flight,
+                    key: key_for_thread,
+                };
+                rebuild();
+            });
+
+        match spawn_result {
+            Ok(_) => ProjectIndexBootstrapRequest::Spawned,
+            Err(error) => {
+                self.release(&key);
+                tracing::warn!(
+                    target: "gwt::index",
+                    error = %error,
+                    "failed to spawn project index rebuild background task"
+                );
+                ProjectIndexBootstrapRequest::SpawnFailed
+            }
+        }
+    }
+
+    /// Synchronously acquire the rebuild key for `(project_root, scope,
+    /// worktree_hash?)`, run `body`, then release. Returns `body`'s result,
+    /// or an error string if the key is already held by another task. Used
+    /// by [`ServiceBackedRebuildSpawner`] so orchestrator + per-cell IPC
+    /// share the same dedup primitive.
+    pub(crate) fn run_rebuild_with_lock<F>(
+        &self,
+        project_root: &Path,
+        scope: IndexRebuildScope,
+        worktree_hash: Option<&str>,
+        body: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let key = IndexInFlightKey::Rebuild {
+            project_root: normalize_project_root(project_root),
+            scope,
+            worktree_hash: worktree_hash.map(String::from),
+        };
+        if !self.try_reserve(key.clone()) {
+            return Err(format!(
+                "rebuild for scope={} worktree_hash={:?} is already in progress",
+                scope.label(),
+                worktree_hash
+            ));
+        }
+        let result = body();
+        self.release(&key);
+        result
+    }
+
+    fn try_reserve(&self, key: IndexInFlightKey) -> bool {
+        let mut in_flight = self.in_flight.lock().expect("project index in-flight set");
+        in_flight.insert(key)
+    }
+
+    fn release(&self, key: &IndexInFlightKey) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.remove(key);
+        }
+    }
 }
 
-struct InFlightBootstrapGuard {
-    in_flight: Arc<Mutex<HashSet<PathBuf>>>,
-    project_key: PathBuf,
+/// Wraps [`ProjectIndexBootstrapService`] and a rebuild runner so the
+/// orchestrator and per-cell IPC share the same dedup + invocation path.
+pub(crate) struct ServiceBackedRebuildSpawner {
+    service: ProjectIndexBootstrapService,
+    rebuild_runner: Arc<gwt::IndexRebuildRunnerFn>,
 }
 
-impl Drop for InFlightBootstrapGuard {
+impl ServiceBackedRebuildSpawner {
+    pub(crate) fn new(
+        service: ProjectIndexBootstrapService,
+        runner: Arc<gwt::IndexRebuildRunnerFn>,
+    ) -> Self {
+        Self {
+            service,
+            rebuild_runner: runner,
+        }
+    }
+
+    pub(crate) fn with_default_runner(service: ProjectIndexBootstrapService) -> Self {
+        Self::new(service, Arc::new(gwt::default_rebuild_runner))
+    }
+}
+
+impl gwt::IndexRebuildSpawner for ServiceBackedRebuildSpawner {
+    fn rebuild(
+        &self,
+        project_root: &Path,
+        scope: IndexRebuildScope,
+        worktree_hash: Option<&str>,
+    ) -> Result<(), String> {
+        self.service
+            .run_rebuild_with_lock(project_root, scope, worktree_hash, || {
+                (self.rebuild_runner)(project_root, scope, worktree_hash)
+            })
+    }
+}
+
+/// Spawn a per-cell rebuild for `(project_root, scope, worktree_hash?)` in
+/// the background. The cell is keyed in the in-flight set so concurrent
+/// requests for the same cell are coalesced; bootstrap and other cells
+/// proceed in parallel. SPEC-1939 US-5 / T-IDX-102.
+pub(crate) fn spawn_per_cell_rebuild(
+    service: ProjectIndexBootstrapService,
+    proxy: AppEventProxy,
+    project_root: PathBuf,
+    scope: IndexRebuildScope,
+    worktree_hash: Option<String>,
+) -> ProjectIndexBootstrapRequest {
+    spawn_per_cell_rebuild_with(
+        service,
+        proxy,
+        project_root,
+        scope,
+        worktree_hash,
+        Arc::new(gwt::default_rebuild_runner),
+        Arc::new(|path: &Path| -> gwt::ProjectIndexStatusView {
+            gwt::global_aggregated_status_cache().invalidate(path);
+            gwt::aggregate_project_index_status_for_path(path)
+        }),
+    )
+}
+
+/// Test-friendly variant of [`spawn_per_cell_rebuild`] that injects a custom
+/// rebuild runner and final-status provider so unit tests can drive the IPC
+/// path without invoking real Python.
+pub(crate) fn spawn_per_cell_rebuild_with(
+    service: ProjectIndexBootstrapService,
+    proxy: AppEventProxy,
+    project_root: PathBuf,
+    scope: IndexRebuildScope,
+    worktree_hash: Option<String>,
+    rebuild_runner: Arc<gwt::IndexRebuildRunnerFn>,
+    final_status_provider: Arc<
+        dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static,
+    >,
+) -> ProjectIndexBootstrapRequest {
+    let project_root_label = project_root.display().to_string();
+    let project_root_for_closure = project_root.clone();
+    let worktree_hash_for_closure = worktree_hash.clone();
+    let proxy_for_closure = proxy.clone();
+    let rebuild_runner_for_closure = rebuild_runner.clone();
+    let final_status_for_closure = final_status_provider.clone();
+
+    service.spawn_rebuild_with(project_root, scope, worktree_hash, move || {
+        let started_at = chrono::Utc::now();
+        // Optimistic transition: switch the badge to `repairing(0/1)`
+        // immediately so observers see auto-rebuild start before the
+        // rebuild actually completes.
+        proxy_for_closure.send(UserEvent::ProjectIndexStatus {
+            project_root: project_root_label.clone(),
+            status: gwt::ProjectIndexStatusView {
+                state: gwt::ProjectIndexStatusState::Repairing,
+                detail: format!(
+                    "Rebuilding {} (worktree={:?})",
+                    scope.label(),
+                    worktree_hash_for_closure
+                ),
+                repair_started_at: Some(started_at),
+                progress: Some(gwt::RebuildProgress {
+                    scopes_done: 0,
+                    scopes_total: 1,
+                }),
+                scopes: gwt::ProjectIndexScopes::default(),
+                worktrees: std::collections::BTreeMap::new(),
+            },
+        });
+
+        let result = rebuild_runner_for_closure(
+            &project_root_for_closure,
+            scope,
+            worktree_hash_for_closure.as_deref(),
+        );
+
+        let final_view = match &result {
+            Ok(()) => final_status_for_closure(&project_root_for_closure),
+            Err(error) => gwt::ProjectIndexStatusView::new(
+                gwt::ProjectIndexStatusState::Error,
+                format!("Rebuild {} failed: {error}", scope.label()),
+            ),
+        };
+        proxy_for_closure.send(UserEvent::ProjectIndexStatus {
+            project_root: project_root_label.clone(),
+            status: final_view,
+        });
+    })
+}
+
+/// Trigger the auto-rebuild orchestrator for `project_root` if the freshly
+/// emitted status reports `RepairRequired`. The orchestrator runs in its own
+/// background thread and re-emits `ProjectIndexStatus` events through the
+/// proxy; the global aggregator cache is invalidated before re-aggregating
+/// the final status so observers see the post-rebuild health.
+pub(crate) fn trigger_auto_repair_for_project(
+    service: ProjectIndexBootstrapService,
+    proxy: AppEventProxy,
+    project_root: PathBuf,
+    initial_status: &gwt::ProjectIndexStatusView,
+) -> Option<thread::JoinHandle<()>> {
+    if initial_status.state != gwt::ProjectIndexStatusState::RepairRequired {
+        return None;
+    }
+    let project_root_label = project_root.display().to_string();
+    let project_root_for_sink = project_root.clone();
+    let event_sink = move |view: gwt::ProjectIndexStatusView| {
+        proxy.send(UserEvent::ProjectIndexStatus {
+            project_root: project_root_for_sink.display().to_string(),
+            status: view,
+        });
+    };
+    let final_status_provider = |path: &Path| -> gwt::ProjectIndexStatusView {
+        gwt::global_aggregated_status_cache().invalidate(path);
+        gwt::aggregate_project_index_status_for_path(path)
+    };
+    tracing::info!(
+        target: "gwt::index",
+        worktree = %project_root_label,
+        "kicking auto-rebuild orchestrator after repair_required status"
+    );
+    gwt::auto_repair_unhealthy_scopes(
+        project_root,
+        initial_status,
+        ServiceBackedRebuildSpawner::with_default_runner(service),
+        final_status_provider,
+        event_sink,
+    )
+}
+
+struct InFlightGuard {
+    in_flight: Arc<Mutex<HashSet<IndexInFlightKey>>>,
+    key: IndexInFlightKey,
+}
+
+impl Drop for InFlightGuard {
     fn drop(&mut self) {
         if let Ok(mut in_flight) = self.in_flight.lock() {
-            in_flight.remove(&self.project_key);
+            in_flight.remove(&self.key);
         }
     }
 }
 
 fn normalize_project_root(project_root: &Path) -> PathBuf {
     dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf())
+}
+
+fn cached_aggregate_status_probe(project_root: &Path) -> gwt::ProjectIndexStatusView {
+    gwt::global_aggregated_status_cache()
+        .get_or_compute(project_root, gwt::aggregate_project_index_status_for_path)
 }
 
 #[cfg(test)]
@@ -172,6 +480,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{app_runtime::AppEventProxy, UserEvent};
+
+    use super::IndexRebuildScope;
 
     fn wait_for_project_status(
         events: &Arc<Mutex<Vec<UserEvent>>>,
@@ -300,5 +610,124 @@ mod tests {
             gwt::ProjectIndexStatusState::Ready,
         );
         assert_eq!(status.detail, "retry ready");
+    }
+
+    #[test]
+    fn rebuild_for_same_cell_is_coalesced_while_other_keys_run_in_parallel() {
+        let service = super::ProjectIndexBootstrapService::new_for_test();
+        let temp = tempdir().expect("tempdir");
+        let project_root = temp.path().to_path_buf();
+        let (block_files_tx, block_files_rx) = mpsc::channel();
+        let (block_specs_tx, block_specs_rx) = mpsc::channel();
+        let (block_bootstrap_tx, block_bootstrap_rx) = mpsc::channel();
+        let files_calls = Arc::new(AtomicUsize::new(0));
+        let specs_calls = Arc::new(AtomicUsize::new(0));
+        let bootstrap_calls = Arc::new(AtomicUsize::new(0));
+
+        let files_calls_handle = files_calls.clone();
+        let first_files = service.spawn_rebuild_with(
+            project_root.clone(),
+            IndexRebuildScope::Files,
+            Some("wtA".to_string()),
+            move || {
+                files_calls_handle.fetch_add(1, Ordering::SeqCst);
+                block_files_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release files");
+            },
+        );
+
+        // Same key: should coalesce while the first task is still running.
+        let duplicate_files = service.spawn_rebuild_with(
+            project_root.clone(),
+            IndexRebuildScope::Files,
+            Some("wtA".to_string()),
+            || unreachable!("duplicate cell rebuild should not run"),
+        );
+
+        // Different worktree on the same scope: must proceed in parallel.
+        let other_worktree_calls = Arc::new(AtomicUsize::new(0));
+        let other_worktree_calls_handle = other_worktree_calls.clone();
+        let (other_worktree_done_tx, other_worktree_done_rx) = mpsc::channel();
+        let other_worktree = service.spawn_rebuild_with(
+            project_root.clone(),
+            IndexRebuildScope::Files,
+            Some("wtB".to_string()),
+            move || {
+                other_worktree_calls_handle.fetch_add(1, Ordering::SeqCst);
+                other_worktree_done_tx.send(()).expect("signal wtB done");
+            },
+        );
+
+        // Different scope: must proceed in parallel.
+        let specs_calls_handle = specs_calls.clone();
+        let specs = service.spawn_rebuild_with(
+            project_root.clone(),
+            IndexRebuildScope::Specs,
+            None,
+            move || {
+                specs_calls_handle.fetch_add(1, Ordering::SeqCst);
+                block_specs_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release specs");
+            },
+        );
+
+        // Bootstrap for the same project must also proceed in parallel.
+        let bootstrap_calls_handle = bootstrap_calls.clone();
+        let (proxy, _events) = AppEventProxy::stub();
+        let bootstrap = service.spawn_with(
+            proxy,
+            project_root.clone(),
+            move |_project_root: &Path| {
+                bootstrap_calls_handle.fetch_add(1, Ordering::SeqCst);
+                block_bootstrap_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release bootstrap");
+                Ok(())
+            },
+            |_project_root| {
+                gwt::ProjectIndexStatusView::new(gwt::ProjectIndexStatusState::Ready, "ready")
+            },
+        );
+
+        assert_eq!(first_files, super::ProjectIndexBootstrapRequest::Spawned);
+        assert_eq!(
+            duplicate_files,
+            super::ProjectIndexBootstrapRequest::AlreadyRunning
+        );
+        assert_eq!(other_worktree, super::ProjectIndexBootstrapRequest::Spawned);
+        assert_eq!(specs, super::ProjectIndexBootstrapRequest::Spawned);
+        assert_eq!(bootstrap, super::ProjectIndexBootstrapRequest::Spawned);
+
+        // The wtB task is unblocked and should complete on its own.
+        other_worktree_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("wtB rebuild should run in parallel");
+        assert_eq!(other_worktree_calls.load(Ordering::SeqCst), 1);
+
+        // Release the blocked tasks so threads exit cleanly.
+        block_files_tx.send(()).expect("release files");
+        block_specs_tx.send(()).expect("release specs");
+        block_bootstrap_tx.send(()).expect("release bootstrap");
+
+        // After the first files rebuild completes, a new one can be queued.
+        let mut retry = super::ProjectIndexBootstrapRequest::AlreadyRunning;
+        for _ in 0..100 {
+            retry = service.spawn_rebuild_with(
+                project_root.clone(),
+                IndexRebuildScope::Files,
+                Some("wtA".to_string()),
+                || {},
+            );
+            if retry == super::ProjectIndexBootstrapRequest::Spawned {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(retry, super::ProjectIndexBootstrapRequest::Spawned);
+        assert_eq!(files_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(specs_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(bootstrap_calls.load(Ordering::SeqCst), 1);
     }
 }

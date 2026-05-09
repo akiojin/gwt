@@ -15,7 +15,7 @@ use serde_json::Value;
 use super::IndexScope;
 
 #[derive(Debug, Clone)]
-pub(super) struct IndexContext {
+pub(crate) struct IndexContext {
     pub project_root: PathBuf,
     pub repo_hash: RepoHash,
     pub worktree_hash: String,
@@ -23,7 +23,7 @@ pub(super) struct IndexContext {
     pub runner: PathBuf,
 }
 
-pub(super) fn resolve_index_context(repo_path: &Path) -> Result<IndexContext, SpecOpsError> {
+pub(crate) fn resolve_index_context(repo_path: &Path) -> Result<IndexContext, SpecOpsError> {
     let project_root = repo_path
         .canonicalize()
         .unwrap_or_else(|_| repo_path.to_path_buf());
@@ -53,7 +53,7 @@ fn project_index_python_path() -> PathBuf {
     }
 }
 
-pub(super) fn run_runner_status(
+pub(crate) fn run_runner_status(
     context: &IndexContext,
 ) -> Result<std::process::Output, SpecOpsError> {
     gwt_core::process::hidden_command(&context.python)
@@ -70,14 +70,14 @@ pub(super) fn run_runner_status(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct RebuildAction {
+pub(crate) struct RebuildAction {
     pub label: &'static str,
     pub action: &'static str,
     pub scope: Option<&'static str>,
     pub needs_worktree_hash: bool,
 }
 
-pub(super) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
+pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
     let all = vec![
         RebuildAction {
             label: "issues",
@@ -116,7 +116,7 @@ pub(super) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
     }
 }
 
-pub(super) fn run_runner_rebuild(
+pub(crate) fn run_runner_rebuild(
     context: &IndexContext,
     action: RebuildAction,
 ) -> Result<std::process::Output, SpecOpsError> {
@@ -141,7 +141,7 @@ pub(super) fn run_runner_rebuild(
     command.output().map_err(io_error)
 }
 
-pub(super) fn parse_runner_json(stdout: &[u8]) -> Result<Value, SpecOpsError> {
+pub(crate) fn parse_runner_json(stdout: &[u8]) -> Result<Value, SpecOpsError> {
     serde_json::from_slice(stdout).map_err(|err| {
         SpecOpsError::from(ApiError::Unexpected(format!(
             "project index status returned invalid JSON: {err}"
@@ -210,7 +210,7 @@ pub fn render_index_status(
     }
 }
 
-pub(super) fn format_runner_failure(output: &std::process::Output) -> String {
+pub(crate) fn format_runner_failure(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let detail = match (stderr.is_empty(), stdout.is_empty()) {

@@ -27,7 +27,7 @@ mod discuss;
 mod env;
 pub mod gwtd_resolver;
 pub mod hook;
-mod index;
+pub(crate) mod index;
 mod issue;
 mod issue_spec;
 mod pane;
