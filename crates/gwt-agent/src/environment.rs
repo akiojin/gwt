@@ -45,6 +45,62 @@ where
     env
 }
 
+/// Compute the hydrated `PATH` for the given base environment.
+///
+/// On non-Windows the result includes macOS `/usr/libexec/path_helper` output
+/// and `~/.bun/bin`, `~/.local/bin`, `~/.cargo/bin` if they exist. On Windows
+/// the result echoes the input PATH (if any) without modification. Returns
+/// `None` only when no PATH entries can be derived (input had no PATH and
+/// hydration found no fallbacks).
+pub fn compute_hydrated_path<I>(base_env: I) -> Option<String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env: HashMap<String, String> = base_env.into_iter().collect();
+    hydrate_host_path(&mut env);
+    env.get("PATH").cloned()
+}
+
+/// Apply host PATH hydration to the running process's `std::env`.
+///
+/// MUST be called from `main` BEFORE any thread is spawned and before any
+/// other env mutation. macOS GUI launches via launchd inherit the minimal
+/// `/usr/bin:/bin:/usr/sbin:/sbin` PATH which omits `/usr/local/bin` and
+/// `/opt/homebrew/bin`; without this hydration, child processes spawned by
+/// the app cannot resolve `docker`, `gh`, `claude`, `codex`, `bunx`, or `npx`
+/// that live in those directories.
+///
+/// Idempotent: re-running on an already-hydrated PATH yields the same value
+/// because `push_unique_path` deduplicates entries. No-op on Windows.
+///
+/// Reads the current process env via `vars_os` (not `vars`) so a single
+/// non-Unicode environment variable does not panic startup. Skips writing to
+/// `std::env` if the computed PATH is empty so we never blank a usable PATH.
+pub fn apply_host_path_hydration_to_std_env() {
+    if cfg!(windows) {
+        return;
+    }
+    if let Some(hydrated) = current_process_hydrated_path() {
+        std::env::set_var("PATH", hydrated);
+    }
+}
+
+/// Compute the hydrated PATH from the running process env.
+///
+/// Returns `None` when the hydrated PATH is empty so `apply_host_path_hydration_to_std_env`
+/// never overwrites a usable `std::env::PATH` with a blank value (which would
+/// disable command lookup for subsequent `Command::new(...)` calls).
+fn current_process_hydrated_path() -> Option<String> {
+    let base_env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let value = value.into_string().ok()?;
+            Some((key, value))
+        })
+        .collect();
+    compute_hydrated_path(base_env).filter(|hydrated| !hydrated.is_empty())
+}
+
 /// Effective environment assembled from the active profile and launch context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchEnvironment {
@@ -563,5 +619,170 @@ mod tests {
         assert!(!env.contains_key(GWT_SESSION_RUNTIME_PATH_ENV));
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn compute_hydrated_path_preserves_existing_entries() {
+        let home = tempfile::tempdir().unwrap();
+        let base_env = vec![
+            (
+                "PATH".to_string(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            ),
+            ("HOME".to_string(), home.path().display().to_string()),
+        ];
+
+        let hydrated = compute_hydrated_path(base_env).expect("hydrated PATH");
+        let entries = std::env::split_paths(&hydrated).collect::<Vec<_>>();
+
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(entries.contains(&PathBuf::from("/bin")));
+        assert!(entries.contains(&PathBuf::from("/usr/sbin")));
+        assert!(entries.contains(&PathBuf::from("/sbin")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn compute_hydrated_path_adds_user_bins_when_present() {
+        let home = tempfile::tempdir().unwrap();
+        for relative in [".bun/bin", ".local/bin", ".cargo/bin"] {
+            std::fs::create_dir_all(home.path().join(relative)).unwrap();
+        }
+        let base_env = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOME".to_string(), home.path().display().to_string()),
+        ];
+
+        let hydrated = compute_hydrated_path(base_env).expect("hydrated PATH");
+        let entries = std::env::split_paths(&hydrated).collect::<Vec<_>>();
+
+        assert!(entries.contains(&home.path().join(".bun/bin")));
+        assert!(entries.contains(&home.path().join(".local/bin")));
+        assert!(entries.contains(&home.path().join(".cargo/bin")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn compute_hydrated_path_is_idempotent() {
+        let home = tempfile::tempdir().unwrap();
+        for relative in [".bun/bin", ".cargo/bin"] {
+            std::fs::create_dir_all(home.path().join(relative)).unwrap();
+        }
+        let base_env = vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), home.path().display().to_string()),
+        ];
+
+        let first = compute_hydrated_path(base_env.clone()).expect("first hydration");
+        let second = compute_hydrated_path(vec![
+            ("PATH".to_string(), first.clone()),
+            ("HOME".to_string(), home.path().display().to_string()),
+        ])
+        .expect("second hydration");
+
+        let first_entries = std::env::split_paths(&first).collect::<Vec<_>>();
+        let second_entries = std::env::split_paths(&second).collect::<Vec<_>>();
+        assert_eq!(first_entries, second_entries);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compute_hydrated_path_includes_macos_path_helper_paths() {
+        let base_env = vec![
+            (
+                "PATH".to_string(),
+                "/usr/bin:/bin:/usr/sbin:/sbin".to_string(),
+            ),
+            ("HOME".to_string(), String::new()),
+        ];
+
+        let hydrated = compute_hydrated_path(base_env).expect("hydrated PATH");
+        let entries = std::env::split_paths(&hydrated).collect::<Vec<_>>();
+
+        assert!(
+            entries.contains(&PathBuf::from("/usr/local/bin")),
+            "expected /usr/local/bin in hydrated PATH; got {hydrated}"
+        );
+    }
+
+    #[test]
+    fn apply_host_path_hydration_to_std_env_does_not_panic() {
+        let _lock = path_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = std::env::var_os("PATH");
+        apply_host_path_hydration_to_std_env();
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compute_hydrated_path_returns_empty_string_when_no_paths_available_on_linux() {
+        // On Linux there is no path_helper, so an env with no PATH and no
+        // HOME yields an empty hydrated PATH. The guard inside
+        // apply_host_path_hydration_to_std_env must skip this case so that
+        // `std::env::PATH` is never blanked.
+        let result = compute_hydrated_path(Vec::<(String, String)>::new());
+        assert_eq!(result.as_deref(), Some(""));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_host_path_hydration_to_std_env_does_not_blank_path_when_no_inputs_on_linux() {
+        let _lock = path_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_path = std::env::var_os("PATH");
+        let original_home = std::env::var_os("HOME");
+        std::env::remove_var("PATH");
+        std::env::remove_var("HOME");
+
+        apply_host_path_hydration_to_std_env();
+
+        if let Some(value) = std::env::var_os("PATH") {
+            assert!(
+                !value.is_empty(),
+                "apply_host_path_hydration_to_std_env must not write an empty PATH"
+            );
+        }
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn apply_host_path_hydration_to_std_env_preserves_existing_path_entries() {
+        let _lock = path_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+
+        apply_host_path_hydration_to_std_env();
+        let after = std::env::var("PATH").unwrap_or_default();
+        let entries = std::env::split_paths(&after).collect::<Vec<_>>();
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(entries.contains(&PathBuf::from("/bin")));
+
+        match original {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    fn path_env_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }
