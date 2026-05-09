@@ -4726,6 +4726,13 @@ mod tests {
 }
 
 fn main() -> wry::Result<()> {
+    // Hydrate process PATH before any subprocess can spawn. macOS GUI launches
+    // via launchd inherit a minimal PATH that omits /usr/local/bin and
+    // /opt/homebrew/bin, breaking docker / gh / claude / codex / bunx / npx
+    // resolution. This call MUST run before any thread starts and before CLI
+    // dispatch so spawned children inherit the augmented PATH.
+    gwt_agent::environment::apply_host_path_hydration_to_std_env();
+
     let argv: Vec<String> = std::env::args().collect();
     if !matches!(
         front_door_route(&argv),
