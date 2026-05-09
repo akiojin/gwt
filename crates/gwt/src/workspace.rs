@@ -175,8 +175,23 @@ impl WorkspaceState {
             return Some(id);
         }
 
-        // Find the currently focused window (highest z_index) within eligible.
-        let current_idx = eligible
+        // Find the currently focused visible window (highest z_index) within
+        // eligible. Tab groups share one z-index across member windows, so the
+        // active tab is the visible focus owner for that group.
+        let visible_eligible = eligible
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let window = &self.persisted.windows[i];
+                window.tab_group_id.is_none() || window.tab_group_active
+            })
+            .collect::<Vec<_>>();
+        let focus_candidates = if visible_eligible.is_empty() {
+            &eligible
+        } else {
+            &visible_eligible
+        };
+        let current_idx = focus_candidates
             .iter()
             .copied()
             .max_by_key(|&i| self.persisted.windows[i].z_index)?;
@@ -187,7 +202,7 @@ impl WorkspaceState {
             FocusCycleDirection::Backward => (pos + eligible.len() - 1) % eligible.len(),
         };
         let next_id = self.persisted.windows[eligible[next_pos]].id.clone();
-        let _ = self.focus_window(&next_id, None);
+        let _ = self.activate_window_tab(&next_id);
         self.center_window(&next_id, bounds);
         Some(next_id)
     }
@@ -1095,6 +1110,72 @@ mod tests {
         assert_eq!(focused, "codex-1");
         assert_eq!(workspace.window("codex-1").expect("codex").z_index, 4);
         assert_eq!(workspace.persisted().next_z_index, 5);
+    }
+
+    #[test]
+    fn cycling_focus_forward_activates_hidden_window_tab() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        // Current focus: shell-1. Forward wraps to claude-1, which is hidden
+        // behind the active codex-1 tab in the same group.
+
+        let focused = workspace
+            .cycle_focus(FocusCycleDirection::Forward, arrange_bounds())
+            .expect("focused window");
+
+        assert_eq!(focused, "claude-1");
+        assert!(
+            workspace
+                .window("claude-1")
+                .expect("claude")
+                .tab_group_active
+        );
+        assert!(!workspace.window("codex-1").expect("codex").tab_group_active);
+    }
+
+    #[test]
+    fn cycling_focus_backward_activates_hidden_window_tab() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        assert!(workspace.activate_window_tab("claude-1"));
+        workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        // Current focus: shell-1. Backward goes to codex-1, which is hidden
+        // behind the active claude-1 tab in the same group.
+
+        let focused = workspace
+            .cycle_focus(FocusCycleDirection::Backward, arrange_bounds())
+            .expect("focused window");
+
+        assert_eq!(focused, "codex-1");
+        assert!(workspace.window("codex-1").expect("codex").tab_group_active);
+        assert!(
+            !workspace
+                .window("claude-1")
+                .expect("claude")
+                .tab_group_active
+        );
+    }
+
+    #[test]
+    fn cycling_focus_uses_active_window_tab_as_current_focus_when_group_z_indexes_tie() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        // Docking assigns one shared z-index to the group. The active tab is
+        // codex-1, so Forward should wrap to claude-1, not treat hidden
+        // claude-1 as the current focus just because its z-index ties.
+
+        let focused = workspace
+            .cycle_focus(FocusCycleDirection::Forward, arrange_bounds())
+            .expect("focused window");
+
+        assert_eq!(focused, "claude-1");
+        assert!(
+            workspace
+                .window("claude-1")
+                .expect("claude")
+                .tab_group_active
+        );
     }
 
     #[test]
