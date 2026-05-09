@@ -26,6 +26,14 @@ test("Workspace journal cards derive titles from each entry instead of the curre
         summary: "Update CTA dismiss PR",
         updated_at: "2026-05-08T14:07:07Z",
       },
+      {
+        id: "journal-focus-only",
+        status_category: "idle",
+        status_text: "Workspace update",
+        next_action: "Continue",
+        agent_current_focus: "Review thread title fallback",
+        updated_at: "2026-05-08T13:00:00Z",
+      },
     ],
     agents: [],
   };
@@ -53,6 +61,10 @@ test("Workspace journal cards derive titles from each entry instead of the curre
   assert.ok(
     titles.includes("Update CTA dismiss PR"),
     "journal cards without title_summary should derive a visible title from their own summary",
+  );
+  assert.ok(
+    titles.includes("Review thread title fallback"),
+    "focus-only journal cards should prefer agent_current_focus before generic status text",
   );
 });
 

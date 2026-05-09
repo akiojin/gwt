@@ -58,9 +58,9 @@ export function createWorkspaceKanbanSurface({
       entry.title,
       entry.agent_title_summary,
       entry.summary,
+      entry.agent_current_focus,
       entry.status_text,
       entry.next_action,
-      entry.agent_current_focus,
     ]) {
       const title = compactWorkspaceTitle(value);
       if (title) return title;
