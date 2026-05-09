@@ -396,7 +396,7 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
     /workspace-kanban-root[\s\S]+workspace-split[\s\S]+kanban-shell/,
     "expected Workspace Overview to share the split Kanban shell",
   );
-  for (const column of ["Active", "Suspended", "Completed"]) {
+  for (const column of ["Active", "Inactive", "Completed"]) {
     assert.match(
       workspaceKanbanCombinedSource,
       new RegExp(`workspace-column-name">${column}`),
@@ -415,8 +415,13 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
   );
   assert.match(
     workspaceKanbanSource,
-    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+open_active_work_launch_wizard[\s\S]+open_start_work/,
-    "expected every Workspace card Resume action to prefer branch resume and fall back to Start Work",
+    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+resume_workspace[\s\S]+source:\s*"journal"[\s\S]+source:\s*"current"/,
+    "expected Workspace card Resume action to send card-scoped resume_workspace events",
+  );
+  assert.match(
+    workspaceKanbanSource,
+    /kind:\s*"journal"[\s\S]+branch:\s*""[\s\S]+worktree_path:\s*""/,
+    "expected suspended journal cards not to borrow the current Workspace branch/worktree",
   );
   assert.doesNotMatch(
     appSource,
@@ -453,16 +458,16 @@ test("Workspace Overview legacy drawer scaffold is retired", () => {
   );
 });
 
-test("SPEC Issue and Workspace Kanban presets open maximized", () => {
+test("non-agent surface presets open maximized from command focus paths", () => {
   assert.match(
     appSource,
-    /function\s+isAutoMaximizedKanbanPreset\([^)]*\)[\s\S]+issue[\s\S]+spec[\s\S]+workspace/,
-    "expected frontend focus/spawn path to identify Issue, SPEC, and Workspace as auto-maximized Kanban presets",
+    /function\s+isAutoMaximizedSurfacePreset\([^)]*\)[\s\S]+file_tree[\s\S]+branches[\s\S]+settings[\s\S]+profile[\s\S]+logs[\s\S]+issue[\s\S]+spec[\s\S]+workspace[\s\S]+board[\s\S]+pr/,
+    "expected frontend focus/spawn path to identify every non-agent surface preset as auto-maximized",
   );
   assert.match(
     appSource,
-    /focusOrSpawnPreset\(preset\)[\s\S]+isAutoMaximizedKanbanPreset\(preset\)[\s\S]+bounds:\s*visibleBounds\(\)/,
-    "expected focusOrSpawnPreset to send viewport bounds for auto-maximized Kanban presets",
+    /focusOrSpawnPreset\(preset\)[\s\S]+isAutoMaximizedSurfacePreset\(preset\)[\s\S]+bounds:\s*visibleBounds\(\)/,
+    "expected focusOrSpawnPreset to send viewport bounds when focusing existing non-agent surfaces",
   );
 });
 

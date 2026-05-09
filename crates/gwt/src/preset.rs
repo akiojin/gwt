@@ -168,7 +168,7 @@ impl WindowPreset {
     }
 
     pub fn opens_maximized_by_default(self) -> bool {
-        matches!(self, Self::Issue | Self::Spec | Self::Workspace)
+        !self.requires_process() && !self.is_removed_legacy()
     }
 
     pub fn command_name(self) -> Option<&'static str> {
@@ -470,10 +470,35 @@ mod tests {
         assert_eq!(WindowPreset::Shell.default_size(), (720.0, 420.0));
         assert_eq!(WindowPreset::FileTree.default_size(), (420.0, 520.0));
         assert_eq!(WindowPreset::Branches.default_size(), (520.0, 420.0));
-        assert!(WindowPreset::Issue.opens_maximized_by_default());
-        assert!(WindowPreset::Spec.opens_maximized_by_default());
-        assert!(WindowPreset::Workspace.opens_maximized_by_default());
-        assert!(!WindowPreset::Pr.opens_maximized_by_default());
+        for preset in [
+            WindowPreset::FileTree,
+            WindowPreset::Branches,
+            WindowPreset::Settings,
+            WindowPreset::Profile,
+            WindowPreset::Logs,
+            WindowPreset::Issue,
+            WindowPreset::Spec,
+            WindowPreset::Workspace,
+            WindowPreset::Board,
+            WindowPreset::Pr,
+        ] {
+            assert!(
+                preset.opens_maximized_by_default(),
+                "{preset:?} should open maximized by default",
+            );
+        }
+        for preset in [
+            WindowPreset::Shell,
+            WindowPreset::Claude,
+            WindowPreset::Codex,
+            WindowPreset::Agent,
+            WindowPreset::Memo,
+        ] {
+            assert!(
+                !preset.opens_maximized_by_default(),
+                "{preset:?} should keep normal floating geometry by default",
+            );
+        }
         assert_eq!(WindowPreset::Shell.command_name(), None);
         assert_eq!(WindowPreset::Claude.command_name(), Some("claude"));
         assert_eq!(WindowPreset::Codex.command_name(), Some("codex"));

@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.24.2] - 2026-05-09
+
+### Bug Fixes
+
+- Recover suspended workspace resume
+- **gui:** Harden update CTA interaction
+- **workspace:** Keep journal cards out of active kanban
+- **workspace:** Journal card title を entry 由来にする
+- **workspace:** Journal title fallback で current focus を優先
+- **workspace:** Avoid stale resume branch reuse
+- Maximize non-agent windows by default
+
+### Miscellaneous Tasks
+
+- Merge develop into workspace kanban fix
+- Merge origin develop into work branch
+- Merge origin/develop into workspace resume fix
+- Merge develop into work branch
+
 ## [9.24.1] - 2026-05-08
 
 ### Bug Fixes

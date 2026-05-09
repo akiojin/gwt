@@ -137,14 +137,21 @@ body::after {
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
    earlier split toast + persistent button flow. */
-.update-cta {
+.update-cta-shell {
   position: fixed;
   bottom: 20px;
   right: 20px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 0;
+  z-index: 9999;
+}
+
+.update-cta {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 10px 14px 10px 16px;
   background: var(--color-surface-elevated);
   border: 1px solid var(--color-focus-ring);
   border-radius: var(--radius-lg);
@@ -154,8 +161,7 @@ body::after {
   font-size: var(--type-sm);
   letter-spacing: var(--tracking-mono);
   color: var(--color-state-active);
-  cursor: default;
-  z-index: 9999;
+  cursor: pointer;
   overflow: hidden;
   transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
@@ -164,31 +170,22 @@ body::after {
   background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
 }
 
-.update-cta__action,
-.update-cta__dismiss {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  letter-spacing: inherit;
-  cursor: pointer;
-}
-
-.update-cta__action {
-  padding: 10px 10px 10px 16px;
-}
-
 .update-cta__dismiss {
   width: 28px;
   height: 28px;
-  margin-right: 6px;
   border-radius: var(--radius-md);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-2);
   color: var(--color-text-muted);
+  font: inherit;
+  letter-spacing: inherit;
   font-size: var(--type-base);
   line-height: 1;
+  cursor: pointer;
 }
 
 .update-cta__dismiss:hover {
@@ -198,9 +195,6 @@ body::after {
 
 .update-cta.is-applying {
   color: var(--color-state-idle);
-}
-
-.update-cta.is-applying .update-cta__action {
   cursor: progress;
 }
 
@@ -209,7 +203,7 @@ body::after {
   color: var(--color-state-blocked);
 }
 
-.update-cta__action:focus-visible,
+.update-cta:focus-visible,
 .update-cta__dismiss:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
