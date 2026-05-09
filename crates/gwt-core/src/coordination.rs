@@ -2751,6 +2751,132 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_100000_entry_smoke_keeps_hot_paths_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = chrono::Utc.with_ymd_and_hms(2026, 5, 10, 0, 0, 0).unwrap();
+        let coordination_root = coordination_dir(dir.path());
+        let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+        std::fs::create_dir_all(&segments_dir).unwrap();
+
+        fn empty_segment(index: usize) -> EventSegmentMeta {
+            EventSegmentMeta {
+                file: segment_file_name(index),
+                entries: 0,
+                bytes: 0,
+                first_created_at: None,
+                last_created_at: None,
+                max_updated_at: None,
+                first_entry_id: None,
+                last_entry_id: None,
+            }
+        }
+
+        let mut manifest = EventSegmentManifest {
+            version: EVENT_MANIFEST_VERSION,
+            active_segment: segment_file_name(1),
+            segments: Vec::new(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut segment_index = 1;
+        let mut current_meta = empty_segment(segment_index);
+        let mut current_file =
+            std::fs::File::create(segments_dir.join(&current_meta.file)).unwrap();
+
+        for idx in 0..100_000 {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                if idx % 2 == 0 { "Codex" } else { "Claude" },
+                BoardEntryKind::Status,
+                format!("synthetic board entry {idx}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_session_id(format!("sess-{}", idx % 8));
+            entry.id = format!("entry-{idx:06}");
+            entry.created_at = base + chrono::Duration::seconds(idx as i64);
+            entry.updated_at = entry.created_at;
+
+            let event = CoordinationEvent::MessageAppended { entry };
+            let event_bytes = serialized_event_line(&event).unwrap();
+            if current_meta.entries > 0
+                && current_meta.bytes + event_bytes.len() as u64 > EVENT_SEGMENT_MAX_BYTES
+            {
+                current_file.flush().unwrap();
+                manifest.segments.push(current_meta);
+                segment_index += 1;
+                current_meta = empty_segment(segment_index);
+                current_file =
+                    std::fs::File::create(segments_dir.join(&current_meta.file)).unwrap();
+            }
+            current_file.write_all(&event_bytes).unwrap();
+            update_segment_meta(&mut current_meta, &event, event_bytes.len() as u64);
+        }
+        current_file.flush().unwrap();
+        manifest.active_segment = current_meta.file.clone();
+        manifest.segments.push(current_meta);
+        manifest.updated_at = chrono::Utc::now();
+        write_event_manifest(&coordination_root, &manifest).unwrap();
+
+        let snapshot = rebuild_snapshot_from_segments(dir.path()).unwrap();
+        write_atomic_json(
+            &coordination_board_projection_path(dir.path()),
+            &snapshot.board,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.board.total_entries, 100_000);
+        assert_eq!(snapshot.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
+        assert!(snapshot.board.has_more_before);
+        assert_eq!(
+            snapshot.board.oldest_entry_id.as_deref(),
+            Some("entry-099500")
+        );
+        assert_eq!(
+            snapshot.board.newest_entry_id.as_deref(),
+            Some("entry-099999")
+        );
+
+        let loaded = load_snapshot(dir.path()).unwrap();
+        assert_eq!(loaded.board.total_entries, 100_000);
+        assert_eq!(loaded.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
+
+        let mut appended = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "after 100k",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("sess-after");
+        appended.id = "entry-100000".to_string();
+        appended.created_at = base + chrono::Duration::seconds(100_000);
+        appended.updated_at = appended.created_at;
+
+        let after = post_entry(dir.path(), appended).unwrap();
+        assert_eq!(after.board.total_entries, 100_001);
+        assert_eq!(after.board.entries.len(), HOT_PROJECTION_ENTRY_LIMIT);
+        assert_eq!(after.board.newest_entry_id.as_deref(), Some("entry-100000"));
+
+        let recent =
+            load_entries_since(dir.path(), base + chrono::Duration::seconds(99_990)).unwrap();
+        assert_eq!(recent.len(), 10);
+        assert_eq!(recent.first().unwrap().id, "entry-099991");
+        assert_eq!(recent.last().unwrap().id, "entry-100000");
+        assert!(has_recent_post_by(
+            dir.path(),
+            "Codex",
+            &BoardEntryKind::Status,
+            chrono::Duration::days(365)
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn reminders_sidecar_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let agent_session_id = "sess-test-123";
