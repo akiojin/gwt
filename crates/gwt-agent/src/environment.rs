@@ -72,13 +72,33 @@ where
 ///
 /// Idempotent: re-running on an already-hydrated PATH yields the same value
 /// because `push_unique_path` deduplicates entries. No-op on Windows.
+///
+/// Reads the current process env via `vars_os` (not `vars`) so a single
+/// non-Unicode environment variable does not panic startup. Skips writing to
+/// `std::env` if the computed PATH is empty so we never blank a usable PATH.
 pub fn apply_host_path_hydration_to_std_env() {
     if cfg!(windows) {
         return;
     }
-    if let Some(hydrated) = compute_hydrated_path(std::env::vars()) {
+    if let Some(hydrated) = current_process_hydrated_path() {
         std::env::set_var("PATH", hydrated);
     }
+}
+
+/// Compute the hydrated PATH from the running process env.
+///
+/// Returns `None` when the hydrated PATH is empty so `apply_host_path_hydration_to_std_env`
+/// never overwrites a usable `std::env::PATH` with a blank value (which would
+/// disable command lookup for subsequent `Command::new(...)` calls).
+fn current_process_hydrated_path() -> Option<String> {
+    let base_env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let value = value.into_string().ok()?;
+            Some((key, value))
+        })
+        .collect();
+    compute_hydrated_path(base_env).filter(|hydrated| !hydrated.is_empty())
 }
 
 /// Effective environment assembled from the active profile and launch context.
@@ -696,6 +716,47 @@ mod tests {
         match original {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compute_hydrated_path_returns_empty_string_when_no_paths_available_on_linux() {
+        // On Linux there is no path_helper, so an env with no PATH and no
+        // HOME yields an empty hydrated PATH. The guard inside
+        // apply_host_path_hydration_to_std_env must skip this case so that
+        // `std::env::PATH` is never blanked.
+        let result = compute_hydrated_path(Vec::<(String, String)>::new());
+        assert_eq!(result.as_deref(), Some(""));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn apply_host_path_hydration_to_std_env_does_not_blank_path_when_no_inputs_on_linux() {
+        let _lock = path_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_path = std::env::var_os("PATH");
+        let original_home = std::env::var_os("HOME");
+        std::env::remove_var("PATH");
+        std::env::remove_var("HOME");
+
+        apply_host_path_hydration_to_std_env();
+
+        if let Some(value) = std::env::var_os("PATH") {
+            assert!(
+                !value.is_empty(),
+                "apply_host_path_hydration_to_std_env must not write an empty PATH"
+            );
+        }
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
         }
     }
 
