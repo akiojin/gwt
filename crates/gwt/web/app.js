@@ -8268,8 +8268,19 @@
       // surface dispatch. Each command either focuses an existing window or
       // creates a new one through the same socket transport the preset
       // buttons use, so they share the legacy invariants.
-      function isAutoMaximizedKanbanPreset(preset) {
-        return preset === "issue" || preset === "spec" || preset === "workspace";
+      function isAutoMaximizedSurfacePreset(preset) {
+        return (
+          preset === "file_tree" ||
+          preset === "branches" ||
+          preset === "settings" ||
+          preset === "profile" ||
+          preset === "logs" ||
+          preset === "issue" ||
+          preset === "spec" ||
+          preset === "workspace" ||
+          preset === "board" ||
+          preset === "pr"
+        );
       }
 
       function focusOrSpawnPreset(preset) {
@@ -8282,7 +8293,7 @@
             kind: "focus_window",
             id: existing.id,
           };
-          if (isAutoMaximizedKanbanPreset(preset)) {
+          if (isAutoMaximizedSurfacePreset(preset)) {
             message.bounds = visibleBounds();
           }
           frontendUnits.socketTransport.send(message);
