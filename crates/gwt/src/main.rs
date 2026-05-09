@@ -1545,6 +1545,16 @@ mod tests {
             .expect("file tree lookup")
             .raw_id
             .clone();
+        assert!(
+            runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&file_tree_raw_id)
+                .expect("window")
+                .maximized,
+            "non-agent windows should be maximized on create"
+        );
 
         assert_eq!(
             runtime.window_status(&branches_id),
@@ -1577,19 +1587,6 @@ mod tests {
                 .arrange_windows_events(ArrangeMode::Tile, bounds.clone())
                 .len(),
             1
-        );
-        assert_eq!(
-            runtime.maximize_window_events(&file_tree_id, bounds).len(),
-            1
-        );
-        assert!(
-            runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .maximized
         );
         assert_eq!(runtime.minimize_window_events(&file_tree_id).len(), 1);
         assert!(
@@ -1642,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn kanban_window_presets_open_and_focus_maximized() {
+    fn non_agent_window_presets_open_and_focus_maximized() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -1651,16 +1648,16 @@ mod tests {
             "Repo",
             repo,
             ProjectKind::NonRepo,
-            &[WindowPreset::Issue, WindowPreset::FileTree],
+            &[WindowPreset::Board, WindowPreset::Shell],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let bounds = canvas_bounds();
 
-        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
-        let issue_raw_id = runtime
+        let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
+        let board_raw_id = runtime
             .window_lookup
-            .get(&issue_id)
-            .expect("issue lookup")
+            .get(&board_id)
+            .expect("board lookup")
             .raw_id
             .clone();
         assert!(
@@ -1668,14 +1665,14 @@ mod tests {
                 .tab("tab-1")
                 .expect("tab")
                 .workspace
-                .window(&issue_raw_id)
-                .expect("issue window")
+                .window(&board_raw_id)
+                .expect("board window")
                 .maximized,
-            "pre-existing Issue windows start as normal floating windows before focus",
+            "pre-existing Board windows can be restored from normal floating persistence",
         );
         assert_eq!(
             runtime
-                .focus_window_events(&issue_id, Some(bounds.clone()))
+                .focus_window_events(&board_id, Some(bounds.clone()))
                 .len(),
             1
         );
@@ -1684,27 +1681,53 @@ mod tests {
                 .tab("tab-1")
                 .expect("tab")
                 .workspace
-                .window(&issue_raw_id)
-                .expect("issue window")
+                .window(&board_raw_id)
+                .expect("board window")
                 .maximized,
-            "focusing an Issue Kanban window should maximize it",
+            "focusing a Board window with viewport bounds should maximize it",
         );
 
+        let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
         assert_eq!(
             runtime
-                .create_window_events(WindowPreset::Spec, bounds.clone())
+                .focus_window_events(&shell_id, Some(bounds.clone()))
                 .len(),
-            3
+            1
         );
-        assert_eq!(
-            runtime
-                .create_window_events(WindowPreset::Workspace, bounds.clone())
-                .len(),
-            3
+        let shell_raw_id = runtime
+            .window_lookup
+            .get(&shell_id)
+            .expect("shell lookup")
+            .raw_id
+            .clone();
+        assert!(
+            !runtime
+                .tab("tab-1")
+                .expect("tab")
+                .workspace
+                .window(&shell_raw_id)
+                .expect("shell window")
+                .maximized,
+            "agent-capable terminal windows should keep their normal floating size",
         );
-        let spec_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Spec, 0);
-        let workspace_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Workspace, 0);
-        for id in [spec_id, workspace_id] {
+
+        for preset in [
+            WindowPreset::FileTree,
+            WindowPreset::Branches,
+            WindowPreset::Settings,
+            WindowPreset::Profile,
+            WindowPreset::Logs,
+            WindowPreset::Issue,
+            WindowPreset::Spec,
+            WindowPreset::Workspace,
+            WindowPreset::Pr,
+        ] {
+            assert_eq!(
+                runtime.create_window_events(preset, bounds.clone()).len(),
+                3,
+                "{preset:?} should create through the normal window path",
+            );
+            let id = window_id_for_preset(&runtime, "tab-1", preset, 0);
             let raw_id = runtime
                 .window_lookup
                 .get(&id)
@@ -1723,24 +1746,6 @@ mod tests {
             assert_eq!(window.geometry.width, 1352.0);
             assert_eq!(window.geometry.height, 852.0);
         }
-
-        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
-        let file_tree_raw_id = runtime
-            .window_lookup
-            .get(&file_tree_id)
-            .expect("file tree lookup")
-            .raw_id
-            .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("file tree window")
-                .maximized,
-            "non-Kanban utility windows should keep their normal floating size",
-        );
     }
 
     #[test]
