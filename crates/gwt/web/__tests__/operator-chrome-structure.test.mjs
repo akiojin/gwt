@@ -396,7 +396,7 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
     /workspace-kanban-root[\s\S]+workspace-split[\s\S]+kanban-shell/,
     "expected Workspace Overview to share the split Kanban shell",
   );
-  for (const column of ["Active", "Suspended", "Completed"]) {
+  for (const column of ["Active", "Inactive", "Completed"]) {
     assert.match(
       workspaceKanbanCombinedSource,
       new RegExp(`workspace-column-name">${column}`),

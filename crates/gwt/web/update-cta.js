@@ -4,37 +4,50 @@ export function createUpdateCtaController({
   confirmUpdate,
   setVersionState = () => {},
 }) {
+  const shellId = "update-cta-shell";
   let latestVersion = null;
   let status = "idle";
 
-  function ensureCta() {
-    let cta = document.getElementById("update-cta");
-    if (!cta) {
-      cta = document.createElement("div");
-      cta.id = "update-cta";
-      cta.className = "update-cta";
-      cta.setAttribute("role", "group");
-      cta.setAttribute("aria-live", "polite");
-      document.body.appendChild(cta);
+  function removeLegacyUpdateSurfaces() {
+    document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
+      node.remove();
+    });
+  }
+
+  function ensureShell() {
+    let shell = document.getElementById(shellId);
+    if (!shell) {
+      shell = document.createElement("div");
+      shell.id = shellId;
+      shell.className = "update-cta-shell";
+      document.body.appendChild(shell);
     }
+    return shell;
+  }
+
+  function ensureCta(shell) {
+    let cta = document.getElementById("update-cta");
+    if (cta && cta.tagName !== "BUTTON") {
+      cta.remove();
+      cta = null;
+    }
+    if (!cta) {
+      cta = document.createElement("button");
+      cta.id = "update-cta";
+      cta.type = "button";
+      cta.className = "update-cta";
+      cta.dataset.updateCtaAction = "true";
+      cta.setAttribute("aria-live", "polite");
+      shell.appendChild(cta);
+    } else if (cta.parentElement !== shell) {
+      shell.appendChild(cta);
+    }
+    cta.onclick = handleClick;
     return cta;
   }
 
-  function ensureAction(cta) {
-    let action = cta.querySelector("[data-update-cta-action]");
-    if (!action) {
-      action = document.createElement("button");
-      action.type = "button";
-      action.className = "update-cta__action";
-      action.dataset.updateCtaAction = "true";
-      cta.appendChild(action);
-    }
-    action.onclick = handleClick;
-    return action;
-  }
-
-  function ensureDismiss(cta) {
-    let dismiss = cta.querySelector("[data-update-cta-dismiss]");
+  function ensureDismiss(shell) {
+    let dismiss = document.querySelector("[data-update-cta-dismiss]");
     if (!dismiss) {
       dismiss = document.createElement("button");
       dismiss.type = "button";
@@ -44,13 +57,15 @@ export function createUpdateCtaController({
       dismiss.title = "Dismiss update notification";
       dismiss.setAttribute("aria-label", "Dismiss update notification");
       dismiss.onclick = dismissCta;
-      cta.appendChild(dismiss);
+      shell.appendChild(dismiss);
+    } else if (dismiss.parentElement !== shell) {
+      shell.appendChild(dismiss);
     }
     return dismiss;
   }
 
-  function removeDismiss(cta) {
-    const dismiss = cta.querySelector("[data-update-cta-dismiss]");
+  function removeDismiss() {
+    const dismiss = document.querySelector("[data-update-cta-dismiss]");
     if (dismiss) {
       dismiss.remove();
     }
@@ -58,26 +73,25 @@ export function createUpdateCtaController({
 
   function render(nextStatus, text) {
     status = nextStatus;
-    const cta = ensureCta();
+    const shell = ensureShell();
+    const cta = ensureCta(shell);
     cta.dataset.status = nextStatus;
     cta.className = nextStatus === "available" ? "update-cta" : `update-cta is-${nextStatus}`;
     cta.title = text;
     cta.setAttribute("aria-label", text);
-    const action = ensureAction(cta);
-    action.disabled = nextStatus === "applying";
-    action.textContent = text;
-    action.title = text;
-    action.setAttribute("aria-label", text);
+    cta.disabled = nextStatus === "applying";
+    cta.textContent = text;
     if (nextStatus === "applying") {
-      removeDismiss(cta);
+      removeDismiss();
     } else {
-      ensureDismiss(cta);
+      ensureDismiss(shell);
     }
     return cta;
   }
 
   function showAvailable(version) {
     if (!version) return null;
+    removeLegacyUpdateSurfaces();
     latestVersion = version;
     return render("available", `Update available: v${version} - Click to update`);
   }
@@ -91,6 +105,7 @@ export function createUpdateCtaController({
     if (!event || event.state !== "available") {
       return;
     }
+    removeLegacyUpdateSurfaces();
     setVersionState(event.current, event.latest);
     if (status === "applying" && latestVersion === event.latest) {
       return;
@@ -100,9 +115,9 @@ export function createUpdateCtaController({
 
   function dismissCta(event) {
     event?.stopPropagation();
-    const cta = document.getElementById("update-cta");
-    if (cta) {
-      cta.remove();
+    const shell = document.getElementById(shellId);
+    if (shell) {
+      shell.remove();
     }
     status = "dismissed";
   }
