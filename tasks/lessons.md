@@ -4875,3 +4875,36 @@ embedded serving と unit test は追加したが、`package.json` の
 2. frontend module 分割の差分レビューでは、`rg "from \"/.*\\.js\""`
    で root import を確認し、配信・syntax check・unit test の3点が
    揃っているかを見る。
+
+## 2026-05-10 — Agent カウントは `windowMap` 走査ではなく preset で判定する
+
+### 事象
+
+Sidebar Layers の Agents 行が、実 Agent pane 数 (2) ではなく
+全 workspace window 数 (Agent 2 + Board / Workspace 等 2 = 4) を
+表示していた。`recomputeOperatorTelemetry()` が `windowMap.values()`
+を走査し、`data-agent-state` を持つ window をすべて `counts.agents`
+に加算していた。
+
+### 原因
+
+`data-agent-state` は CSS overlay / animation 用に **全 window** へ
+打たれる DOM marker であり、agent 種別を表すものではない。Agent 判定の
+真実源は `presetSupportsWaitingStatus(preset)` (`agent | claude | codex`)
+だが、`recomputeOperatorTelemetry` ではこの述語を呼ばずに DOM の
+data 属性だけで判定していた。同じく `activeWorkProjection` 由来の
+`Math.max(counts.agents, activeAgents + blockedAgents)` も二重計上の
+温床になり得る。
+
+### 再発防止策
+
+1. `windowMap.values()` / `.entries()` を走査して "agent らしさ" を
+   集計する箇所では、必ず `presetSupportsWaitingStatus(preset)` を経由
+   する。`workspaceWindowById(windowId)` で `windowData.preset` を解決
+   してから判定する。
+2. `data-agent-state` は CSS / overlay 用途であり、agent 判定の
+   primary signal として使わない。差分レビューでは
+   `rg "dataset.agentState" crates/gwt/web` で利用箇所を確認する。
+3. Sidebar / Status Strip / Mission Briefing が共有する集計関数は、
+   regression を `operator-chrome-structure` 等の source-level
+   assertion で固定し、preset filter の脱落を CI で拾う。

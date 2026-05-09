@@ -1429,9 +1429,15 @@
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
-        for (const el of windowMap.values()) {
+        for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;
           if (!state) continue;
+          // SPEC-2356 follow-up: only count live agent panes. Other workspace
+          // windows (Board / Workspace / Logs / Branches / etc.) carry
+          // data-agent-state for overlay/animation purposes but must not
+          // inflate the Sidebar Layers Agents row or Status Strip cells.
+          const windowData = workspaceWindowById(windowId);
+          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
           if (state in counts) counts[state] += 1;
           counts.agents += 1;
         }
