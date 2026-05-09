@@ -122,6 +122,32 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
+test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
+  // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
+  // without checking preset, so every workspace window with data-agent-state
+  // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
+  // the Sidebar Layers "Agents" row showed e.g. 4 when only 2 agent panes
+  // were live. The DOM walk must scope to presets that represent agent panes.
+  const fnMatch = appSource.match(
+    /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
+  );
+  assert.ok(
+    fnMatch,
+    "expected recomputeOperatorTelemetry definition in app.js",
+  );
+  const body = fnMatch[0];
+  assert.match(
+    body,
+    /windowMap\.entries\(\)/,
+    "recomputeOperatorTelemetry must iterate windowMap.entries() so it can resolve each window's preset before counting it as an agent",
+  );
+  assert.match(
+    body,
+    /presetSupportsWaitingStatus/,
+    "recomputeOperatorTelemetry must filter via presetSupportsWaitingStatus(preset) so non-agent windows do not inflate the Sidebar Agents counter",
+  );
+});
+
 test("Workspace sidebar exposes active work and per-agent overview", () => {
   assert.ok(
     document.querySelector("#op-active-work"),
