@@ -794,7 +794,10 @@ fn workspace_resume_owner_issue_number(owner: Option<&str>) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
-fn workspace_resume_branch_from_journal_project_root(project_root: &Path) -> Option<String> {
+fn workspace_resume_branch_from_journal_project_root(
+    project_root: &Path,
+    active_project_root: &Path,
+) -> Option<String> {
     if let Ok(branch) = current_git_branch(project_root) {
         let branch = normalize_branch_name(branch.trim());
         if !branch.is_empty() {
@@ -802,21 +805,51 @@ fn workspace_resume_branch_from_journal_project_root(project_root: &Path) -> Opt
         }
     }
 
-    let components = project_root
+    let main_repo_path = gwt_git::worktree::main_worktree_root(active_project_root).ok()?;
+    let layout_root = main_repo_path.parent()?;
+    let normalized_project_root = normalize_existing_path_prefix(project_root);
+    let normalized_layout_root = normalize_existing_path_prefix(layout_root);
+    let relative_path = normalized_project_root
+        .strip_prefix(&normalized_layout_root)
+        .ok()?;
+    let branch = relative_path
         .components()
         .filter_map(|component| match component {
-            std::path::Component::Normal(value) => value.to_str().map(str::to_string),
+            std::path::Component::Normal(value) => value.to_str(),
             _ => None,
         })
-        .collect::<Vec<_>>();
-    let work_index = components
-        .iter()
-        .rposition(|component| component == "work")?;
-    let branch_parts = components.get(work_index..)?;
-    if branch_parts.len() < 2 {
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if branch.is_empty() {
         return None;
     }
-    Some(branch_parts.join("/"))
+    Some(branch)
+}
+
+fn normalize_existing_path_prefix(path: &Path) -> PathBuf {
+    if path.exists() {
+        return std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    }
+
+    let mut missing_components = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        let Some(name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        missing_components.push(name.to_os_string());
+        let Some(parent) = current.parent() else {
+            return path.to_path_buf();
+        };
+        current = parent;
+    }
+
+    let mut normalized = std::fs::canonicalize(current).unwrap_or_else(|_| current.to_path_buf());
+    for component in missing_components.iter().rev() {
+        normalized.push(component);
+    }
+    normalized
 }
 
 fn workspace_resume_branch_exists(project_root: &Path, branch_name: &str) -> bool {
@@ -1071,6 +1104,20 @@ fn reset_idle_workspace_current_identity(
     projection.git_details = None;
     projection.board_refs.clear();
     projection.updated_at = updated_at;
+}
+
+fn workspace_projection_for_current_resume(
+    mut projection: gwt_core::workspace_projection::WorkspaceProjection,
+    sessions: &[&ActiveAgentSession],
+    tab_title: &str,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> gwt_core::workspace_projection::WorkspaceProjection {
+    merge_active_sessions_into_projection(&mut projection, sessions.iter().copied(), updated_at);
+    retain_live_workspace_agents(&mut projection, sessions, updated_at);
+    if !workspace_projection_has_current_agents(&projection) {
+        reset_idle_workspace_current_identity(&mut projection, tab_title, updated_at);
+    }
+    projection
 }
 
 fn workspace_cleanup_candidate_for_projection(
@@ -7188,6 +7235,15 @@ exit 0
             "SPEC-2359",
             "Resume the suspended Workspace card.",
         );
+        assert_eq!(
+            super::workspace_resume_branch_from_journal_project_root(
+                &temp.path().join("work").join("20260507-0001"),
+                &repo
+            )
+            .as_deref(),
+            Some(branch)
+        );
+        assert!(super::workspace_resume_branch_exists(&repo, branch));
         let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -7262,6 +7318,120 @@ exit 0
             context.summary.as_deref(),
             Some("Carry this suspended context into a new work branch.")
         );
+    }
+
+    #[test]
+    fn app_runtime_resume_workspace_current_ignores_idle_stale_git_details() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let stale_branch = "work/20260507-stale";
+        run_git(&repo, &["branch", stale_branch]);
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.title = "Stale Workspace".to_string();
+        projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
+        projection.status_text = "No active work".to_string();
+        projection.summary = Some("Old work should not be resumed".to_string());
+        projection.owner = Some("Issue #2359".to_string());
+        projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+            branch: Some(stale_branch.to_string()),
+            worktree_path: Some(temp.path().join("work/20260507-stale")),
+            base_branch: Some("origin/develop".to_string()),
+            pr_number: None,
+            pr_state: None,
+            pr_url: None,
+            pr_created_at: None,
+            created_by_start_work: true,
+            created_at: chrono::Utc::now(),
+        });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspace {
+                source: gwt::WorkspaceResumeSource::Current,
+                journal_id: None,
+            },
+        );
+
+        let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        let view = session.wizard.view();
+        assert_eq!(view.title, "Start Work");
+        assert!(view.branch_name.starts_with("work/"));
+        assert_ne!(view.branch_name, stale_branch);
+        let context = session
+            .workspace_resume_context
+            .as_ref()
+            .expect("workspace resume context");
+        assert_eq!(context.title.as_deref(), Some("Repo workspace"));
+        assert_eq!(context.owner, None);
+        assert_eq!(context.summary, None);
+    }
+
+    #[test]
+    fn app_runtime_resume_workspace_journal_derives_feature_branch_under_work_named_repo_parent() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("work").join("repo");
+        init_git_clone_with_origin(&repo);
+        let branch = "feature/resume-existing";
+        run_git(&repo, &["branch", branch]);
+        gwt_core::workspace_projection::save_workspace_projection(
+            &repo,
+            &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+        )
+        .expect("save projection");
+        append_workspace_resume_journal(
+            &repo,
+            "journal-feature",
+            temp.path()
+                .join("work")
+                .join("feature")
+                .join("resume-existing"),
+            "Issue #2359",
+            "Resume a non-work branch from a deleted worktree path.",
+        );
+        assert_eq!(
+            super::workspace_resume_branch_from_journal_project_root(
+                &temp
+                    .path()
+                    .join("work")
+                    .join("feature")
+                    .join("resume-existing"),
+                &repo
+            )
+            .as_deref(),
+            Some(branch)
+        );
+        assert!(super::workspace_resume_branch_exists(&repo, branch));
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::ResumeWorkspace {
+                source: gwt::WorkspaceResumeSource::Journal,
+                journal_id: Some("journal-feature".to_string()),
+            },
+        );
+
+        let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+        let view = session.wizard.view();
+        assert_eq!(view.title, "Launch Agent");
+        assert_eq!(view.branch_name, branch);
     }
 
     #[test]
