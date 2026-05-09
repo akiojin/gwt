@@ -82,6 +82,11 @@ pub fn focus_trap_js() -> &'static str {
     include_str!("../web/focus-trap.js")
 }
 
+// SPEC-1939 Phase 12 — index status badge controller.
+pub fn index_status_controller_js() -> &'static str {
+    include_str!("../web/index-status-controller.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -142,6 +147,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/focus-trap.js",
         source: focus_trap_js,
         marker: "createFocusTrap",
+    },
+    RootJsModuleAsset {
+        path: "/index-status-controller.js",
+        source: index_status_controller_js,
+        marker: "formatIndexStatusLabel",
     },
 ];
 
@@ -874,13 +884,28 @@ mod tests {
             "expected project bar to expose project index status badge",
         );
         assert!(
-            html.contains(".index-status.ready") && html.contains(".index-status.error"),
-            "expected embedded css to define index health states",
+            html.contains("type=\"button\"") && html.contains("class=\"index-status\""),
+            "SPEC-1939 T-IDX-105: expected #index-status to be a clickable button",
+        );
+        assert!(
+            html.contains(".index-status.ready")
+                && html.contains(".index-status.error")
+                && html.contains(".index-status.repairing"),
+            "expected embedded css to define index health states including repairing",
+        );
+        assert!(
+            html.contains("animation: index-status-spin"),
+            "SPEC-1939 T-IDX-104: expected repairing badge to render a spinner",
         );
         assert!(
             js.contains("function setIndexStatus(projectRoot, status)")
                 && js.contains("case \"project_index_status\""),
             "expected frontend to consume project_index_status events",
+        );
+        assert!(
+            js.contains("formatIndexStatusLabel(state)")
+                && js.contains("dispatchOpenIndexSettings(indexStatusLabel)"),
+            "SPEC-1939 T-IDX-103/105: renderIndexStatus must use the shared controller",
         );
     }
 

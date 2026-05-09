@@ -174,6 +174,7 @@
       .index-status {
         display: inline-flex;
         align-items: center;
+        gap: 6px;
         height: 32px;
         padding: 0 10px;
         border: 1px solid var(--color-border);
@@ -185,6 +186,12 @@
         letter-spacing: var(--tracking-mono);
         font-weight: 700;
         white-space: nowrap;
+        cursor: pointer;
+      }
+
+      .index-status:focus-visible {
+        outline: 2px solid var(--color-state-active);
+        outline-offset: 2px;
       }
 
       .index-status.ready {
@@ -194,8 +201,30 @@
 
       .index-status.repair_required,
       .index-status.error {
+        border-color: var(--color-state-blocked);
+        color: var(--color-state-blocked);
+      }
+
+      .index-status.repairing {
         border-color: var(--agent-claude);
         color: var(--agent-claude);
+      }
+
+      .index-status.repairing::before {
+        content: "";
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        border: 2px solid currentColor;
+        border-top-color: transparent;
+        animation: index-status-spin 0.85s linear infinite;
+      }
+
+      @keyframes index-status-spin {
+        to {
+          transform: rotate(360deg);
+        }
       }
 
       .index-status[hidden] {
@@ -3027,7 +3056,13 @@
         <div class="project-bar">
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
-            <span class="index-status" id="index-status" hidden></span>
+            <button
+              type="button"
+              class="index-status"
+              id="index-status"
+              aria-label="Project index health"
+              hidden
+            ></button>
             <span class="app-version" id="app-version" hidden></span>
             <button class="arrange-button" id="project-workspace-overview-button" aria-label="Workspace overview">
               Workspace
