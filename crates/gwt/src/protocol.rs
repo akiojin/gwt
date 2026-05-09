@@ -40,6 +40,13 @@ pub enum BranchEntriesPhase {
     Hydrated,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceResumeSource {
+    Current,
+    Journal,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
@@ -224,6 +231,11 @@ pub enum FrontendEvent {
         issue_number: u64,
     },
     OpenStartWork,
+    ResumeWorkspace {
+        source: WorkspaceResumeSource,
+        #[serde(default)]
+        journal_id: Option<String>,
+    },
     OpenLaunchWizard {
         id: String,
         branch_name: String,
@@ -927,6 +939,38 @@ mod tests {
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
         );
+    }
+
+    #[test]
+    fn frontend_event_accepts_workspace_resume_sources() {
+        let current: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "resume_workspace",
+            "source": "current"
+        }))
+        .expect("deserialize current workspace resume");
+
+        assert!(matches!(
+            current,
+            FrontendEvent::ResumeWorkspace {
+                source: super::WorkspaceResumeSource::Current,
+                journal_id: None,
+            }
+        ));
+
+        let journal: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "resume_workspace",
+            "source": "journal",
+            "journal_id": "journal-1"
+        }))
+        .expect("deserialize journal workspace resume");
+
+        assert!(matches!(
+            journal,
+            FrontendEvent::ResumeWorkspace {
+                source: super::WorkspaceResumeSource::Journal,
+                journal_id: Some(id),
+            } if id == "journal-1"
+        ));
     }
 
     #[test]

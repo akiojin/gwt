@@ -229,12 +229,41 @@ pub fn branch_worktree_path(repo_path: &Path, branch_name: &str) -> Option<PathB
 
     let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
     let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    manager
-        .list()
-        .ok()?
-        .into_iter()
-        .find(|worktree| worktree.branch.as_deref() == Some(branch_name))
-        .map(|worktree| worktree.path)
+    let mut worktrees = manager.list().ok()?;
+    if let Some(path) = usable_worktree_path_for_branch(&worktrees, branch_name) {
+        return Some(path);
+    }
+    if worktrees_have_stale_branch_entry(&worktrees, branch_name) {
+        manager.prune().ok()?;
+        worktrees = manager.list().ok()?;
+        return usable_worktree_path_for_branch(&worktrees, branch_name);
+    }
+    None
+}
+
+pub fn usable_worktree_path_for_branch(
+    worktrees: &[gwt_git::WorktreeInfo],
+    branch_name: &str,
+) -> Option<PathBuf> {
+    worktrees
+        .iter()
+        .find(|worktree| {
+            worktree.branch.as_deref() == Some(branch_name) && usable_worktree_entry(worktree)
+        })
+        .map(|worktree| worktree.path.clone())
+}
+
+pub fn worktrees_have_stale_branch_entry(
+    worktrees: &[gwt_git::WorktreeInfo],
+    branch_name: &str,
+) -> bool {
+    worktrees.iter().any(|worktree| {
+        worktree.branch.as_deref() == Some(branch_name) && !usable_worktree_entry(worktree)
+    })
+}
+
+pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
+    !worktree.prunable && worktree.path.exists()
 }
 
 pub fn first_available_worktree_path(
