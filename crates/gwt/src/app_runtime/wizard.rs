@@ -42,11 +42,12 @@ use super::{
     branch_worktree_path, build_shell_process_launch, combined_window_id,
     detect_wizard_docker_context_and_status, knowledge_error_event, knowledge_kind_for_preset,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
-    resolve_shell_launch_worktree, synthetic_branch_entry, workspace_resume_branch_exists,
-    workspace_resume_branch_from_journal_project_root, workspace_resume_context_from_journal,
-    workspace_resume_context_from_projection, workspace_resume_owner_issue_number, AppEventProxy,
-    AppRuntime, BackendEvent, IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    resolve_shell_launch_worktree, synthetic_branch_entry, workspace_projection_for_current_resume,
+    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
+    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
+    workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
+    IssueLaunchWizardPrepared, LaunchWizardSession, OutboundEvent, WindowPreset,
+    WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 
 impl AppRuntime {
@@ -271,13 +272,26 @@ impl AppRuntime {
         }
         let project_root = tab.project_root.clone();
         let tab_title = tab.title.clone();
+        let current_sessions = self
+            .active_agent_sessions
+            .values()
+            .filter(|session| session.tab_id == tab_id)
+            .collect::<Vec<_>>();
 
         let (branch_candidate, context) = match source {
             gwt::WorkspaceResumeSource::Current => {
                 let projection =
                     gwt_core::workspace_projection::load_workspace_projection(&project_root)
                         .ok()
-                        .flatten();
+                        .flatten()
+                        .map(|projection| {
+                            workspace_projection_for_current_resume(
+                                projection,
+                                &current_sessions,
+                                &tab_title,
+                                Utc::now(),
+                            )
+                        });
                 let branch = projection
                     .as_ref()
                     .and_then(|projection| projection.git_details.as_ref())
@@ -309,7 +323,10 @@ impl AppRuntime {
                     return error_event("Workspace journal entry not found");
                 };
                 (
-                    workspace_resume_branch_from_journal_project_root(&entry.project_root),
+                    workspace_resume_branch_from_journal_project_root(
+                        &entry.project_root,
+                        &project_root,
+                    ),
                     workspace_resume_context_from_journal(&entry),
                 )
             }
