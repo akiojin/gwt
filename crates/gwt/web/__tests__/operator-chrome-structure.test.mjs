@@ -396,7 +396,7 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
     /workspace-kanban-root[\s\S]+workspace-split[\s\S]+kanban-shell/,
     "expected Workspace Overview to share the split Kanban shell",
   );
-  for (const column of ["Active", "Suspended", "Completed"]) {
+  for (const column of ["Active", "Inactive", "Completed"]) {
     assert.match(
       workspaceKanbanCombinedSource,
       new RegExp(`workspace-column-name">${column}`),
@@ -415,8 +415,13 @@ test("Workspace Overview uses the shared full-window Kanban + detail layout", ()
   );
   assert.match(
     workspaceKanbanSource,
-    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+open_active_work_launch_wizard[\s\S]+open_start_work/,
-    "expected every Workspace card Resume action to prefer branch resume and fall back to Start Work",
+    /function\s+resumeWorkspaceCard\([^)]*\)[\s\S]+resume_workspace[\s\S]+source:\s*"journal"[\s\S]+source:\s*"current"/,
+    "expected Workspace card Resume action to send card-scoped resume_workspace events",
+  );
+  assert.match(
+    workspaceKanbanSource,
+    /kind:\s*"journal"[\s\S]+branch:\s*""[\s\S]+worktree_path:\s*""/,
+    "expected suspended journal cards not to borrow the current Workspace branch/worktree",
   );
   assert.doesNotMatch(
     appSource,

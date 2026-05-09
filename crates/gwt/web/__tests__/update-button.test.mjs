@@ -35,11 +35,11 @@ test("update_state renders one reusable update CTA", () => {
 
   assert.equal(fixture.document.querySelectorAll("#update-cta").length, 1);
   const cta = fixture.document.getElementById("update-cta");
-  const action = cta.querySelector("[data-update-cta-action]");
-  const dismiss = cta.querySelector("[data-update-cta-dismiss]");
-  assert.equal(action.textContent, "Update available: v9.23.0 - Click to update");
-  assert.equal(action.title, "Update available: v9.23.0 - Click to update");
-  assert.equal(action.getAttribute("aria-label"), "Update available: v9.23.0 - Click to update");
+  const dismiss = fixture.document.querySelector("[data-update-cta-dismiss]");
+  assert.equal(cta.tagName, "BUTTON");
+  assert.equal(cta.textContent, "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.title, "Update available: v9.23.0 - Click to update");
+  assert.equal(cta.getAttribute("aria-label"), "Update available: v9.23.0 - Click to update");
   assert.equal(dismiss.textContent, "\u00d7");
   assert.equal(dismiss.getAttribute("aria-label"), "Dismiss update notification");
   assert.equal(cta.title, "Update available: v9.23.0 - Click to update");
@@ -53,7 +53,7 @@ test("update CTA click cancel leaves it available and does not send apply_update
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.23.0");
 
-  fixture.document.querySelector("[data-update-cta-action]").click();
+  fixture.document.getElementById("update-cta").click();
 
   assert.equal(fixture.confirmCalls.length, 1);
   assert.deepEqual(fixture.sent, []);
@@ -65,15 +65,14 @@ test("update CTA click approve sends apply_update and shows applying state", () 
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.23.0");
 
-  fixture.document.querySelector("[data-update-cta-action]").click();
+  fixture.document.getElementById("update-cta").click();
 
   assert.deepEqual(fixture.sent, [{ kind: "apply_update" }]);
   const cta = fixture.document.getElementById("update-cta");
-  const action = cta.querySelector("[data-update-cta-action]");
   assert.equal(cta.dataset.status, "applying");
-  assert.equal(action.disabled, true);
-  assert.equal(action.textContent, "Applying update...");
-  assert.equal(cta.querySelector("[data-update-cta-dismiss]"), null);
+  assert.equal(cta.disabled, true);
+  assert.equal(cta.textContent, "Applying update...");
+  assert.equal(fixture.document.querySelector("[data-update-cta-dismiss]"), null);
 });
 
 test("duplicate update_state does not reset an applying CTA", () => {
@@ -84,7 +83,7 @@ test("duplicate update_state does not reset an applying CTA", () => {
     current: "9.22.0",
     latest: "9.23.0",
   });
-  fixture.document.querySelector("[data-update-cta-action]").click();
+  fixture.document.getElementById("update-cta").click();
 
   controller.handleUpdateState({
     state: "available",
@@ -93,30 +92,28 @@ test("duplicate update_state does not reset an applying CTA", () => {
   });
 
   const cta = fixture.document.getElementById("update-cta");
-  const action = cta.querySelector("[data-update-cta-action]");
   assert.equal(cta.dataset.status, "applying");
-  assert.equal(action.disabled, true);
-  assert.equal(action.textContent, "Applying update...");
+  assert.equal(cta.disabled, true);
+  assert.equal(cta.textContent, "Applying update...");
 });
 
 test("update_apply_error reuses the same CTA and allows retry", () => {
   const fixture = createFixture({ confirmResult: true });
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.23.0");
-  fixture.document.querySelector("[data-update-cta-action]").click();
+  fixture.document.getElementById("update-cta").click();
 
   controller.showError("Failed to start the update.");
   const cta = fixture.document.getElementById("update-cta");
-  const action = cta.querySelector("[data-update-cta-action]");
 
   assert.equal(fixture.document.querySelectorAll("#update-cta").length, 1);
   assert.equal(cta.dataset.status, "error");
-  assert.equal(action.disabled, false);
-  assert.match(action.textContent, /Update failed/);
-  assert.match(action.textContent, /Failed to start the update/);
-  assert.ok(cta.querySelector("[data-update-cta-dismiss]"));
+  assert.equal(cta.disabled, false);
+  assert.match(cta.textContent, /Update failed/);
+  assert.match(cta.textContent, /Failed to start the update/);
+  assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
 
-  action.click();
+  cta.click();
   assert.deepEqual(fixture.sent, [{ kind: "apply_update" }, { kind: "apply_update" }]);
 });
 
@@ -147,7 +144,7 @@ test("dismissed update CTA reappears on the next update_state", () => {
   const cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "available");
   assert.equal(
-    cta.querySelector("[data-update-cta-action]").textContent,
+    cta.textContent,
     "Update available: v9.23.0 - Click to update",
   );
 });
@@ -156,13 +153,41 @@ test("update CTA dismiss hides error state without retrying", () => {
   const fixture = createFixture({ confirmResult: true });
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.23.0");
-  fixture.document.querySelector("[data-update-cta-action]").click();
+  fixture.document.getElementById("update-cta").click();
   controller.showError("Failed to start the update.");
 
   fixture.document.querySelector("[data-update-cta-dismiss]").click();
 
   assert.equal(fixture.document.getElementById("update-cta"), null);
   assert.deepEqual(fixture.sent, [{ kind: "apply_update" }]);
+});
+
+test("update_state removes stale split toast and button DOM before showing CTA", () => {
+  const fixture = createFixture();
+  const staleToast = fixture.document.createElement("button");
+  staleToast.className = "update-toast";
+  staleToast.textContent = "stale toast";
+  const staleButton = fixture.document.createElement("button");
+  staleButton.className = "update-button";
+  staleButton.textContent = "stale button";
+  const staleCta = fixture.document.createElement("div");
+  staleCta.id = "update-cta";
+  staleCta.textContent = "stale wrapper";
+  fixture.document.body.appendChild(staleToast);
+  fixture.document.body.appendChild(staleButton);
+  fixture.document.body.appendChild(staleCta);
+  const controller = createUpdateCtaController(fixture.options);
+
+  controller.handleUpdateState({
+    state: "available",
+    current: "9.22.0",
+    latest: "9.23.0",
+  });
+
+  assert.equal(Boolean(fixture.document.querySelector(".update-toast")), false);
+  assert.equal(Boolean(fixture.document.querySelector(".update-button")), false);
+  assert.equal(fixture.document.querySelectorAll("#update-cta").length, 1);
+  assert.equal(fixture.document.getElementById("update-cta").tagName, "BUTTON");
 });
 
 test("app.js delegates update handling to the unified update CTA controller", () => {
@@ -179,14 +204,15 @@ test("legacy split update toast and button surfaces are removed", () => {
 });
 
 test("index.html declares a fixed bottom-right unified update CTA style", () => {
+  const shellMatch = componentsCss.match(/\.update-cta-shell\s*\{[^}]+\}/);
+  assert.ok(shellMatch, "expected .update-cta-shell rule inside components.css");
+  assert.match(shellMatch[0], /position:\s*fixed/);
+  assert.match(shellMatch[0], /bottom:\s*\d+px/);
+  assert.match(shellMatch[0], /right:\s*\d+px/);
   const styleMatch = componentsCss.match(/\.update-cta\s*\{[^}]+\}/);
   assert.ok(styleMatch, "expected .update-cta rule inside components.css");
-  assert.match(styleMatch[0], /position:\s*fixed/);
-  assert.match(styleMatch[0], /bottom:\s*\d+px/);
-  assert.match(styleMatch[0], /right:\s*\d+px/);
   assert.match(componentsCss, /\.update-cta\.is-applying\s*\{/);
   assert.match(componentsCss, /\.update-cta\.is-error\s*\{/);
-  assert.match(componentsCss, /\.update-cta__action\s*\{/);
   assert.match(componentsCss, /\.update-cta__dismiss\s*\{/);
   assert.doesNotMatch(indexHtml, /\.update-cta\s*\{/);
 });

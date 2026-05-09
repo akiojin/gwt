@@ -86,7 +86,8 @@ pub(crate) use runtime_support::{
     knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
     resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
-    should_auto_start_restored_window, synthetic_branch_entry, workspace_view_for_tab,
+    should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
+    workspace_view_for_tab, worktrees_have_stale_branch_entry,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -1097,6 +1098,7 @@ mod tests {
             sessions_dir,
             launch_wizard_cache,
             launch_wizard: None,
+            pending_workspace_resume_contexts: HashMap::new(),
             active_agent_sessions: HashMap::new(),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
@@ -1138,6 +1140,7 @@ mod tests {
                 },
                 Vec::new(),
             ),
+            workspace_resume_context: None,
         }
     }
 
@@ -1245,6 +1248,7 @@ mod tests {
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
             ),
+            workspace_resume_context: None,
         }
     }
 
@@ -2718,6 +2722,7 @@ mod tests {
                 sample_wizard_stale_agent_options(),
                 Vec::new(),
             ),
+            workspace_resume_context: None,
         });
         {
             let wizard = &mut runtime.launch_wizard.as_mut().unwrap().wizard;
@@ -4175,6 +4180,55 @@ mod tests {
         assert!(env_vars
             .get("GWT_PROJECT_ROOT")
             .is_some_and(|value| super::same_worktree_path(Path::new(value), &worktree)));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_prunes_missing_existing_worktree_before_recreating() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let branch = "feature/stale-worktree";
+        let create_branch = gwt_core::process::hidden_command("git")
+            .args(["branch", branch])
+            .current_dir(&repo)
+            .status()
+            .expect("create branch");
+        assert!(create_branch.success(), "create branch failed");
+        let stale_worktree = temp.path().join("stale-worktree");
+        let add = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "-q"])
+            .arg(&stale_worktree)
+            .arg(branch)
+            .current_dir(&repo)
+            .status()
+            .expect("add worktree");
+        assert!(add.success(), "git worktree add failed");
+        fs::remove_dir_all(&stale_worktree).expect("remove stale worktree dir");
+
+        let mut base_branch = Some("develop".to_string());
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some(branch),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("stale worktree should be pruned and recreated");
+
+        let recreated = working_dir.expect("working dir");
+        assert!(recreated.exists(), "recreated worktree path must exist");
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &recreated)));
+        let output = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&recreated)
+            .output()
+            .expect("read recreated branch");
+        assert!(output.status.success(), "branch --show-current failed");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), branch);
     }
 
     #[test]

@@ -21,7 +21,7 @@ export function createWorkspaceKanbanSurface({
     return workspaceKanbanStateMap.get(windowId);
   }
 
-  function workspaceColumnForStatus(statusCategory) {
+  function workspaceColumnForCurrentStatus(statusCategory) {
     const state = String(statusCategory || "").toLowerCase();
     if (state === "active" || state === "blocked") {
       return "active";
@@ -29,7 +29,15 @@ export function createWorkspaceKanbanSurface({
     if (state === "done" || state === "completed" || state === "closed") {
       return "completed";
     }
-    return "suspended";
+    return "inactive";
+  }
+
+  function workspaceColumnForJournalStatus(statusCategory) {
+    const state = String(statusCategory || "").toLowerCase();
+    if (state === "done" || state === "completed" || state === "closed") {
+      return "completed";
+    }
+    return "inactive";
   }
 
   function ownerIssueNumber(owner) {
@@ -37,6 +45,27 @@ export function createWorkspaceKanbanSurface({
     if (!match) return null;
     const number = Number.parseInt(match[1] || match[2], 10);
     return Number.isFinite(number) ? number : null;
+  }
+
+  function compactWorkspaceTitle(value) {
+    const title = String(value || "").replace(/\s+/g, " ").trim();
+    if (!title) return "";
+    return title.length > 80 ? `${title.slice(0, 77)}...` : title;
+  }
+
+  function workspaceJournalCardTitle(entry) {
+    for (const value of [
+      entry.title,
+      entry.agent_title_summary,
+      entry.summary,
+      entry.agent_current_focus,
+      entry.status_text,
+      entry.next_action,
+    ]) {
+      const title = compactWorkspaceTitle(value);
+      if (title) return title;
+    }
+    return "Workspace update";
   }
 
   function workspaceCardsFromProjection(projection) {
@@ -63,7 +92,9 @@ export function createWorkspaceKanbanSurface({
         agents: Array.isArray(projection.agents) ? projection.agents : [],
         cleanup_candidate: projection.cleanup_candidate || null,
         updated_at: projection.updated_at || "",
-        column: workspaceColumnForStatus(projection.status_category),
+        resume_source: "current",
+        journal_id: null,
+        column: workspaceColumnForCurrentStatus(projection.status_category),
       },
     ];
 
@@ -71,11 +102,11 @@ export function createWorkspaceKanbanSurface({
       ? projection.journal_entries
       : [];
     for (const entry of journalEntries) {
-      const statusCategory = entry.status_category || projection.status_category || "idle";
+      const statusCategory = entry.status_category || "idle";
       cards.push({
         id: `journal-${entry.id || cards.length}`,
         kind: "journal",
-        title: entry.title || title,
+        title: workspaceJournalCardTitle(entry),
         status_category: statusCategory,
         status_text: entry.status_text || projection.status_text || "",
         summary:
@@ -87,8 +118,8 @@ export function createWorkspaceKanbanSurface({
           "Workspace update",
         owner: entry.owner || projection.owner || "",
         next_action: entry.next_action || "",
-        branch,
-        worktree_path: worktreePath,
+        branch: "",
+        worktree_path: "",
         pr_number: projection.pr_number || null,
         pr_url: projection.pr_url || "",
         pr_state: projection.pr_state || "",
@@ -96,7 +127,9 @@ export function createWorkspaceKanbanSurface({
         agents: [],
         cleanup_candidate: null,
         updated_at: entry.updated_at || "",
-        column: workspaceColumnForStatus(statusCategory),
+        resume_source: "journal",
+        journal_id: entry.id || "",
+        column: workspaceColumnForJournalStatus(statusCategory),
       });
     }
 
@@ -104,17 +137,15 @@ export function createWorkspaceKanbanSurface({
   }
 
   function resumeWorkspaceCard(card) {
-    const projection = getActiveWorkProjection();
-    const branchName = card?.branch || projection?.branch || "";
-    if (branchName) {
+    if (card?.resume_source === "journal" && card?.journal_id) {
       send({
-        kind: "open_active_work_launch_wizard",
-        branch_name: branchName,
-        linked_issue_number: ownerIssueNumber(card?.owner || projection?.owner),
+        kind: "resume_workspace",
+        source: "journal",
+        journal_id: card.journal_id,
       });
       return;
     }
-    send({ kind: "open_start_work" });
+    send({ kind: "resume_workspace", source: "current" });
   }
 
   function renderWorkspaceKanbanCard(windowId, state, cardData) {
@@ -297,7 +328,7 @@ export function createWorkspaceKanbanSurface({
 
     const counts = new Map();
     for (const cardData of cards) {
-      const column = columnsByStatus.get(cardData.column) || columnsByStatus.get("suspended");
+      const column = columnsByStatus.get(cardData.column) || columnsByStatus.get("inactive");
       const body = column?.querySelector("[data-role='body']");
       if (!body) continue;
       body.appendChild(renderWorkspaceKanbanCard(windowId, state, cardData));
@@ -347,9 +378,9 @@ export function createWorkspaceKanbanSurface({
                 </div>
                 <div class="kanban-column-body" data-role="body"></div>
               </div>
-              <div class="kanban-column workspace-kanban-column" data-workspace-column="suspended" aria-label="Suspended Workspace column">
+              <div class="kanban-column workspace-kanban-column" data-workspace-column="inactive" aria-label="Inactive Workspace column">
                 <div class="kanban-column-header">
-                  <span class="workspace-column-name">Suspended</span>
+                  <span class="workspace-column-name">Inactive</span>
                   <span class="kanban-column-count" data-role="count">0</span>
                 </div>
                 <div class="kanban-column-body" data-role="body"></div>
