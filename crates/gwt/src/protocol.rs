@@ -190,6 +190,17 @@ pub enum FrontendEvent {
         branch: String,
         delete_remote: bool,
     },
+    /// SPEC-1939 US-5: trigger a per-cell index rebuild for
+    /// `(project_root, scope, worktree_hash?)`. The backend funnels this
+    /// through the same orchestrator + `.lock` path as the auto-rebuild
+    /// orchestrator and `gwt index rebuild` CLI so concurrent invocations
+    /// dedup.
+    RebuildIndexCell {
+        project_root: String,
+        scope: crate::IndexRebuildScope,
+        #[serde(default)]
+        worktree_hash: Option<String>,
+    },
     PostBoardEntry {
         id: String,
         entry_kind: BoardEntryKind,

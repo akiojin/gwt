@@ -50,7 +50,14 @@ pub use custom_agents_service::{
 pub use daemon_runtime::{HookForwardTarget, RuntimeHookEvent, RuntimeHookEventKind};
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
-pub use index_worker::{ProjectIndexStatusState, ProjectIndexStatusView};
+pub use index_worker::{
+    aggregate_project_index_status_for_path, auto_repair_unhealthy_scopes,
+    build_aggregated_status_view, collect_unhealthy_rebuild_targets, default_rebuild_runner,
+    global_aggregated_status_cache, list_worktree_probe_inputs, parse_scope_health,
+    AggregatedStatusCache, IndexRebuildRunnerFn, IndexRebuildScope, IndexRebuildSpawner,
+    ProjectIndexScopes, ProjectIndexStatusState, ProjectIndexStatusView, RebuildProgress,
+    RebuildTarget, ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
+};
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,
     update_knowledge_phase, KnowledgeBridgeView, KnowledgeDetailSection, KnowledgeDetailView,
