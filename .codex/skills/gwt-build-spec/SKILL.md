@@ -65,10 +65,28 @@ Determine the mode at entry:
 ### SPEC mode
 
 1. `gwtd issue spec <N>` で SPEC の全セクション（spec, plan, tasks）を読み込む。
-2. Identify the next incomplete task slice in dependency order:
+2. Run the Board active-claim preflight for the target SPEC before choosing a
+   task slice:
+   - Read the current Board with `gwtd board show --json` when available, or
+     `gwtd board show` as the fallback.
+   - Look for active `claim` entries from another session that mention the same
+     owner (`#<N>` or `SPEC-<N>`) or the same phase label (`Phase <N>`,
+     `Phase <label>`) as the task slice under consideration.
+   - If a matching claim exists, pause before Phase 2 and present the conflict:
+     propose joining that session with a Board handoff request, splitting the
+     work through `gwt-discussion`, or continuing only after the user explicitly
+     accepts duplicate risk.
+   - Intentional parallel work is allowed only when write scopes are disjoint.
+     Post a fresh Board `claim` that includes a `Boundary:` line naming the
+     files/modules owned by this session before continuing.
+   - Acceptance scenario: Given another session has an active Board claim for
+     `SPEC-2008 Phase 24`, when `gwt-build-spec` starts for SPEC-2008, then the
+     preflight reports the claim and requires user confirmation before any RED
+     test or production edit is made.
+3. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-3. SPEC セクションの読み書きは `gwtd issue spec <N> --section <name>` / `gwtd issue spec <N> --edit <name> -f <file>` を使用する。
+4. SPEC セクションの読み書きは `gwtd issue spec <N> --section <name>` / `gwtd issue spec <N> --edit <name> -f <file>` を使用する。
 
 ### Standalone mode
 

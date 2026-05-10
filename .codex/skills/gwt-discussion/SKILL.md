@@ -154,6 +154,23 @@ exception path. Keep the same one-question-at-a-time discipline.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.
+6. If the clear owner is an existing SPEC, run the Board active-claim preflight
+   before changing `.gwt/discussion.md` or any SPEC/plan artifacts:
+   - Read the current Board with `gwtd board show --json` when available, or
+     `gwtd board show` as the fallback.
+   - Look for active `claim` entries from another session that mention the same
+     owner (`#<N>` or `SPEC-<N>`) or the same phase/topic under discussion.
+   - If a matching claim exists, pause the discussion flow and present the
+     conflict: join that session with a Board handoff request, redesign a
+     disjoint work split, or continue only after the user explicitly accepts
+     duplicate risk.
+   - Intentional parallel discussion/planning is allowed only when ownership is
+     disjoint. Post a fresh Board `claim` with a `Boundary:` line naming the
+     topic, artifacts, or files owned by this session before continuing.
+   - Acceptance scenario: Given another session has an active Board claim for
+     `SPEC-2008 Phase 24`, when `gwt-discussion --deepen SPEC-2008` starts,
+     then the preflight reports the claim and requires user confirmation before
+     producing an Action Delta or changing SPEC artifacts.
 
 ### Phase 2: Investigation
 
