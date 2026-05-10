@@ -2575,28 +2575,31 @@ mod tests {
     #[test]
     fn embedded_web_host_window_resize_fans_out_terminal_fit() {
         let js = app_js();
-        let host_resize_listener = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("resize",\s*\(\)\s*=>\s*\{(?P<body>.*?)\}\);"#,
-        )
-        .expect("valid regex");
-        let captures = host_resize_listener.captures(js).expect(
-            "expected an OS host window resize listener wired through window.addEventListener",
-        );
+        // After SPEC-2008 Phase 24 follow-up (PR #2590), the host resize
+        // fan-out is dispatched through `attachHostResizeReflow` from
+        // `terminal-viewport-reflow.js`. The behaviour assertion lives in
+        // `__tests__/terminal-viewport-reflow.test.mjs`; this Rust contract
+        // only confirms the wiring stays in the bundle.
+        let attach_call = regex::Regex::new(r#"(?s)attachHostResizeReflow\(\{(?P<body>.*?)\}\);"#)
+            .expect("valid regex");
+        let captures = attach_call
+            .captures(js)
+            .expect("expected attachHostResizeReflow wiring for host window.resize");
         let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
         assert!(
-            body.contains("syncMaximizedWindowsToViewport()"),
-            "expected host resize listener to keep maximized window sync, body: {body}",
-        );
-        assert!(
-            body.contains("terminalMap"),
-            "expected host resize listener to iterate terminalMap so per-terminal fit \
+            body.contains("terminalIds: () => terminalMap.keys()")
+                || body.contains("terminalMap.keys()"),
+            "expected attachHostResizeReflow to iterate terminalMap so per-terminal fit \
              can fan out to every visible terminal window (SPEC-2008 FR-050), body: {body}",
         );
         assert!(
-            body.contains("fitTerminal(") && body.contains(", true)"),
-            "expected host resize listener to call fitTerminal(id, true) for each terminal \
-             so xterm.js cols/rows refit and UpdateWindowGeometry persists to the backend; \
-             body: {body}",
+            body.contains("fitTerminal,"),
+            "expected attachHostResizeReflow to receive fitTerminal so cols/rows refit and \
+             UpdateWindowGeometry persists to the backend; body: {body}",
+        );
+        assert!(
+            body.contains("syncMaximizedWindowsToViewport()"),
+            "expected attachHostResizeReflow.beforeFan to keep maximized window sync, body: {body}",
         );
     }
 
@@ -2613,28 +2616,25 @@ mod tests {
             .find(signature)
             .expect("expected canRefreshTerminalViewport predicate definition");
         let after = &js[start..];
-        // Body extends until the next top-level `function ` declaration in
-        // the bundle. This avoids brittle non-greedy regex matching that
-        // trips on the early-return braces inside the predicate.
         let end_offset = after[signature.len()..]
             .find("\n      function ")
             .map(|i| signature.len() + i)
             .unwrap_or(after.len());
         let body = &after[..end_offset];
+        // After SPEC-2008 Phase 24 follow-up, the predicate delegates to
+        // `viewportEligibleForRefresh` in `terminal-viewport-reflow.js`.
+        // Behaviour (.hidden short-circuit + minimised short-circuit) is
+        // pinned by `__tests__/terminal-viewport-reflow.test.mjs`; this
+        // Rust contract only confirms the wiring stays in the bundle.
         assert!(
-            body.contains("minimized"),
-            "expected canRefreshTerminalViewport to keep minimized check; body: {body}",
+            body.contains("viewportEligibleForRefresh({"),
+            "expected canRefreshTerminalViewport to delegate to viewportEligibleForRefresh \
+             (SPEC-2008 FR-051 + Phase 24 follow-up); body: {body}",
         );
         assert!(
-            body.contains("element?.hidden") || body.contains("element.hidden"),
-            "expected canRefreshTerminalViewport to also skip windows whose DOM element is \
-             hidden (.hidden attribute set during tab visibility transition, SPEC-2008 FR-051); \
-             body: {body}",
-        );
-        assert!(
-            body.contains("windowMap.get(windowId)"),
-            "expected canRefreshTerminalViewport to look up the DOM element via windowMap so \
-             the hidden-tab check sees the actual element flag; body: {body}",
+            body.contains("windowMap.get(windowId)") && body.contains("workspaceWindowById"),
+            "expected predicate to forward both the DOM element and the workspace window \
+             so the helper can short-circuit on .hidden / minimized; body: {body}",
         );
     }
 
@@ -2654,10 +2654,18 @@ mod tests {
             .captures(js)
             .expect("expected the workspace.windows visibility loop that sets element.hidden");
         let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
+        // After SPEC-2008 Phase 24 follow-up, the loop delegates to
+        // `applyVisibilityTransition` from `terminal-viewport-reflow.js`.
+        // Hidden->visible behaviour is pinned by the linkedom behaviour
+        // test; here we only assert the wiring is intact.
         assert!(
-            body.contains("element.hidden") && body.contains("visibleWindowData"),
-            "expected the visibility loop to keep element.hidden = !visibleWindowData(...); \
-             body: {body}",
+            body.contains("applyVisibilityTransition({"),
+            "expected the visibility loop to delegate to applyVisibilityTransition \
+             so element.hidden mutation + reveal hook share one helper; body: {body}",
+        );
+        assert!(
+            body.contains("visibleWindowData(windowData)"),
+            "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
         );
         assert!(
             body.contains("scheduleTerminalFocusActivation(") && body.contains("terminalMap"),
