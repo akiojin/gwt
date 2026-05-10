@@ -1335,6 +1335,25 @@ fn update_apply_error_failed(stage: &str, reason: &str) -> BackendEvent {
     }
 }
 
+/// SPEC-2041 Phase 19 (FR-065, CodeRabbit review on PR #2630): pure
+/// validator for renderer-supplied update log paths. Returns the canonical
+/// path when (1) the input is non-empty and contains no URL scheme,
+/// (2) it canonicalizes successfully, (3) it is a file, and (4) it
+/// resides within the canonicalized `logs_root`. Returns `None` otherwise so
+/// callers can silently drop the request.
+fn validate_update_log_path(raw: &str, logs_root: &Path) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return None;
+    }
+    let canonical_root = std::fs::canonicalize(logs_root).ok()?;
+    let candidate = std::fs::canonicalize(trimmed).ok()?;
+    if !candidate.starts_with(&canonical_root) || !candidate.is_file() {
+        return None;
+    }
+    Some(candidate)
+}
+
 /// SPEC-2041 Phase 19 (FR-065): launch the platform default opener
 /// (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows). Errors are
 /// silently dropped so the modal does not surface noise; the path is logged
@@ -2061,30 +2080,18 @@ impl AppRuntime {
         log_path: Option<String>,
     ) -> Vec<OutboundEvent> {
         if let Some(raw) = log_path {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed.contains("://") {
-                return vec![];
-            }
             // Derive the allowed logs root from the canonical update log
             // resolver itself. AppRuntime is not allowed to call the legacy
             // `gwt_logs_dir()` directly (project-scoped resolver test in
             // main.rs), so we ride on `update_log_path()`'s parent.
-            let logs_root_candidate = match gwt_core::update::update_log_path().parent() {
-                Some(p) => p.to_path_buf(),
-                None => return vec![],
-            };
-            let logs_root = match std::fs::canonicalize(&logs_root_candidate) {
-                Ok(root) => root,
-                Err(_) => return vec![],
-            };
-            let candidate = match std::fs::canonicalize(trimmed) {
-                Ok(p) => p,
-                Err(_) => return vec![],
-            };
-            if !candidate.starts_with(&logs_root) || !candidate.is_file() {
-                return vec![];
+            if let Some(logs_root) = gwt_core::update::update_log_path()
+                .parent()
+                .map(|p| p.to_path_buf())
+            {
+                if let Some(safe) = validate_update_log_path(&raw, &logs_root) {
+                    let _ = open_path_with_os_default(&safe.to_string_lossy());
+                }
             }
-            let _ = open_path_with_os_default(&candidate.to_string_lossy());
         }
         vec![]
     }
@@ -11011,5 +11018,72 @@ exit 0
             )),
             "existing migration backup must be surfaced as a recovery error"
         );
+    }
+
+    // SPEC-2041 Phase 19 (FR-065 / CodeRabbit review on PR #2630): renderer-
+    // supplied log paths must canonicalize into the gwt update logs root.
+    // These tests cover the `validate_update_log_path` pure validator.
+    #[test]
+    fn validate_update_log_path_accepts_file_inside_logs_root() {
+        let logs_root = tempfile::tempdir().expect("logs root tempdir");
+        let log_file = logs_root.path().join("update-2026-05-10.log");
+        std::fs::write(&log_file, b"{}\n").unwrap();
+
+        let resolved =
+            super::validate_update_log_path(log_file.to_str().unwrap(), logs_root.path());
+        assert!(
+            resolved.is_some(),
+            "expected file inside logs_root to validate"
+        );
+        let resolved = resolved.unwrap();
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with("update-2026-05-10.log"));
+    }
+
+    #[test]
+    fn validate_update_log_path_rejects_files_outside_logs_root() {
+        let logs_root = tempfile::tempdir().expect("logs root tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("evil.txt");
+        std::fs::write(&outside_file, b"steal me").unwrap();
+
+        let resolved =
+            super::validate_update_log_path(outside_file.to_str().unwrap(), logs_root.path());
+        assert!(resolved.is_none(), "outside-root paths must be rejected");
+    }
+
+    #[test]
+    fn validate_update_log_path_rejects_url_schemes_and_empty() {
+        let logs_root = tempfile::tempdir().expect("logs root tempdir");
+        for raw in [
+            "",
+            "   ",
+            "http://evil.example/log",
+            "https://evil.example/log",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                super::validate_update_log_path(raw, logs_root.path()).is_none(),
+                "expected `{raw}` to be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_update_log_path_rejects_directories() {
+        let logs_root = tempfile::tempdir().expect("logs root tempdir");
+        // Caller passes the logs root itself; a directory must not be opened
+        // as a file.
+        let resolved =
+            super::validate_update_log_path(logs_root.path().to_str().unwrap(), logs_root.path());
+        assert!(resolved.is_none(), "directories must be rejected");
+    }
+
+    #[test]
+    fn validate_update_log_path_rejects_missing_files() {
+        let logs_root = tempfile::tempdir().expect("logs root tempdir");
+        let missing = logs_root.path().join("does-not-exist.log");
+        let resolved = super::validate_update_log_path(missing.to_str().unwrap(), logs_root.path());
+        assert!(resolved.is_none(), "missing files must be rejected");
     }
 }
