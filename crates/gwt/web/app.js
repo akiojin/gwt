@@ -1291,7 +1291,22 @@
       }
 
       function canRefreshTerminalViewport(windowId) {
-        return !workspaceWindowById(windowId)?.minimized;
+        if (workspaceWindowById(windowId)?.minimized) {
+          return false;
+        }
+        // SPEC-2008 FR-051 Phase 24: skip windows whose DOM element is
+        // currently `.hidden` (tab group non-active member, display:none
+        // equivalent). Running fitAddon.fit() while the element is hidden
+        // measures 0x0 and pollutes xterm.js with cols/rows = 0 so the
+        // scrollback wheel input stops responding until a manual resize.
+        // The hidden->visible transition (handled in the workspace render
+        // loop) will re-trigger scheduleTerminalFocusActivation, which
+        // re-checks this predicate and runs the deferred fit cleanly.
+        const element = windowMap.get(windowId);
+        if (element?.hidden) {
+          return false;
+        }
+        return true;
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -7093,7 +7108,19 @@
           ensureWindow(windowData);
           const element = windowMap.get(windowData.id);
           if (element) {
-            element.hidden = !visibleWindowData(windowData);
+            const wasHidden = element.hidden === true;
+            const nextHidden = !visibleWindowData(windowData);
+            element.hidden = nextHidden;
+            // SPEC-2008 FR-051 Phase 24: when a window-tab transitions from
+            // hidden -> visible (tab switch / focus cycle / window list /
+            // Command Palette), defer fit + viewport refresh + focus to the
+            // next animation frame so xterm.js measures a non-zero element
+            // and scrollback wheel/trackpad input responds without a manual
+            // resize. Skipping non-terminal panes is implicit: the helper
+            // exits early when terminalMap has no entry for the window id.
+            if (wasHidden && !nextHidden && terminalMap.has(windowData.id)) {
+              scheduleTerminalFocusActivation(windowData.id);
+            }
           }
         }
 
@@ -8246,6 +8273,17 @@
       window.addEventListener("resize", () => {
         frontendUnits.projectWorkspaceShell.renderWindowList();
         syncMaximizedWindowsToViewport();
+        // SPEC-2008 FR-050 Phase 24: fan out per-terminal fitTerminal() so
+        // xterm.js cols/rows track the new host viewport, and persist the
+        // updated geometry to the backend via UpdateWindowGeometry. Without
+        // this fan-out the wrap stays stuck at the previous host size until
+        // the user resizes a single terminal manually. fitTerminal already
+        // gates on canRefreshTerminalViewport, so minimized / hidden tabs
+        // are skipped automatically and will re-fit when they become
+        // visible (FR-051 hook above).
+        for (const windowId of terminalMap.keys()) {
+          fitTerminal(windowId, true);
+        }
       });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {
