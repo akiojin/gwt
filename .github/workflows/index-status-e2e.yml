@@ -67,6 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           export GWT_INDEX_TEST_FIXTURE="$WORKSPACE_ROOT/crates/gwt/playwright/fixtures/index-status-repair-required.json"
+
           # Headless display for tao + wry.
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x720x24 &
@@ -74,11 +75,21 @@ jobs:
           echo "XVFB_PID=$XVFB_PID" >> "$GITHUB_ENV"
           sleep 2
 
-          # Run gwt outside any git worktree so the project picker is the
-          # entry surface; the index status seam still applies because the
-          # aggregator is invoked via the bootstrap path.
-          mkdir -p /tmp/gwt-runtime
-          cd /tmp/gwt-runtime
+          # gwt opens the current directory as a project tab when it is a
+          # git repo. Initialise a tiny throwaway repo + an `origin` remote
+          # so the index status seam (which keys on origin URL hash) has a
+          # repo_hash to anchor on.
+          PROJECT_ROOT=/tmp/gwt-runtime/project
+          rm -rf /tmp/gwt-runtime
+          mkdir -p "$PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+          git init -q -b develop
+          git config user.email "ci@example.com"
+          git config user.name "CI"
+          git remote add origin https://example.com/gwt-e2e.git
+          echo '# gwt index e2e' > README.md
+          git add README.md
+          git commit -q -m "init"
 
           rm -f "$GWT_BROWSER_URL_FILE"
           "$WORKSPACE_ROOT/target/release/gwt" >/tmp/gwt.log 2>&1 &
