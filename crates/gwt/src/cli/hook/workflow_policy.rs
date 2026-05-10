@@ -407,6 +407,13 @@ fn is_read_only_git_branch_args(args: &[&str]) -> bool {
             list_mode = true;
             continue;
         }
+        if flag == "--no-list" {
+            if has_inline_value {
+                return false;
+            }
+            list_mode = false;
+            continue;
+        }
         if is_value_taking_git_branch_read_flag(flag) {
             pending_read_value = !has_inline_value;
             continue;
@@ -871,6 +878,8 @@ Coverage requirements.
             "git branch -avv --contains HEAD",
             "git branch -l 'work/*'",
             "git branch -i --list 'foo*'",
+            "git branch --no-list",
+            "git branch -l --no-list",
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
