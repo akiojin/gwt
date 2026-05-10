@@ -4,7 +4,9 @@ import { defineConfig, devices } from "@playwright/test";
 // Tests render the embedded gwt frontend and snapshot per surface × theme.
 export default defineConfig({
   testDir: "./tests",
+  outputDir: "./test-results",
   snapshotDir: "./snapshots",
+  snapshotPathTemplate: "{snapshotDir}/{testFilePath}/{projectName}/{platform}/{arg}{ext}",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
