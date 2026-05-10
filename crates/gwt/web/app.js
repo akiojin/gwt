@@ -29,6 +29,11 @@
         formatIndexStatusLabel,
       } from "/index-status-controller.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
+      import {
+        applyVisibilityTransition,
+        attachHostResizeReflow,
+        viewportEligibleForRefresh,
+      } from "/terminal-viewport-reflow.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -1362,17 +1367,15 @@
         });
       }
 
-      // SPEC-2008 Phase 24 / T-188: extend the predicate so a hidden tab
-      // (display:none on the window element) is treated the same as a
-      // minimized window. xterm.js's fit / refresh do nothing useful while
-      // the host is invisible, and skipping here prevents stale measurement
-      // from leaking into the next visible cycle.
+      // SPEC-2008 Phase 24 / T-188: a hidden tab (display:none) skips fit /
+      // refresh just like a minimized window. The shared predicate lives in
+      // `terminal-viewport-reflow.js` so the host resize controller and
+      // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
-        const element = windowMap.get(windowId);
-        if (element && element.hidden) {
-          return false;
-        }
-        return !workspaceWindowById(windowId)?.minimized;
+        return viewportEligibleForRefresh({
+          element: windowMap.get(windowId),
+          workspaceWindow: workspaceWindowById(windowId),
+        });
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -7250,22 +7253,20 @@
         // for tab-grouped terminal windows so the newly visible terminal
         // gets fit + viewport refresh + focus on the same animation frame
         // cycle. Without this, scrollback wheel input requires a manual
-        // OS-level resize before xterm picks up the new measurement.
-        const reflowAfterActivation = [];
+        // OS-level resize before xterm picks up the new measurement. The
+        // transition logic lives in `terminal-viewport-reflow.js` so a
+        // behavior test (linkedom + element stub) can exercise the
+        // hidden-to-visible activation path directly.
         for (const windowData of workspace.windows) {
           ensureWindow(windowData);
           const element = windowMap.get(windowData.id);
-          if (element) {
-            const wasHidden = element.hidden;
-            const shouldHide = !visibleWindowData(windowData);
-            element.hidden = shouldHide;
-            if (wasHidden && !shouldHide && terminalMap.has(windowData.id)) {
-              reflowAfterActivation.push(windowData.id);
-            }
-          }
-        }
-        for (const windowId of reflowAfterActivation) {
-          scheduleTerminalFocusActivation(windowId);
+          if (!element) continue;
+          applyVisibilityTransition({
+            element,
+            shouldHide: !visibleWindowData(windowData),
+            hasTerminal: terminalMap.has(windowData.id),
+            onReveal: () => scheduleTerminalFocusActivation(windowData.id),
+          });
         }
 
         requestAnimationFrame(syncMaximizedWindowsToViewport);
@@ -8414,21 +8415,21 @@
           event.preventDefault();
         }
       });
-      window.addEventListener("resize", () => {
-        frontendUnits.projectWorkspaceShell.renderWindowList();
-        syncMaximizedWindowsToViewport();
-        // SPEC-2008 Phase 24 / T-187: window.resize must fan out
-        // `fitTerminal(persist=true)` to every visible terminal window so
-        // xterm cols/rows stay aligned with the host viewport and the
-        // backend PTY is informed via UpdateWindowGeometry. Skipping here
-        // is what kept text wrapping fixed at the previous viewport width
-        // until the user manually resized each window.
-        for (const windowId of terminalMap.keys()) {
-          if (!canRefreshTerminalViewport(windowId)) {
-            continue;
-          }
-          fitTerminal(windowId, true);
-        }
+      // SPEC-2008 Phase 24 / T-187: host resize must fan out `fitTerminal
+      // (persist=true)` to every visible terminal so xterm cols/rows stay
+      // aligned with the viewport and `UpdateWindowGeometry` reaches the
+      // backend PTY. The fan-out lives in `terminal-viewport-reflow.js`
+      // so the behavior is exercised by linkedom unit tests rather than
+      // only source-string contract.
+      attachHostResizeReflow({
+        window,
+        terminalIds: () => terminalMap.keys(),
+        canRefreshViewport: canRefreshTerminalViewport,
+        fitTerminal,
+        beforeFan: () => {
+          frontendUnits.projectWorkspaceShell.renderWindowList();
+          syncMaximizedWindowsToViewport();
+        },
       });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {

@@ -1,108 +1,198 @@
-// SPEC-2008 Phase 24 / T-184..T-186 — terminal viewport reflow on resize
-// and tab visibility transitions. These tests pin the contract via
-// source-level assertions on app.js. Behavior runs through the IIFE-scoped
-// `fitTerminal` / `canRefreshTerminalViewport` / `scheduleTerminalFocusActivation`
-// helpers, so we assert that the listener / activation hooks call into them
-// rather than re-implementing xterm.js + window state inside the test.
+// SPEC-2008 Phase 24 / T-184..T-186 — terminal viewport reflow on host
+// resize and tab visibility transitions. Behaviour tests drive the
+// extracted controller (terminal-viewport-reflow.js) so the operation
+// shape is exercised end-to-end (`tasks/lessons.md` 2026-05-07 lesson —
+// window interaction features need behavior tests, not only source-string
+// contract). app.js still imports the same primitives, and a thin
+// source-string assertion at the bottom makes sure the wiring stays in
+// place.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { parseHTML } from "linkedom";
+
+import {
+  applyVisibilityTransition,
+  attachHostResizeReflow,
+  viewportEligibleForRefresh,
+} from "../terminal-viewport-reflow.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 
-test("window.resize listener fans out fitTerminal(persist=true) across visible terminals (T-187)", () => {
-  // The resize handler block must (1) keep the existing
-  // `syncMaximizedWindowsToViewport()` call, (2) iterate over `terminalMap`
-  // keys, (3) skip via `canRefreshTerminalViewport`, and (4) call
-  // `fitTerminal(windowId, true)` so backend PTY receives
-  // `UpdateWindowGeometry`.
-  const resizeBlockMatch = appSource.match(
-    /window\.addEventListener\("resize",\s*\(\)\s*=>\s*\{([\s\S]*?)\n\s*\}\);/,
-  );
-  assert.ok(resizeBlockMatch, "window.resize listener block must exist");
-  const resizeBody = resizeBlockMatch[1];
+function fixtureWindow() {
+  const { document } = parseHTML(`<!doctype html><body></body>`);
+  return document.defaultView;
+}
 
-  assert.match(resizeBody, /syncMaximizedWindowsToViewport\(\);/);
-  assert.match(
-    resizeBody,
-    /for\s*\(\s*const\s+windowId\s+of\s+terminalMap\.keys\(\)\s*\)/,
-    "resize listener must iterate over terminalMap windows",
+test("attachHostResizeReflow fans fitTerminal(persist=true) across visible terminals (T-184/T-187)", () => {
+  const window = fixtureWindow();
+  const terminals = ["wtA", "wtB", "wtC"];
+  const fitCalls = [];
+  const beforeFanCalls = [];
+
+  const dispose = attachHostResizeReflow({
+    window,
+    terminalIds: () => terminals,
+    canRefreshViewport: (id) => id !== "wtB", // wtB is hidden / minimised.
+    fitTerminal: (id, persist) => fitCalls.push([id, persist]),
+    beforeFan: () => beforeFanCalls.push("flushed"),
+  });
+
+  window.dispatchEvent(new window.Event("resize"));
+
+  assert.deepEqual(beforeFanCalls, ["flushed"]);
+  assert.deepEqual(fitCalls, [
+    ["wtA", true],
+    ["wtC", true],
+  ]);
+
+  // dispose detaches the listener so subsequent resize events do not
+  // double-fire fan-out (regression against repeated wiring).
+  dispose();
+  window.dispatchEvent(new window.Event("resize"));
+  assert.deepEqual(fitCalls.length, 2, "dispose() must remove the listener");
+});
+
+test("applyVisibilityTransition fires onReveal only on hidden -> visible with terminal (T-185/T-188)", () => {
+  const { document } = parseHTML(`<!doctype html><body></body>`);
+  const make = (hidden) => {
+    const el = document.createElement("section");
+    el.hidden = hidden;
+    return el;
+  };
+
+  // hidden -> visible with terminal: must call onReveal and clear .hidden.
+  let revealed = 0;
+  const hiddenWithTerminal = make(true);
+  const fired = applyVisibilityTransition({
+    element: hiddenWithTerminal,
+    shouldHide: false,
+    hasTerminal: true,
+    onReveal: () => {
+      revealed += 1;
+    },
+  });
+  assert.equal(fired, true);
+  assert.equal(revealed, 1);
+  assert.equal(hiddenWithTerminal.hidden, false);
+
+  // hidden -> visible but no terminal runtime yet: do NOT fire (avoids
+  // scheduling fit on a window that has not mounted xterm).
+  let revealedNoTerm = 0;
+  const hiddenNoTerminal = make(true);
+  const firedNoTerm = applyVisibilityTransition({
+    element: hiddenNoTerminal,
+    shouldHide: false,
+    hasTerminal: false,
+    onReveal: () => {
+      revealedNoTerm += 1;
+    },
+  });
+  assert.equal(firedNoTerm, false);
+  assert.equal(revealedNoTerm, 0);
+  assert.equal(hiddenNoTerminal.hidden, false);
+
+  // visible -> visible: no transition, do NOT fire.
+  let revealedVisible = 0;
+  const visibleEl = make(false);
+  applyVisibilityTransition({
+    element: visibleEl,
+    shouldHide: false,
+    hasTerminal: true,
+    onReveal: () => {
+      revealedVisible += 1;
+    },
+  });
+  assert.equal(revealedVisible, 0);
+
+  // visible -> hidden: do NOT fire and apply the new hidden state.
+  let revealedHide = 0;
+  const becomingHidden = make(false);
+  applyVisibilityTransition({
+    element: becomingHidden,
+    shouldHide: true,
+    hasTerminal: true,
+    onReveal: () => {
+      revealedHide += 1;
+    },
+  });
+  assert.equal(revealedHide, 0);
+  assert.equal(becomingHidden.hidden, true);
+});
+
+test("viewportEligibleForRefresh skips display:none and minimised windows (T-186)", () => {
+  const { document } = parseHTML(`<!doctype html><body></body>`);
+  const visibleEl = document.createElement("section");
+  visibleEl.hidden = false;
+  const hiddenEl = document.createElement("section");
+  hiddenEl.hidden = true;
+
+  // Hidden element short-circuits before the workspace state is consulted.
+  assert.equal(
+    viewportEligibleForRefresh({ element: hiddenEl, workspaceWindow: { minimized: false } }),
+    false,
+    ".hidden element must skip refresh",
   );
-  assert.match(
-    resizeBody,
-    /canRefreshTerminalViewport\(windowId\)/,
-    "resize listener must skip windows that fail the refresh predicate",
+
+  // Visible + minimised: the existing minimised short-circuit still wins.
+  assert.equal(
+    viewportEligibleForRefresh({ element: visibleEl, workspaceWindow: { minimized: true } }),
+    false,
+    "minimised workspace state must skip refresh",
   );
-  assert.match(
-    resizeBody,
-    /fitTerminal\(windowId,\s*true\)/,
-    "resize listener must call fitTerminal with persist=true so backend PTY gets UpdateWindowGeometry",
+
+  // Visible + not minimised: refresh allowed.
+  assert.equal(
+    viewportEligibleForRefresh({ element: visibleEl, workspaceWindow: { minimized: false } }),
+    true,
+  );
+
+  // Defensive: missing element / workspaceWindow falls back to allow.
+  assert.equal(
+    viewportEligibleForRefresh({ element: null, workspaceWindow: null }),
+    true,
   );
 });
 
-test("renderWindows reflows hidden -> visible terminal tabs after activation (T-188)", () => {
-  // The transition detection block lives inside the workspace render. We
-  // require an "wasHidden" capture before mutating element.hidden plus a
-  // call to scheduleTerminalFocusActivation for any window that flips
-  // hidden -> visible and has a live terminal runtime.
-  assert.match(
-    appSource,
-    /const\s+wasHidden\s*=\s*element\.hidden;/,
-    "render must capture pre-mutation hidden state for transition detection",
-  );
-  assert.match(
-    appSource,
-    /const\s+shouldHide\s*=\s*!visibleWindowData\(windowData\);/,
-    "render must compute the new hidden state from workspace data",
-  );
-  assert.match(
-    appSource,
-    /element\.hidden\s*=\s*shouldHide;/,
-    "render must apply the new hidden state to the element",
-  );
-  assert.match(
-    appSource,
-    /if\s*\(wasHidden\s*&&\s*!shouldHide\s*&&\s*terminalMap\.has\(windowData\.id\)\)/,
-    "render must detect hidden -> visible transitions for terminal-bearing windows",
-  );
-  assert.match(
-    appSource,
-    /scheduleTerminalFocusActivation\(windowId\)/,
-    "render must call scheduleTerminalFocusActivation on hidden -> visible transitions",
+test("attachHostResizeReflow throws when given a non-DOM window", () => {
+  assert.throws(
+    () =>
+      attachHostResizeReflow({
+        window: null,
+        terminalIds: () => [],
+        canRefreshViewport: () => true,
+        fitTerminal: () => {},
+      }),
+    /requires a DOM window/,
   );
 });
 
-test("canRefreshTerminalViewport refuses refresh while the host element is .hidden (T-186)", () => {
-  // Match from the function header to the closing brace at column 6
-  // (function body indentation in the IIFE). element.hidden must
-  // short-circuit before the workspace minimized check so display:none
-  // tabs skip both fit and refresh.
-  const predicateMatch = appSource.match(
-    /function\s+canRefreshTerminalViewport\(windowId\)\s*\{([\s\S]*?)\n      \}/,
-  );
-  assert.ok(predicateMatch, "canRefreshTerminalViewport function must exist");
-  const body = predicateMatch[1];
-
-  assert.match(body, /windowMap\.get\(windowId\)/);
+test("app.js wires the reflow controller for resize, transition, and predicate", () => {
+  // Source-string contract retained per the lesson — limited to wiring
+  // detection so a future refactor that drops the import / call surfaces
+  // immediately, without claiming behaviour coverage.
   assert.match(
-    body,
-    /element\.hidden/,
-    "predicate must consult element.hidden so display:none tabs skip fit/refresh",
+    appSource,
+    /from "\/terminal-viewport-reflow\.js"/,
+    "app.js must import terminal-viewport-reflow primitives",
   );
   assert.match(
-    body,
-    /workspaceWindowById\(windowId\)\?\.minimized/,
-    "predicate must keep the existing minimized short-circuit",
+    appSource,
+    /attachHostResizeReflow\(\{[\s\S]*?fitTerminal,\s*\n[\s\S]*?\}\)/,
+    "host resize fan-out must dispatch through the reflow controller",
   );
-  // Order: element.hidden short-circuit must precede the minimized check.
-  const hiddenIdx = body.indexOf("element.hidden");
-  const minimizedIdx = body.indexOf("workspaceWindowById(windowId)?.minimized");
-  assert.ok(
-    hiddenIdx >= 0 && minimizedIdx > hiddenIdx,
-    "element.hidden short-circuit must come before the minimized check",
+  assert.match(
+    appSource,
+    /applyVisibilityTransition\(\{/,
+    "render path must apply visibility transition through the helper",
+  );
+  assert.match(
+    appSource,
+    /viewportEligibleForRefresh\(\{/,
+    "canRefreshTerminalViewport must consult the shared predicate",
   );
 });
