@@ -85,9 +85,6 @@
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
       const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
-      const projectWorkspaceOverviewButton = document.getElementById(
-        "project-workspace-overview-button",
-      );
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -8230,9 +8227,6 @@
       }
       if (workspaceOverviewEntry) {
         workspaceOverviewEntry.addEventListener("click", openWorkspaceOverview);
-      }
-      if (projectWorkspaceOverviewButton) {
-        projectWorkspaceOverviewButton.addEventListener("click", openWorkspaceOverview);
       }
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command

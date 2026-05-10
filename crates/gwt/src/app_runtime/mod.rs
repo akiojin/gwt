@@ -692,6 +692,33 @@ fn active_work_projection_from_saved_with_journal(
     }
 }
 
+fn empty_active_work_projection_view(
+    tab_id: &str,
+    tab: &ProjectTabRuntime,
+) -> gwt::ActiveWorkProjectionView {
+    gwt::ActiveWorkProjectionView {
+        id: tab_id.to_string(),
+        title: format!("{} workspace", tab.title),
+        status_category: "idle".to_string(),
+        status_text: String::new(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: None,
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        pr_created_at: None,
+        board_refs: Vec::new(),
+        journal_entries: Vec::new(),
+        cleanup_candidate: None,
+        agents: Vec::new(),
+    }
+}
+
 fn active_work_cleanup_candidate_view_from_candidate(
     candidate: gwt_core::workspace_projection::WorkspaceCleanupCandidate,
 ) -> gwt::ActiveWorkCleanupCandidateView {
@@ -1929,6 +1956,23 @@ impl AppRuntime {
         ))
     }
 
+    /// Like `active_work_projection_broadcast_for_active_tab`, but always emits an event
+    /// when an active tab exists — falling back to an empty projection so that frontends
+    /// clear stale per-project data when the tab focus moves to a project without
+    /// any saved projection or live agent sessions.
+    fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
+        let tab_id = self.active_tab_id.as_ref()?;
+        let tab = self.tab(tab_id)?;
+        let projection = self
+            .active_work_projection_for_tab(tab_id, tab)
+            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab));
+        Some(OutboundEvent::broadcast(
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
+        ))
+    }
+
     fn active_work_projection_for_tab(
         &self,
         tab_id: &str,
@@ -2029,6 +2073,9 @@ impl AppRuntime {
         match self.open_project_path(path) {
             Ok(wizard_closed) => {
                 let mut events = vec![self.workspace_state_broadcast()];
+                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                    events.push(event);
+                }
                 if wizard_closed {
                     events.push(self.launch_wizard_state_broadcast(None));
                 }
@@ -2177,6 +2224,9 @@ impl AppRuntime {
         let wizard_closed = self.set_active_tab(tab_id.to_string());
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+            events.push(event);
+        }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -2225,6 +2275,9 @@ impl AppRuntime {
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+            events.push(event);
+        }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -6622,7 +6675,7 @@ exit 0
 
         let events = runtime.select_project_tab_events("tab-2");
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(matches!(events[0].target, DispatchTarget::Broadcast));
         assert!(matches!(
             events[0].event,
@@ -6631,8 +6684,96 @@ exit 0
         assert!(matches!(events[1].target, DispatchTarget::Broadcast));
         assert!(matches!(
             events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
+        assert!(matches!(events[2].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            events[2].event,
             BackendEvent::LaunchWizardState { wizard: None }
         ));
+    }
+
+    #[test]
+    fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_tab() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other).expect("create other");
+        let tabs = vec![
+            sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+            sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+
+        let events = runtime.select_project_tab_events("tab-2");
+
+        let projection = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+                _ => None,
+            })
+            .expect("ActiveWorkProjection broadcast for newly selected tab");
+        assert_eq!(
+            projection.id, "tab-2",
+            "projection must reflect the newly active tab"
+        );
+    }
+
+    #[test]
+    fn app_runtime_close_project_tab_emits_active_work_projection_when_active_changes() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other).expect("create other");
+        let tabs = vec![
+            sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+            sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+
+        let events = runtime.close_project_tab_events("tab-1");
+
+        let projection = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+                _ => None,
+            })
+            .expect("ActiveWorkProjection broadcast after closing the active tab");
+        assert_eq!(
+            projection.id, "tab-2",
+            "projection must reflect the new active tab after close"
+        );
+    }
+
+    #[test]
+    fn app_runtime_open_project_path_emits_active_work_projection_for_new_tab() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tabs = vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[],
+        )];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+
+        let other = temp.path().join("other-project");
+        fs::create_dir_all(&other).expect("create other");
+
+        let events = runtime.open_project_path_events(other.clone());
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.event, BackendEvent::ActiveWorkProjection { .. })),
+            "opening a new project must emit ActiveWorkProjection for the new active tab"
+        );
     }
 
     #[test]
