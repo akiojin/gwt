@@ -1635,6 +1635,11 @@ impl AppRuntime {
                 branch,
                 delete_remote,
             } => self.run_workspace_cleanup_events(&client_id, &branch, delete_remote),
+            FrontendEvent::RebuildIndexCell {
+                project_root,
+                scope,
+                worktree_hash,
+            } => self.rebuild_index_cell_events(project_root, scope, worktree_hash),
             FrontendEvent::PostBoardEntry {
                 id,
                 entry_kind,
@@ -3176,6 +3181,28 @@ impl AppRuntime {
             self.active_session_branches_for_tab(tab_id),
             branch.to_string(),
             delete_remote,
+        );
+        Vec::new()
+    }
+
+    /// SPEC-1939 US-5 / T-IDX-102: handle a per-cell rebuild request from the
+    /// frontend. Spawns the rebuild via the global bootstrap service so the
+    /// in-flight set is shared with the orchestrator and CLI.
+    pub(crate) fn rebuild_index_cell_events(
+        &self,
+        project_root: String,
+        scope: gwt::IndexRebuildScope,
+        worktree_hash: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let project_root = std::path::PathBuf::from(project_root);
+        let service =
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let _request = crate::project_index_bootstrap::spawn_per_cell_rebuild(
+            service,
+            self.proxy.clone(),
+            project_root,
+            scope,
+            worktree_hash,
         );
         Vec::new()
     }
