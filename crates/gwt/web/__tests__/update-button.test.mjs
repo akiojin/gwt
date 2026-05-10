@@ -48,26 +48,17 @@ test("update_state renders one reusable update CTA", () => {
   assert.equal(fixture.versionUpdates.length, 2);
 });
 
-test("update CTA click cancel leaves it available and does not send apply_update", () => {
-  const fixture = createFixture({ confirmResult: false });
-  const controller = createUpdateCtaController(fixture.options);
-  controller.showAvailable("9.23.0");
-
-  fixture.document.getElementById("update-cta").click();
-
-  assert.equal(fixture.confirmCalls.length, 1);
-  assert.deepEqual(fixture.sent, []);
-  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "available");
-});
-
-test("update CTA click approve sends apply_update and shows applying state", () => {
+// Phase 19 supersedes the Phase 14 window.confirm gate. The "click cancel"
+// test is dropped because the new modal flow always sends apply_update_start;
+// see the dedicated phase19 tests below for the modal-driven cancel path.
+test("update CTA click sends apply_update_start and shows applying state with modal", () => {
   const fixture = createFixture({ confirmResult: true });
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.23.0");
 
   fixture.document.getElementById("update-cta").click();
 
-  assert.deepEqual(fixture.sent, [{ kind: "apply_update" }]);
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
   const cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "applying");
   assert.equal(cta.disabled, true);
@@ -114,7 +105,10 @@ test("update_apply_error reuses the same CTA and allows retry", () => {
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
 
   cta.click();
-  assert.deepEqual(fixture.sent, [{ kind: "apply_update" }, { kind: "apply_update" }]);
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "apply_update_start" },
+  ]);
 });
 
 test("update CTA dismiss hides available state without applying", () => {
@@ -159,7 +153,7 @@ test("update CTA dismiss hides error state without retrying", () => {
   fixture.document.querySelector("[data-update-cta-dismiss]").click();
 
   assert.equal(fixture.document.getElementById("update-cta"), null);
-  assert.deepEqual(fixture.sent, [{ kind: "apply_update" }]);
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
 });
 
 test("update_state removes stale split toast and button DOM before showing CTA", () => {
@@ -193,7 +187,14 @@ test("update_state removes stale split toast and button DOM before showing CTA",
 test("app.js delegates update handling to the unified update CTA controller", () => {
   assert.match(appSource, /createUpdateCtaController/);
   assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
-  assert.match(appSource, /updateCtaController\.showError\(/);
+  // Phase 19 replaces showError() with handleUpdateApplyError().
+  assert.match(appSource, /updateCtaController\.handleUpdateApplyError\(/);
+  assert.match(appSource, /updateCtaController\.handleUpdateProgress\(/);
+  assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);
+  assert.match(
+    appSource,
+    /updateCtaController\.handleUpdateApplyPendingPersisted\(/,
+  );
 });
 
 test("legacy split update toast and button surfaces are removed", () => {

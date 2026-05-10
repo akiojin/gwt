@@ -7801,8 +7801,31 @@
               updateCtaController.handleUpdateState(event);
             }
             break;
+          case "update_progress":
+            updateCtaController.handleUpdateProgress({
+              downloaded: event.downloaded,
+              total: event.total,
+              asset: event.asset,
+              version: event.version,
+            });
+            break;
+          case "update_ready":
+            updateCtaController.handleUpdateReady({
+              version: event.version,
+              asset_path: event.asset_path,
+            });
+            break;
           case "update_apply_error":
-            updateCtaController.showError(event.message || "Failed to start the update.");
+            updateCtaController.handleUpdateApplyError({
+              stage: event.stage,
+              reason: event.reason || event.message,
+              log_path: event.log_path,
+            });
+            break;
+          case "update_apply_pending_persisted":
+            updateCtaController.handleUpdateApplyPendingPersisted({
+              version: event.version,
+            });
             break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];

@@ -203,10 +203,137 @@ body::after {
   color: var(--color-state-blocked);
 }
 
+.update-cta.is-ready {
+  border-color: var(--color-state-active, var(--color-focus-ring));
+  color: var(--color-state-active, var(--color-text-primary));
+}
+
 .update-cta:focus-visible,
 .update-cta__dismiss:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* SPEC-2041 Phase 19 — Post-click update modal. */
+
+.update-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 10100;
+}
+
+.update-modal__panel {
+  min-width: 360px;
+  max-width: 480px;
+  padding: 24px 28px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg, 8px);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-3, 0 18px 48px rgba(0, 0, 0, 0.42));
+  font: var(--font-body);
+}
+
+.update-modal__panel h2 {
+  margin: 0 0 12px;
+  font-size: var(--font-size-h3, 18px);
+  letter-spacing: 0.01em;
+}
+
+.update-modal__version {
+  margin: 0 0 8px;
+  font-size: var(--font-size-body, 14px);
+  color: var(--color-text-secondary);
+}
+
+.update-modal__hint {
+  margin: 0 0 16px;
+  font-size: var(--font-size-body-sm, 13px);
+  color: var(--color-text-secondary);
+}
+
+.update-modal__progress {
+  position: relative;
+  height: 8px;
+  margin: 12px 0 8px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--color-surface-sunken, rgba(255, 255, 255, 0.08));
+  overflow: hidden;
+}
+
+.update-modal__progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--color-state-active, var(--color-focus-ring));
+  transition: width 120ms linear;
+}
+
+.update-modal__bytes {
+  margin: 0 0 16px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--font-size-body-sm, 13px);
+  color: var(--color-text-secondary);
+}
+
+.update-modal__details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 12px;
+  margin: 0 0 16px;
+  font-size: var(--font-size-body-sm, 13px);
+}
+
+.update-modal__details dt {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.update-modal__details dd {
+  margin: 0;
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
+.update-modal__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.update-modal__btn {
+  appearance: none;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  padding: 8px 14px;
+  border-radius: var(--radius-sm, 4px);
+  font: inherit;
+  cursor: pointer;
+}
+
+.update-modal__btn:hover {
+  background: var(--color-surface-hover, rgba(255, 255, 255, 0.04));
+}
+
+.update-modal__btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.update-modal__btn--primary {
+  border-color: var(--color-state-active, var(--color-focus-ring));
+  background: var(--color-state-active, var(--color-focus-ring));
+  color: var(--color-text-on-accent, #0a0a0a);
+}
+
+.update-modal__btn--secondary {
+  background: transparent;
 }
 
 .terminal-context-menu {
