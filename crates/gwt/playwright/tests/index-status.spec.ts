@@ -268,6 +268,97 @@ test.describe("Project Index status badge", () => {
     await expect(dot).toHaveAttribute("data-state", "repairing", { timeout: 5_000 });
   });
 
+  test("multi-worktree dot aggregates: unhealthy in one worktree turns the dot red", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+
+    // wtA healthy, wtB healthy → dot ready.
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        files: {
+          wtAhash: { healthy: true, repair_required: false, document_count: 310 },
+          wtBhash: { healthy: true, repair_required: false, document_count: 200 },
+        },
+        "files-docs": {
+          wtAhash: { healthy: true, repair_required: false, document_count: 16 },
+          wtBhash: { healthy: true, repair_required: false, document_count: 10 },
+        },
+      },
+      worktrees: {
+        wtAhash: { branch: "develop", path: "/abs/wtA" },
+        wtBhash: { branch: "feature/x", path: "/abs/wtB" },
+      },
+    });
+
+    await page.goto(APP_URL);
+    const dot = page.locator(".project-tab .project-tab-dot");
+    await expect(dot).toHaveAttribute("data-state", "ready", { timeout: 10_000 });
+
+    // Force wtB's files unhealthy → dot must flip to error even though
+    // wtA stays healthy (aggregation is "any unhealthy → red").
+    await page.evaluate(() => {
+      window.__gwtFixtureWebSocket.emit({
+        kind: "project_index_status",
+        project_root: "/fixture",
+        status: {
+          state: "repair_required",
+          detail: "",
+          progress: null,
+          scopes: {
+            files: {
+              wtAhash: { healthy: true, repair_required: false, document_count: 310 },
+              wtBhash: {
+                healthy: false,
+                repair_required: true,
+                document_count: 0,
+                reason: "manifest_missing",
+              },
+            },
+            "files-docs": {
+              wtAhash: { healthy: true, repair_required: false, document_count: 16 },
+              wtBhash: { healthy: true, repair_required: false, document_count: 10 },
+            },
+          },
+          worktrees: {
+            wtAhash: { branch: "develop", path: "/abs/wtA" },
+            wtBhash: { branch: "feature/x", path: "/abs/wtB" },
+          },
+        },
+      });
+    });
+    await expect(dot).toHaveAttribute("data-state", "error", { timeout: 5_000 });
+
+    // Restore wtB to healthy → dot returns to ready.
+    await page.evaluate(() => {
+      window.__gwtFixtureWebSocket.emit({
+        kind: "project_index_status",
+        project_root: "/fixture",
+        status: {
+          state: "ready",
+          detail: "",
+          progress: null,
+          scopes: {
+            files: {
+              wtAhash: { healthy: true, repair_required: false, document_count: 310 },
+              wtBhash: { healthy: true, repair_required: false, document_count: 200 },
+            },
+            "files-docs": {
+              wtAhash: { healthy: true, repair_required: false, document_count: 16 },
+              wtBhash: { healthy: true, repair_required: false, document_count: 10 },
+            },
+          },
+          worktrees: {
+            wtAhash: { branch: "develop", path: "/abs/wtA" },
+            wtBhash: { branch: "feature/x", path: "/abs/wtB" },
+          },
+        },
+      });
+    });
+    await expect(dot).toHaveAttribute("data-state", "ready", { timeout: 5_000 });
+  });
+
   test("badge click opens Settings.Index tab and renders the scope health table (T-IDX-106)", async ({
     page,
   }) => {
