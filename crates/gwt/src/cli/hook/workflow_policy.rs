@@ -384,14 +384,49 @@ fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
 }
 
 fn is_read_only_git_branch_args(args: &[&str]) -> bool {
-    const MUTATING_FLAGS: &[&str] = &[
-        "-c",
-        "-C",
-        "-d",
-        "-D",
-        "-m",
-        "-M",
-        "-u",
+    if args.iter().any(|arg| is_mutating_git_branch_arg(arg)) {
+        return false;
+    }
+
+    let mut list_mode = false;
+    let mut pending_read_value = false;
+    for arg in args {
+        if pending_read_value {
+            pending_read_value = false;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            if list_mode {
+                continue;
+            }
+            return false;
+        }
+
+        let (flag, has_inline_value) = split_flag_value(arg);
+        if flag == "--list" {
+            list_mode = true;
+            continue;
+        }
+        if is_value_taking_git_branch_read_flag(flag) {
+            pending_read_value = !has_inline_value;
+            continue;
+        }
+        if is_valueless_git_branch_read_flag(flag) || is_read_only_git_branch_short_flags(flag) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn split_flag_value(arg: &str) -> (&str, bool) {
+    arg.split_once('=')
+        .map(|(flag, _)| (flag, true))
+        .unwrap_or((arg, false))
+}
+
+fn is_mutating_git_branch_arg(arg: &str) -> bool {
+    const MUTATING_LONG_FLAGS: &[&str] = &[
         "--copy",
         "--delete",
         "--edit-description",
@@ -400,15 +435,55 @@ fn is_read_only_git_branch_args(args: &[&str]) -> bool {
         "--track",
         "--unset-upstream",
     ];
-    if args.iter().any(|arg| {
-        MUTATING_FLAGS.contains(arg)
-            || arg
-                .split_once('=')
-                .is_some_and(|(flag, _)| MUTATING_FLAGS.contains(&flag))
-    }) {
-        return false;
+    let (flag, _) = split_flag_value(arg);
+    if MUTATING_LONG_FLAGS.contains(&flag) {
+        return true;
     }
-    args.iter().all(|arg| arg.starts_with('-'))
+    arg.strip_prefix('-')
+        .filter(|shorts| !shorts.starts_with('-'))
+        .is_some_and(|shorts| {
+            shorts
+                .chars()
+                .any(|ch| matches!(ch, 'c' | 'C' | 'd' | 'D' | 'm' | 'M' | 'u'))
+        })
+}
+
+fn is_value_taking_git_branch_read_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--abbrev"
+            | "--color"
+            | "--column"
+            | "--contains"
+            | "--format"
+            | "--merged"
+            | "--no-contains"
+            | "--no-merged"
+            | "--points-at"
+            | "--sort"
+    )
+}
+
+fn is_valueless_git_branch_read_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--all"
+            | "--ignore-case"
+            | "--no-abbrev"
+            | "--no-color"
+            | "--no-column"
+            | "--omit-empty"
+            | "--quiet"
+            | "--remotes"
+            | "--show-current"
+            | "--verbose"
+    )
+}
+
+fn is_read_only_git_branch_short_flags(flag: &str) -> bool {
+    flag.strip_prefix('-')
+        .filter(|shorts| !shorts.is_empty() && !shorts.starts_with('-'))
+        .is_some_and(|shorts| shorts.chars().all(|ch| matches!(ch, 'a' | 'q' | 'r' | 'v')))
 }
 
 fn is_read_only_git_config_args(args: &[&str]) -> bool {
@@ -771,6 +846,30 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_read_only_git_branch_queries() {
+        for command in [
+            "git branch --contains HEAD",
+            "git branch --points-at HEAD",
+            "git branch --list 'work/*'",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": command
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+
+            assert_eq!(
+                evaluate_title_summary_guard(&event, true).expect("guard output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn title_summary_guard_blocks_mutating_exploration_like_sed_in_place() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
@@ -836,6 +935,28 @@ Coverage requirements.
             evaluate_title_summary_guard(&event, true).expect("guard output"),
             HookOutput::PreToolUsePermission { .. }
         ));
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_mutating_git_branch() {
+        for command in ["git branch new-work", "git branch -D old-work"] {
+            let event = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": command
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+
+            assert!(
+                matches!(
+                    evaluate_title_summary_guard(&event, true).expect("guard output"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "{command}"
+            );
+        }
     }
 
     #[test]
