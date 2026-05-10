@@ -516,6 +516,42 @@ pub fn command_matches_runner(command: &str, runner: &str) -> bool {
 }
 
 pub fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let docker_bin = std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string());
+    tracing::info!(
+        target: "gwt::launch::preflight",
+        runtime_target = "docker",
+        attempted_binary = %docker_bin,
+        path = %path,
+        "docker preflight started"
+    );
+    let result = run_docker_preflight();
+    match &result {
+        Ok(()) => {
+            tracing::info!(
+                target: "gwt::launch::preflight",
+                runtime_target = "docker",
+                outcome = "ready",
+                attempted_binary = %docker_bin,
+                "docker preflight completed"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "gwt::launch::preflight",
+                runtime_target = "docker",
+                outcome = "failed",
+                attempted_binary = %docker_bin,
+                path = %path,
+                error = %error,
+                "docker preflight failed"
+            );
+        }
+    }
+    result
+}
+
+fn run_docker_preflight() -> Result<(), String> {
     if !gwt_docker::docker_available() {
         return Err("Docker is not installed or not available on PATH".to_string());
     }

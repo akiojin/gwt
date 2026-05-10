@@ -80,9 +80,37 @@ pub fn apply_host_path_hydration_to_std_env() {
     if cfg!(windows) {
         return;
     }
-    if let Some(hydrated) = current_process_hydrated_path() {
-        std::env::set_var("PATH", hydrated);
-    }
+    let before = std::env::var("PATH").unwrap_or_default();
+    let before_count = std::env::split_paths(&before).count();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let Some(hydrated) = current_process_hydrated_path() else {
+        tracing::info!(
+            target: "gwt::launch::startup",
+            stage = "path_hydration",
+            outcome = "skipped",
+            reason = "no_hydrated_path",
+            path_before = %before,
+            path_entry_count_before = before_count,
+            home = %home,
+            "host PATH hydration skipped"
+        );
+        return;
+    };
+    let after_count = std::env::split_paths(&hydrated).count();
+    let added = after_count.saturating_sub(before_count);
+    std::env::set_var("PATH", &hydrated);
+    tracing::info!(
+        target: "gwt::launch::startup",
+        stage = "path_hydration",
+        outcome = "applied",
+        path_before = %before,
+        path_after = %hydrated,
+        path_entry_count_before = before_count,
+        path_entry_count_after = after_count,
+        path_entries_added = added,
+        home = %home,
+        "host PATH hydration applied"
+    );
 }
 
 /// Compute the hydrated PATH from the running process env.
@@ -784,5 +812,48 @@ mod tests {
     fn path_env_test_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn apply_host_path_hydration_to_std_env_emits_info_event_with_path_summary() {
+        use crate::test_capture::{CaptureLayer, CapturedEvents};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let _lock = path_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", "/usr/bin:/bin");
+
+        let events = CapturedEvents::new();
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            apply_host_path_hydration_to_std_env();
+        });
+
+        match original_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let captured = events.snapshot();
+        let info_events: Vec<_> = captured
+            .iter()
+            .filter(|event| event.level == tracing::Level::INFO)
+            .filter(|event| event.target == "gwt::launch::startup")
+            .collect();
+        assert!(
+            !info_events.is_empty(),
+            "expected at least one INFO event with target gwt::launch::startup; captured = {:?}",
+            captured
+        );
+        let event = info_events[0];
+        assert_eq!(
+            event.fields.get("stage").map(String::as_str),
+            Some("path_hydration")
+        );
+        assert!(event.fields.contains_key("path_before"));
+        assert!(event.fields.contains_key("path_entry_count_before"));
     }
 }

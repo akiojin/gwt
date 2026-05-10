@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Detected Docker files in a directory.
 #[derive(Debug, Clone, Default)]
@@ -30,17 +30,46 @@ impl DockerFiles {
 
 /// Run a docker sub-command and return whether it succeeded.
 fn docker_probe(args: &[&str], label: &str) -> bool {
-    let result = std::process::Command::new(docker_binary())
-        .args(args)
-        .output();
+    let binary = docker_binary();
+    let attempted_binary = binary.to_string_lossy().into_owned();
+    let result = std::process::Command::new(&binary).args(args).output();
     match result {
         Ok(output) => {
             let ok = output.status.success();
-            debug!(category = "docker", ok = ok, label = label, "probe");
+            info!(
+                target: "gwt::launch::probe",
+                category = "docker",
+                label = label,
+                attempted_binary = %attempted_binary,
+                ok = ok,
+                "docker probe"
+            );
+            if !ok {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = stderr.trim();
+                if !stderr.is_empty() {
+                    debug!(
+                        target: "gwt::launch::probe",
+                        category = "docker",
+                        label = label,
+                        attempted_binary = %attempted_binary,
+                        stderr = %stderr,
+                        "docker probe stderr"
+                    );
+                }
+            }
             ok
         }
         Err(e) => {
-            debug!(category = "docker", error = %e, label = label, "probe failed");
+            info!(
+                target: "gwt::launch::probe",
+                category = "docker",
+                label = label,
+                attempted_binary = %attempted_binary,
+                ok = false,
+                error = %e,
+                "docker probe failed"
+            );
             false
         }
     }
@@ -209,5 +238,103 @@ mod tests {
     #[test]
     fn daemon_running_returns_bool() {
         let _ = daemon_running();
+    }
+
+    #[test]
+    fn docker_probe_emits_info_event_with_label_and_attempted_binary() {
+        use std::sync::{Arc, Mutex};
+        use tracing::{Event, Level, Subscriber};
+        use tracing_subscriber::{
+            layer::{Context, Layer, SubscriberExt},
+            registry::LookupSpan,
+        };
+
+        #[derive(Clone, Debug)]
+        struct CapturedEvent {
+            level: Level,
+            target: String,
+            fields: std::collections::HashMap<String, String>,
+        }
+
+        struct CaptureLayer {
+            events: Arc<Mutex<Vec<CapturedEvent>>>,
+        }
+
+        struct CaptureVisitor<'a>(&'a mut CapturedEvent);
+
+        impl<'a> tracing::field::Visit for CaptureVisitor<'a> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+            fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+                self.0
+                    .fields
+                    .insert(field.name().to_string(), value.to_string());
+            }
+        }
+
+        impl<S> Layer<S> for CaptureLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                let mut captured = CapturedEvent {
+                    level: *event.metadata().level(),
+                    target: event.metadata().target().to_string(),
+                    fields: std::collections::HashMap::new(),
+                };
+                event.record(&mut CaptureVisitor(&mut captured));
+                self.events.lock().unwrap().push(captured);
+            }
+        }
+
+        let _lock = docker_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_bin = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", "/this-binary-does-not-exist-gwt-test");
+
+        let events = Arc::new(Mutex::new(Vec::<CapturedEvent>::new()));
+        let layer = CaptureLayer {
+            events: Arc::clone(&events),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = docker_available();
+        });
+
+        match previous_bin {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        let captured = events.lock().unwrap().clone();
+        let info_events: Vec<_> = captured
+            .iter()
+            .filter(|event| event.level == Level::INFO && event.target == "gwt::launch::probe")
+            .collect();
+        assert!(
+            !info_events.is_empty(),
+            "expected at least one INFO event with target gwt::launch::probe; captured = {:?}",
+            captured
+        );
+        let event = info_events[0];
+        assert_eq!(
+            event.fields.get("label").map(String::as_str),
+            Some("docker CLI")
+        );
+        assert!(event.fields.contains_key("attempted_binary"));
+    }
+
+    fn docker_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }

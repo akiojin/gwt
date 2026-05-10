@@ -291,6 +291,12 @@ impl ScopedEnvVar {
         env::set_var(key, value);
         Self { key, previous }
     }
+
+    pub(crate) fn unset(key: &'static str) -> Self {
+        let previous = env::var_os(key);
+        env::remove_var(key);
+        Self { key, previous }
+    }
 }
 
 impl Drop for ScopedEnvVar {

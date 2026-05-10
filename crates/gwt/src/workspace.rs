@@ -287,23 +287,32 @@ impl WorkspaceState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
-        let window = &mut self.persisted.windows[index];
-        if window.maximized {
-            if let Some(geometry) = window.pre_maximize_geometry.take() {
-                window.geometry = geometry;
+        let group_id = self.persisted.windows[index].tab_group_id.clone();
+        let was_maximized = self.persisted.windows[index].maximized;
+        let restore_geometry = self.persisted.windows[index].pre_maximize_geometry.clone();
+        let pre_geometry = self.persisted.windows[index].geometry.clone();
+        let target_geometry = WindowGeometry {
+            x: bounds.x + ARRANGE_PADDING,
+            y: bounds.y + ARRANGE_PADDING,
+            width: (bounds.width - ARRANGE_PADDING * 2.0).max(0.0),
+            height: (bounds.height - ARRANGE_PADDING * 2.0).max(0.0),
+        };
+
+        for member in self.group_member_indices(group_id.as_deref(), index) {
+            let window = &mut self.persisted.windows[member];
+            if was_maximized {
+                if let Some(geometry) = restore_geometry.clone() {
+                    window.geometry = geometry;
+                }
+                window.pre_maximize_geometry = None;
+                window.maximized = false;
+                window.minimized = false;
+            } else {
+                window.pre_maximize_geometry = Some(pre_geometry.clone());
+                window.geometry = target_geometry.clone();
+                window.minimized = false;
+                window.maximized = true;
             }
-            window.maximized = false;
-            window.minimized = false;
-        } else {
-            window.pre_maximize_geometry = Some(window.geometry.clone());
-            window.geometry = WindowGeometry {
-                x: bounds.x + ARRANGE_PADDING,
-                y: bounds.y + ARRANGE_PADDING,
-                width: (bounds.width - ARRANGE_PADDING * 2.0).max(0.0),
-                height: (bounds.height - ARRANGE_PADDING * 2.0).max(0.0),
-            };
-            window.minimized = false;
-            window.maximized = true;
         }
         self.bring_to_front(index);
         true
@@ -313,17 +322,25 @@ impl WorkspaceState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
-        let window = &mut self.persisted.windows[index];
-        if window.minimized {
-            window.minimized = false;
-        } else {
-            if window.maximized {
-                if let Some(geometry) = window.pre_maximize_geometry.take() {
-                    window.geometry = geometry;
+        let group_id = self.persisted.windows[index].tab_group_id.clone();
+        let was_minimized = self.persisted.windows[index].minimized;
+        let was_maximized = self.persisted.windows[index].maximized;
+        let restore_geometry = self.persisted.windows[index].pre_maximize_geometry.clone();
+
+        for member in self.group_member_indices(group_id.as_deref(), index) {
+            let window = &mut self.persisted.windows[member];
+            if was_minimized {
+                window.minimized = false;
+            } else {
+                if was_maximized {
+                    if let Some(geometry) = restore_geometry.clone() {
+                        window.geometry = geometry;
+                    }
+                    window.pre_maximize_geometry = None;
+                    window.maximized = false;
                 }
-                window.maximized = false;
+                window.minimized = true;
             }
-            window.minimized = true;
         }
         self.bring_to_front(index);
         true
@@ -333,32 +350,40 @@ impl WorkspaceState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
-        let window = &mut self.persisted.windows[index];
-        if window.maximized {
-            if let Some(geometry) = window.pre_maximize_geometry.take() {
-                window.geometry = geometry;
-            }
-            window.maximized = false;
-            window.minimized = false;
-        } else if window.minimized {
-            window.minimized = false;
-        } else {
+        let window = &self.persisted.windows[index];
+        let was_maximized = window.maximized;
+        let was_minimized = window.minimized;
+        if !was_maximized && !was_minimized {
             return false;
+        }
+        let group_id = window.tab_group_id.clone();
+        let restore_geometry = window.pre_maximize_geometry.clone();
+
+        for member in self.group_member_indices(group_id.as_deref(), index) {
+            let window = &mut self.persisted.windows[member];
+            if was_maximized {
+                if let Some(geometry) = restore_geometry.clone() {
+                    window.geometry = geometry;
+                }
+                window.pre_maximize_geometry = None;
+                window.maximized = false;
+                window.minimized = false;
+            } else {
+                window.minimized = false;
+            }
         }
         self.bring_to_front(index);
         true
     }
 
     pub fn update_geometry(&mut self, id: &str, geometry: WindowGeometry) -> bool {
-        let Some(window) = self
-            .persisted
-            .windows
-            .iter_mut()
-            .find(|window| window.id == id)
-        else {
+        let Some(index) = self.window_index(id) else {
             return false;
         };
-        window.geometry = geometry;
+        let group_id = self.persisted.windows[index].tab_group_id.clone();
+        for member in self.group_member_indices(group_id.as_deref(), index) {
+            self.persisted.windows[member].geometry = geometry.clone();
+        }
         true
     }
 
@@ -425,13 +450,14 @@ impl WorkspaceState {
         let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
             return self.focus_window(id, None);
         };
-        let group_geometry = self.persisted.windows[index].geometry.clone();
+        // SPEC-2008 FR-043C: chrome 状態 (geometry / maximize / minimize /
+        // pre_maximize_geometry) は group-aware mutator で常時同期されている
+        // ため、activate ではアクティブマーカと z_index のみを更新する。
         let next_z_index = self.persisted.next_z_index;
         self.persisted.next_z_index += 1;
         for window in &mut self.persisted.windows {
             if window.tab_group_id.as_deref() == Some(&group_id) {
                 window.tab_group_active = window.id == id;
-                window.geometry = group_geometry.clone();
                 window.z_index = next_z_index;
             }
         }
@@ -600,6 +626,29 @@ impl WorkspaceState {
             .windows
             .iter()
             .position(|window| window.id == id)
+    }
+
+    // SPEC-2008 FR-043C: group-aware mutator が触るべき index 集合を返す。
+    // group_id が None なら fallback として primary_index 単独を返し、未グループ
+    // ウィンドウでも同じコードパスを使い回せるようにする。
+    fn group_member_indices(&self, group_id: Option<&str>, primary_index: usize) -> Vec<usize> {
+        let Some(group_id) = group_id else {
+            return vec![primary_index];
+        };
+        let members: Vec<usize> = self
+            .persisted
+            .windows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, window)| {
+                (window.tab_group_id.as_deref() == Some(group_id)).then_some(index)
+            })
+            .collect();
+        if members.is_empty() {
+            vec![primary_index]
+        } else {
+            members
+        }
     }
 
     fn bring_to_front(&mut self, index: usize) {
@@ -1423,5 +1472,140 @@ mod tests {
                 .any(|window| window.tab_group_active),
             "source group must keep one visible active tab after active tab moves out"
         );
+    }
+
+    // SPEC-2008 US-14 / FR-043C: tab グループに属するウィンドウの geometry /
+    // maximize / minimize / pre_maximize_geometry を変更する mutator は、同じ
+    // tab_group_id を持つ全メンバーへ同一の値を伝播しなければならない。
+    // activate_window_tab はアクティブマーカと z_index 以外の chrome 状態を
+    // 変更してはならない。
+    #[test]
+    fn geometry_update_propagates_across_grouped_tabs() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        let new_geometry = WindowGeometry {
+            x: 432.0,
+            y: 256.0,
+            width: 880.0,
+            height: 540.0,
+        };
+        assert!(workspace.update_geometry("codex-1", new_geometry.clone()));
+
+        assert_eq!(
+            workspace.window("codex-1").expect("codex").geometry,
+            new_geometry,
+            "active tab must record its updated geometry"
+        );
+        assert_eq!(
+            workspace.window("claude-1").expect("claude").geometry,
+            new_geometry,
+            "grouped sibling tab must adopt the same geometry so tab switch does not reset chrome"
+        );
+
+        assert!(workspace.activate_window_tab("claude-1"));
+        assert_eq!(
+            workspace.window("claude-1").expect("claude").geometry,
+            new_geometry,
+            "activate must not overwrite the propagated geometry"
+        );
+        assert_eq!(
+            workspace.window("codex-1").expect("codex").geometry,
+            new_geometry,
+            "previously-active tab must keep the propagated geometry after switching back"
+        );
+    }
+
+    #[test]
+    fn maximize_propagates_across_grouped_tabs() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+        let pre_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
+
+        let bounds = WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1440.0,
+            height: 900.0,
+        };
+        assert!(workspace.maximize_window("codex-1", bounds.clone()));
+
+        let codex = workspace.window("codex-1").expect("codex");
+        let claude = workspace.window("claude-1").expect("claude");
+        assert!(codex.maximized);
+        assert!(
+            claude.maximized,
+            "grouped sibling must share maximize state"
+        );
+        assert_eq!(codex.geometry, claude.geometry);
+        assert_eq!(
+            codex.pre_maximize_geometry.as_ref(),
+            Some(&pre_geometry),
+            "pre_maximize_geometry must record the geometry shared before maximize"
+        );
+        assert_eq!(
+            claude.pre_maximize_geometry.as_ref(),
+            Some(&pre_geometry),
+            "grouped sibling must share pre_maximize_geometry so restore is symmetric"
+        );
+
+        assert!(workspace.maximize_window("codex-1", bounds));
+        let codex = workspace.window("codex-1").expect("codex");
+        let claude = workspace.window("claude-1").expect("claude");
+        assert!(!codex.maximized, "second toggle must restore");
+        assert!(!claude.maximized, "grouped sibling must restore together");
+        assert_eq!(codex.geometry, pre_geometry);
+        assert_eq!(claude.geometry, pre_geometry);
+        assert!(codex.pre_maximize_geometry.is_none());
+        assert!(claude.pre_maximize_geometry.is_none());
+    }
+
+    #[test]
+    fn minimize_and_restore_propagate_across_grouped_tabs() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        assert!(workspace.minimize_window("codex-1"));
+        assert!(workspace.window("codex-1").expect("codex").minimized);
+        assert!(
+            workspace.window("claude-1").expect("claude").minimized,
+            "grouped sibling must share minimize state"
+        );
+
+        assert!(workspace.restore_window("codex-1"));
+        assert!(!workspace.window("codex-1").expect("codex").minimized);
+        assert!(
+            !workspace.window("claude-1").expect("claude").minimized,
+            "grouped sibling must restore together"
+        );
+    }
+
+    #[test]
+    fn activate_window_tab_preserves_grouped_chrome_state() {
+        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
+
+        let new_geometry = WindowGeometry {
+            x: 320.0,
+            y: 180.0,
+            width: 960.0,
+            height: 600.0,
+        };
+        assert!(workspace.update_geometry("codex-1", new_geometry.clone()));
+        let snapshot = workspace.window("codex-1").expect("codex").clone();
+
+        assert!(workspace.activate_window_tab("claude-1"));
+        let claude = workspace.window("claude-1").expect("claude");
+        let codex = workspace.window("codex-1").expect("codex");
+        assert!(claude.tab_group_active);
+        assert!(!codex.tab_group_active);
+        assert_eq!(claude.geometry, new_geometry);
+        assert_eq!(codex.geometry, new_geometry);
+        assert_eq!(claude.maximized, snapshot.maximized);
+        assert_eq!(codex.maximized, snapshot.maximized);
+        assert_eq!(claude.minimized, snapshot.minimized);
+        assert_eq!(codex.minimized, snapshot.minimized);
+        assert_eq!(claude.pre_maximize_geometry, snapshot.pre_maximize_geometry);
+        assert_eq!(codex.pre_maximize_geometry, snapshot.pre_maximize_geometry);
     }
 }
