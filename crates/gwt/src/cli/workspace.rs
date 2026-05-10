@@ -43,6 +43,9 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     if agent_session.is_none() && (current_focus.is_some() || title_summary.is_some()) {
         return Err(CliParseError::MissingFlag("--agent-session"));
     }
+    if let Some(value) = title_summary.as_deref() {
+        super::validate_title_summary_work_name("--title-summary", value)?;
+    }
     Ok(WorkspaceCommand::Update {
         title,
         status,
@@ -210,5 +213,24 @@ mod tests {
         .expect_err("agent title summary requires agent session");
 
         assert!(matches!(err, CliParseError::MissingFlag("--agent-session")));
+    }
+
+    #[test]
+    fn parse_workspace_update_rejects_status_like_agent_title_summary() {
+        let err = parse(&[
+            s("update"),
+            s("--agent-session"),
+            s("session-1"),
+            s("--current-focus"),
+            s("Finished implementing the Agent title improvement"),
+            s("--title-summary"),
+            s("エージェントタイトル改善完了"),
+        ])
+        .expect_err("title-summary must describe the work, not its status");
+
+        let message = err.to_string();
+        assert!(message.contains("--title-summary"), "{message}");
+        assert!(message.contains("work name"), "{message}");
+        assert!(message.contains("status"), "{message}");
     }
 }

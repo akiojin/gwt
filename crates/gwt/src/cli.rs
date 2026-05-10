@@ -404,6 +404,10 @@ pub enum CliParseError {
     Usage,
     InvalidNumber(String),
     MissingFlag(&'static str),
+    InvalidValue {
+        flag: &'static str,
+        reason: &'static str,
+    },
     UnknownSubcommand(String),
 }
 
@@ -416,12 +420,102 @@ impl std::fmt::Display for CliParseError {
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
+            CliParseError::InvalidValue { flag, reason } => {
+                write!(f, "invalid value for {flag}: {reason}")
+            }
             CliParseError::UnknownSubcommand(s) => write!(f, "unknown subcommand: {s}"),
         }
     }
 }
 
 impl std::error::Error for CliParseError {}
+
+const TITLE_SUMMARY_WORK_NAME_REASON: &str =
+    "title-summary must be a work name, not a status/result; keep completion, progress, or blocker state in --status, --current-focus, --summary, or Board --body";
+
+fn validate_title_summary_work_name(flag: &'static str, value: &str) -> Result<(), CliParseError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || title_summary_has_status_marker(trimmed) {
+        return Err(CliParseError::InvalidValue {
+            flag,
+            reason: TITLE_SUMMARY_WORK_NAME_REASON,
+        });
+    }
+    Ok(())
+}
+
+fn title_summary_has_status_marker(value: &str) -> bool {
+    let normalized = trim_title_status_punctuation(value);
+    let lower = normalized.to_ascii_lowercase();
+    let english_status_suffixes = [
+        "blocked",
+        "complete",
+        "completed",
+        "done",
+        "finished",
+        "fixed",
+        "implemented",
+        "in progress",
+        "verified",
+        "wip",
+    ];
+    if english_status_suffixes
+        .iter()
+        .any(|suffix| lower == *suffix || lower.ends_with(&format!(" {suffix}")))
+    {
+        return true;
+    }
+
+    let japanese_status_suffixes = [
+        "完了",
+        "完了済み",
+        "完了しました",
+        "対応済み",
+        "実装済み",
+        "修正済み",
+        "検証済み",
+        "作業中",
+        "進行中",
+        "対応中",
+        "実装中",
+        "修正中",
+        "検証中",
+        "レビュー中",
+        "ブロック中",
+    ];
+    japanese_status_suffixes
+        .iter()
+        .any(|suffix| normalized == *suffix || normalized.ends_with(suffix))
+}
+
+fn trim_title_status_punctuation(value: &str) -> &str {
+    value.trim().trim_end_matches(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '.' | '。'
+                    | '．'
+                    | '!'
+                    | '！'
+                    | '?'
+                    | '？'
+                    | ','
+                    | '、'
+                    | ';'
+                    | '；'
+                    | ':'
+                    | '：'
+                    | ')'
+                    | '）'
+                    | ']'
+                    | '】'
+                    | '"'
+                    | '\''
+                    | '」'
+                    | '』'
+            )
+    })
+}
 
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with

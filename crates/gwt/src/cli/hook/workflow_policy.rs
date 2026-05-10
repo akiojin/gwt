@@ -219,10 +219,12 @@ fn evaluate_title_summary_guard(
     if is_title_sensitive_tool(event) {
         return Ok(HookOutput::pre_tool_use_permission(
             "Agent title-summary is required before work starts",
-            "Set a short work title before implementation or verification commands.\n\n\
+            "Set a short work name before implementation or verification commands. The title-summary must describe what the work is, not a status/result.\n\n\
 Required command shape:\n\
   gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<current work focus>' --title-summary '<short work title>'\n\n\
-Use the configured narrative language for the title-summary. Keep long detail in --current-focus, --summary, or Board --body.",
+Good example: --title-summary 'Agent title improvement'\n\
+Bad example: --title-summary 'Agent title improvement complete'\n\n\
+Use the configured narrative language for the title-summary. Keep progress, completion, blocker state, and long detail in --current-focus, --summary, or Board --body.",
         ));
     }
 
@@ -588,6 +590,8 @@ Coverage requirements.
         assert!(detail.contains("gwtd workspace update"));
         assert!(detail.contains("--title-summary"));
         assert!(detail.contains("--agent-session"));
+        assert!(detail.contains("work name"), "{detail}");
+        assert!(detail.contains("not a status"), "{detail}");
     }
 
     #[test]

@@ -271,6 +271,8 @@ mod tests {
         assert!(text.contains("title-summary"));
         assert!(text.contains("gwtd workspace update"));
         assert!(text.contains("--agent-session"));
+        assert!(text.contains("作業名"));
+        assert!(text.contains("完了"));
         assert!(text.contains("Use language: ja"));
     }
 
