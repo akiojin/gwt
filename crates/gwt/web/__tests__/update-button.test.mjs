@@ -242,3 +242,295 @@ function createFixture({ confirmResult = true } = {}) {
     },
   };
 }
+
+// SPEC-2041 Phase 19 (FR-052..066) — Post-click modal & restart UX.
+//
+// These tests pin the modal-driven state machine before implementation.
+// They will fail against the current `update-cta.js` (which uses
+// window.confirm and immediate apply_update_state_and_exit). The implementation
+// in T-122 must satisfy these invariants without regressing earlier tests.
+
+test("phase19: click no longer uses window.confirm and instead opens #update-modal in downloading state", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+
+  fixture.document.getElementById("update-cta").click();
+
+  assert.equal(
+    fixture.confirmCalls.length,
+    0,
+    "window.confirm must not be called; the modal replaces it",
+  );
+  const modal = fixture.document.getElementById("update-modal");
+  assert.ok(modal, "expected #update-modal to be rendered after click");
+  assert.equal(modal.dataset.state, "downloading");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }]);
+  assert.equal(
+    fixture.document.getElementById("update-cta").dataset.status,
+    "applying",
+  );
+});
+
+test("phase19: update_progress events update modal progress bar and byte counter", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+
+  controller.handleUpdateProgress({
+    downloaded: 1024 * 1024,
+    total: 4 * 1024 * 1024,
+    asset: "gwt-macos-arm64.tar.gz",
+    version: "9.26.0",
+  });
+  controller.handleUpdateProgress({
+    downloaded: 3 * 1024 * 1024,
+    total: 4 * 1024 * 1024,
+    asset: "gwt-macos-arm64.tar.gz",
+    version: "9.26.0",
+  });
+
+  const modal = fixture.document.getElementById("update-modal");
+  const progress = modal.querySelector("[data-update-modal-progress]");
+  const counter = modal.querySelector("[data-update-modal-byte-counter]");
+  assert.ok(progress, "expected progress bar element");
+  assert.ok(counter, "expected byte counter element");
+  assert.equal(progress.getAttribute("aria-valuenow"), "75");
+  assert.match(counter.textContent, /3.0\s*MB\s*\/\s*4.0\s*MB/);
+});
+
+test("phase19: cancel during download sends cancel_update_download and returns CTA to available", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+
+  fixture.document
+    .querySelector("[data-update-modal-cancel]")
+    .click();
+
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "cancel_update_download" },
+  ]);
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "available");
+});
+
+test("phase19: update_ready transitions modal to ready state with [Later] [Restart now]", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+
+  controller.handleUpdateReady({
+    version: "9.26.0",
+    asset_path: "/Users/x/.gwt/pending-update/9.26.0/gwt-macos-arm64.tar.gz",
+  });
+
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "ready");
+  assert.ok(modal.querySelector("[data-update-modal-restart-now]"));
+  assert.ok(modal.querySelector("[data-update-modal-later]"));
+});
+
+test("phase19: [Restart now] sends apply_update_restart_now without confirmation", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.26.0", asset_path: "/x" });
+
+  fixture.document
+    .querySelector("[data-update-modal-restart-now]")
+    .click();
+
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "apply_update_restart_now" },
+  ]);
+  assert.equal(
+    fixture.confirmCalls.length,
+    0,
+    "Restart now must not gate behind window.confirm",
+  );
+});
+
+test("phase19: [Later] closes modal, sends apply_update_later, and morphs CTA to ready state", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.26.0", asset_path: "/x" });
+
+  fixture.document
+    .querySelector("[data-update-modal-later]")
+    .click();
+
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "apply_update_later" },
+  ]);
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Update v9.26.0 ready\s*[—-]\s*Restart now/);
+  assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
+});
+
+test("phase19: re-clicking CTA in ready state opens modal at ready (no re-download)", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.26.0", asset_path: "/x" });
+  fixture.document.querySelector("[data-update-modal-later]").click();
+
+  fixture.document.getElementById("update-cta").click();
+
+  const modal = fixture.document.getElementById("update-modal");
+  assert.ok(modal, "modal should reopen on re-click");
+  assert.equal(modal.dataset.state, "ready");
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "apply_update_later" },
+  ]);
+});
+
+test("phase19: dismiss in ready state hides CTA without losing pending binary", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.26.0", asset_path: "/x" });
+  fixture.document.querySelector("[data-update-modal-later]").click();
+
+  fixture.document
+    .querySelector("[data-update-cta-dismiss]")
+    .click();
+
+  assert.equal(fixture.document.getElementById("update-cta"), null);
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "apply_update_later" },
+  ]);
+});
+
+test("phase19: update_apply_error transitions modal to failed state with stage/reason/log/buttons", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+
+  controller.handleUpdateApplyError({
+    stage: "Download asset",
+    reason: "HTTP 503",
+    log_path: "/Users/x/.gwt/logs/update-2026-05-10.log",
+  });
+
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "failed");
+  const stage = modal.querySelector("[data-update-modal-stage]");
+  const reason = modal.querySelector("[data-update-modal-reason]");
+  const log = modal.querySelector("[data-update-modal-log]");
+  assert.match(stage.textContent, /Download asset/);
+  assert.match(reason.textContent, /HTTP 503/);
+  assert.match(log.textContent, /update-2026-05-10/);
+  assert.ok(modal.querySelector("[data-update-modal-open-log]"));
+  assert.ok(modal.querySelector("[data-update-modal-retry]"));
+  assert.ok(modal.querySelector("[data-update-modal-close]"));
+});
+
+test("phase19: failed-state [Retry] resends apply_update_start and switches modal back to downloading", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateApplyError({
+    stage: "Download asset",
+    reason: "HTTP 503",
+    log_path: "/x.log",
+  });
+
+  fixture.document
+    .querySelector("[data-update-modal-retry]")
+    .click();
+
+  assert.deepEqual(fixture.sent, [
+    { kind: "apply_update_start" },
+    { kind: "apply_update_start" },
+  ]);
+  assert.equal(
+    fixture.document.getElementById("update-modal").dataset.state,
+    "downloading",
+  );
+});
+
+test("phase19: failed-state [Open log] sends open_update_log with the log_path", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateApplyError({
+    stage: "Replace binary",
+    reason: "EPERM",
+    log_path: "/Users/x/.gwt/logs/update-2026-05-10.log",
+  });
+
+  fixture.document
+    .querySelector("[data-update-modal-open-log]")
+    .click();
+
+  assert.deepEqual(fixture.sent.slice(-1), [
+    {
+      kind: "open_update_log",
+      log_path: "/Users/x/.gwt/logs/update-2026-05-10.log",
+    },
+  ]);
+});
+
+test("phase19: failed-state [Close] closes modal and returns CTA to available", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateApplyError({
+    stage: "Download asset",
+    reason: "HTTP 503",
+    log_path: "/x.log",
+  });
+
+  fixture.document
+    .querySelector("[data-update-modal-close]")
+    .click();
+
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.equal(
+    fixture.document.getElementById("update-cta").dataset.status,
+    "available",
+  );
+});
+
+test("phase19: update_apply_pending_persisted morphs CTA directly to ready state (next-launch path)", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+
+  controller.handleUpdateApplyPendingPersisted({ version: "9.26.0" });
+
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Update v9.26.0 ready\s*[—-]\s*Restart now/);
+  assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
+});
+
+test("phase19: controller exposes the Phase 19 event handlers required by app.js wiring", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+
+  assert.equal(typeof controller.handleUpdateProgress, "function");
+  assert.equal(typeof controller.handleUpdateReady, "function");
+  assert.equal(typeof controller.handleUpdateApplyError, "function");
+  assert.equal(typeof controller.handleUpdateApplyPendingPersisted, "function");
+});
