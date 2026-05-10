@@ -413,6 +413,58 @@ test.describe("Project Index status badge", () => {
       .toContainText("develop");
   });
 
+  test("Settings.Index scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "repair_required",
+      scopes: {
+        issues: {
+          healthy: false,
+          repair_required: true,
+          document_count: 0,
+          reason: "manifest_missing",
+        },
+      },
+    });
+
+    await page.goto(APP_URL);
+    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#index-status").click();
+
+    const issuesRow = page
+      .locator("[data-settings-panel='index'] tr[data-scope='issues']")
+      .first();
+    await expect(issuesRow).toBeVisible({ timeout: 10_000 });
+
+    // The scope-row Rebuild button lives in the row header (`th`),
+    // distinct from the per-cell Rebuild button inside `td`.
+    const rebuildAll = issuesRow.locator(".settings-index-rebuild-all[data-scope='issues']");
+    await rebuildAll.click();
+
+    const lastRebuild = await page.evaluate(() => {
+      const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
+      return sends
+        .map((raw) => {
+          try {
+            return JSON.parse(raw);
+          } catch (e) {
+            return null;
+          }
+        })
+        .filter((m) => m && m.kind === "rebuild_index_cell")
+        .pop();
+    });
+
+    expect(lastRebuild).toMatchObject({
+      kind: "rebuild_index_cell",
+      project_root: "/fixture",
+      scope: "issues",
+    });
+    // Repo-shared scopes (`issues`, `specs`) must NOT carry a worktree_hash
+    // since they are not per-worktree.
+    expect(lastRebuild).not.toHaveProperty("worktree_hash");
+  });
+
   test("Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
     page,
   }) => {
