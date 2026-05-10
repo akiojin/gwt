@@ -10552,6 +10552,80 @@ exit 0
     }
 
     #[test]
+    fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        init_repo(&project);
+
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let open_events = runtime.open_project_path_events(project.clone());
+        let tab_id = runtime.active_tab_id.clone().expect("active tab");
+
+        assert!(open_events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MigrationDetected { .. },
+            }
+        )));
+
+        let skip_events = runtime.skip_migration_events(&tab_id);
+        assert!(skip_events.is_empty(), "skip must not mutate repository");
+        assert!(matches!(
+            gwt_git::detect_repo_type(&project),
+            gwt_git::RepoType::Normal {
+                needs_migration: true,
+                ..
+            }
+        ));
+
+        let mut next_runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let next_events = next_runtime.open_project_path_events(project);
+
+        assert!(
+            next_events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::MigrationDetected { .. },
+                }
+            )),
+            "skip is launch-local; the modal must be shown again next launch"
+        );
+    }
+
+    #[test]
+    fn quit_migration_events_requests_app_quit_without_repository_changes() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        init_repo(&project);
+
+        let tab = migration_pending_tab("tab-1", project.clone());
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.quit_migration_events("tab-1");
+
+        assert!(
+            events.is_empty(),
+            "quit is delivered through the event proxy"
+        );
+        let recorded_events = recorded_events.lock().expect("recorded events");
+        assert!(recorded_events
+            .iter()
+            .any(|event| matches!(event, UserEvent::QuitApp)));
+        assert!(matches!(
+            gwt_git::detect_repo_type(&project),
+            gwt_git::RepoType::Normal {
+                needs_migration: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn open_project_with_existing_migration_backup_emits_recovery_error() {
         let temp = tempdir().expect("tempdir");
         let project = temp.path().join("project");
