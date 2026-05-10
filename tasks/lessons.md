@@ -1,5 +1,35 @@
 # Lessons Learned
 
+## 2026-05-10 — SPEC section edits must preserve section markers and avoid concurrent writes
+
+### 事象
+
+SPEC-2021 の spec/plan/tasks section を複数 `gwtd issue spec --edit ...`
+で並列更新したところ、GitHub Issue body の `sections` metadata と comment
+section の内容が競合し、`--section tasks` が一時的に読めなくなった。
+その後 SPEC-1784 tasks comment を `gh api PATCH` で直接修正した際も、
+`<!-- artifact:tasks BEGIN/END -->` marker を付けずに comment body を
+置き換えてしまい、`gwtd issue spec 1784 --section tasks` が
+`comment ... does not contain section 'tasks'` で壊れた。
+
+### 原因
+
+SPEC section は GitHub Issue body の section index と、body/comment 内の
+artifact marker の組み合わせで成立している。並列 edit は同じ index map の
+read/modify/write 競合を起こす。さらに `gh api` で comment を直接 PATCH
+する場合、section file 本文だけでは artifact marker が不足し、gwtd parser
+が section を識別できない。
+
+### 再発防止策
+
+1. 同一 Issue の `gwtd issue spec --edit <section>` は必ず逐次実行し、
+   並列化しない。並列化してよいのは section read / grep などの読み取りだけ。
+2. 書き込み後は `gwtd issue spec <n> --section <section>` を必ず読み直し、
+   対象 section が parse できることと、変更行が反映されたことを確認する。
+3. `gh api` で section comment を直接 PATCH する必要がある場合は、本文を
+   `<!-- artifact:<section> BEGIN --> ... <!-- artifact:<section> END -->`
+   で包む。marker なしの raw section body を送らない。
+
 ## 2026-05-10 — Auto-merge can fire before review-feedback corrections land
 
 ### 事象
