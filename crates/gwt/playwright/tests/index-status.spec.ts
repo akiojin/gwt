@@ -55,6 +55,11 @@ test.describe("Project Index status badge (SPEC-1939 Phase 12)", () => {
   test("dispatches settings:open on click (T-IDX-109 click path)", async ({ page }) => {
     await page.goto(BASE);
 
+    // Wait for the badge to be visible before clicking — without this the
+    // click can fire on a hidden element and `settings:open` never gets
+    // dispatched, masking real regressions as inconsistent test failures.
+    await expect(page.locator("#index-status")).toBeVisible({ timeout: 30_000 });
+
     // Wire a temporary listener so the test can observe the dispatched
     // CustomEvent without depending on the Settings.Index window opening
     // (which requires backend create_window plumbing).
