@@ -92,6 +92,11 @@ pub fn index_settings_panel_js() -> &'static str {
     include_str!("../web/index-settings-panel.js")
 }
 
+// SPEC-2008 Phase 24 — terminal viewport reflow primitives.
+pub fn terminal_viewport_reflow_js() -> &'static str {
+    include_str!("../web/terminal-viewport-reflow.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -162,6 +167,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/index-settings-panel.js",
         source: index_settings_panel_js,
         marker: "renderIndexSettingsPanel",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-viewport-reflow.js",
+        source: terminal_viewport_reflow_js,
+        marker: "attachHostResizeReflow",
     },
 ];
 
@@ -540,9 +550,9 @@ mod tests {
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
-                && html.contains("!workspaceWindowById(windowId)?.minimized")
+                && html.contains("viewportEligibleForRefresh({")
                 && refresh_call.is_match(html),
-            "expected terminal viewport refresh to skip minimized windows",
+            "expected terminal viewport refresh predicate to delegate to viewportEligibleForRefresh",
         );
         assert!(
             !html.contains(
