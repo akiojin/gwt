@@ -465,11 +465,29 @@ fn apply_prepared_payload_with_ops(
     }
 }
 
+/// SPEC-2041 Phase 19 (FR-059..062): explicit no-op named after the SPEC's
+/// `commit_update_later_pending` so the post-click flow has the named seam
+/// FR-064 prescribes even though persistence happens earlier (in
+/// `UserEvent::ApplyUpdateStart`'s worker thread). Runs a sanity check that
+/// the manifest the bootstrap path will rely on actually exists, returning
+/// an error so callers can surface it via `update_apply_error`.
+pub fn commit_update_later_pending() -> Result<(), String> {
+    match gwt_core::update::load_pending_update_manifest() {
+        Some(_) => Ok(()),
+        None => Err("Pending update manifest is missing; download did not persist.".to_string()),
+    }
+}
+
 /// SPEC-2041 Phase 19 (FR-058/062): consume an already-persisted manifest.
 /// Used both by `Restart now` (when the user clicked through the modal) and
 /// by the bootstrap path (when a previous run wrote the manifest via
 /// `Later`). After the helper subprocess is spawned the manifest is removed
 /// so a future launch does not re-apply the same payload.
+///
+/// This is the function FR-064 names `commit_update_restart_now`. Kept under
+/// the implementation-evolved name `apply_pending_manifest_and_exit` because
+/// renaming would force a much larger diff across tests; the SPEC contract is
+/// satisfied by the function's behavior, not its identifier.
 pub fn apply_pending_manifest_and_exit(
     manifest: gwt_core::update::PendingUpdateManifest,
 ) -> Result<(), String> {

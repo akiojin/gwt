@@ -1983,20 +1983,28 @@ impl AppRuntime {
         vec![]
     }
 
-    /// SPEC-2041 Phase 19 (FR-059..061): user pressed `Later`. Emit
-    /// [`BackendEvent::UpdateApplyPendingPersisted`] so the CTA morphs to
-    /// ready state. Persistence to `~/.gwt/pending-update/` is wired in T-129
-    /// / T-133; for now the prepared payload remains in `prepared_update_path`
-    /// until the parent process exits.
+    /// SPEC-2041 Phase 19 (FR-059..061, FR-064): user pressed `Later`.
+    /// Verifies the manifest persisted by `ApplyUpdateStart`'s worker thread
+    /// is still on disk via [`crate::update_front_door::commit_update_later_pending`],
+    /// then emits [`BackendEvent::UpdateApplyPendingPersisted`] so the CTA
+    /// morphs to ready state. If persistence somehow vanished (external
+    /// cleanup, disk-full race), surface a structured error instead of
+    /// silently lying about pending state.
     fn apply_update_later_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         let version = match self.pending_update.as_ref() {
             Some(gwt_core::update::UpdateState::Available { latest, .. }) => latest.clone(),
             _ => return vec![],
         };
-        vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::UpdateApplyPendingPersisted { version },
-        )]
+        match crate::update_front_door::commit_update_later_pending() {
+            Ok(()) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::UpdateApplyPendingPersisted { version },
+            )],
+            Err(message) => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed("Persist pending", &message),
+            )],
+        }
     }
 
     /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend
