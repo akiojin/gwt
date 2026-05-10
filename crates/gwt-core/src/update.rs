@@ -2970,6 +2970,82 @@ mod tests {
         assert!(err.contains("Downloaded payload is empty"));
     }
 
+    // SPEC-2041 Phase 19 (T-125 / FR-054): progress callback fires monotonically
+    // and reports a final completion tick that matches Content-Length.
+    #[test]
+    fn prepare_update_with_progress_invokes_callback_monotonically() {
+        let temp = tempfile::tempdir().unwrap();
+        let mgr = UpdateManager::new()
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        // Build a tiny tarball so prepare_update finishes the extract step too,
+        // proving progress fired across the whole download.
+        let archive_path = temp.path().join("payload.tar.gz");
+        {
+            let archive_file = fs::File::create(&archive_path).unwrap();
+            let encoder =
+                flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let binary_name = Platform::detect().binary_name();
+            let daemon_name = companion_binary_name(&binary_name);
+            let bytes = b"progress-bin";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("nested/{binary_name}"), &bytes[..])
+                .unwrap();
+            let daemon_bytes = b"progress-daemon";
+            let mut daemon_header = tar::Header::new_gnu();
+            daemon_header.set_size(daemon_bytes.len() as u64);
+            daemon_header.set_mode(0o755);
+            daemon_header.set_cksum();
+            archive
+                .append_data(
+                    &mut daemon_header,
+                    format!("nested/{daemon_name}"),
+                    &daemon_bytes[..],
+                )
+                .unwrap();
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+
+        let body = fs::read(&archive_path).unwrap();
+        let expected_len = body.len() as u64;
+        let tarball_url = serve_once("/progress.tar.gz", "200 OK", "application/gzip", body);
+
+        let mut ticks: Vec<(u64, Option<u64>)> = Vec::new();
+        mgr.prepare_update_with_progress("99.0.7", &tarball_url, &mut |downloaded, total| {
+            ticks.push((downloaded, total));
+        })
+        .expect("progress prepare");
+
+        assert!(
+            !ticks.is_empty(),
+            "progress callback must fire at least once"
+        );
+
+        // Each tick reports the same `total` (Some(content_length)).
+        for (_, total) in &ticks {
+            assert_eq!(*total, Some(expected_len));
+        }
+
+        // Downloaded counter is monotonic non-decreasing.
+        for window in ticks.windows(2) {
+            assert!(
+                window[1].0 >= window[0].0,
+                "progress downloaded counter must not regress: {ticks:?}",
+            );
+        }
+
+        // Final tick lands at Content-Length (FR-054).
+        let last = ticks.last().unwrap();
+        assert_eq!(last.0, expected_len);
+        assert_eq!(last.1, Some(expected_len));
+    }
+
     #[test]
     fn install_latest_docker_linux_bundle_downloads_release_tarball_to_cache_paths() {
         let temp = tempfile::tempdir().unwrap();
