@@ -1,5 +1,21 @@
 # Lessons Learned
 
+## 2026-05-10 — Auto-merge can fire before review-feedback corrections land
+
+### 事象
+
+PR #2602 で CodeRabbit からの指摘 (`PRRT_kwDOPLof2M6A4N7G`: `format_board_help_documents_mention_flag` assertion が `*` 反復マーカーを要求していない) を修正する commit (`2a8853f6`) を push した直後、auto-merge が一つ前の SHA (`c3ec646a`) に対して既に発火しており、PR #2602 は強化前のテストのまま develop に landed した。CodeRabbit suggestion を適用したつもりが、その commit は次の PR (#2603) で別途 land させる必要が生じた。
+
+### 原因
+
+`Auto Merge PR` workflow は「PR の checks が全部 green になった瞬間」に発火する。CodeRabbit が PR にコメントしてから、こちらが修正 commit を push して新しい checks が走り始めるまでの空白期間に、prior commit の checks が完了して auto-merge が prior SHA で merge を実行してしまう競合が発生し得る。auto-merge は SHA-pinned ではないため、新 commit は merge 後に取り残される。
+
+### 再発防止策
+
+1. CodeRabbit / Codex review でアクション可能な提案を受けたら、修正 commit を push する **前** に PR の auto-merge 進行度を確認する (`gwtd pr checks <n>` で `Enable auto-merge` 状態確認)。すでに大半が SUCCESS になっている場合、修正 commit を push しても auto-merge が prior SHA を選ぶ余地が残る。
+2. もしどうしても prior commit が先に merge してしまうリスクがあるなら、修正 commit は **次の PR で land させる前提** で書く (本 PR #2603 はその対応)。同時に、その follow-up を必ず開くことを reviewer 通知の reply に明記する。
+3. `gwtd pr edit <n> --add-label hold` などで auto-merge を一時的に無効化する手段があれば優先する (現時点で gwtd には専用 flag はないので、修正 commit + immediate watch を運用ルールにする)。
+
 ## 2026-05-10 — Verify CLI commands and flags against the parser, not just the help text
 
 ### 事象
