@@ -1378,16 +1378,11 @@ kbd.op-kbd {
   background: color-mix(in oklab, var(--color-text) 24%, transparent);
 }
 
-:root[data-theme] .app-version,
-:root[data-theme] .index-status {
+:root[data-theme] .app-version {
   background: var(--color-surface-elevated);
   color: var(--color-text-muted);
   border-color: var(--color-border);
 }
-:root[data-theme] .index-status.ready { color: var(--color-state-active); border-color: var(--color-state-active); }
-:root[data-theme] .index-status.repair_required,
-:root[data-theme] .index-status.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
-:root[data-theme] .index-status.repairing { color: var(--agent-claude); border-color: var(--agent-claude); }
 
 :root[data-theme] .hint {
   color: var(--color-text-muted);

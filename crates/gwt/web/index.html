@@ -171,66 +171,6 @@
         display: none;
       }
 
-      .index-status {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        height: 32px;
-        padding: 0 10px;
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-md);
-        background: var(--color-surface-elevated);
-        color: var(--color-text-muted);
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        letter-spacing: var(--tracking-mono);
-        font-weight: 700;
-        white-space: nowrap;
-        cursor: pointer;
-      }
-
-      .index-status:focus-visible {
-        outline: 2px solid var(--color-state-active);
-        outline-offset: 2px;
-      }
-
-      .index-status.ready {
-        border-color: var(--color-state-active);
-        color: var(--color-state-active);
-      }
-
-      .index-status.repair_required,
-      .index-status.error {
-        border-color: var(--color-state-blocked);
-        color: var(--color-state-blocked);
-      }
-
-      .index-status.repairing {
-        border-color: var(--agent-claude);
-        color: var(--agent-claude);
-      }
-
-      .index-status.repairing::before {
-        content: "";
-        display: inline-block;
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        border: 2px solid currentColor;
-        border-top-color: transparent;
-        animation: index-status-spin 0.85s linear infinite;
-      }
-
-      @keyframes index-status-spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
-
-      .index-status[hidden] {
-        display: none;
-      }
-
       /* SPEC-1939 T-IDX-107 — per-worktree health dot on project tabs. */
       .project-tab-dot {
         display: inline-block;
@@ -249,31 +189,6 @@
       }
       .project-tab-dot[data-state="repairing"] {
         background: var(--agent-claude);
-      }
-
-      /* SPEC-1939 T-IDX-108 — progress toast for repairing badge click. */
-      .index-status-toast {
-        position: fixed;
-        right: 16px;
-        bottom: 16px;
-        max-width: 480px;
-        padding: 10px 14px;
-        background: var(--color-surface-elevated);
-        color: var(--color-text);
-        border: 1px solid var(--color-border);
-        border-radius: var(--radius-md);
-        box-shadow: var(--shadow-glow-active, 0 4px 16px rgba(0, 0, 0, 0.2));
-        font-size: var(--type-xs);
-        font-family: var(--font-mono);
-        opacity: 0;
-        transform: translateY(8px);
-        pointer-events: none;
-        transition: opacity 200ms ease, transform 200ms ease;
-        z-index: 50;
-      }
-      .index-status-toast[data-visible="true"] {
-        opacity: 1;
-        transform: translateY(0);
       }
 
       /* SPEC-1939 T-IDX-106 — Settings.Index health table. */
@@ -3146,13 +3061,6 @@
         <div class="project-bar">
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
-            <button
-              type="button"
-              class="index-status"
-              id="index-status"
-              aria-label="Project index health"
-              hidden
-            ></button>
             <span class="app-version" id="app-version" hidden></span>
             <button class="arrange-button" id="project-workspace-overview-button" aria-label="Workspace overview">
               Workspace
