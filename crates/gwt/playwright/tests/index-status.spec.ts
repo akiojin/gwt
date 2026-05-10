@@ -184,6 +184,60 @@ test.describe("Project Index status badge", () => {
     await expect(badge).not.toHaveClass(/repairing/);
   });
 
+  test("badge click opens Settings.Index tab and renders the scope health table (T-IDX-106)", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "repair_required",
+      scopes: {
+        specs: {
+          healthy: false,
+          repair_required: true,
+          document_count: 5,
+          reason: "count_mismatch",
+        },
+        files: {
+          wtAhash: {
+            healthy: false,
+            repair_required: true,
+            document_count: 0,
+            reason: "manifest_missing",
+          },
+        },
+      },
+      worktrees: {
+        wtAhash: { branch: "develop", path: "/abs/wtA" },
+      },
+    });
+
+    await page.goto(APP_URL);
+    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#index-status").click();
+
+    // The Settings window mounts asynchronously after the create_window
+    // round-trip. The Index panel is one of three tabs and should be
+    // active by the time we look for the table.
+    const indexPanel = page.locator("[data-settings-panel='index']").first();
+    await expect(indexPanel).toBeVisible({ timeout: 10_000 });
+    await expect(indexPanel).not.toHaveClass(/hidden/);
+
+    const table = indexPanel.locator("[data-role='index-settings-table']");
+    await expect(table).toBeVisible();
+
+    const specsRow = table.locator("tr[data-scope='specs']");
+    await expect(specsRow.locator(".settings-index-cell.unhealthy"))
+      .toContainText("count_mismatch");
+
+    const filesRow = table.locator("tr[data-scope='files']");
+    await expect(filesRow.locator(".settings-index-cell[data-worktree-hash='wtAhash']"))
+      .toContainText("manifest_missing");
+
+    // Worktree column header should reflect the supplied branch label.
+    await expect(table.locator("thead th[data-worktree-hash='wtAhash']"))
+      .toContainText("develop");
+  });
+
   test("repairing click shows a progress toast (T-IDX-108)", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
@@ -260,22 +314,21 @@ function contentTypeFor(assetPath) {
 async function installIndexStatusBackend(page, indexStatus) {
   await page.addInitScript((indexStatusPayload) => {
     const projectRoot = "/fixture";
+    const baseTabState = {
+      id: "tab-1",
+      title: "Fixture Project",
+      project_root: projectRoot,
+      kind: "git",
+      workspace: {
+        viewport: { x: 0, y: 0, zoom: 1 },
+        windows: [],
+      },
+    };
     const workspaceState = {
       kind: "workspace_state",
       workspace: {
         app_version: "playwright",
-        tabs: [
-          {
-            id: "tab-1",
-            title: "Fixture Project",
-            project_root: projectRoot,
-            kind: "git",
-            workspace: {
-              viewport: { x: 0, y: 0, zoom: 1 },
-              windows: [],
-            },
-          },
-        ],
+        tabs: [JSON.parse(JSON.stringify(baseTabState))],
         active_tab_id: "tab-1",
         recent_projects: [],
       },
@@ -322,6 +375,37 @@ async function installIndexStatusBackend(page, indexStatus) {
         if (message.kind === "frontend_ready") {
           this.emit(workspaceState);
           this.emit(projectIndexStatus);
+          return;
+        }
+        // SPEC-1939 T-IDX-106: simulate the backend create_window behaviour
+        // for `preset === "settings"` so click → settings:open →
+        // focusOrSpawnPreset("settings") can drive a real Settings window
+        // mount end-to-end. The fixture appends a Settings window to the
+        // current tab's workspace and re-emits workspace_state.
+        if (message.kind === "create_window" && message.preset === "settings") {
+          const tab = workspaceState.workspace.tabs[0];
+          tab.workspace.windows = (tab.workspace.windows || []).concat([
+            {
+              id: `settings-${Date.now()}`,
+              title: "Settings",
+              preset: "settings",
+              geometry: { x: 96, y: 76, width: 720, height: 540 },
+              z_index: tab.workspace.windows.length + 1,
+              status: "running",
+              minimized: false,
+              maximized: false,
+              pre_maximize_geometry: null,
+              persist: true,
+              purpose_title: null,
+              dynamic_title: null,
+              dynamic_title_detail: null,
+              agent_id: null,
+              agent_color: null,
+              tab_group_id: null,
+              tab_group_active: false,
+            },
+          ]);
+          this.emit(workspaceState);
         }
       }
 
