@@ -1929,7 +1929,6 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(knowledge_missing.len(), 1);
@@ -1946,7 +1945,6 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(knowledge_wrong.len(), 1);
@@ -2532,7 +2530,6 @@ mod tests {
                     request_id: None,
                     selected_number: None,
                     refresh: false,
-                    list_scope: None,
                 },
             )
             .is_empty());
@@ -2544,7 +2541,6 @@ mod tests {
                     knowledge_kind: KnowledgeKind::Issue,
                     request_id: None,
                     number: 42,
-                    list_scope: None,
                 },
             )
             .is_empty());

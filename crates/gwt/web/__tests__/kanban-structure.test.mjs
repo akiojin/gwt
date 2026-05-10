@@ -52,6 +52,19 @@ test("Kanban toolbar exposes Hide done toggle id", () => {
   );
 });
 
+test("Kanban removes legacy open and closed list scope controls", () => {
+  assert.doesNotMatch(
+    appSource,
+    /data-knowledge-scope/,
+    "Kanban should not render the legacy Open/Closed scope toggle",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /listScope|list_scope|switchKnowledgeListScope/,
+    "Kanban should not keep the legacy listScope request contract",
+  );
+});
+
 test("renderKnowledgeBridge groups entries into kanban columns by phase", () => {
   // The renderer must use entry.phase to assign data-phase on each card,
   // and fall back to "backlog" when phase is null.

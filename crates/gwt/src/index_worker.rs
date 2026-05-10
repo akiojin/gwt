@@ -27,6 +27,14 @@ pub fn detect_repo_hash(repo_root: &Path) -> Option<RepoHash> {
 }
 
 pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), String> {
+    if test_fixture_status_path().is_some() {
+        tracing::info!(
+            target: "gwt::index",
+            project_root = %project_root.display(),
+            "GWT_INDEX_TEST_FIXTURE applied: skipping project index bootstrap"
+        );
+        return Ok(());
+    }
     let runtime_started = Instant::now();
     gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
     tracing::info!(
@@ -382,11 +390,16 @@ pub const GWT_INDEX_TEST_FIXTURE_ENV: &str = "GWT_INDEX_TEST_FIXTURE";
 /// Returns `None` when the env var is absent. Errors during read / parse
 /// surface as a synthetic `Error` status so the GUI / orchestrator path
 /// behaves the same as a real runner failure.
-fn load_test_fixture_status() -> Option<ProjectIndexStatusView> {
+fn test_fixture_status_path() -> Option<String> {
     let path = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok()?;
     if path.trim().is_empty() {
         return None;
     }
+    Some(path)
+}
+
+fn load_test_fixture_status() -> Option<ProjectIndexStatusView> {
+    let path = test_fixture_status_path()?;
     match std::fs::read_to_string(&path) {
         Ok(payload) => match serde_json::from_str::<ProjectIndexStatusView>(&payload) {
             Ok(view) => {
@@ -886,6 +899,14 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     index_root: &Path,
     spawner: &S,
 ) -> Result<(), String> {
+    if test_fixture_status_path().is_some() {
+        tracing::info!(
+            target: "gwt::index",
+            project_root = %project_root.display(),
+            "GWT_INDEX_TEST_FIXTURE applied: skipping project index bootstrap helper"
+        );
+        return Ok(());
+    }
     let bootstrap_started = Instant::now();
     let Some(repo_root) = resolve_git_worktree_root(project_root) else {
         return Ok(());
@@ -1010,6 +1031,82 @@ pub(crate) fn project_index_python_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static GWT_INDEX_TEST_FIXTURE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct FixtureEnvGuard {
+        previous: Option<String>,
+    }
+
+    impl FixtureEnvGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok();
+            unsafe {
+                std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, path);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for FixtureEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, value),
+                    None => std::env::remove_var(GWT_INDEX_TEST_FIXTURE_ENV),
+                }
+            }
+        }
+    }
+
+    struct PanicRunnerSpawner;
+
+    impl RunnerSpawner for PanicRunnerSpawner {
+        fn spawn_index_issues(
+            &self,
+            _repo_hash: &str,
+            _project_root: &Path,
+            _respect_ttl: bool,
+        ) -> std::io::Result<()> {
+            panic!("fixture-backed bootstrap must not spawn the real runner");
+        }
+    }
+
+    fn write_status_fixture(root: &Path, state: ProjectIndexStatusState, detail: &str) -> PathBuf {
+        let fixture_path = root.join("status.json");
+        let fixture = ProjectIndexStatusView {
+            state,
+            detail: detail.to_string(),
+            repair_started_at: None,
+            progress: None,
+            scopes: ProjectIndexScopes {
+                specs: Some(ScopeHealthView::unhealthy("count_mismatch")),
+                ..Default::default()
+            },
+            worktrees: BTreeMap::new(),
+        };
+        std::fs::write(
+            &fixture_path,
+            serde_json::to_string(&fixture).expect("serialize"),
+        )
+        .expect("write fixture");
+        fixture_path
+    }
+
+    fn init_git_repo_with_origin(path: &Path) {
+        let init = gwt_core::process::hidden_command("git")
+            .args(["init", "-q", "-b", "develop"])
+            .current_dir(path)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed");
+        let remote = gwt_core::process::hidden_command("git")
+            .args(["remote", "add", "origin", "https://example.com/gwt-e2e.git"])
+            .current_dir(path)
+            .output()
+            .expect("git remote add origin");
+        assert!(remote.status.success(), "git remote add origin failed");
+    }
 
     #[test]
     fn project_index_status_state_serializes_stable_protocol_values() {
@@ -1240,46 +1337,49 @@ mod tests {
         // fixture verbatim. Playwright e2e drives gwt with this env var so
         // tests can assert badge transitions deterministically without
         // running real Python.
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
-        let fixture_path = temp.path().join("status.json");
-        let fixture = ProjectIndexStatusView {
-            state: ProjectIndexStatusState::RepairRequired,
-            detail: "fixture-driven repair_required".to_string(),
-            repair_started_at: None,
-            progress: None,
-            scopes: ProjectIndexScopes {
-                specs: Some(ScopeHealthView::unhealthy("count_mismatch")),
-                ..Default::default()
-            },
-            worktrees: BTreeMap::new(),
-        };
-        std::fs::write(
-            &fixture_path,
-            serde_json::to_string(&fixture).expect("serialize"),
-        )
-        .expect("write fixture");
-
-        // The lib uses std::env which is process-wide; isolate by saving /
-        // restoring the previous value.
-        let previous = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok();
-        // Safety: tests in this lib run with `--test-threads` allowed to be
-        // > 1, but no other test reads this env var. Set / restore is
-        // unconditional.
-        // SAFETY: setting / removing process env is unsafe in std 1.89+.
-        unsafe {
-            std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, &fixture_path);
-        }
+        let fixture_path = write_status_fixture(
+            temp.path(),
+            ProjectIndexStatusState::RepairRequired,
+            "fixture-driven repair_required",
+        );
+        let _fixture_env = FixtureEnvGuard::set(&fixture_path);
         let view = aggregate_project_index_status_for_path(temp.path());
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, value),
-                None => std::env::remove_var(GWT_INDEX_TEST_FIXTURE_ENV),
-            }
-        }
 
         assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
         assert_eq!(view.detail, "fixture-driven repair_required");
         assert!(view.scopes.specs.is_some());
+    }
+
+    #[test]
+    fn bootstrap_skips_real_runner_when_test_fixture_env_var_set() {
+        // The Playwright e2e workflow launches the GUI with fixture-backed
+        // status and waits for the embedded server URL. The synchronous
+        // startup bootstrap must therefore bypass the real Python runner
+        // before the GUI server is started.
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo");
+        init_git_repo_with_origin(&repo);
+        let fixture_path = write_status_fixture(
+            temp.path(),
+            ProjectIndexStatusState::RepairRequired,
+            "fixture-driven repair_required",
+        );
+        let _fixture_env = FixtureEnvGuard::set(&fixture_path);
+
+        bootstrap_project_index_for_path_with(
+            &repo,
+            &temp.path().join("index"),
+            &PanicRunnerSpawner,
+        )
+        .expect("fixture-backed bootstrap");
     }
 
     #[test]
@@ -1309,21 +1409,15 @@ mod tests {
 
     #[test]
     fn aggregate_test_fixture_invalid_json_surfaces_error_state() {
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture_path = temp.path().join("status.json");
         std::fs::write(&fixture_path, "{ this is not json }").expect("write fixture");
 
-        let previous = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok();
-        unsafe {
-            std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, &fixture_path);
-        }
+        let _fixture_env = FixtureEnvGuard::set(&fixture_path);
         let view = aggregate_project_index_status_for_path(temp.path());
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, value),
-                None => std::env::remove_var(GWT_INDEX_TEST_FIXTURE_ENV),
-            }
-        }
 
         assert_eq!(view.state, ProjectIndexStatusState::Error);
         assert!(view.detail.contains("parse error"));

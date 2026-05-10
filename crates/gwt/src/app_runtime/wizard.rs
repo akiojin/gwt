@@ -425,14 +425,7 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    KnowledgeKind::Issue,
-                    "Window not found",
-                    None,
-                    None,
-                    None,
-                ),
+                knowledge_error_event(id, KnowledgeKind::Issue, "Window not found", None, None),
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
@@ -444,21 +437,13 @@ impl AppRuntime {
                     "Project tab not found",
                     None,
                     None,
-                    None,
                 ),
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    KnowledgeKind::Issue,
-                    "Window not found",
-                    None,
-                    None,
-                    None,
-                ),
+                knowledge_error_event(id, KnowledgeKind::Issue, "Window not found", None, None),
             )];
         };
         let Some(kind) = knowledge_kind_for_preset(window.preset) else {
@@ -468,7 +453,6 @@ impl AppRuntime {
                     id,
                     KnowledgeKind::Issue,
                     "Window is not a knowledge bridge",
-                    None,
                     None,
                     None,
                 ),
@@ -520,14 +504,7 @@ impl AppRuntime {
         if self.tab(&tab_id).is_none() {
             return vec![OutboundEvent::reply(
                 &client_id,
-                knowledge_error_event(
-                    id,
-                    knowledge_kind,
-                    "Project tab not found",
-                    None,
-                    None,
-                    None,
-                ),
+                knowledge_error_event(id, knowledge_kind, "Project tab not found", None, None),
             )];
         }
 
@@ -542,12 +519,12 @@ impl AppRuntime {
                 Ok(()) => vec![self.launch_wizard_state_outbound()],
                 Err(error) => vec![OutboundEvent::reply(
                     &client_id,
-                    knowledge_error_event(id, knowledge_kind, error, None, None, None),
+                    knowledge_error_event(id, knowledge_kind, error, None, None),
                 )],
             },
             Err(error) => vec![OutboundEvent::reply(
                 &client_id,
-                knowledge_error_event(id, knowledge_kind, error, None, None, None),
+                knowledge_error_event(id, knowledge_kind, error, None, None),
             )],
         }
     }

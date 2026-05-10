@@ -75,7 +75,6 @@ pub struct KnowledgeSearchRequest<'a> {
     pub(crate) query: &'a str,
     pub(crate) request_id: u64,
     pub(crate) selected_number: Option<u64>,
-    pub(crate) list_scope: gwt::KnowledgeListScope,
 }
 
 pub struct KnowledgeLoadRequest<'a> {
@@ -84,7 +83,6 @@ pub struct KnowledgeLoadRequest<'a> {
     pub(crate) request_id: Option<u64>,
     pub(crate) selected_number: Option<u64>,
     pub(crate) refresh: bool,
-    pub(crate) list_scope: gwt::KnowledgeListScope,
 }
 
 struct KnowledgeRefreshTask {
@@ -95,7 +93,6 @@ struct KnowledgeRefreshTask {
     request_id: Option<u64>,
     selected_number: Option<u64>,
     force: bool,
-    list_scope: gwt::KnowledgeListScope,
 }
 
 struct KnowledgeSearchTask {
@@ -106,7 +103,6 @@ struct KnowledgeSearchTask {
     query: String,
     request_id: u64,
     selected_number: Option<u64>,
-    list_scope: gwt::KnowledgeListScope,
 }
 
 pub struct WindowRuntime {
@@ -477,14 +473,12 @@ fn knowledge_error_event(
     message: impl Into<String>,
     request_id: Option<u64>,
     query: Option<String>,
-    list_scope: Option<gwt::KnowledgeListScope>,
 ) -> BackendEvent {
     BackendEvent::KnowledgeError {
         id: id.into(),
         knowledge_kind: kind,
         request_id,
         query,
-        list_scope,
         message: message.into(),
     }
 }
@@ -510,7 +504,6 @@ fn knowledge_view_events(
     id: String,
     kind: KnowledgeKind,
     request_id: Option<u64>,
-    list_scope: gwt::KnowledgeListScope,
     view: gwt::KnowledgeBridgeView,
 ) -> Vec<OutboundEvent> {
     vec![
@@ -520,7 +513,6 @@ fn knowledge_view_events(
                 id: id.clone(),
                 knowledge_kind: kind,
                 request_id,
-                list_scope: Some(list_scope),
                 entries: view.entries,
                 selected_number: view.selected_number,
                 empty_message: view.empty_message,
@@ -533,7 +525,6 @@ fn knowledge_view_events(
                 id,
                 knowledge_kind: kind,
                 request_id,
-                list_scope: Some(list_scope),
                 detail: view.detail,
             },
         ),
@@ -1567,7 +1558,6 @@ impl AppRuntime {
                 request_id,
                 selected_number,
                 refresh,
-                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 KnowledgeLoadRequest {
@@ -1576,7 +1566,6 @@ impl AppRuntime {
                     request_id,
                     selected_number,
                     refresh,
-                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
             ),
             FrontendEvent::SearchKnowledgeBridge {
@@ -1585,7 +1574,6 @@ impl AppRuntime {
                 query,
                 request_id,
                 selected_number,
-                list_scope,
             } => self.search_knowledge_bridge_events(
                 &client_id,
                 KnowledgeSearchRequest {
@@ -1594,7 +1582,6 @@ impl AppRuntime {
                     query: &query,
                     request_id,
                     selected_number,
-                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
@@ -1602,7 +1589,6 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 KnowledgeLoadRequest {
@@ -1611,7 +1597,6 @@ impl AppRuntime {
                     request_id,
                     selected_number: Some(number),
                     refresh: false,
-                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
             ),
             FrontendEvent::UpdateKnowledgeBridgePhase {
@@ -2729,40 +2714,19 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    "Window not found",
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, "Window not found", request.request_id, None),
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    "Project tab not found",
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, "Project tab not found", request.request_id, None),
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    "Window not found",
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, "Window not found", request.request_id, None),
             )];
         };
         if knowledge_kind_for_preset(window.preset) != Some(kind) {
@@ -2774,7 +2738,6 @@ impl AppRuntime {
                     "Window is not a knowledge bridge",
                     request.request_id,
                     None,
-                    Some(request.list_scope),
                 ),
             )];
         }
@@ -2788,18 +2751,11 @@ impl AppRuntime {
                 request_id: request.request_id,
                 selected_number: request.selected_number,
                 force: true,
-                list_scope: request.list_scope,
             });
             return Vec::new();
         }
 
-        match load_knowledge_bridge(
-            &tab.project_root,
-            kind,
-            request.selected_number,
-            false,
-            request.list_scope,
-        ) {
+        match load_knowledge_bridge(&tab.project_root, kind, request.selected_number, false) {
             Ok(view) => {
                 if request.request_id.is_some() && view.refresh_enabled {
                     self.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
@@ -2810,7 +2766,6 @@ impl AppRuntime {
                         request_id: request.request_id,
                         selected_number: request.selected_number,
                         force: false,
-                        list_scope: request.list_scope,
                     });
                 }
                 knowledge_view_events(
@@ -2818,20 +2773,12 @@ impl AppRuntime {
                     id.to_string(),
                     kind,
                     request.request_id,
-                    request.list_scope,
                     view,
                 )
             }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    error,
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, error, request.request_id, None),
             )],
         }
     }
@@ -2845,7 +2792,6 @@ impl AppRuntime {
             request_id,
             selected_number,
             force,
-            list_scope,
         } = task;
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
@@ -2855,14 +2801,7 @@ impl AppRuntime {
                     if force {
                         proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                             client_id,
-                            knowledge_error_event(
-                                id,
-                                kind,
-                                error,
-                                request_id,
-                                None,
-                                Some(list_scope),
-                            ),
+                            knowledge_error_event(id, kind, error, request_id, None),
                         )]));
                     }
                     return;
@@ -2871,21 +2810,14 @@ impl AppRuntime {
             if !force && !refreshed {
                 return;
             }
-            let event = match gwt::load_knowledge_bridge(
-                &project_root,
-                kind,
-                selected_number,
-                false,
-                list_scope,
-            ) {
-                Ok(view) => {
-                    knowledge_view_events(client_id, id, kind, request_id, list_scope, view)
-                }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id,
-                    knowledge_error_event(id, kind, error, request_id, None, Some(list_scope)),
-                )],
-            };
+            let event =
+                match gwt::load_knowledge_bridge(&project_root, kind, selected_number, false) {
+                    Ok(view) => knowledge_view_events(client_id, id, kind, request_id, view),
+                    Err(error) => vec![OutboundEvent::reply(
+                        client_id,
+                        knowledge_error_event(id, kind, error, request_id, None),
+                    )],
+                };
             proxy.send(UserEvent::Dispatch(event));
         });
     }
@@ -2906,7 +2838,6 @@ impl AppRuntime {
                     "Window not found",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         };
@@ -2919,7 +2850,6 @@ impl AppRuntime {
                     "Project tab not found",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         };
@@ -2932,7 +2862,6 @@ impl AppRuntime {
                     "Window not found",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         };
@@ -2945,7 +2874,6 @@ impl AppRuntime {
                     "Window is not a knowledge bridge",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         }
@@ -2958,7 +2886,6 @@ impl AppRuntime {
             query: request.query.to_string(),
             request_id: request.request_id,
             selected_number: request.selected_number,
-            list_scope: request.list_scope,
         });
         Vec::new()
     }
@@ -2972,37 +2899,25 @@ impl AppRuntime {
             query,
             request_id,
             selected_number,
-            list_scope,
         } = task;
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
-            let event = match gwt::search_knowledge_bridge(
-                &project_root,
-                kind,
-                &query,
-                selected_number,
-                list_scope,
-            ) {
-                Ok(view) => BackendEvent::KnowledgeSearchResults {
-                    id: id.clone(),
-                    knowledge_kind: kind,
-                    query: query.clone(),
-                    request_id,
-                    list_scope: Some(list_scope),
-                    entries: view.entries,
-                    selected_number: view.selected_number,
-                    empty_message: view.empty_message,
-                    refresh_enabled: view.refresh_enabled,
-                },
-                Err(error) => knowledge_error_event(
-                    id,
-                    kind,
-                    error,
-                    Some(request_id),
-                    Some(query),
-                    Some(list_scope),
-                ),
-            };
+            let event =
+                match gwt::search_knowledge_bridge(&project_root, kind, &query, selected_number) {
+                    Ok(view) => BackendEvent::KnowledgeSearchResults {
+                        id: id.clone(),
+                        knowledge_kind: kind,
+                        query: query.clone(),
+                        request_id,
+                        entries: view.entries,
+                        selected_number: view.selected_number,
+                        empty_message: view.empty_message,
+                        refresh_enabled: view.refresh_enabled,
+                    },
+                    Err(error) => {
+                        knowledge_error_event(id, kind, error, Some(request_id), Some(query))
+                    }
+                };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                 client_id, event,
             )]));
@@ -8315,7 +8230,6 @@ exit 0
                 request_id: None,
                 selected_number: Some(42),
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(issue_events.len(), 2);
@@ -8350,7 +8264,6 @@ exit 0
                 request_id: None,
                 selected_number: Some(1930),
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(spec_events.len(), 2);
@@ -8400,7 +8313,6 @@ exit 0
                 query: "semantic query",
                 request_id: 9,
                 selected_number: None,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
 
@@ -8464,7 +8376,6 @@ exit 0
                 query: "semantic query".to_string(),
                 request_id: 9,
                 selected_number: None,
-                list_scope: Some(gwt::KnowledgeListScope::Open),
             },
         );
 
@@ -8541,7 +8452,6 @@ exit 0
                 request_id: Some(31),
                 selected_number: Some(43),
                 refresh: true,
-                list_scope: Some(gwt::KnowledgeListScope::Open),
             },
         );
 
@@ -8630,7 +8540,6 @@ exit 0
                 request_id: Some(32),
                 selected_number: None,
                 refresh: true,
-                list_scope: Some(gwt::KnowledgeListScope::Closed),
             },
         );
 
@@ -8650,13 +8559,11 @@ exit 0
                                     id,
                                     knowledge_kind,
                                     request_id,
-                                    list_scope,
                                     message,
                                     ..
                                 } if id == &window_id
                                     && *knowledge_kind == gwt::KnowledgeKind::Issue
                                     && *request_id == Some(32)
-                                    && *list_scope == Some(gwt::KnowledgeListScope::Closed)
                                     && message.contains("gh refresh failed")
                             )
                         })
@@ -8704,7 +8611,6 @@ exit 0
             request_id: Some(33),
             selected_number: None,
             force: false,
-            list_scope: gwt::KnowledgeListScope::Open,
         });
         wait_for_path("stale knowledge refresh gh invocation", &marker);
         assert!(
@@ -8724,7 +8630,6 @@ exit 0
             request_id: Some(34),
             selected_number: Some(43),
             force: false,
-            list_scope: gwt::KnowledgeListScope::Open,
         });
         thread::sleep(Duration::from_millis(250));
         assert!(
@@ -8757,7 +8662,6 @@ exit 0
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
 
