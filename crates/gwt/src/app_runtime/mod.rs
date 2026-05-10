@@ -3365,8 +3365,30 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        if !self.window_lookup.contains_key(&id) {
+        self.handle_runtime_output_inner(id, data, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_output(
+        &mut self,
+        id: String,
+        data: Vec<u8>,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_output_inner(id, data, false)
+    }
+
+    fn handle_runtime_output_inner(
+        &mut self,
+        id: String,
+        data: Vec<u8>,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
             return Vec::new();
+        };
+        if publish_to_daemon {
+            if let Some(tab) = self.tab(&address.tab_id) {
+                publish_runtime_output_change(&tab.project_root, &id, &data);
+            }
         }
         vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
             id,
@@ -3380,6 +3402,25 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
+        self.handle_runtime_status_inner(id, status, detail, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_status(
+        &mut self,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_status_inner(id, status, detail, false)
+    }
+
+    fn handle_runtime_status_inner(
+        &mut self,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
         let Some(_address) = self.window_lookup.get(&id).cloned() else {
             self.remove_window_state_tracking(&id);
             self.deregister_pty_writer(&id);
@@ -3387,6 +3428,13 @@ impl AppRuntime {
             self.window_details.remove(&id);
             return Vec::new();
         };
+        if publish_to_daemon {
+            if let Some(address) = self.window_lookup.get(&id) {
+                if let Some(tab) = self.tab(&address.tab_id) {
+                    publish_runtime_status_change(&tab.project_root, &id, status, detail.clone());
+                }
+            }
+        }
 
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
@@ -3445,6 +3493,26 @@ impl AppRuntime {
         &mut self,
         event: gwt::RuntimeHookEvent,
     ) -> Vec<OutboundEvent> {
+        self.handle_runtime_hook_event_inner(event, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_hook_event(
+        &mut self,
+        event: gwt::RuntimeHookEvent,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_hook_event_inner(event, false)
+    }
+
+    fn handle_runtime_hook_event_inner(
+        &mut self,
+        event: gwt::RuntimeHookEvent,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
+        if publish_to_daemon {
+            if let Some(project_root) = event.project_root.as_deref().map(PathBuf::from) {
+                publish_runtime_hook_change(&project_root, &event);
+            }
+        }
         let mut events = vec![OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
             event: event.clone(),
         })];
@@ -4834,6 +4902,105 @@ fn update_issue_branch_link_with_cache_dir(
     gwt_github::cache::write_atomic(&path, &bytes)
         .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
+
+#[cfg(unix)]
+fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
+    let project_root_owned = project_root.to_path_buf();
+    let id = id.to_string();
+    let data = data.to_vec();
+    let _ = std::thread::Builder::new()
+        .name("gwt-runtime-output-daemon-publish".to_string())
+        .spawn(move || {
+            let payload =
+                gwt::runtime_daemon_events::runtime_output_payload(&id, &data, std::process::id());
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root_owned,
+                gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root_owned.display(),
+                    window_id = %id,
+                    "runtime output daemon publish failed (non-fatal)"
+                );
+            }
+        });
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_output_change(_project_root: &Path, _id: &str, _data: &[u8]) {}
+
+#[cfg(unix)]
+fn publish_runtime_status_change(
+    project_root: &Path,
+    id: &str,
+    status: WindowProcessStatus,
+    detail: Option<String>,
+) {
+    let project_root_owned = project_root.to_path_buf();
+    let id = id.to_string();
+    let _ = std::thread::Builder::new()
+        .name("gwt-runtime-status-daemon-publish".to_string())
+        .spawn(move || {
+            let payload = gwt::runtime_daemon_events::runtime_status_payload(
+                &id,
+                status,
+                detail,
+                std::process::id(),
+            );
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root_owned,
+                gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root_owned.display(),
+                    window_id = %id,
+                    "runtime status daemon publish failed (non-fatal)"
+                );
+            }
+        });
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_status_change(
+    _project_root: &Path,
+    _id: &str,
+    _status: WindowProcessStatus,
+    _detail: Option<String>,
+) {
+}
+
+#[cfg(unix)]
+fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
+    let project_root_owned = project_root.to_path_buf();
+    let event = event.clone();
+    let _ = std::thread::Builder::new()
+        .name("gwt-runtime-hook-daemon-publish".to_string())
+        .spawn(move || {
+            let payload =
+                gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root_owned,
+                gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root_owned.display(),
+                    "runtime hook daemon publish failed (non-fatal)"
+                );
+            }
+        });
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
 
 #[cfg(test)]
 mod tests {

@@ -474,20 +474,61 @@ fn spawn_board_daemon_subscriber(
     Some(
         gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
             resolver,
-            vec!["board".to_string(), "workspace".to_string()],
-            move |channel, _payload| {
-                if channel == "board" {
-                    let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
-                        project_root: project_root_for_callback.clone(),
-                    });
-                } else if channel == "workspace" {
-                    let _ = proxy_for_callback.send_event(UserEvent::WorkspaceProjectionChanged {
-                        project_root: project_root_for_callback.clone(),
-                    });
+            daemon_subscriber_channels(),
+            move |channel, payload| {
+                if let Some(event) = daemon_broadcast_user_event(
+                    &channel,
+                    payload,
+                    &project_root_for_callback,
+                    std::process::id(),
+                ) {
+                    let _ = proxy_for_callback.send_event(event);
                 }
             },
         ),
     )
+}
+
+#[cfg(unix)]
+fn daemon_subscriber_channels() -> Vec<String> {
+    vec![
+        "board".to_string(),
+        "workspace".to_string(),
+        gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL.to_string(),
+        gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL.to_string(),
+        gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL.to_string(),
+    ]
+}
+
+#[cfg(unix)]
+fn daemon_broadcast_user_event(
+    channel: &str,
+    payload: serde_json::Value,
+    project_root: &Path,
+    current_pid: u32,
+) -> Option<UserEvent> {
+    if channel == "board" {
+        return Some(UserEvent::BoardProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    if channel == "workspace" {
+        return Some(UserEvent::WorkspaceProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+
+    match gwt::runtime_daemon_events::decode_runtime_daemon_event(channel, payload, current_pid)? {
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Output { id, data } => {
+            Some(UserEvent::DaemonRuntimeOutput { id, data })
+        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Status { id, status, detail } => {
+            Some(UserEvent::DaemonRuntimeStatus { id, status, detail })
+        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } => {
+            Some(UserEvent::DaemonRuntimeHook(event))
+        }
+    }
 }
 
 // Liveness probe shared with `cli::daemon` and `daemon_publisher`;
@@ -526,7 +567,16 @@ enum UserEvent {
         id: String,
         data: Vec<u8>,
     },
+    DaemonRuntimeOutput {
+        id: String,
+        data: Vec<u8>,
+    },
     RuntimeStatus {
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    },
+    DaemonRuntimeStatus {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
@@ -538,6 +588,7 @@ enum UserEvent {
         project_root: PathBuf,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
+    DaemonRuntimeHook(gwt::RuntimeHookEvent),
     LaunchProgress {
         window_id: String,
         message: String,
@@ -638,6 +689,110 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_subscriber_channels_include_runtime_h2_channels() {
+        let channels = super::daemon_subscriber_channels();
+
+        assert!(channels.iter().any(|channel| channel == "board"));
+        assert!(channels.iter().any(|channel| channel == "workspace"));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
+        let project_root = Path::new("/tmp/gwt-project");
+        let output_payload =
+            gwt::runtime_daemon_events::runtime_output_payload("tab-1::shell-1", b"hello", 42);
+        let status_payload = gwt::runtime_daemon_events::runtime_status_payload(
+            "tab-1::shell-1",
+            WindowProcessStatus::Error,
+            Some("boom".to_string()),
+            42,
+        );
+        let hook_event = RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("Stop".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: Some("agent-1".to_string()),
+            project_root: Some(project_root.display().to_string()),
+            branch: Some("work/runtime".to_string()),
+            status: Some("waiting".to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-05-10T00:00:00Z".to_string(),
+        };
+        let hook_payload = gwt::runtime_daemon_events::runtime_hook_payload(&hook_event, 42);
+
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
+            output_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeOutput { id, data }) => {
+                assert_eq!(id, "tab-1::shell-1");
+                assert_eq!(data, b"hello");
+            }
+            other => panic!("unexpected runtime output event: {other:?}"),
+        }
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+            status_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {
+                assert_eq!(id, "tab-1::shell-1");
+                assert_eq!(status, WindowProcessStatus::Error);
+                assert_eq!(detail.as_deref(), Some("boom"));
+            }
+            other => panic!("unexpected runtime status event: {other:?}"),
+        }
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            hook_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeHook(event)) => {
+                assert_eq!(event, hook_event);
+            }
+            other => panic!("unexpected runtime hook event: {other:?}"),
+        }
+
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
+            output_payload,
+            project_root,
+            42,
+        )
+        .is_none());
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+            status_payload,
+            project_root,
+            42,
+        )
+        .is_none());
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            hook_payload,
+            project_root,
+            42,
+        )
+        .is_none());
     }
 
     #[test]
@@ -5046,8 +5201,16 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_runtime_output(id, data);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data }) => {
+                let events = app.handle_daemon_runtime_output(id, data);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {
+                let events = app.handle_daemon_runtime_status(id, status, detail);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
@@ -5060,6 +5223,10 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let events = app.handle_runtime_hook_event(event);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::DaemonRuntimeHook(event)) => {
+                let events = app.handle_daemon_runtime_hook_event(event);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
