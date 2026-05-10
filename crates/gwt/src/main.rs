@@ -181,36 +181,40 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
 }
 
 fn spawn_project_index_status_check(
-    runtime: &Runtime,
+    _runtime: &Runtime,
     proxy: EventLoopProxy<UserEvent>,
     project_root: Option<PathBuf>,
 ) {
-    let project_root_label = project_root
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    drop(runtime.spawn(async move {
-        let status = match project_root {
-            Some(path) => tokio::task::spawn_blocking(move || {
-                gwt::index_worker::project_index_status_for_path(&path)
-            })
-            .await
-            .unwrap_or_else(|err| {
-                gwt::ProjectIndexStatusView::new(
-                    gwt::ProjectIndexStatusState::Error,
-                    format!("Project index status task failed: {err}"),
-                )
-            }),
-            None => gwt::ProjectIndexStatusView::new(
+    dispatch_project_index_status_check_with(
+        AppEventProxy::new(proxy),
+        project_root,
+        |proxy, root| {
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
+                .spawn(proxy, root)
+        },
+    );
+}
+
+fn dispatch_project_index_status_check_with(
+    proxy: AppEventProxy,
+    project_root: Option<PathBuf>,
+    spawn_bootstrap: impl FnOnce(
+        AppEventProxy,
+        PathBuf,
+    ) -> crate::project_index_bootstrap::ProjectIndexBootstrapRequest,
+) -> Option<crate::project_index_bootstrap::ProjectIndexBootstrapRequest> {
+    let Some(project_root) = project_root else {
+        proxy.send(UserEvent::ProjectIndexStatus {
+            project_root: String::new(),
+            status: gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 "No current directory",
             ),
-        };
-        let _ = proxy.send_event(UserEvent::ProjectIndexStatus {
-            project_root: project_root_label,
-            status,
         });
-    }));
+        return None;
+    };
+
+    Some(spawn_bootstrap(proxy, project_root))
 }
 
 fn record_update_available(
@@ -1066,6 +1070,78 @@ mod tests {
 
         assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
         assert_eq!(surface.webview_url, "http://127.0.0.1:44557/");
+    }
+
+    #[test]
+    fn project_index_status_check_without_project_root_emits_skipped_status() {
+        let (proxy, events) = AppEventProxy::stub();
+
+        let request =
+            super::dispatch_project_index_status_check_with(proxy, None, |_proxy, _root| {
+                panic!("bootstrap must not run without an active project root");
+            });
+
+        assert_eq!(request, None);
+        let recorded = events.lock().expect("events");
+        assert!(
+            matches!(
+                recorded.as_slice(),
+                [UserEvent::ProjectIndexStatus {
+                    project_root,
+                    status,
+                }] if project_root.is_empty()
+                    && status.state == gwt::ProjectIndexStatusState::Skipped
+                    && status.detail == "No current directory"
+            ),
+            "startup without a project should emit a single skipped index status: {recorded:?}",
+        );
+    }
+
+    #[test]
+    fn project_index_status_check_delegates_project_root_to_bootstrap_path() {
+        let temp = tempdir().expect("tempdir");
+        let (proxy, events) = AppEventProxy::stub();
+        let captured_root = Arc::new(Mutex::new(None));
+        let captured_root_for_closure = captured_root.clone();
+
+        let request = super::dispatch_project_index_status_check_with(
+            proxy,
+            Some(temp.path().to_path_buf()),
+            move |proxy, project_root| {
+                *captured_root_for_closure.lock().expect("captured root") =
+                    Some(project_root.clone());
+                proxy.send(UserEvent::ProjectIndexStatus {
+                    project_root: project_root.display().to_string(),
+                    status: gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        "bootstrap status",
+                    ),
+                });
+                crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
+            },
+        );
+
+        assert_eq!(
+            request,
+            Some(crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned)
+        );
+        assert_eq!(
+            captured_root.lock().expect("captured root").as_deref(),
+            Some(temp.path())
+        );
+        let recorded = events.lock().expect("events");
+        assert!(
+            matches!(
+                recorded.as_slice(),
+                [UserEvent::ProjectIndexStatus {
+                    project_root,
+                    status,
+                }] if project_root == &temp.path().display().to_string()
+                    && status.state == gwt::ProjectIndexStatusState::Ready
+                    && status.detail == "bootstrap status"
+            ),
+            "startup with a project must receive the bootstrap status event: {recorded:?}",
+        );
     }
 
     #[test]

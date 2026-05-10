@@ -98,7 +98,10 @@ fn run_post_backup(
 
     let bare_repo_path = match origin_url.as_deref() {
         Some(url) => match git_migration::clone_bare_from_normal(url, &bare_target) {
-            Ok(p) => p,
+            Ok(p) => {
+                refresh_bare_refs_from_local(&dot_git, &p)?;
+                p
+            }
             Err(_) => bareify_local_or_fail(project_root, &bare_target)?,
         },
         None => bareify_local_or_fail(project_root, &bare_target)?,
@@ -354,6 +357,36 @@ fn bareify_local_or_fail(
         message: e.to_string(),
         recovery: RecoveryState::Partial,
     })
+}
+
+fn refresh_bare_refs_from_local(
+    dot_git: &Path,
+    bare_repo_path: &Path,
+) -> Result<(), MigrationError> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["fetch"])
+        .arg(dot_git)
+        .args(["+refs/*:refs/*"])
+        .current_dir(bare_repo_path)
+        .output()
+        .map_err(|e| MigrationError {
+            phase: MigrationPhase::Bareify,
+            message: format!("refresh bare refs from local git dir: {e}"),
+            recovery: RecoveryState::Partial,
+        })?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(MigrationError {
+            phase: MigrationPhase::Bareify,
+            message: format!(
+                "refresh bare refs from local git dir failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            recovery: RecoveryState::Partial,
+        })
+    }
 }
 
 fn derive_bare_repo_name(project_root: &Path) -> String {
