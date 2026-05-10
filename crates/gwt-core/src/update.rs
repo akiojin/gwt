@@ -405,12 +405,22 @@ impl UpdateManager {
             .build()
             .unwrap_or_else(|_| Client::new());
 
+        // SPEC-2041 Phase 19 (T-137 enabler): allow Gate 2 mock smokes to
+        // redirect the update API to a local fixture by setting
+        // `GWT_UPDATE_API_BASE_URL`. Empty values fall back to the default so
+        // an accidental `export GWT_UPDATE_API_BASE_URL=` does not break
+        // production updates.
+        let api_base_url = std::env::var("GWT_UPDATE_API_BASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
+
         Self {
             current_version,
             owner: DEFAULT_OWNER.to_string(),
             repo: DEFAULT_REPO.to_string(),
             ttl: DEFAULT_TTL,
-            api_base_url: DEFAULT_API_BASE_URL.to_string(),
+            api_base_url,
             cache_path,
             updates_dir,
             client,
