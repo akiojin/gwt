@@ -184,6 +184,90 @@ test.describe("Project Index status badge", () => {
     await expect(badge).not.toHaveClass(/repairing/);
   });
 
+  test("project tab dot reflects aggregated worktree health (T-IDX-107)", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+
+    // Initial state: one healthy file scope in wtA — dot should be green.
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        files: {
+          wtAhash: { healthy: true, repair_required: false, document_count: 310 },
+        },
+        "files-docs": {
+          wtAhash: { healthy: true, repair_required: false, document_count: 16 },
+        },
+      },
+      worktrees: {
+        wtAhash: { branch: "develop", path: "/abs/wtA" },
+      },
+    });
+
+    await page.goto(APP_URL);
+    const dot = page.locator(".project-tab .project-tab-dot");
+    await expect(dot).toHaveAttribute("data-state", "ready", { timeout: 10_000 });
+
+    // Drive an unhealthy `files` cell on the same worktree → dot should
+    // flip to `error` (red).
+    await page.evaluate(() => {
+      window.__gwtFixtureWebSocket.emit({
+        kind: "project_index_status",
+        project_root: "/fixture",
+        status: {
+          state: "repair_required",
+          detail: "",
+          progress: null,
+          scopes: {
+            files: {
+              wtAhash: {
+                healthy: false,
+                repair_required: true,
+                document_count: 0,
+                reason: "manifest_missing",
+              },
+            },
+            "files-docs": {
+              wtAhash: { healthy: true, repair_required: false, document_count: 16 },
+            },
+          },
+          worktrees: {
+            wtAhash: { branch: "develop", path: "/abs/wtA" },
+          },
+        },
+      });
+    });
+    await expect(dot).toHaveAttribute("data-state", "error", { timeout: 5_000 });
+
+    // Transition to repairing (state==="repairing") → dot should be yellow.
+    await page.evaluate(() => {
+      window.__gwtFixtureWebSocket.emit({
+        kind: "project_index_status",
+        project_root: "/fixture",
+        status: {
+          state: "repairing",
+          detail: "",
+          progress: { scopes_done: 0, scopes_total: 1 },
+          scopes: {
+            files: {
+              wtAhash: {
+                healthy: true,
+                repair_required: false,
+                document_count: 1,
+              },
+            },
+            "files-docs": {
+              wtAhash: { healthy: true, repair_required: false, document_count: 16 },
+            },
+          },
+          worktrees: {
+            wtAhash: { branch: "develop", path: "/abs/wtA" },
+          },
+        },
+      });
+    });
+    await expect(dot).toHaveAttribute("data-state", "repairing", { timeout: 5_000 });
+  });
+
   test("badge click opens Settings.Index tab and renders the scope health table (T-IDX-106)", async ({
     page,
   }) => {
