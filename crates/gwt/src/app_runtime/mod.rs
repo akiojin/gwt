@@ -3342,6 +3342,9 @@ impl AppRuntime {
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
                 active: true,
+                runtime_status: self
+                    .window_status(&session.window_id)
+                    .unwrap_or(WindowProcessStatus::Running),
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -6401,6 +6404,39 @@ exit 0
         assert!(view.show_branch_controls);
         assert_eq!(view.live_sessions.len(), 1);
         assert_eq!(view.live_sessions[0].name, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_live_sessions_report_composed_waiting_runtime_status() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: PathBuf::from("E:/gwt/test-repo"),
+                agent_project_root: "E:/gwt/test-repo".to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Waiting);
     }
 
     #[test]
