@@ -1,5 +1,45 @@
 # Lessons Learned
 
+## 2026-05-10 — Verify CLI commands and flags against the parser, not just the help text
+
+### 事象
+
+`docs/spec-1939-phase-12-manual-smoke.md` (PR #2599 で develop merged) に、
+実在しないサブコマンド `gwtd start-work develop /tmp/...` を含めてしまい、
+follow-up PR #2600 で修正したものの、その PR で「`gwtd board post` には
+`--mention` フラグは存在しない」と誤った claim を書いてしまった。実際に
+は `crates/gwt/src/cli/board.rs:234` の parser に `--mention <kind:id>` が
+landing 済みで、tests (`board_family_parse_post_collects_typed_mentions`)
+でも `--mention user:akiojin` 形式が gating されていたため、Codex review
+(PRRT_kwDOPLof2M6A4JHA) で指摘され、二度目の follow-up が必要になった。
+
+### 原因
+
+最初の修正で `gwtd --help board post` (実体は `crates/gwt/src/bin/gwtd.rs::
+format_board_help()`) の出力だけを根拠にし、parser source (`cli/board.rs`)
+や cli.rs の集中 usage 文字列を読まなかった。`bin/gwtd.rs` の subcommand
+help は手書きで cli.rs / parser から自動生成されておらず、`--mention` の
+ように後から landing したフラグが反映されていない場合がある。help text
+を「正本」と仮定してしまったのが事故の構造的原因。
+
+### 再発防止策
+
+1. CLI flag / subcommand の有無を doc / lesson に固定する場合、`gwtd
+   <subcommand> --help` だけでなく、parser 側 (`crates/gwt/src/cli/*.rs`
+   の `--flag` arm) と test (`board_family_parse_post_*` 等) の両方で
+   確認する。help 文字列は手書きのため、フラグの抜けが発生する。
+2. user 向け手順に CLI snippet を埋め込む際は、commit 前に **実 invocation
+   で reproduce** してから snippet を確定する (例: 実際に `gwtd board post
+   --mention user:akiojin --body 'test'` を投げて成功するかを board entry
+   で確認)。help 文字列は古い場合がある。
+3. もし help と parser に乖離があったら、help 側も合わせて修正する
+   (`crates/gwt/src/bin/gwtd.rs::format_*_help()`)。ドキュメントを書く
+   作業の副産物として help 同期も行うことで、次の reviewer が同じ事故を
+   踏まなくなる。
+4. 既存 doc / 既存テストの flag 列挙 (parser の `--mention` arm、cli.rs
+   の集中 usage 文字列) を参照元として優先し、help の subcommand 出力は
+   second-source 扱いとする。
+
 ## 2026-05-10 — Read tasks/lessons.md before designing tests for window interaction features
 
 ### 事象

@@ -301,7 +301,9 @@ pub enum ActionsCommand {
 pub enum BoardCommand {
     /// `gwtd board show [--json]`.
     Show { json: bool },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--target <id>] [--mention <kind:id>]`.
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
+    /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
+    /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
     Post(Box<BoardPostCommand>),
 }
 
