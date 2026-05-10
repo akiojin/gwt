@@ -31,6 +31,49 @@ assertion だけを書いてしまった。
    ように)、AGENTS.md の `Self-Improvement Loop` に従い該当領域の lesson
    をすべて並べて読み返す。
 
+## 2026-05-10 — gwt-build-spec must preflight Board active claims
+
+### 事象
+
+ユーザー報告のターミナル安定化 3 症状を SPEC-1919 (TTY) と SPEC-2008
+(Window host) に分割して並行実装するため、別セッションで
+SPEC-1919 PR #2587 を merge 後、続いて SPEC-2008 Phase 24 を
+`gwt-build-spec` で着手し PR #2589 を作成した。同時刻に別 Claude Code
+セッション (work/20260509-1639) も SPEC-2008 Phase 24 を Board claim
+済みで実装し、PR #2588 として先に CI 完走 → auto-merge した。結果
+PR #2589 は `merge: CONFLICTING` の重複 PR になり、SUPERSEDED 扱いで
+close 待ちとなった。
+
+### 原因
+
+`gwt-build-spec` の Phase 1 (Context Load) が SPEC tasks セクションは
+読むが、対象 SPEC に対して **他 agent が active claim を持っているか
+を Board から確認するステップを持たない**。SPEC-1935 FR-014b/c の
+`board-reminder` は SessionStart / UserPromptSubmit に最近の Board
+posts を注入するが、注入のタイミングと skill 起動のタイミングが一致
+せず、別セッションの SessionStart context には PR #2588 の claim
+post が含まれていなかった。結果として、先行 claim の存在を検知でき
+ないまま並行実装に入り、merge 段階で重複が露呈した。
+
+### 再発防止策
+
+1. `gwt-build-spec` / `gwt-plan-spec` / `gwt-discussion` 起動直後
+   (Phase 1 内、対象 SPEC 番号確定後) に `gwtd board show` を読み、
+   対象 SPEC owner / Phase に対する `[active]` claim を持つ別 session
+   が存在するかをチェックする。存在する場合は当該 session への合流
+   提案 (handoff request) または work split の議論に切り替える。
+2. 上記チェックを skill 内マニュアル運用ではなく `gwtd build start`
+   / `gwtd plan start` / `gwtd discuss start` 等のライフサイクル CLI
+   側でも実行し、stderr に warning を出すことを検討する (実装は別
+   Issue で議論)。
+3. 並行作業を意図的に許可するケース (例: 同 SPEC 内で disjoint なファ
+   イル境界が明示されている) は Board claim の `Boundary:` 行で明示
+   する運用を継続し、preflight はあくまで "知らずに重複する" を防
+   ぐためのものとする。
+4. Issue として "[skill-preflight] gwt-build-spec / gwt-plan-spec /
+   gwt-discussion must check Board active claims before starting"
+   を別途登録し追跡する (本 lesson とリンク)。
+
 ## 2026-05-07 — Hook fixes must separate diagnostics from shipped behavior
 
 ### 事象
