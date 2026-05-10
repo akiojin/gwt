@@ -851,6 +851,13 @@ Coverage requirements.
             "git branch --contains HEAD",
             "git branch --points-at HEAD",
             "git branch --list 'work/*'",
+            "git branch --merged main",
+            "git branch --no-merged origin/develop",
+            "git branch --format=%(refname:short)",
+            "git branch --sort=-committerdate",
+            "git branch -a",
+            "git branch -v",
+            "git branch -avv --contains HEAD",
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
@@ -939,7 +946,11 @@ Coverage requirements.
 
     #[test]
     fn title_summary_guard_blocks_mutating_git_branch() {
-        for command in ["git branch new-work", "git branch -D old-work"] {
+        for command in [
+            "git branch new-work",
+            "git branch -D old-work",
+            "git branch -df old-work",
+        ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({
