@@ -2636,6 +2636,82 @@ impl AppRuntime {
         events
     }
 
+    pub(crate) fn handle_workspace_projection_changed_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let Ok(Some(projection)) =
+            gwt_core::workspace_projection::load_workspace_projection(project_root)
+        else {
+            return Vec::new();
+        };
+        self.sync_agent_window_titles_from_workspace_projection(project_root, &projection);
+
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                same_worktree_path(&tab.project_root, project_root)
+                    && self.active_tab_id.as_deref() == Some(tab.id.as_str())
+            })
+            .map(|tab| tab.id.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return Vec::new();
+        };
+        let Some(projection) = self.active_work_projection_for_tab(&tab_id, tab) else {
+            return Vec::new();
+        };
+        vec![OutboundEvent::broadcast(
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
+        )]
+    }
+
+    fn sync_agent_window_titles_from_workspace_projection(
+        &mut self,
+        project_root: &Path,
+        projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    ) {
+        let updates = projection
+            .agents
+            .iter()
+            .filter_map(|agent| {
+                let title = agent
+                    .title_summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                let (window_id, session) = self
+                    .active_agent_sessions
+                    .iter()
+                    .find(|(_, session)| session.session_id == agent.session_id)?;
+                if !same_worktree_path(&session.worktree_path, project_root) {
+                    return None;
+                }
+                Some((
+                    window_id.clone(),
+                    title.to_string(),
+                    agent.current_focus.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        for (window_id, title, detail) in updates {
+            let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                continue;
+            };
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                continue;
+            };
+            tab.workspace
+                .set_dynamic_title_with_detail(&address.raw_id, Some(title), detail);
+        }
+    }
+
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -9759,6 +9835,89 @@ exit 0
                 .dynamic_title
                 .as_deref(),
             None
+        );
+    }
+
+    #[test]
+    fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab_workspace = empty_workspace_state();
+        let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+        agent.title = "Codex".to_string();
+        tab_workspace.windows.push(agent);
+        tab_workspace.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260510-0900".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "session-1".to_string(),
+                window_id: Some(window_id),
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some(
+                    "Implement mandatory Agent title summary updates for Workspace".to_string(),
+                ),
+                title_summary: Some("Agent title summary guard".to_string()),
+                worktree_path: Some(repo.clone()),
+                branch: Some("work/20260510-0900".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        let events = runtime.handle_workspace_projection_changed_events(&repo);
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Agent title summary guard")
+        );
+        assert_eq!(
+            agent_window.dynamic_title_detail.as_deref(),
+            Some("Implement mandatory Agent title summary updates for Workspace")
         );
     }
 
