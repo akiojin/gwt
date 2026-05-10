@@ -6,7 +6,7 @@ export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
   snapshotDir: "./snapshots",
-  snapshotPathTemplate: "{snapshotDir}/{testFilePath}/{projectName}/{arg}{ext}",
+  snapshotPathTemplate: "{snapshotDir}/{testFilePath}/{projectName}/{platform}/{arg}{ext}",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
