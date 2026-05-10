@@ -87,6 +87,11 @@ pub fn index_status_controller_js() -> &'static str {
     include_str!("../web/index-status-controller.js")
 }
 
+// SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
+pub fn index_settings_panel_js() -> &'static str {
+    include_str!("../web/index-settings-panel.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -152,6 +157,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/index-status-controller.js",
         source: index_status_controller_js,
         marker: "formatIndexStatusLabel",
+    },
+    RootJsModuleAsset {
+        path: "/index-settings-panel.js",
+        source: index_settings_panel_js,
+        marker: "renderIndexSettingsPanel",
     },
 ];
 
@@ -906,6 +916,20 @@ mod tests {
             js.contains("formatIndexStatusLabel(state)")
                 && js.contains("dispatchOpenIndexSettings(indexStatusLabel)"),
             "SPEC-1939 T-IDX-103/105: renderIndexStatus must use the shared controller",
+        );
+        assert!(
+            js.contains("buildSettingsTab(\"index\", \"Index\", false)")
+                && js.contains("renderIndexSettingsPanel({"),
+            "SPEC-1939 T-IDX-106: Settings window must mount an Index tab + panel",
+        );
+        assert!(
+            js.contains("showRepairingProgressToast(status)")
+                && html.contains(".index-status-toast"),
+            "SPEC-1939 T-IDX-108: repairing click should show a progress toast",
+        );
+        assert!(
+            html.contains(".project-tab-dot") && js.contains("aggregateProjectTabDotState(status)"),
+            "SPEC-1939 T-IDX-107: project tab must render an aggregated worktree health dot",
         );
     }
 
