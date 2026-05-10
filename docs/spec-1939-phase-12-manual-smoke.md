@@ -29,10 +29,27 @@ SPEC-1939 Issue #2584 can close.
    the gwt GUI's *Start Work* flow against an existing project — agent
    CLIs do not create worktrees, so do not invoke `git worktree add`
    from automation.
-4. Optional: pre-seed an unhealthy index scope by deleting one
-   worktree's chroma store under `~/.gwt/index/<repo-hash>/worktrees/
-   <wt-hash>/files/`. This forces the bootstrap path into
-   `repair_required` so the auto-rebuild orchestrator runs.
+4. Optional: pre-seed an unhealthy index scope so the bootstrap path
+   enters `repair_required` and the auto-rebuild orchestrator runs.
+   The chroma stores live under `~/.gwt/index/<repo-hash>/worktrees/
+   <wt-hash>/files/`. The 16-char `repo-hash` is computed from the
+   project's git remote URL (or local path when no remote is set), and
+   each worktree gets its own `wt-hash` directory. The simplest recipe:
+
+   ```bash
+   # 1. List the indexed worktrees for the active gwt project (run from
+   #    inside the project's repo root):
+   ls -d ~/.gwt/index/*/worktrees/*/
+
+   # 2. Pick one of those `<wt-hash>/` directories and remove its `files/`
+   #    chroma store to force `manifest_missing`:
+   rm -rf ~/.gwt/index/<repo-hash>/worktrees/<wt-hash>/files
+   ```
+
+   When you re-launch `gwt`, the bootstrap probe should detect the
+   missing chroma store, surface the red `Index: repair` badge for one
+   tick, then transition through `Index: repairing` (yellow + spinner)
+   to `Index: ready` (green) once the orchestrator rebuilds the scope.
 
 ## T-IDX-111 — macOS manual smoke
 
