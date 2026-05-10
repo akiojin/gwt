@@ -29,6 +29,7 @@
         formatIndexStatusLabel,
       } from "/index-status-controller.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
+      import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
         applyVisibilityTransition,
         attachHostResizeReflow,
@@ -6558,6 +6559,7 @@
       };
       const settingsWindowBodies = new Set();
       let pendingAddFromPreset = null;
+      let editingCustomAgentId = null;
 
       function createDiv(className) {
         const el = document.createElement("div");
@@ -6899,8 +6901,37 @@
                 send({ kind: "delete_custom_agent", agent_id: agent.id });
               }
             });
+            const editBtn = document.createElement("button");
+            editBtn.className = "icon-button";
+            editBtn.setAttribute("aria-label", "Edit agent environment");
+            editBtn.title = "Edit environment";
+            editBtn.textContent = "✎";
+            editBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              editingCustomAgentId =
+                editingCustomAgentId === agent.id ? null : agent.id;
+              renderSettingsAgentList();
+            });
+            row.appendChild(editBtn);
             row.appendChild(delBtn);
             section.appendChild(row);
+            if (editingCustomAgentId === agent.id) {
+              section.appendChild(
+                renderCustomAgentEnvEditor({
+                  document,
+                  agent,
+                  onSave: (updatedAgent) => {
+                    editingCustomAgentId = null;
+                    setSettingsStatus("Saving custom agent…", "info");
+                    send({ kind: "update_custom_agent", agent: updatedAgent });
+                  },
+                  onCancel: () => {
+                    editingCustomAgentId = null;
+                    renderSettingsAgentList();
+                  },
+                }),
+              );
+            }
             scroll.appendChild(section);
           }
         }
@@ -7859,6 +7890,9 @@
             customAgentsState.agents = customAgentsState.agents.filter(
               (a) => a.id !== event.agent_id,
             );
+            if (editingCustomAgentId === event.agent_id) {
+              editingCustomAgentId = null;
+            }
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
             break;
           case "system_settings":

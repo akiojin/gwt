@@ -19,6 +19,7 @@ const ROOT_MODULES = new Set([
   "app.js",
   "board-surface.js",
   "branch-cleanup-modal.js",
+  "custom-agent-env-editor.js",
   "focus-trap.js",
   "hotkey.js",
   "index-settings-panel.js",

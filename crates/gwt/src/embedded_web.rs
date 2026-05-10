@@ -97,6 +97,11 @@ pub fn terminal_viewport_reflow_js() -> &'static str {
     include_str!("../web/terminal-viewport-reflow.js")
 }
 
+// SPEC-1921 T231 — Settings.Custom Agents env editor.
+pub fn custom_agent_env_editor_js() -> &'static str {
+    include_str!("../web/custom-agent-env-editor.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -172,6 +177,11 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/terminal-viewport-reflow.js",
         source: terminal_viewport_reflow_js,
         marker: "attachHostResizeReflow",
+    },
+    RootJsModuleAsset {
+        path: "/custom-agent-env-editor.js",
+        source: custom_agent_env_editor_js,
+        marker: "renderCustomAgentEnvEditor",
     },
 ];
 
@@ -1412,6 +1422,7 @@ mod tests {
             "/operator-shell.js",
             "/focus-trap.js",
             "/terminal-context-menu.js",
+            "/custom-agent-env-editor.js",
         ] {
             assert!(
                 registry_paths.contains(&module_path),
