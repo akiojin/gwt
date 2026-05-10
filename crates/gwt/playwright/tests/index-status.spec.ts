@@ -413,6 +413,65 @@ test.describe("Project Index status badge", () => {
       .toContainText("develop");
   });
 
+  test("Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "error",
+      scopes: {
+        files: {
+          wtAhash: {
+            healthy: false,
+            repair_required: true,
+            document_count: 0,
+            reason: "rebuild_failed",
+          },
+        },
+      },
+      worktrees: {
+        wtAhash: { branch: "develop", path: "/abs/wtA" },
+      },
+    });
+
+    await page.goto(APP_URL);
+    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
+    await page.locator("#index-status").click();
+
+    // Wait for Settings.Index to render the row, then click the per-cell
+    // Rebuild button.
+    const filesCell = page
+      .locator("[data-settings-panel='index'] tr[data-scope='files'] .settings-index-cell[data-worktree-hash='wtAhash']")
+      .first();
+    await expect(filesCell).toBeVisible({ timeout: 10_000 });
+
+    await filesCell.locator(".settings-index-rebuild").click();
+
+    // The fixture WebSocket has captured every send() call; the click
+    // must enqueue a `rebuild_index_cell` payload with the right scope +
+    // worktree hash.
+    const lastRebuild = await page.evaluate(() => {
+      const sends = (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
+      return sends
+        .map((raw) => {
+          try {
+            return JSON.parse(raw);
+          } catch (e) {
+            return null;
+          }
+        })
+        .filter((m) => m && m.kind === "rebuild_index_cell")
+        .pop();
+    });
+
+    expect(lastRebuild).toMatchObject({
+      kind: "rebuild_index_cell",
+      project_root: "/fixture",
+      scope: "files",
+      worktree_hash: "wtAhash",
+    });
+  });
+
   test("repairing click shows a progress toast (T-IDX-108)", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
@@ -534,6 +593,9 @@ async function installIndexStatusBackend(page, indexStatus) {
         super();
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
+        // SPEC-1939 T-IDX-102 — record every payload the frontend sends so
+        // tests can assert on `rebuild_index_cell` and similar dispatches.
+        this.recordedSends = [];
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
@@ -541,6 +603,7 @@ async function installIndexStatusBackend(page, indexStatus) {
       }
 
       send(raw) {
+        this.recordedSends.push(raw);
         let message;
         try {
           message = JSON.parse(raw);
