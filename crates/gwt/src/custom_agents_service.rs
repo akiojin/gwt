@@ -9,9 +9,10 @@
 use std::path::Path;
 
 use gwt_agent::{
-    list_presets as agent_list_presets, load_custom_agents_from_path,
+    is_secret_env_key, list_presets as agent_list_presets, load_custom_agents_from_path,
     load_stored_custom_agents_from_path, save_stored_custom_agents_to_path, seed_agent,
     CustomCodingAgent, PresetDefinition, PresetError, PresetId, StoredCustomAgent,
+    REDACTED_PLACEHOLDER,
 };
 use gwt_ai::models_probe::{list_model_ids_blocking, ProbeError};
 use serde_json::Value;
@@ -110,10 +111,59 @@ pub fn update_custom_agent(
     else {
         return Err(CustomAgentsServiceError::NotFound(updated.id));
     };
+    let mut updated = updated;
+    preserve_redacted_secret_env_values(&mut updated, &entry.agent);
     entry.agent = updated;
     let saved = entry.agent.clone();
     save_stored_custom_agents_to_path(config_path, &entries)?;
     Ok(saved)
+}
+
+fn preserve_redacted_secret_env_values(
+    updated: &mut CustomCodingAgent,
+    existing: &CustomCodingAgent,
+) {
+    let removed_secret_values: Vec<String> = existing
+        .env
+        .iter()
+        .filter_map(|(key, value)| {
+            if is_secret_env_key(key) && !updated.env.contains_key(key) {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let placeholder_new_secret_keys: Vec<String> = updated
+        .env
+        .iter()
+        .filter_map(|(key, value)| {
+            if value == REDACTED_PLACEHOLDER
+                && is_secret_env_key(key)
+                && !existing.env.contains_key(key)
+            {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (key, value) in &mut updated.env {
+        if value == REDACTED_PLACEHOLDER && is_secret_env_key(key) {
+            if let Some(existing_value) = existing.env.get(key) {
+                *value = existing_value.clone();
+            }
+        }
+    }
+
+    if removed_secret_values.len() == 1 && placeholder_new_secret_keys.len() == 1 {
+        if let Some(value) = updated.env.get_mut(&placeholder_new_secret_keys[0]) {
+            if value == REDACTED_PLACEHOLDER {
+                *value = removed_secret_values[0].clone();
+            }
+        }
+    }
 }
 
 /// Remove the custom agent with the given id. Returns `NotFound` if no
@@ -135,7 +185,7 @@ pub fn delete_custom_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gwt_agent::ClaudeCodeOpenaiCompatInput;
+    use gwt_agent::{ClaudeCodeOpenaiCompatInput, REDACTED_PLACEHOLDER};
 
     fn sample_input() -> ClaudeCodeOpenaiCompatInput {
         ClaudeCodeOpenaiCompatInput {
@@ -310,6 +360,58 @@ mod tests {
             reloaded[0].env.get("CUSTOM_EXTRA").map(String::as_str),
             Some("value")
         );
+    }
+
+    #[test]
+    fn update_custom_agent_preserves_existing_secret_env_when_placeholder_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let input = sample_input();
+        let mut agent = add_sample_from_preset(&path, &input).unwrap();
+        let original_api_key = agent.env["ANTHROPIC_API_KEY"].clone();
+
+        agent.display_name = "Renamed Claude".to_string();
+        agent.env.insert(
+            "ANTHROPIC_API_KEY".to_string(),
+            REDACTED_PLACEHOLDER.to_string(),
+        );
+        agent.env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "http://updated.example".to_string(),
+        );
+
+        let saved = update_custom_agent(&path, agent).expect("update");
+        let reloaded = list_custom_agents(&path).unwrap();
+
+        assert_eq!(saved.env["ANTHROPIC_API_KEY"], original_api_key);
+        assert_eq!(reloaded[0].env["ANTHROPIC_API_KEY"], original_api_key);
+        assert_eq!(
+            reloaded[0].env["ANTHROPIC_BASE_URL"],
+            "http://updated.example"
+        );
+        assert_eq!(reloaded[0].display_name, "Renamed Claude");
+    }
+
+    #[test]
+    fn update_custom_agent_preserves_secret_env_when_placeholder_key_is_renamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let input = sample_input();
+        let mut agent = add_sample_from_preset(&path, &input).unwrap();
+        let original_api_key = agent.env["ANTHROPIC_API_KEY"].clone();
+
+        agent.env.remove("ANTHROPIC_API_KEY");
+        agent.env.insert(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            REDACTED_PLACEHOLDER.to_string(),
+        );
+
+        let saved = update_custom_agent(&path, agent).expect("update");
+        let reloaded = list_custom_agents(&path).unwrap();
+
+        assert!(!saved.env.contains_key("ANTHROPIC_API_KEY"));
+        assert_eq!(saved.env["ANTHROPIC_AUTH_TOKEN"], original_api_key);
+        assert_eq!(reloaded[0].env["ANTHROPIC_AUTH_TOKEN"], original_api_key);
     }
 
     #[test]

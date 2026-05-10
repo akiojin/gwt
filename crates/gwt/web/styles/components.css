@@ -2615,3 +2615,60 @@ kbd.op-kbd {
 :root[data-theme] .settings-status[data-kind="error"] {
   color: var(--color-state-negative);
 }
+
+:root[data-theme] .custom-agent-env-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+:root[data-theme] .custom-agent-env-title {
+  margin: 0;
+  color: var(--color-text-strong);
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+:root[data-theme] .custom-agent-env-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .custom-agent-env-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(160px, 1.2fr) 32px;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+:root[data-theme] .custom-agent-env-input {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  padding: 0 var(--space-2);
+}
+
+:root[data-theme] .custom-agent-env-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-color: var(--color-state-active);
+}
+
+:root[data-theme] .custom-agent-env-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
