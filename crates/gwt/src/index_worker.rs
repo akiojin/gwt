@@ -1283,6 +1283,31 @@ mod tests {
     }
 
     #[test]
+    fn playwright_fixtures_deserialize_into_project_index_status_view() {
+        // SPEC-1939 T-IDX-109/110 Playwright e2e: pin the fixture format so
+        // a regression in `ProjectIndexStatusView` deserialization is
+        // caught before CI shells out a misshapen fixture into the GUI.
+        for relative in [
+            "../gwt/playwright/fixtures/index-status-repair-required.json",
+            "../gwt/playwright/fixtures/index-status-error.json",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let payload = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read fixture {}: {err}", path.display()));
+            let view: ProjectIndexStatusView = serde_json::from_str(&payload)
+                .unwrap_or_else(|err| panic!("parse fixture {}: {err}", path.display()));
+            assert!(
+                matches!(
+                    view.state,
+                    ProjectIndexStatusState::RepairRequired | ProjectIndexStatusState::Error
+                ),
+                "fixture {} must seed a non-trivial badge state",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
     fn aggregate_test_fixture_invalid_json_surfaces_error_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let fixture_path = temp.path().join("status.json");
