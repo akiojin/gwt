@@ -69,7 +69,7 @@ impl IndexRebuildScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectIndexStatusState {
     Ready,
@@ -97,7 +97,7 @@ impl fmt::Display for ProjectIndexStatusState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct RebuildProgress {
     pub scopes_done: u32,
     pub scopes_total: u32,
@@ -105,7 +105,7 @@ pub struct RebuildProgress {
 
 /// Per-scope health detail for `(scope, worktree?)` pairs surfaced via
 /// `ProjectIndexStatus` events (SPEC-1939 FR-038 / FR-053).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ScopeHealthView {
     pub healthy: bool,
     pub repair_required: bool,
@@ -144,7 +144,7 @@ impl ScopeHealthView {
 /// Aggregated scope health: `issues` and `specs` are repo-shared and emitted
 /// once per project, while `files` and `files_docs` are per-worktree, keyed
 /// by `worktree_hash` (SPEC-1939 FR-053).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ProjectIndexScopes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issues: Option<ScopeHealthView>,
@@ -171,13 +171,13 @@ impl ProjectIndexScopes {
 
 /// Worktree metadata indexed by worktree hash for the per-worktree health
 /// table (SPEC-1939 FR-053).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct WorktreeMeta {
     pub branch: String,
     pub path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ProjectIndexStatusView {
     pub state: ProjectIndexStatusState,
     pub detail: String,
@@ -372,10 +372,54 @@ fn count_unhealthy_scopes(scopes: &ProjectIndexScopes) -> usize {
     count
 }
 
+/// Environment variable used by Playwright e2e and integration tests to
+/// inject a fake `ProjectIndexStatusView` instead of running the real
+/// Python runner. The value is a path to a JSON file that deserializes into
+/// a `ProjectIndexStatusView`. SPEC-1939 T-IDX-109/110 follow-up scaffolding.
+pub const GWT_INDEX_TEST_FIXTURE_ENV: &str = "GWT_INDEX_TEST_FIXTURE";
+
+/// Try to load an aggregated status fixture from `GWT_INDEX_TEST_FIXTURE`.
+/// Returns `None` when the env var is absent. Errors during read / parse
+/// surface as a synthetic `Error` status so the GUI / orchestrator path
+/// behaves the same as a real runner failure.
+fn load_test_fixture_status() -> Option<ProjectIndexStatusView> {
+    let path = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok()?;
+    if path.trim().is_empty() {
+        return None;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(payload) => match serde_json::from_str::<ProjectIndexStatusView>(&payload) {
+            Ok(view) => {
+                tracing::info!(
+                    target: "gwt::index",
+                    fixture = %path,
+                    state = %view.state,
+                    "GWT_INDEX_TEST_FIXTURE applied — bypassing real runner"
+                );
+                Some(view)
+            }
+            Err(error) => Some(ProjectIndexStatusView::new(
+                ProjectIndexStatusState::Error,
+                format!("GWT_INDEX_TEST_FIXTURE parse error: {error}"),
+            )),
+        },
+        Err(error) => Some(ProjectIndexStatusView::new(
+            ProjectIndexStatusState::Error,
+            format!("GWT_INDEX_TEST_FIXTURE read error ({path}): {error}"),
+        )),
+    }
+}
+
 /// Aggregate per-worktree status for a project root by listing every active
 /// worktree from `git worktree list --porcelain`, probing each via the
 /// runner, and combining the results with [`build_aggregated_status_view`].
+///
+/// When `GWT_INDEX_TEST_FIXTURE` is set, the fixture JSON is loaded instead
+/// — this is the seam used by Playwright e2e (SPEC-1939 T-IDX-109/110).
 pub fn aggregate_project_index_status_for_path(project_root: &Path) -> ProjectIndexStatusView {
+    if let Some(fixture) = load_test_fixture_status() {
+        return fixture;
+    }
     match aggregate_project_index_status_for_path_inner(project_root) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
@@ -1187,6 +1231,77 @@ mod tests {
         assert_eq!(view.worktrees.len(), 2);
         assert_eq!(view.worktrees["wtAhash"].branch, "develop");
         assert_eq!(view.worktrees["wtBhash"].path, "/abs/wtB");
+    }
+
+    #[test]
+    fn aggregate_uses_test_fixture_when_env_var_set() {
+        // SPEC-1939 T-IDX-109/110 follow-up scaffolding: when
+        // GWT_INDEX_TEST_FIXTURE is set, the aggregator returns the parsed
+        // fixture verbatim. Playwright e2e drives gwt with this env var so
+        // tests can assert badge transitions deterministically without
+        // running real Python.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture_path = temp.path().join("status.json");
+        let fixture = ProjectIndexStatusView {
+            state: ProjectIndexStatusState::RepairRequired,
+            detail: "fixture-driven repair_required".to_string(),
+            repair_started_at: None,
+            progress: None,
+            scopes: ProjectIndexScopes {
+                specs: Some(ScopeHealthView::unhealthy("count_mismatch")),
+                ..Default::default()
+            },
+            worktrees: BTreeMap::new(),
+        };
+        std::fs::write(
+            &fixture_path,
+            serde_json::to_string(&fixture).expect("serialize"),
+        )
+        .expect("write fixture");
+
+        // The lib uses std::env which is process-wide; isolate by saving /
+        // restoring the previous value.
+        let previous = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok();
+        // Safety: tests in this lib run with `--test-threads` allowed to be
+        // > 1, but no other test reads this env var. Set / restore is
+        // unconditional.
+        // SAFETY: setting / removing process env is unsafe in std 1.89+.
+        unsafe {
+            std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, &fixture_path);
+        }
+        let view = aggregate_project_index_status_for_path(temp.path());
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, value),
+                None => std::env::remove_var(GWT_INDEX_TEST_FIXTURE_ENV),
+            }
+        }
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert_eq!(view.detail, "fixture-driven repair_required");
+        assert!(view.scopes.specs.is_some());
+    }
+
+    #[test]
+    fn aggregate_test_fixture_invalid_json_surfaces_error_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture_path = temp.path().join("status.json");
+        std::fs::write(&fixture_path, "{ this is not json }").expect("write fixture");
+
+        let previous = std::env::var(GWT_INDEX_TEST_FIXTURE_ENV).ok();
+        unsafe {
+            std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, &fixture_path);
+        }
+        let view = aggregate_project_index_status_for_path(temp.path());
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var(GWT_INDEX_TEST_FIXTURE_ENV, value),
+                None => std::env::remove_var(GWT_INDEX_TEST_FIXTURE_ENV),
+            }
+        }
+
+        assert_eq!(view.state, ProjectIndexStatusState::Error);
+        assert!(view.detail.contains("parse error"));
     }
 
     #[test]
