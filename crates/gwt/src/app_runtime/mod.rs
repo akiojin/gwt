@@ -4427,6 +4427,12 @@ impl AppRuntime {
         self.tabs.iter().find(|tab| tab.id == tab_id)
     }
 
+    pub(crate) fn active_project_root(&self) -> Option<&Path> {
+        let active_tab_id = self.active_tab_id.as_ref()?;
+        self.tab(active_tab_id)
+            .map(|tab| tab.project_root.as_path())
+    }
+
     pub(crate) fn tab_mut(&mut self, tab_id: &str) -> Option<&mut ProjectTabRuntime> {
         self.tabs.iter_mut().find(|tab| tab.id == tab_id)
     }
