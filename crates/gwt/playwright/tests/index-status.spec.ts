@@ -131,6 +131,59 @@ test.describe("Project Index status badge", () => {
     expect(dispatched).toEqual({ target: "index" });
   });
 
+  test("badge transitions repair_required -> repairing -> ready over WebSocket events (T-IDX-109)", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    // Initial state: repair_required.
+    await installIndexStatusBackend(page, { state: "repair_required" });
+
+    await page.goto(APP_URL);
+
+    const badge = page.locator("#index-status");
+    await expect(badge).toHaveClass(/repair_required/, { timeout: 10_000 });
+    await expect(badge).toContainText(/Index:\s+repair$/);
+
+    // Drive a repairing(1/2) update through the fixture WebSocket. The
+    // fixture exposes itself on window.__gwtFixtureWebSocket so tests can
+    // simulate orchestrator state-machine progress without a real backend.
+    await page.evaluate(() => {
+      const ws = window.__gwtFixtureWebSocket;
+      ws.emit({
+        kind: "project_index_status",
+        project_root: "/fixture",
+        status: {
+          state: "repairing",
+          detail: "",
+          progress: { scopes_done: 1, scopes_total: 2 },
+          scopes: {},
+          worktrees: {},
+        },
+      });
+    });
+    await expect(badge).toHaveClass(/repairing/, { timeout: 5_000 });
+    await expect(badge).toContainText(/Index:\s+repairing/);
+
+    // Final transition to ready.
+    await page.evaluate(() => {
+      const ws = window.__gwtFixtureWebSocket;
+      ws.emit({
+        kind: "project_index_status",
+        project_root: "/fixture",
+        status: {
+          state: "ready",
+          detail: "",
+          progress: null,
+          scopes: {},
+          worktrees: {},
+        },
+      });
+    });
+    await expect(badge).toHaveClass(/ready/, { timeout: 5_000 });
+    await expect(badge).toContainText(/Index:\s+ready/);
+    await expect(badge).not.toHaveClass(/repairing/);
+  });
+
   test("repairing click shows a progress toast (T-IDX-108)", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
@@ -289,6 +342,27 @@ async function installIndexStatusBackend(page, indexStatus) {
     Object.defineProperty(window, "WebSocket", {
       configurable: true,
       value: FixtureWebSocket,
+    });
+
+    // Expose the most recently constructed FixtureWebSocket on window so
+    // transition tests can drive additional `project_index_status` events
+    // without needing a second WebSocket. The wrapper guards against a
+    // race where the test calls `.emit` before app.js has constructed the
+    // WebSocket — in that case `__gwtFixtureWebSocket` is undefined and
+    // the test fails fast.
+    const originalConstructor = FixtureWebSocket;
+    const FixtureWebSocketWithTracking = function (url) {
+      const instance = new originalConstructor(url);
+      window.__gwtFixtureWebSocket = instance;
+      return instance;
+    };
+    FixtureWebSocketWithTracking.CONNECTING = 0;
+    FixtureWebSocketWithTracking.OPEN = 1;
+    FixtureWebSocketWithTracking.CLOSING = 2;
+    FixtureWebSocketWithTracking.CLOSED = 3;
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      value: FixtureWebSocketWithTracking,
     });
   }, indexStatus);
 }
