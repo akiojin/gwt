@@ -5124,3 +5124,46 @@ CLI 実行を同じ quoting context に混ぜてしまった。
    を使い、Markdown 本文を shell double quote に直接埋め込まない。
 3. `gh issue close --comment` を使う場合でも、本文は単一引用符で安全に
    表現できる短文だけに限定する。複数行の検証ログは別途ファイル入力にする。
+
+## 2026-05-10 — 自動更新クリック後の silent failure を 5 回連続で見逃した
+
+### 事象
+
+`自動更新のクリックの対応` を 5 回連続で fix したが、ユーザーから「全く対応できていません」と
+強い不満を受けた。修正対象はすべて click 前 (cache / DOM / 表示) で、click 後の silent failure
+path は untouched だった。
+
+- 76be413f: 5分ポーリング + 永続更新ボタン (UI 表示のみ)
+- 293a1627 / 04d721cc / ca2b8221: toast → CTA 統一 (UI 表示のみ)
+- ffe40f46 / c5348421: asset wiring / ラベル文言 (UI 表示のみ)
+- 3a2e0628: dismiss button (UI 表示のみ)
+- 665dea8e: WebView cache 無効化 (click 検知のみ)
+
+### 原因
+
+1. `apply_update_state_and_exit` (`crates/gwt/src/update_front_door.rs:277`) が
+   `std::process::exit(0)` で親プロセスを click 直後に殺す設計のため、
+   helper subprocess の失敗が UI に surface されない silent failure path だった。
+2. テストが pass していたため done 宣言を繰り返したが、実環境では helper の失敗が見えないため
+   UX としては破綻していた。CI green = done 宣言が untested path を覆い隠した。
+3. 「click 検知が動かない」という assumption に基づいて修正対象を選んだが、根本的には
+   「click は反応しているが post-click が silent」という別問題だった。
+4. ユーザー意図 UX (modal で進捗 → 完了確認 → restart) を確認せず、SPEC は click 前領域の
+   みを規定していた。post-click UX が SPEC に書かれていない feature を「直す」ことができていなかった。
+
+### 再発防止策
+
+1. **CI green = done 禁止**: バグ修正・新機能の完了宣言には Gate 3 manual smoke
+   (実機で実 user flow を 1 往復) を必須化する。SPEC-2041 Phase 14 (FR-066) で正式化済み。
+2. **silent failure path の禁止**: 親プロセスが即時 exit する設計は許容しない。
+   download / install / replace / spawn の各 stage を必ず frontend (UI) に surface する。
+   `*_and_exit` という関数名が出てきた時点で silent failure を疑う。
+3. **修正前の前提検証**: 「動かない」報告を受けたら、表面的な仮説 (cache / DOM) で fix を
+   始める前に、ユーザーが実際に何を見ているか・どこで止まっているかを最低 1 度確認する。
+   「クリック反応するが画面出ない」と「クリック自体反応しない」は別問題。
+4. **再発カウントによる切り替え**: 同じ feature を 2 回以上 fix している場合、表面的修正
+   でなく architecture / silent failure path の review に切り替える。fix を重ねる前に
+   「過去の fix が効かなかった理由は何か」を root cause として specifically 特定する。
+5. **post-action UX の SPEC 義務化**: button / link / action を SPEC に書く際は post-action
+   UX (進捗・成功・失敗・確認) を必ず受け入れシナリオに含める。click 前後を分離して片方しか
+   書かない SPEC を禁止する。
