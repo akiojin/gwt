@@ -1,11 +1,42 @@
 # Lessons Learned
 
+## 2026-05-10 — Read tasks/lessons.md before designing tests for window interaction features
+
+### 事象
+
+SPEC-2008 Phase 24 (terminal viewport reflow) を `crates/gwt/web/app.js` に
+実装した PR #2588 で、frontend test を全て source-string regex assertion で
+書いた。直後に「2026-05-07 — Window interaction features need behavior
+tests」の lesson と矛盾している指摘を別 Agent から受け、後追いで behavior
+test ベースの follow-up PR #2590 を作成する手戻りが発生した。
+
+### 原因
+
+実装着手前に `tasks/lessons.md` を確認しなかった。ホット領域の lesson は
+過去の同種失敗をまとめており、参照すれば即座に適切なテスト設計を選べる。
+2026-05-07 lesson は「window interaction features は behavior test で操作
+可能性を検証する。source-string contract は配線漏れ検出に限定する」と
+明示していたが、これを参照せずに既存 helper の延長で source-string
+assertion だけを書いてしまった。
+
+### 再発防止策
+
+1. `crates/gwt/web/` の interaction (resize / drag / hidden→visible / click
+   dispatch / keyboard / pointer) を変更する作業では、最初に
+   `tasks/lessons.md` の関連 lesson (特に 2026-05-07 window interaction)
+   を読んで、test 設計を確定してからコードに着手する。
+2. test 設計時は behavior test を default、source-string assertion は
+   wiring 漏れ検出限定で 1〜2 件に留める。
+3. 同種の問題ドメインで複数 lesson が並ぶ場合 (2026-05-07 が 2 件あった
+   ように)、AGENTS.md の `Self-Improvement Loop` に従い該当領域の lesson
+   をすべて並べて読み返す。
+
 ## 2026-05-10 — gwt-build-spec must preflight Board active claims
 
 ### 事象
 
 ユーザー報告のターミナル安定化 3 症状を SPEC-1919 (TTY) と SPEC-2008
-(Window host) に分割して並行実装するため、本セッションで
+(Window host) に分割して並行実装するため、別セッションで
 SPEC-1919 PR #2587 を merge 後、続いて SPEC-2008 Phase 24 を
 `gwt-build-spec` で着手し PR #2589 を作成した。同時刻に別 Claude Code
 セッション (work/20260509-1639) も SPEC-2008 Phase 24 を Board claim
@@ -20,7 +51,7 @@ close 待ちとなった。
 を Board から確認するステップを持たない**。SPEC-1935 FR-014b/c の
 `board-reminder` は SessionStart / UserPromptSubmit に最近の Board
 posts を注入するが、注入のタイミングと skill 起動のタイミングが一致
-せず、本セッションの SessionStart context には PR #2588 の claim
+せず、別セッションの SessionStart context には PR #2588 の claim
 post が含まれていなかった。結果として、先行 claim の存在を検知でき
 ないまま並行実装に入り、merge 段階で重複が露呈した。
 
