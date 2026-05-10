@@ -200,6 +200,14 @@ Managed hooks は user hook を保持しながら、Agent state、workflow guard
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
 
+gwt から起動された Agent に live GUI / browser backend がある場合、managed hook
+は local hook-forward bridge も有効にします。この bridge は、その session に
+gwt が注入した loopback endpoint と bearer token だけへ hook event を POST し、
+既存の live event stream 経由で frontend client へ fan-out します。gwt 外から
+起動した session には転送先が注入されないため、`gwt hook forward` は silent
+no-op のままです。古い転送先、接続拒否、validation error、delivery timeout は
+fail-open の診断情報として扱われ、Agent の tool call を block しません。
+
 ## ワークスペース基盤
 
 Agent session の隔離と再現性のため、gwt は各プロジェクトをワークスペース

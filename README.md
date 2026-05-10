@@ -205,6 +205,14 @@ Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
 
+When an agent is launched by gwt with a live GUI/browser backend, managed hooks
+also enable the local hook-forward bridge. The bridge posts hook events only to
+the loopback endpoint and bearer token that gwt injects for that session, then
+fans them out through the existing live event stream. Sessions started outside
+gwt do not receive that target and `gwt hook forward` remains a silent no-op;
+stale targets, refused connections, validation errors, and delivery timeouts are
+fail-open diagnostics and do not block agent tool calls.
+
 ## Workspace Foundation
 
 For isolation and repeatable agent sessions, gwt can manage each project as a
