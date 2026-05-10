@@ -64,6 +64,33 @@ test.describe("Project Index status badge", () => {
     await expect(badge).toHaveClass(/repairing/);
   });
 
+  test("ready surfaces the green badge with the steady-state label", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, { state: "ready" });
+
+    await page.goto(APP_URL);
+
+    const badge = page.locator("#index-status");
+    await expect(badge).toBeVisible({ timeout: 10_000 });
+    await expect(badge).toContainText(/Index:\s+ready/);
+    await expect(badge).toHaveClass(/ready/);
+  });
+
+  test("skipped keeps the badge hidden so non-git projects do not flash chrome", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, { state: "skipped" });
+
+    await page.goto(APP_URL);
+
+    // Wait for the workspace state to settle (project tab attached, status
+    // dispatched) before asserting the badge is hidden — otherwise the
+    // assertion can race with the initial render.
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#index-status")).toBeHidden();
+  });
+
   test("error surfaces the red badge with the failure title", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, { state: "error" });
