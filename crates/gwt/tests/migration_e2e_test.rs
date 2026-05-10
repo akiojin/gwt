@@ -127,6 +127,109 @@ fn t101_dirty_normal_repo_preserves_uncommitted_changes_after_migration() {
 }
 
 #[test]
+fn t102_e2e_multi_worktree_migration_preserves_each_branch_worktree() {
+    // SPEC-1934 US-6.4: a Normal Git repo with multiple linked worktrees must
+    // migrate each worktree into the nested bare layout, not fold linked
+    // worktree directories into the main branch worktree.
+    let project = tempfile::tempdir().unwrap();
+    init_repo_with_commit(project.path());
+    let main_branch = current_branch(project.path());
+    let project_dir_name = project
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo")
+        .to_string();
+
+    let clean_path = project.path().join("feature").join("clean");
+    run_git(
+        project.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/clean",
+            clean_path.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(clean_path.join("feature.txt"), "clean branch\n").unwrap();
+    run_git(&clean_path, &["add", "feature.txt"]);
+    run_git(&clean_path, &["commit", "-m", "feature clean"]);
+
+    let dirty_path = project.path().join("bugfix").join("dirty");
+    run_git(
+        project.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "bugfix/dirty",
+            dirty_path.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(dirty_path.join("README.md"), "# sample dirty branch\n").unwrap();
+    std::fs::write(dirty_path.join("scratch.txt"), "untracked dirty").unwrap();
+
+    let outcome = execute_migration(
+        project.path(),
+        MigrationOptions::default(),
+        |_phase, _pct| {},
+    )
+    .expect("execute_migration");
+
+    let bare = project.path().join(format!("{project_dir_name}.git"));
+    let main_target = project.path().join(&main_branch);
+    let clean_target = project.path().join("feature").join("clean");
+    let dirty_target = project.path().join("bugfix").join("dirty");
+
+    assert!(bare.is_dir(), "bare repo must exist");
+    assert!(main_target.join("README.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(clean_target.join("feature.txt")).unwrap(),
+        "clean branch\n",
+        "clean linked worktree content must stay with its branch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirty_target.join("README.md")).unwrap(),
+        "# sample dirty branch\n",
+        "dirty linked worktree modifications must survive"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirty_target.join("scratch.txt")).unwrap(),
+        "untracked dirty",
+        "dirty linked worktree untracked files must survive"
+    );
+    assert!(
+        !main_target.join("feature").exists(),
+        "linked worktree directories must not be restored inside the main branch worktree"
+    );
+
+    let mut migrated = outcome.migrated_worktrees.clone();
+    migrated.sort();
+    let mut expected = vec![
+        main_target.clone(),
+        clean_target.clone(),
+        dirty_target.clone(),
+    ];
+    expected.sort();
+    assert_eq!(migrated, expected);
+
+    for target in [&main_target, &clean_target, &dirty_target] {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["status", "--short"])
+            .current_dir(target)
+            .output()
+            .expect("git status");
+        assert!(
+            output.status.success(),
+            "{} must be a valid migrated worktree: {}",
+            target.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn t103_e2e_locked_worktree_blocks_migration_with_no_changes() {
     // SPEC-1934 US-6.5: locked worktree が見つかったらマイグレーションを中止
     // し、リポジトリレイアウトは未変更で残らなければならない。
