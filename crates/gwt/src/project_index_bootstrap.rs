@@ -614,12 +614,25 @@ mod tests {
 
     #[test]
     fn rebuild_for_same_cell_is_coalesced_while_other_keys_run_in_parallel() {
+        // Long timeouts intentionally tolerate slow CI hosts: every blocking
+        // recv waits up to 60s, every "completed" channel waits up to 30s,
+        // and the post-release retry loop polls for up to 30s. Real failures
+        // surface as in-flight semantics regressions, not timing flakes.
+        const RECV_TIMEOUT: Duration = Duration::from_secs(60);
+        const DONE_TIMEOUT: Duration = Duration::from_secs(30);
+        const RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+
         let service = super::ProjectIndexBootstrapService::new_for_test();
         let temp = tempdir().expect("tempdir");
         let project_root = temp.path().to_path_buf();
         let (block_files_tx, block_files_rx) = mpsc::channel();
         let (block_specs_tx, block_specs_rx) = mpsc::channel();
         let (block_bootstrap_tx, block_bootstrap_rx) = mpsc::channel();
+        // Per-thread "exited" signals let the test wait for InFlightGuard
+        // drop deterministically instead of polling on the in-flight set.
+        let (files_exited_tx, files_exited_rx) = mpsc::channel();
+        let (specs_exited_tx, specs_exited_rx) = mpsc::channel();
+        let (bootstrap_exited_tx, bootstrap_exited_rx) = mpsc::channel();
         let files_calls = Arc::new(AtomicUsize::new(0));
         let specs_calls = Arc::new(AtomicUsize::new(0));
         let bootstrap_calls = Arc::new(AtomicUsize::new(0));
@@ -632,8 +645,9 @@ mod tests {
             move || {
                 files_calls_handle.fetch_add(1, Ordering::SeqCst);
                 block_files_rx
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(RECV_TIMEOUT)
                     .expect("release files");
+                let _ = files_exited_tx.send(());
             },
         );
 
@@ -668,8 +682,9 @@ mod tests {
             move || {
                 specs_calls_handle.fetch_add(1, Ordering::SeqCst);
                 block_specs_rx
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(RECV_TIMEOUT)
                     .expect("release specs");
+                let _ = specs_exited_tx.send(());
             },
         );
 
@@ -682,8 +697,9 @@ mod tests {
             move |_project_root: &Path| {
                 bootstrap_calls_handle.fetch_add(1, Ordering::SeqCst);
                 block_bootstrap_rx
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(RECV_TIMEOUT)
                     .expect("release bootstrap");
+                let _ = bootstrap_exited_tx.send(());
                 Ok(())
             },
             |_project_root| {
@@ -702,18 +718,34 @@ mod tests {
 
         // The wtB task is unblocked and should complete on its own.
         other_worktree_done_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(DONE_TIMEOUT)
             .expect("wtB rebuild should run in parallel");
         assert_eq!(other_worktree_calls.load(Ordering::SeqCst), 1);
 
-        // Release the blocked tasks so threads exit cleanly.
+        // Release the blocked tasks so threads exit cleanly. We then wait
+        // for the explicit "exited" signal from each closure: by the time
+        // those signals fire, the closures have returned and the
+        // InFlightGuard drops are scheduled. Polling for the slot to be
+        // released afterwards is bounded but typically immediate.
         block_files_tx.send(()).expect("release files");
         block_specs_tx.send(()).expect("release specs");
         block_bootstrap_tx.send(()).expect("release bootstrap");
+        files_exited_rx
+            .recv_timeout(DONE_TIMEOUT)
+            .expect("files closure should exit");
+        specs_exited_rx
+            .recv_timeout(DONE_TIMEOUT)
+            .expect("specs closure should exit");
+        bootstrap_exited_rx
+            .recv_timeout(DONE_TIMEOUT)
+            .expect("bootstrap closure should exit");
 
         // After the first files rebuild completes, a new one can be queued.
+        // The retry loop bounds wall time by RETRY_TIMEOUT to absorb any
+        // residual gap between closure return and InFlightGuard drop.
+        let started = std::time::Instant::now();
         let mut retry = super::ProjectIndexBootstrapRequest::AlreadyRunning;
-        for _ in 0..100 {
+        while started.elapsed() < RETRY_TIMEOUT {
             retry = service.spawn_rebuild_with(
                 project_root.clone(),
                 IndexRebuildScope::Files,
@@ -723,7 +755,7 @@ mod tests {
             if retry == super::ProjectIndexBootstrapRequest::Spawned {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(retry, super::ProjectIndexBootstrapRequest::Spawned);
         assert_eq!(files_calls.load(Ordering::SeqCst), 1);
