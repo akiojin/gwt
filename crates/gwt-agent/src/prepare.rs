@@ -628,6 +628,42 @@ fn command_matches_runner(command: &str, runner: &str) -> bool {
 }
 
 fn ensure_docker_launch_runtime_ready() -> Result<(), String> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let docker_bin = std::env::var("GWT_DOCKER_BIN").unwrap_or_else(|_| "docker".to_string());
+    tracing::info!(
+        target: "gwt::launch::preflight",
+        runtime_target = "docker",
+        attempted_binary = %docker_bin,
+        path = %path,
+        "docker preflight started"
+    );
+    let result = run_docker_preflight();
+    match &result {
+        Ok(()) => {
+            tracing::info!(
+                target: "gwt::launch::preflight",
+                runtime_target = "docker",
+                outcome = "ready",
+                attempted_binary = %docker_bin,
+                "docker preflight completed"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "gwt::launch::preflight",
+                runtime_target = "docker",
+                outcome = "failed",
+                attempted_binary = %docker_bin,
+                path = %path,
+                error = %error,
+                "docker preflight failed"
+            );
+        }
+    }
+    result
+}
+
+fn run_docker_preflight() -> Result<(), String> {
     if !gwt_docker::docker_available() {
         return Err("Docker is not installed or not available on PATH".to_string());
     }
@@ -1782,5 +1818,73 @@ mod tests {
 
         assert!(working_dir.is_none());
         assert!(env_vars.is_empty());
+    }
+
+    #[test]
+    fn ensure_docker_launch_runtime_ready_emits_preflight_started_and_failure_when_docker_missing()
+    {
+        use crate::test_capture::{CaptureLayer, CapturedEvents};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let _lock = preflight_env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_bin = std::env::var_os("GWT_DOCKER_BIN");
+        std::env::set_var("GWT_DOCKER_BIN", "/this-binary-does-not-exist-for-gwt-test");
+
+        let events = CapturedEvents::new();
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer::new(events.clone()));
+        let result =
+            tracing::subscriber::with_default(subscriber, ensure_docker_launch_runtime_ready);
+
+        match previous_bin {
+            Some(value) => std::env::set_var("GWT_DOCKER_BIN", value),
+            None => std::env::remove_var("GWT_DOCKER_BIN"),
+        }
+
+        assert!(result.is_err(), "expected Err for missing docker binary");
+
+        let captured = events.snapshot();
+        let preflight_events: Vec<_> = captured
+            .iter()
+            .filter(|event| event.target == "gwt::launch::preflight")
+            .collect();
+        let info_started: Vec<_> = preflight_events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::INFO
+                    && event.fields.get("message").map(String::as_str)
+                        == Some("docker preflight started")
+            })
+            .collect();
+        let error_failed: Vec<_> = preflight_events
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::ERROR
+                    && event.fields.get("message").map(String::as_str)
+                        == Some("docker preflight failed")
+            })
+            .collect();
+        assert!(
+            !info_started.is_empty(),
+            "expected an INFO 'docker preflight started' event; captured = {:?}",
+            captured
+        );
+        assert!(
+            !error_failed.is_empty(),
+            "expected an ERROR 'docker preflight failed' event; captured = {:?}",
+            captured
+        );
+        let started = info_started[0];
+        assert_eq!(
+            started.fields.get("attempted_binary").map(String::as_str),
+            Some("/this-binary-does-not-exist-for-gwt-test")
+        );
+        assert!(started.fields.contains_key("path"));
+    }
+
+    fn preflight_env_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }

@@ -242,6 +242,9 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         }
         i += 1;
     }
+    if let Some(value) = title_summary.as_deref() {
+        super::validate_title_summary_work_name("--title-summary", value)?;
+    }
 
     Ok(BoardCommand::Post(Box::new(BoardPostCommand {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
@@ -470,6 +473,25 @@ mod tests {
                 mentions: vec![],
             }))
         );
+    }
+
+    #[test]
+    fn board_family_parse_post_rejects_status_like_title_summary() {
+        let err = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("Finished implementing the Agent title improvement"),
+            s("--title-summary"),
+            s("Agent title improvement complete"),
+        ])
+        .expect_err("title-summary must describe the work, not its status");
+
+        let message = err.to_string();
+        assert!(message.contains("--title-summary"), "{message}");
+        assert!(message.contains("work name"), "{message}");
+        assert!(message.contains("status"), "{message}");
     }
 
     #[test]

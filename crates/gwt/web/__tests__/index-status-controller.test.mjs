@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import {
+  aggregateProjectTabDotState,
   dispatchOpenIndexSettings,
   formatIndexStatusLabel,
   INDEX_STATUS_OPEN_SETTINGS_EVENT,
@@ -135,5 +136,83 @@ test("renderIndexStatus in app.js consumes formatIndexStatusLabel", () => {
   assert.ok(
     appSource.includes("dispatchOpenIndexSettings(indexStatusLabel)"),
     "click handler should dispatch settings:open via the shared helper",
+  );
+});
+
+test("aggregateProjectTabDotState ignores repo-shared scopes", () => {
+  // issues / specs are repo-shared and intentionally do not contribute.
+  assert.equal(
+    aggregateProjectTabDotState({
+      scopes: {
+        issues: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
+        specs: { healthy: false, repair_required: true, document_count: 0, reason: "missing" },
+      },
+    }),
+    "",
+  );
+});
+
+test("aggregateProjectTabDotState returns 'error' when any worktree files cell is unhealthy", () => {
+  assert.equal(
+    aggregateProjectTabDotState({
+      state: "repair_required",
+      scopes: {
+        files: {
+          wtA: { healthy: true, repair_required: false, document_count: 1 },
+          wtB: { healthy: false, repair_required: true, document_count: 0 },
+        },
+      },
+    }),
+    "error",
+  );
+});
+
+test("aggregateProjectTabDotState returns 'repairing' when state is repairing and no error", () => {
+  assert.equal(
+    aggregateProjectTabDotState({
+      state: "repairing",
+      scopes: {
+        files: {
+          wtA: { healthy: true, repair_required: false, document_count: 1 },
+        },
+        "files-docs": {
+          wtA: { healthy: true, repair_required: false, document_count: 1 },
+        },
+      },
+    }),
+    "repairing",
+  );
+});
+
+test("aggregateProjectTabDotState returns 'ready' when every files / files-docs cell is healthy", () => {
+  assert.equal(
+    aggregateProjectTabDotState({
+      state: "ready",
+      scopes: {
+        files: {
+          wtA: { healthy: true, repair_required: false, document_count: 310 },
+        },
+        "files-docs": {
+          wtA: { healthy: true, repair_required: false, document_count: 16 },
+        },
+      },
+    }),
+    "ready",
+  );
+});
+
+test("aggregateProjectTabDotState returns '' when no worktree health is reported", () => {
+  assert.equal(aggregateProjectTabDotState({ state: "ready", scopes: {} }), "");
+  assert.equal(aggregateProjectTabDotState(null), "");
+});
+
+test("app.js wires the shared aggregator and progress toast helpers", () => {
+  assert.ok(
+    appSource.includes("aggregateProjectTabDotState(status)"),
+    "renderProjectTabs should consume the shared aggregator",
+  );
+  assert.ok(
+    appSource.includes("showRepairingProgressToast(status)"),
+    "indexStatusLabel click should call the progress toast helper",
   );
 });

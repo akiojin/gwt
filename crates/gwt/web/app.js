@@ -24,9 +24,11 @@
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import {
+        aggregateProjectTabDotState,
         dispatchOpenIndexSettings,
         formatIndexStatusLabel,
       } from "/index-status-controller.js";
+      import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -316,8 +318,43 @@
 
       indexStatusLabel.addEventListener("click", () => {
         if (indexStatusLabel.hidden) return;
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const status =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        if (status?.state === "repairing") {
+          showRepairingProgressToast(status);
+          return;
+        }
         dispatchOpenIndexSettings(indexStatusLabel);
       });
+
+      // SPEC-1939 T-IDX-108: while badge is `repairing`, click shows a
+      // progress toast sourced from the aggregated payload's `progress`
+      // field. No cancel button is provided because plan.md keeps the
+      // failure path visible (one shot per scope, then `error` for retry).
+      function showRepairingProgressToast(status) {
+        const progress = status?.progress || {};
+        const done = Number.isFinite(progress.scopes_done) ? progress.scopes_done : 0;
+        const total = Number.isFinite(progress.scopes_total) ? progress.scopes_total : 0;
+        const text = total > 0
+          ? `Rebuilding project index: ${done} of ${total} scope(s) completed`
+          : "Rebuilding project index…";
+        let toast = document.getElementById("index-status-toast");
+        if (!toast) {
+          toast = document.createElement("div");
+          toast.id = "index-status-toast";
+          toast.className = "index-status-toast";
+          toast.setAttribute("role", "status");
+          toast.setAttribute("aria-live", "polite");
+          document.body.appendChild(toast);
+        }
+        toast.textContent = text;
+        toast.dataset.visible = "true";
+        if (toast._hideTimer) clearTimeout(toast._hideTimer);
+        toast._hideTimer = setTimeout(() => {
+          toast.dataset.visible = "false";
+        }, 3500);
+      }
 
       function setIndexStatus(projectRoot, status) {
         if (!projectRoot) {
@@ -326,8 +363,14 @@
         indexStatusByProjectRoot.set(projectRoot, {
           state: status?.state || "",
           detail: status?.detail || "",
+          repair_started_at: status?.repair_started_at || null,
+          progress: status?.progress || null,
+          scopes: status?.scopes || {},
+          worktrees: status?.worktrees || {},
         });
         renderIndexStatus();
+        renderIndexPanelInAllSettingsWindows();
+        refreshProjectTabDots();
       }
 
       function formatVersionLabel() {
@@ -852,6 +895,7 @@
           const button = document.createElement("div");
           button.className = "project-tab";
           button.title = tab.project_root;
+          button.dataset.projectRoot = tab.project_root || "";
           button.setAttribute("role", "button");
           button.tabIndex = 0;
           // SPEC-2356 — aria-current="page" announces the active tab to
@@ -864,10 +908,25 @@
           } else {
             button.removeAttribute("aria-current");
           }
-          button.innerHTML = `
-            <span class="project-tab-label">${tab.title}</span>
-            <button class="project-tab-close" type="button" aria-label="Close ${tab.title}">×</button>
-          `;
+          // SPEC-1939 T-IDX-107 — aggregated worktree health dot precedes
+          // the tab label.
+          const dot = document.createElement("span");
+          dot.className = "project-tab-dot";
+          dot.dataset.role = "project-tab-dot";
+          dot.dataset.state = "";
+          dot.setAttribute("aria-hidden", "true");
+          button.appendChild(dot);
+          const labelEl = document.createElement("span");
+          labelEl.className = "project-tab-label";
+          labelEl.textContent = tab.title;
+          button.appendChild(labelEl);
+          const closeEl = document.createElement("button");
+          closeEl.className = "project-tab-close";
+          closeEl.type = "button";
+          closeEl.setAttribute("aria-label", `Close ${tab.title}`);
+          closeEl.textContent = "×";
+          button.appendChild(closeEl);
+          updateProjectTabDot(button, tab.project_root);
           button.addEventListener("click", () => {
             send({ kind: "select_project_tab", tab_id: tab.id });
           });
@@ -877,13 +936,26 @@
               send({ kind: "select_project_tab", tab_id: tab.id });
             }
           });
-          button
-            .querySelector(".project-tab-close")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              send({ kind: "close_project_tab", tab_id: tab.id });
-            });
+          closeEl.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_project_tab", tab_id: tab.id });
+          });
           projectTabs.appendChild(button);
+        }
+      }
+
+      function updateProjectTabDot(buttonEl, projectRoot) {
+        const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
+        if (!dot) return;
+        const status = (projectRoot && indexStatusByProjectRoot.get(projectRoot)) || null;
+        const dotState = aggregateProjectTabDotState(status);
+        dot.dataset.state = dotState;
+      }
+
+      function refreshProjectTabDots() {
+        for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
+          const projectRoot = buttonEl.dataset.projectRoot || "";
+          updateProjectTabDot(buttonEl, projectRoot);
         }
       }
 
@@ -1290,23 +1362,17 @@
         });
       }
 
+      // SPEC-2008 Phase 24 / T-188: extend the predicate so a hidden tab
+      // (display:none on the window element) is treated the same as a
+      // minimized window. xterm.js's fit / refresh do nothing useful while
+      // the host is invisible, and skipping here prevents stale measurement
+      // from leaking into the next visible cycle.
       function canRefreshTerminalViewport(windowId) {
-        if (workspaceWindowById(windowId)?.minimized) {
-          return false;
-        }
-        // SPEC-2008 FR-051 Phase 24: skip windows whose DOM element is
-        // currently `.hidden` (tab group non-active member, display:none
-        // equivalent). Running fitAddon.fit() while the element is hidden
-        // measures 0x0 and pollutes xterm.js with cols/rows = 0 so the
-        // scrollback wheel input stops responding until a manual resize.
-        // The hidden->visible transition (handled in the workspace render
-        // loop) will re-trigger scheduleTerminalFocusActivation, which
-        // re-checks this predicate and runs the deferred fit cleanly.
         const element = windowMap.get(windowId);
-        if (element?.hidden) {
+        if (element && element.hidden) {
           return false;
         }
-        return true;
+        return !workspaceWindowById(windowId)?.minimized;
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -1482,7 +1548,7 @@
           if (!agent?.window_id) return false;
           const windowData = workspaceWindowById(agent.window_id);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) return false;
-          const status = String(windowData.status || "running").toLowerCase();
+          const status = runtimeStateForWindow(windowData);
           return status !== "stopped" && status !== "exited" && status !== "error";
         });
       }
@@ -1518,6 +1584,24 @@
           default:
             return "Unknown";
         }
+      }
+
+      function agentRuntimeStatusLabel(agent) {
+        const windowData = workspaceWindowById(agent.window_id);
+        if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+          const runtimeState = runtimeStateForWindow(windowData);
+          return windowRuntimeLabel(runtimeState);
+        }
+        return agentStatusLabel(agent.status_category);
+      }
+
+      function liveSessionStatusLabel(session) {
+        const fallback = session.active ? "running" : "stopped";
+        const runtimeState = normalizeWindowRuntimeState(
+          session.runtime_status || fallback,
+          "agent",
+        );
+        return `${windowRuntimeLabel(runtimeState)} window`;
       }
 
       function focusActiveWorkAgentWindow(agent) {
@@ -1701,7 +1785,7 @@
           if (coordinationLabel) {
             chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
           }
-          chips.appendChild(createNode("div", "op-agent-state", agentStatusLabel(state)));
+          chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
           head.appendChild(chips);
           card.appendChild(head);
 
@@ -4468,7 +4552,7 @@
                 createNode(
                   "div",
                   "live-session-status",
-                  session.active ? "Active window" : "Running window",
+                  liveSessionStatusLabel(session),
                 ),
               );
               if (session.detail) {
@@ -6583,6 +6667,7 @@
         tabs.setAttribute("role", "tablist");
         tabs.appendChild(buildSettingsTab("system", "System", true));
         tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+        tabs.appendChild(buildSettingsTab("index", "Index", false));
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -6602,8 +6687,15 @@
         // the Add button and agent rows.
         panelAgents.dataset.role = "settings-scroll";
 
+        const panelIndex = document.createElement("section");
+        panelIndex.className = "settings-panel hidden";
+        panelIndex.setAttribute("role", "tabpanel");
+        panelIndex.dataset.settingsPanel = "index";
+        panelIndex.dataset.role = "settings-scroll";
+
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelAgents);
+        bodyEl.appendChild(panelIndex);
 
         root.appendChild(toolbar);
         root.appendChild(bodyEl);
@@ -6639,7 +6731,57 @@
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
         }
+
+        // SPEC-1939 T-IDX-106: render the Project Index health table.
+        renderIndexPanel(panelIndex);
+
+        // Honour any pending settings:open dispatch (e.g. from the badge
+        // click) by switching to the requested tab once the panel is mounted.
+        if (pendingSettingsTabTarget) {
+          switchSettingsTab(body, pendingSettingsTabTarget);
+          pendingSettingsTabTarget = null;
+        }
       }
+
+      let pendingSettingsTabTarget = null;
+
+      function renderIndexPanel(panel) {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const status =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        renderIndexSettingsPanel({
+          panel,
+          status,
+          projectRoot: activeProjectRoot,
+          send,
+        });
+      }
+
+      function renderIndexPanelInAllSettingsWindows() {
+        for (const settingsBody of Array.from(settingsWindowBodies)) {
+          if (!settingsBody.isConnected) {
+            settingsWindowBodies.delete(settingsBody);
+            continue;
+          }
+          const panel = settingsBody.querySelector(
+            "[data-settings-panel='index']",
+          );
+          if (panel) renderIndexPanel(panel);
+        }
+      }
+
+      document.addEventListener("settings:open", (event) => {
+        const target = event?.detail?.target || "system";
+        const existingBody = Array.from(settingsWindowBodies).find(
+          (settingsBody) => settingsBody.isConnected,
+        );
+        if (existingBody) {
+          switchSettingsTab(existingBody, target);
+          return;
+        }
+        pendingSettingsTabTarget = target;
+        focusOrSpawnPreset("settings");
+      });
 
       function buildSettingsTab(id, label, selected) {
         const btn = document.createElement("button");
@@ -7104,24 +7246,26 @@
           windowMap.delete(windowId);
         }
 
+        // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+        // for tab-grouped terminal windows so the newly visible terminal
+        // gets fit + viewport refresh + focus on the same animation frame
+        // cycle. Without this, scrollback wheel input requires a manual
+        // OS-level resize before xterm picks up the new measurement.
+        const reflowAfterActivation = [];
         for (const windowData of workspace.windows) {
           ensureWindow(windowData);
           const element = windowMap.get(windowData.id);
           if (element) {
-            const wasHidden = element.hidden === true;
-            const nextHidden = !visibleWindowData(windowData);
-            element.hidden = nextHidden;
-            // SPEC-2008 FR-051 Phase 24: when a window-tab transitions from
-            // hidden -> visible (tab switch / focus cycle / window list /
-            // Command Palette), defer fit + viewport refresh + focus to the
-            // next animation frame so xterm.js measures a non-zero element
-            // and scrollback wheel/trackpad input responds without a manual
-            // resize. Skipping non-terminal panes is implicit: the helper
-            // exits early when terminalMap has no entry for the window id.
-            if (wasHidden && !nextHidden && terminalMap.has(windowData.id)) {
-              scheduleTerminalFocusActivation(windowData.id);
+            const wasHidden = element.hidden;
+            const shouldHide = !visibleWindowData(windowData);
+            element.hidden = shouldHide;
+            if (wasHidden && !shouldHide && terminalMap.has(windowData.id)) {
+              reflowAfterActivation.push(windowData.id);
             }
           }
+        }
+        for (const windowId of reflowAfterActivation) {
+          scheduleTerminalFocusActivation(windowId);
         }
 
         requestAnimationFrame(syncMaximizedWindowsToViewport);
@@ -8273,15 +8417,16 @@
       window.addEventListener("resize", () => {
         frontendUnits.projectWorkspaceShell.renderWindowList();
         syncMaximizedWindowsToViewport();
-        // SPEC-2008 FR-050 Phase 24: fan out per-terminal fitTerminal() so
-        // xterm.js cols/rows track the new host viewport, and persist the
-        // updated geometry to the backend via UpdateWindowGeometry. Without
-        // this fan-out the wrap stays stuck at the previous host size until
-        // the user resizes a single terminal manually. fitTerminal already
-        // gates on canRefreshTerminalViewport, so minimized / hidden tabs
-        // are skipped automatically and will re-fit when they become
-        // visible (FR-051 hook above).
+        // SPEC-2008 Phase 24 / T-187: window.resize must fan out
+        // `fitTerminal(persist=true)` to every visible terminal window so
+        // xterm cols/rows stay aligned with the host viewport and the
+        // backend PTY is informed via UpdateWindowGeometry. Skipping here
+        // is what kept text wrapping fixed at the previous viewport width
+        // until the user manually resized each window.
         for (const windowId of terminalMap.keys()) {
+          if (!canRefreshTerminalViewport(windowId)) {
+            continue;
+          }
           fitTerminal(windowId, true);
         }
       });
