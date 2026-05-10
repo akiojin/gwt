@@ -2649,7 +2649,6 @@
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
             kind: knowledgeKind,
-            listScope: "open",
             entries: [],
             baseEntries: [],
             selectedNumber: null,
@@ -2683,9 +2682,6 @@
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         state.kind = knowledgeKind || state.kind;
-        if (!state.listScope) {
-          state.listScope = "open";
-        }
         if (state.hideDone === undefined) {
           state.hideDone = readKanbanHideDonePreference();
         }
@@ -2915,8 +2911,6 @@
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
-          list_scope:
-            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -2932,14 +2926,6 @@
           state.selectedNumber =
             state.entries.length > 0 ? state.entries[0].number : null;
         }
-      }
-
-      function knowledgeEventScopeMatches(state, event) {
-        return !(
-          state.kind === "issue" &&
-          event.list_scope &&
-          event.list_scope !== state.listScope
-        );
       }
 
       function knowledgeDetailRequestMatches(state, event) {
@@ -2965,8 +2951,6 @@
           query,
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
-          list_scope:
-            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -3035,8 +3019,6 @@
           knowledge_kind: effectiveKind,
           request_id: requestId,
           number,
-          list_scope:
-            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -5302,12 +5284,10 @@
         }
       }
 
-      function knowledgeSearchPlaceholder(kind, listScope = "open") {
+      function knowledgeSearchPlaceholder(kind) {
         switch (kind) {
           case "issue":
-            return listScope === "closed"
-              ? "Semantic search closed issues"
-              : "Semantic search open issues";
+            return "Semantic search issues";
           case "spec":
             return "Semantic search cached SPECs";
           case "pr":
@@ -5333,36 +5313,6 @@
             .toLowerCase()
             .includes(query),
         );
-      }
-
-      function switchKnowledgeListScope(windowId, nextScope) {
-        const state = ensureKnowledgeBridgeState(
-          windowId,
-          knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
-        );
-        if (state.kind !== "issue" || state.listScope === nextScope || state.loading) {
-          return;
-        }
-        if (state.pendingSearchTimer) {
-          clearTimeout(state.pendingSearchTimer);
-          state.pendingSearchTimer = null;
-        }
-        state.listScope = nextScope;
-        state.entries = [];
-        state.baseEntries = [];
-        state.selectedNumber = null;
-        state.detail = null;
-        state.detailLoading = false;
-        state.query = "";
-        state.searching = false;
-        state.refreshing = false;
-        state.searchInFlight = false;
-        state.inFlightSearchRequestId = 0;
-        state.queuedSearchQuery = "";
-        state.loadRequestId += 1;
-        state.searchRequestId += 1;
-        requestKnowledgeBridge(windowId, state.kind, false);
-        renderKnowledgeBridge(windowId);
       }
 
       function kanbanEmptyMessage(state, phase) {
@@ -5570,22 +5520,13 @@
         const status = element.querySelector(".knowledge-status");
         const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
         const searchInput = element.querySelector(".knowledge-search");
-        const scopeButtons = element.querySelectorAll("[data-knowledge-scope]");
         const hideDoneToggle = element.querySelector("[data-action='kanban-hide-done']");
         if (!board || !detailPane || !status || !refreshButton || !searchInput) {
           return;
         }
 
         refreshButton.disabled = !state.refreshEnabled || state.loading;
-        searchInput.placeholder = knowledgeSearchPlaceholder(
-          state.kind,
-          state.listScope,
-        );
-        for (const button of scopeButtons) {
-          const active = button.dataset.knowledgeScope === state.listScope;
-          button.classList.toggle("active", active);
-          button.disabled = state.loading && !active;
-        }
+        searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
         if (hideDoneToggle) {
           hideDoneToggle.checked = state.hideDone === true;
         }
@@ -6433,14 +6374,6 @@
               <div class="workspace-toolbar kanban-toolbar is-stacked">
                 <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
-                  ${
-                    knowledgeKind === "issue"
-                      ? `<div class="branch-filter-group">
-                  <button class="branch-filter-button" type="button" data-knowledge-scope="open">Open</button>
-                  <button class="branch-filter-button" type="button" data-knowledge-scope="closed">Closed</button>
-                </div>`
-                      : ""
-                  }
                   <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
                   <label class="kanban-hide-done-toggle" for="kanban-hide-done-${windowData.id}">
                     <input
@@ -6525,15 +6458,6 @@
               knowledgeKind,
             );
           });
-          for (const button of body.querySelectorAll("[data-knowledge-scope]")) {
-            button.addEventListener("click", (event) => {
-              event.stopPropagation();
-              frontendUnits.knowledgeSettingsSurface.switchKnowledgeListScope(
-                windowData.id,
-                button.dataset.knowledgeScope,
-              );
-            });
-          }
           body
             .querySelector("[data-action='refresh-knowledge']")
             .addEventListener("click", (event) => {
@@ -7377,9 +7301,7 @@
         requestKnowledgeBridge,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
-        knowledgeEventScopeMatches,
         knowledgeDetailRequestMatches,
-        switchKnowledgeListScope,
         renderKnowledgeBridge,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -7607,10 +7529,7 @@
               event.id,
               event.knowledge_kind,
             );
-            if (
-              (event.request_id && event.request_id !== state.loadRequestId) ||
-              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
-            ) {
+            if (event.request_id && event.request_id !== state.loadRequestId) {
               break;
             }
             const queuedQuery = state.query.trim();
@@ -7652,11 +7571,6 @@
             if (isInFlightResponse) {
               state.searchInFlight = false;
               state.inFlightSearchRequestId = 0;
-            }
-            if (
-              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
-            ) {
-              break;
             }
             if (
               event.request_id !== state.searchRequestId ||
@@ -7705,10 +7619,7 @@
               event.id,
               event.knowledge_kind,
             );
-            if (
-              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
-              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
-            ) {
+            if (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event)) {
               break;
             }
             const matchesLoadRequest =
@@ -7863,8 +7774,7 @@
             if (
               isSearchError &&
               (event.request_id !== state.inFlightSearchRequestId ||
-                event.query !== state.query.trim() ||
-                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+                event.query !== state.query.trim())
             ) {
               if (event.request_id === state.inFlightSearchRequestId) {
                 state.searchInFlight = false;
@@ -7882,8 +7792,7 @@
             }
             if (
               !isSearchError &&
-              (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
-                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event)
             ) {
               break;
             }

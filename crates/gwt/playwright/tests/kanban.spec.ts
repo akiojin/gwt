@@ -276,7 +276,6 @@ async function installKanbanBackend(page, { hideDone, theme }) {
               id: message.id,
               knowledge_kind: message.knowledge_kind,
               request_id: message.request_id,
-              list_scope: message.list_scope ?? null,
               entries,
               selected_number: 2017,
               empty_message: null,

@@ -112,8 +112,7 @@ fn frontend_event_deserializes_window_state_commands() {
         "knowledge_kind": "issue",
         "request_id": 7,
         "selected_number": 2017,
-        "refresh": true,
-        "list_scope": "closed"
+        "refresh": true
     }))
     .expect("load_knowledge_bridge should deserialize");
     match knowledge {
@@ -123,14 +122,12 @@ fn frontend_event_deserializes_window_state_commands() {
             request_id,
             selected_number,
             refresh,
-            list_scope,
         } => {
             assert_eq!(id, "project-1::issue-1");
             assert_eq!(knowledge_kind, gwt::KnowledgeKind::Issue);
             assert_eq!(request_id, Some(7));
             assert_eq!(selected_number, Some(2017));
             assert!(refresh);
-            assert_eq!(list_scope, Some(gwt::KnowledgeListScope::Closed));
         }
         other => panic!("unexpected event: {other:?}"),
     }

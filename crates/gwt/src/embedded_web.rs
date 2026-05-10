@@ -1485,13 +1485,12 @@ mod tests {
             "expected knowledge bridge refresh affordance to describe cache-backed reloads",
         );
         assert!(
-            html.contains("data-knowledge-scope=\"open\"")
-                && html.contains("data-knowledge-scope=\"closed\""),
-            "expected issue knowledge bridge surface to expose open and closed cache tabs",
+            !html.contains("data-knowledge-scope="),
+            "expected Kanban bridge to remove legacy open/closed cache tabs",
         );
         assert!(
-            html.contains("list_scope"),
-            "expected knowledge bridge requests to carry the active issue list scope",
+            !html.contains("list_scope"),
+            "expected Kanban bridge requests to omit legacy issue list scope",
         );
         assert!(
             html.contains("Loading cache-backed data"),
