@@ -616,6 +616,27 @@ enum UserEvent {
         state: gwt_core::update::UpdateState,
         client_id: ClientId,
     },
+    /// SPEC-2041 Phase 19 (FR-052/056): begin downloading the prepared payload
+    /// without exiting the parent process. On completion, the worker thread
+    /// emits an `UpdatePrepared` event so the dispatcher can broadcast
+    /// `UpdateReady` to all clients.
+    ApplyUpdateStart {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
+    /// SPEC-2041 Phase 19 (FR-058): user pressed Restart now. Apply the
+    /// prepared payload via the helper subprocess and exit the parent.
+    ApplyUpdateRestartNow {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
+    /// SPEC-2041 Phase 19 (FR-056): worker thread completed `prepare_update`
+    /// and the prepared payload is ready on disk. Dispatcher broadcasts
+    /// `UpdateReady` to subscribed clients.
+    UpdatePrepared {
+        version: String,
+        asset_path: std::path::PathBuf,
+    },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
     /// [`gwt::BackendEvent::MigrationProgress`].
@@ -5368,7 +5389,67 @@ fn main() -> wry::Result<()> {
                         let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
                             OutboundEvent::reply(
                                 client_id,
-                                BackendEvent::UpdateApplyError { message },
+                                BackendEvent::UpdateApplyError {
+                                    message: Some(message.clone()),
+                                    stage: Some("Apply update".to_string()),
+                                    reason: Some(message),
+                                    log_path: None,
+                                },
+                            ),
+                        ]));
+                    }
+                });
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateStart { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    match update_front_door::prepare_update_payload(state) {
+                        Ok(prepared) => {
+                            let asset_path = prepared.payload_path();
+                            let version = prepared.latest;
+                            let _ = apply_proxy.send_event(UserEvent::UpdatePrepared {
+                                version,
+                                asset_path,
+                            });
+                        }
+                        Err(message) => {
+                            let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                                OutboundEvent::reply(
+                                    client_id,
+                                    BackendEvent::UpdateApplyError {
+                                        message: Some(message.clone()),
+                                        stage: Some("Download asset".to_string()),
+                                        reason: Some(message),
+                                        log_path: None,
+                                    },
+                                ),
+                            ]));
+                        }
+                    }
+                });
+            }
+            Event::UserEvent(UserEvent::UpdatePrepared {
+                version,
+                asset_path,
+            }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                    version,
+                    asset_path: asset_path.to_string_lossy().to_string(),
+                })]);
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateRestartNow { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    if let Err(message) = apply_update_state_and_exit(state) {
+                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError {
+                                    message: Some(message.clone()),
+                                    stage: Some("Restart now".to_string()),
+                                    reason: Some(message),
+                                    log_path: None,
+                                },
                             ),
                         ]));
                     }

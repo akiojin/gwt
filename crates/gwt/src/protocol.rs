@@ -257,7 +257,33 @@ pub enum FrontendEvent {
         action: LaunchWizardAction,
         bounds: Option<WindowGeometry>,
     },
+    /// Legacy Phase 14 entry point. Frontend now sends
+    /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
+    /// instead. Kept so older clients and unit tests that still drive
+    /// `apply_update` continue to work; routes to the same backend behavior as
+    /// `ApplyUpdateRestartNow` (download → spawn helper → exit).
     ApplyUpdate,
+    /// SPEC-2041 Phase 19 (FR-052..057): user clicked the update CTA. Backend
+    /// downloads/prepares the asset and emits [`BackendEvent::UpdateProgress`]
+    /// during the transfer plus [`BackendEvent::UpdateReady`] on completion,
+    /// without exiting the parent process.
+    ApplyUpdateStart,
+    /// SPEC-2041 Phase 19 (FR-055): user pressed Cancel on the downloading
+    /// modal. Backend aborts the in-flight download and removes any partial
+    /// payload. Currently a best-effort no-op until async download lands.
+    CancelUpdateDownload,
+    /// SPEC-2041 Phase 19 (FR-059..061): user pressed `Later`. Binary stays
+    /// preserved; backend emits [`BackendEvent::UpdateApplyPendingPersisted`]
+    /// so the CTA morphs to ready state and same-session polling stops.
+    ApplyUpdateLater,
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
+    /// the prepared binary via the helper subprocess and exits the parent.
+    ApplyUpdateRestartNow,
+    /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
+    /// modal. Backend opens the log file in the OS default application.
+    OpenUpdateLog {
+        log_path: Option<String>,
+    },
     /// Settings > Custom Agents: list every stored custom agent. Response is
     /// [`BackendEvent::CustomAgentList`].
     ListCustomAgents,
@@ -594,8 +620,47 @@ pub enum BackendEvent {
         event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
+    /// SPEC-2041 Phase 19 (FR-054): download progress for the current update.
+    /// Emitted from `Backend` while a download is active; the `#update-modal`
+    /// uses these to drive the progress bar and byte counter.
+    UpdateProgress {
+        /// Bytes already received.
+        downloaded: u64,
+        /// Expected total bytes (when the server advertises Content-Length).
+        total: Option<u64>,
+        /// Asset filename (e.g. `gwt-macos-arm64.tar.gz`).
+        asset: Option<String>,
+        /// Target version (without the `v` prefix).
+        version: Option<String>,
+    },
+    /// SPEC-2041 Phase 19 (FR-056): download completed and the prepared payload
+    /// lives on disk. Frontend transitions the modal to the `ready` state.
+    UpdateReady {
+        version: String,
+        /// On-disk path to the prepared payload (extracted binary or installer).
+        asset_path: String,
+    },
+    /// SPEC-2041 Phase 19 (FR-059): `Later` was confirmed. The downloaded
+    /// binary is preserved (in-memory today; persistent across restarts once
+    /// the bootstrap path lands in T-133). Frontend morphs the CTA to ready.
+    UpdateApplyPendingPersisted {
+        version: String,
+    },
     UpdateApplyError {
-        message: String,
+        /// Phase 14 free-form message. Still emitted for backward compat.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Phase 19 (FR-063): structured failure stage
+        /// (e.g. `"Download asset"`, `"Replace binary"`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+        /// Phase 19 (FR-063): human-readable reason.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Phase 19 (FR-065): path to the per-day update log so the modal can
+        /// surface `[Open log]`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        log_path: Option<String>,
     },
     /// Response to [`FrontendEvent::ListCustomAgents`].
     CustomAgentList {

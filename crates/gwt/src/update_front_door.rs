@@ -269,6 +269,73 @@ impl UpdateApplyOps for RealUpdateApplyOps {
     }
 }
 
+/// SPEC-2041 Phase 19 (T-130): a download that has been completed but not yet
+/// committed via the helper subprocess. Constructed by
+/// [`prepare_update_payload`] from a verified `UpdateState::Available`, then
+/// reused by `apply_update_state_and_exit` (which performs the helper spawn +
+/// `exit(0)`). The struct intentionally owns the on-disk path so the apply
+/// path does not have to re-derive it from the asset URL.
+#[derive(Debug, Clone)]
+pub struct PreparedUpdate {
+    pub latest: String,
+    /// Source URL the asset was downloaded from. Retained for diagnostics
+    /// (logs, retry telemetry) so future Phase 19 work can correlate ready
+    /// payloads back to the upstream release without re-walking the cache.
+    #[allow(dead_code)]
+    pub asset_url: String,
+    pub payload: gwt_core::update::PreparedPayload,
+}
+
+impl PreparedUpdate {
+    /// Filesystem path of the prepared payload (binary or installer).
+    pub fn payload_path(&self) -> PathBuf {
+        match &self.payload {
+            gwt_core::update::PreparedPayload::PortableBinary { path }
+            | gwt_core::update::PreparedPayload::Installer { path, .. } => path.clone(),
+        }
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-052/056): download and stage the update payload
+/// without spawning the helper subprocess. The caller (typically the
+/// `UserEvent::ApplyUpdateStart` worker thread in `main.rs`) broadcasts
+/// [`crate::BackendEvent::UpdateReady`] when this returns `Ok`.
+///
+/// This is the explicit no-side-effects half of the legacy
+/// [`apply_update_state_and_exit`]: it never calls `exit(0)`, never spawns the
+/// helper, and never mutates the running binary. T-130 will eventually replace
+/// `apply_update_state_and_exit` entirely with this + a separate
+/// `commit_update_restart_now` once Phase 19 stabilizes.
+pub fn prepare_update_payload(
+    state: gwt_core::update::UpdateState,
+) -> Result<PreparedUpdate, String> {
+    let (latest, asset_url) = match state {
+        gwt_core::update::UpdateState::Available {
+            latest,
+            asset_url: Some(asset_url),
+            ..
+        } => (latest, asset_url),
+        gwt_core::update::UpdateState::Available { .. } => {
+            return Err("No applicable update asset is available for this platform.".to_string());
+        }
+        gwt_core::update::UpdateState::UpToDate { .. } => {
+            return Err("No pending update is available.".to_string());
+        }
+        gwt_core::update::UpdateState::Failed { message, .. } => {
+            return Err(format!("Update check failed: {message}"));
+        }
+    };
+    let mut ops = RealUpdateApplyOps::default();
+    let payload = ops
+        .prepare_update(&latest, &asset_url)
+        .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
+    Ok(PreparedUpdate {
+        latest,
+        asset_url,
+        payload,
+    })
+}
+
 /// Apply an already-detected update state from the GUI notification path.
 ///
 /// The startup poll has already selected the platform-specific asset. Reusing

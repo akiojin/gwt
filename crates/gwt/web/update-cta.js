@@ -332,11 +332,11 @@ export function createUpdateCtaController({
         el("h2", { id: "update-modal-title", text: "Update ready" }),
         el("p", {
           className: "update-modal__version",
-          text: `v${version} を適用する準備ができました。`,
+          text: `v${version} is ready to install.`,
         }),
         el("p", {
           className: "update-modal__hint",
-          text: "Restart で新しいバージョンが起動します。",
+          text: "Restart now to launch the new version.",
         }),
         el("div", { className: "update-modal__actions" }, [later, restartNow]),
       ],
