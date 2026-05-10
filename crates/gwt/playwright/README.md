@@ -31,63 +31,45 @@ npx playwright test --update-snapshots --config crates/gwt/playwright/playwright
 | `tests/adoption-surfaces.spec.ts` | 各サーフェス × Dark/Light スナップショット |
 | `tests/index-status.spec.ts` | SPEC-1939 Phase 12 — Index status badge transitions, click → settings:open |
 
-## SPEC-1939 Phase 12 e2e seams
+## SPEC-1939 Phase 12 e2e
 
-`tests/index-status.spec.ts` exercises behaviour rather than snapshots, so
-the suite needs a *running* gwt instance with two env vars set. The CI
-workflow (`.github/workflows/index-status-e2e.yml`) wires both seams; for
-local reproduction:
+`tests/index-status.spec.ts` follows the SPEC-2017 Kanban fixture pattern
+(`tests/kanban.spec.ts`): the spec serves the embedded frontend assets
+through Playwright `page.route()` and replaces `WebSocket` with a
+deterministic backend that emits canned `workspace_state` and
+`project_index_status` events. **No live gwt process / xvfb / WebKit
+required**, so the suite runs reliably under the existing
+`Visual Regression` workflow without any extra orchestration.
+
+To reproduce locally, simply run:
 
 ```bash
-# 1. Build gwt (release recommended — debug also works).
-cargo build -p gwt --release
-
-# 2. Pick a fixture for the seeded badge state.
-export GWT_INDEX_TEST_FIXTURE="$PWD/crates/gwt/playwright/fixtures/index-status-repair-required.json"
-
-# 3. Tell gwt to write its embedded server URL to a known path.
-export GWT_BROWSER_URL_FILE=/tmp/gwt-browser-url
-rm -f "$GWT_BROWSER_URL_FILE"
-
-# 4. Launch gwt under a display server. xvfb on Linux, native on macOS.
-target/release/gwt &
-GWT_PID=$!
-
-# 5. Wait for the URL handoff file (gwt writes it after the server is up).
-while [ ! -s "$GWT_BROWSER_URL_FILE" ]; do sleep 1; done
-export GWT_PLAYWRIGHT_BASE_URL="$(cat "$GWT_BROWSER_URL_FILE")"
-
-# 6. Run the spec.
-npx playwright test \
-  --config crates/gwt/playwright/playwright.config.ts \
-  crates/gwt/playwright/tests/index-status.spec.ts
-
-# 7. Tear down.
-kill "$GWT_PID"
+npm run test:visual -- --project=chromium-dark crates/gwt/playwright/tests/index-status.spec.ts
 ```
 
-`fixtures/` contents:
+The spec covers:
 
-| Fixture | seeded `state` | 用途 |
-|---|---|---|
-| `index-status-repair-required.json` | `repair_required` | T-IDX-109 happy-path badge transitions |
-| `index-status-error.json` | `error` | T-IDX-110 manual-retry path (set `GWT_INDEX_FIXTURE_KIND=error`) |
+| Test | カバー範囲 |
+|---|---|
+| `repair_required surfaces the red badge as a clickable button` | T-IDX-105 button + ARIA + label |
+| `repairing surfaces the yellow badge with a spinner glyph` | T-IDX-104 yellow + spinner |
+| `error surfaces the red badge with the failure title` | T-IDX-104 error title |
+| `badge click dispatches settings:open with target=index` | T-IDX-105 dispatch |
+| `repairing click shows a progress toast` | T-IDX-108 toast |
 
-### CI failure triage
+### Optional production debugging seams
 
-If the `Project Index status (Playwright)` workflow fails, follow this
-order:
+If you want to drive a real gwt instance (e.g. for screenshot-based UX
+review on macOS), two env-controlled seams are still available:
 
-1. Download the `gwt-runtime-log` artifact (uploaded on failure) and look
-   for `embedded server URL written for CI handoff` (success), Tao/wry
-   panic stacks (display issue), or repeated bootstrap failures (fixture
-   path issue).
-2. Confirm the Boot step printed `gwt embedded server URL: …`. If not,
-   the URL handoff timed out — gwt likely never reached the embedded
-   server (build error, missing GTK/WebKit dep, xvfb crash).
-3. If the URL was captured but the spec still failed, jump straight to
-   the Playwright trace: each test runs with `trace: "on-first-retry"`,
-   so the second-retry attempt records the full DOM + WebSocket flow.
-4. Reproduce locally with the steps above (only macOS / native-display
-   Linux supported); fixtures live next to the spec so the dev
-   experience matches CI.
+- `GWT_INDEX_TEST_FIXTURE=<json>` — `aggregate_project_index_status_for_path`
+  (`crates/gwt/src/index_worker.rs`) returns the parsed view immediately
+  instead of running the real Python runner. Fixture JSON files in
+  `fixtures/` (`index-status-repair-required.json`, `index-status-error.json`)
+  are kept around for this manual workflow.
+- `GWT_BROWSER_URL_FILE=<path>` — `crates/gwt/src/main.rs` writes the
+  embedded server URL to that path so an external script can pick it up
+  without parsing stderr.
+
+Both seams are no-ops when the env vars are unset and never run in normal
+production.
