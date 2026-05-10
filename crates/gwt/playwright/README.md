@@ -1,7 +1,9 @@
-# Playwright — SPEC-2356 Operator Design System / SPEC-1939 Phase 12 e2e
+# Playwright — SPEC-2356 Operator Design System / SPEC-1939 Phase 12 / 13 e2e
 
 Visual regression baseline for the Operator Design System surfaces and
-behaviour e2e for the Project Index status badge (SPEC-1939 Phase 12).
+behaviour e2e for the Project Index health UX (SPEC-1939 Phase 12, with
+the Phase 13 badge withdrawal applied — see "SPEC-1939 Phase 12 / 13 e2e"
+below).
 
 ## Run
 
@@ -25,7 +27,7 @@ npx playwright test --update-snapshots --config crates/gwt/playwright/playwright
 | `tests/theme-toggle.spec.ts` | Dark↔Light 200ms 切替、xterm 追従 | live-gwt (skip-if-no-`GWT_PLAYWRIGHT_BASE_URL`) |
 | `tests/reduced-motion.spec.ts` | Living Telemetry 縮退 | live-gwt (skip-if-no-`GWT_PLAYWRIGHT_BASE_URL`) |
 | `tests/kanban.spec.ts` | SPEC-2017 Knowledge Bridge Kanban visual snapshots | embedded-frontend fixture |
-| `tests/index-status.spec.ts` | SPEC-1939 Phase 12 Index status badge / Settings.Index / project tab dot / per-cell rebuild | embedded-frontend fixture |
+| `tests/index-status.spec.ts` | SPEC-1939 Phase 13 Index status surface (per-tab dot / Settings.Index / per-cell rebuild) | embedded-frontend fixture |
 
 `live-gwt` specs require the CI workflow (or a developer) to launch a
 real `gwt` instance and export `GWT_PLAYWRIGHT_BASE_URL`. `embedded-frontend`
@@ -33,7 +35,7 @@ specs serve `crates/gwt/web/**` through Playwright `page.route` and stub
 `WebSocket` directly, so they run unmodified under the standard
 `Visual Regression` workflow.
 
-## SPEC-1939 Phase 12 e2e
+## SPEC-1939 Phase 12 / 13 e2e
 
 `tests/index-status.spec.ts` follows the SPEC-2017 Kanban fixture pattern
 (`tests/kanban.spec.ts`): the spec serves the embedded frontend assets
@@ -42,6 +44,13 @@ deterministic backend that emits canned `workspace_state` and
 `project_index_status` events. **No live gwt process / xvfb / WebKit
 required**, so the suite runs reliably under the existing
 `Visual Regression` workflow without any extra orchestration.
+
+> **Phase 13 scope change.** The project-bar `Index:` badge has been
+> withdrawn (concept separation between repo-shared `issues`/`specs`
+> and per-worktree `files`/`files-docs`). The earlier badge state /
+> spinner / progress-toast tests have been removed; remaining coverage
+> drives the per-tab dot aggregator and Settings.Index panel via the
+> canonical `settings:open` event.
 
 To reproduce locally, simply run:
 
@@ -53,19 +62,12 @@ The spec covers (chromium-dark + chromium-light):
 
 | Test | カバー範囲 |
 |---|---|
-| `repair_required surfaces the red badge as a clickable button` | T-IDX-105 button + ARIA + label |
-| `repairing surfaces the yellow badge with a spinner glyph` | T-IDX-104 yellow + spinner |
-| `ready surfaces the green badge with the steady-state label` | T-IDX-104 green |
-| `skipped keeps the badge hidden so non-git projects do not flash chrome` | T-IDX-104 hidden 分岐 |
-| `error surfaces the red badge with the failure title` | T-IDX-104 error title |
-| `badge click dispatches settings:open with target=index (T-IDX-105)` | T-IDX-105 dispatch |
-| `badge transitions repair_required -> repairing -> ready over WebSocket events (T-IDX-109)` | T-IDX-109 state machine |
+| `project-bar Index badge has been withdrawn (Phase 13)` | Phase 13 撤去確認 (`#index-status` が DOM に存在しない) |
 | `project tab dot reflects aggregated worktree health (T-IDX-107)` | T-IDX-107 single-worktree |
 | `multi-worktree dot aggregates: unhealthy in one worktree turns the dot red` | T-IDX-107 multi-worktree |
-| `badge click opens Settings.Index tab and renders the scope health table (T-IDX-106)` | T-IDX-106 panel + table |
+| `Settings.Index renders the scope health table from project_index_status (T-IDX-106)` | T-IDX-106 panel + table (settings:open 直接 dispatch) |
 | `Settings.Index scope-row Rebuild all dispatches without worktree_hash` | T-IDX-102 scope-row dispatch |
 | `Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)` | T-IDX-102 per-cell / T-IDX-110 retry |
-| `repairing click shows a progress toast (T-IDX-108)` | T-IDX-108 toast |
 
 ### Optional production debugging seams
 

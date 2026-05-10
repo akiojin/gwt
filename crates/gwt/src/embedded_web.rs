@@ -166,7 +166,7 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/index-status-controller.js",
         source: index_status_controller_js,
-        marker: "formatIndexStatusLabel",
+        marker: "aggregateProjectTabDotState",
     },
     RootJsModuleAsset {
         path: "/index-settings-panel.js",
@@ -905,51 +905,48 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_project_bar_renders_index_status_badge() {
+    fn embedded_web_project_bar_omits_index_status_badge() {
         let html = index_html();
         let js = app_js();
 
+        // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
+        // surface and its supporting controller / progress-toast wiring must
+        // not ship in the embedded assets. The aggregated payload still
+        // drives the per-tab dot and the Settings.Index panel.
         assert!(
-            html.contains("id=\"index-status\""),
-            "expected project bar to expose project index status badge",
+            !html.contains("id=\"index-status\""),
+            "SPEC-1939 Phase 13: project-bar Index badge must be removed",
         );
         assert!(
-            html.contains("type=\"button\"") && html.contains("class=\"index-status\""),
-            "SPEC-1939 T-IDX-105: expected #index-status to be a clickable button",
+            !html.contains(".index-status ")
+                && !html.contains(".index-status.")
+                && !html.contains(".index-status-toast"),
+            "SPEC-1939 Phase 13: index-status / toast CSS rules must be removed",
         );
         assert!(
-            html.contains(".index-status.ready")
-                && html.contains(".index-status.error")
-                && html.contains(".index-status.repairing"),
-            "expected embedded css to define index health states including repairing",
+            !html.contains("animation: index-status-spin"),
+            "SPEC-1939 Phase 13: badge spinner animation must be removed",
         );
         assert!(
-            html.contains("animation: index-status-spin"),
-            "SPEC-1939 T-IDX-104: expected repairing badge to render a spinner",
+            !js.contains("formatIndexStatusLabel")
+                && !js.contains("indexStatusLabel")
+                && !js.contains("showRepairingProgressToast")
+                && !js.contains("renderIndexStatus("),
+            "SPEC-1939 Phase 13: badge formatter / toast helpers must be removed from app.js",
         );
         assert!(
             js.contains("function setIndexStatus(projectRoot, status)")
                 && js.contains("case \"project_index_status\""),
-            "expected frontend to consume project_index_status events",
-        );
-        assert!(
-            js.contains("formatIndexStatusLabel(state)")
-                && js.contains("dispatchOpenIndexSettings(indexStatusLabel)"),
-            "SPEC-1939 T-IDX-103/105: renderIndexStatus must use the shared controller",
+            "frontend must still consume project_index_status events for the dot + Settings panel",
         );
         assert!(
             js.contains("buildSettingsTab(\"index\", \"Index\", false)")
                 && js.contains("renderIndexSettingsPanel({"),
-            "SPEC-1939 T-IDX-106: Settings window must mount an Index tab + panel",
-        );
-        assert!(
-            js.contains("showRepairingProgressToast(status)")
-                && html.contains(".index-status-toast"),
-            "SPEC-1939 T-IDX-108: repairing click should show a progress toast",
+            "SPEC-1939 T-IDX-106: Settings window must keep the Index tab + panel",
         );
         assert!(
             html.contains(".project-tab-dot") && js.contains("aggregateProjectTabDotState(status)"),
-            "SPEC-1939 T-IDX-107: project tab must render an aggregated worktree health dot",
+            "SPEC-1939 T-IDX-107: project tab must keep its aggregated worktree health dot",
         );
     }
 

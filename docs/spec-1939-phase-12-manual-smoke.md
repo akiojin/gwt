@@ -1,16 +1,23 @@
-# SPEC-1939 Phase 12 — manual smoke checklist
+# SPEC-1939 Phase 12 / 13 — manual smoke checklist
 
 T-IDX-111 (macOS) and T-IDX-112 (Windows best-effort) require a human
 reviewer to drive a real `gwt` GUI build because the fit between
 xterm.js / wry / tao / OS window chrome is not exercisable from
 Playwright's embedded-frontend fixture pattern.
 
-The Playwright behaviour suite (`crates/gwt/playwright/tests/index-status.
-spec.ts`, 13 tests × 2 themes) gates **frontend logic** end-to-end:
-state-machine transitions, click → `settings:open`, Settings.Index table,
-per-cell / scope-row Rebuild dispatch, project tab dot aggregation, and
-the progress toast. Manual smoke just confirms that the same frontend
-renders correctly when wired to the real backend.
+The Playwright behaviour suite (`crates/gwt/playwright/tests/index-status.spec.ts`)
+gates **frontend logic** end-to-end after Phase 13: per-tab dot aggregation,
+Settings.Index table rendering, and per-cell / scope-row Rebuild dispatch
+through the `settings:open` event. Manual smoke just confirms that the
+same frontend renders correctly when wired to the real backend.
+
+> **Phase 13 scope change.** The project-bar `Index: ready / repair / …`
+> badge has been withdrawn (concept separation: `issues` / `specs` are
+> repo-shared while `files` / `files-docs` are per-worktree, so a single
+> aggregated badge mixed scopes and produced cross-branch contamination).
+> All steps that previously inspected the badge or its progress toast are
+> removed. Use the per-tab dot for Files/Files-docs health and the
+> Settings → Index tab for full per-scope details.
 
 Use this checklist when verifying a release candidate. Record the
 outcome in the Board (`gwtd board post --kind status --body ...`) so
@@ -32,13 +39,10 @@ SPEC-1939 Issue #2584 can close.
 4. Optional: pre-seed an unhealthy index scope so the bootstrap path
    enters `repair_required` and the auto-rebuild orchestrator runs.
    The chroma stores live under `~/.gwt/index/<repo-hash>/worktrees/
-   <wt-hash>/files/`. The 16-char `repo-hash` is computed from the
-   project's git remote URL (or local path when no remote is set), and
-   each worktree gets its own `wt-hash` directory. The simplest recipe:
+   <wt-hash>/files/`. The simplest recipe:
 
    ```bash
-   # 1. List the indexed worktrees for the active gwt project (run from
-   #    inside the project's repo root):
+   # 1. List the indexed worktrees for the active gwt project:
    ls -d ~/.gwt/index/*/worktrees/*/
 
    # 2. Pick one of those `<wt-hash>/` directories and remove its `files/`
@@ -46,49 +50,43 @@ SPEC-1939 Issue #2584 can close.
    rm -rf ~/.gwt/index/<repo-hash>/worktrees/<wt-hash>/files
    ```
 
-   When you re-launch `gwt`, the bootstrap probe should detect the
-   missing chroma store, surface the red `Index: repair` badge for one
-   tick, then transition through `Index: repairing` (yellow + spinner)
-   to `Index: ready` (green) once the orchestrator rebuilds the scope.
+   When you re-launch `gwt`, the per-tab dot for the affected worktree
+   should turn red while the orchestrator rebuilds, transition through
+   yellow (repairing), and end on green (ready) once the rebuild
+   completes. The project-bar surface stays unchanged because the badge
+   no longer exists.
 
 ## T-IDX-111 — macOS manual smoke
 
 Open the project and confirm each step in order. Stop and capture a
 screenshot if any step fails.
 
-1. **Bootstrap badge transitions.** Launch `gwt` in the multi-worktree
-   project. The top-bar badge should briefly show `Index: checking`,
-   transition to `Index: repair` (red) when the unhealthy scope is
-   detected, then `Index: repairing` (yellow + spinner) once the
-   orchestrator starts, and finally `Index: ready` (green).
-2. **Project tab dot aggregation.** While the transition runs, the
-   project tab's coloured dot must follow the same colour: red →
-   yellow → green. Other project tabs must stay green throughout.
-3. **Settings.Index tab opens via badge click.** Click the badge during
-   any non-`ready` state. The Settings window must open with the
-   `Index` tab pre-selected (`data-settings-tab=index`).
-4. **Health table renders.** The Index tab must list `(scope, worktree)`
+1. **Project tab dot aggregation.** Launch `gwt` in the multi-worktree
+   project. While the orchestrator runs, the affected project tab's
+   coloured dot must follow red → yellow → green. Other project tabs
+   must stay green throughout. The project-bar surface (Workspace /
+   Open Project / theme toggle) must NOT show any `Index:` badge.
+2. **Settings → Index tab opens.** Open Settings (existing entry point
+   such as the Settings menu / button or any keybinding wired to it).
+   Switch to the `Index` tab.
+3. **Health table renders.** The Index tab must list `(scope, worktree)`
    cells with `last_repair_at` / `document_count` / `reason`. The
    unhealthy worktree's `files` cell must read `manifest_missing` (or
-   the reason you seeded).
-5. **Per-cell Rebuild → green dot.** Click the per-cell `Rebuild`
+   the reason you seeded). Repo-shared scopes (`issues`, `specs`) must
+   appear without per-worktree columns.
+4. **Per-cell Rebuild → green dot.** Click the per-cell `Rebuild`
    button on the unhealthy worktree's `files` row. The cell must flip
-   to ready, the project tab dot must return to green, and a fresh
-   `Index: ready` (green) badge must remain stable.
-6. **Progress toast on repairing click.** While the badge is
-   `Index: repairing`, click it. A toast like `Rebuilding project
-   index: X of Y scope(s) completed` must appear in the bottom-right
-   for ~3.5 s.
-7. **No flicker / focus loss.** Throughout the run, the host window
+   to ready and the project tab dot must return to green.
+5. **No flicker / focus loss.** Throughout the run, the host window
    must not flicker, and keyboard focus must not jump.
 
 ## T-IDX-112 — Windows best-effort smoke
 
 Repeat the macOS checklist on Windows. Pay extra attention to:
 
-- Badge button click does **not** open Settings as a flickering window
-  (white frame ≤ 1 frame).
-- xterm scrollback continues to scroll while the badge transitions —
+- Settings window mount does **not** flash a white frame > 1 frame
+  when opened from the Index entry path.
+- xterm scrollback continues to scroll while the orchestrator runs —
   there is a known interaction with terminal viewport reflow
   (SPEC-2008 Phase 24 covers this; mention any regression in the smoke
   Board post).
@@ -104,14 +102,12 @@ After running the checklist, post a status update:
 ```bash
 gwtd board post --kind status --owner SPEC-1939 --topic phase-12-smoke \
   --mention user:akiojin --body $'\
-SPEC-1939 Phase 12 macOS smoke (T-IDX-111) 完了:\n\
-- 1: pass\n\
-- 2: pass\n\
-- 3: pass\n\
-- 4: pass\n\
-- 5: pass\n\
-- 6: pass\n\
-- 7: pass\n\
+SPEC-1939 Phase 12/13 macOS smoke (T-IDX-111) 完了:\n\
+- 1 (tab dot aggregation): pass\n\
+- 2 (Settings.Index opens): pass\n\
+- 3 (health table): pass\n\
+- 4 (per-cell Rebuild → green dot): pass\n\
+- 5 (no flicker / focus loss): pass\n\
 \n\
 Windows (T-IDX-112): <pass | best-effort deferred>'
 ```
@@ -124,4 +120,4 @@ agent / branch / session; `--mention` records a typed audience marker that
 ships with the entry payload.
 
 When the smoke passes on macOS, comment on Issue #2584 with the Board
-link to close the Phase 12 verification follow-up.
+link to close the Phase 12 / 13 verification follow-up.

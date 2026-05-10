@@ -1,161 +1,26 @@
-/* SPEC-1939 Phase 12 / T-IDX-102..T-IDX-110 — Project Index status badge.
- *
- * Reuses the SPEC-2017 Kanban fixture pattern: the embedded frontend is
- * served via `installEmbeddedRoutes` (`_helpers/embedded-frontend.ts`) and
- * the WebSocket is stubbed with a deterministic backend that emits canned
- * `workspace_state` + `project_index_status` events. No xvfb / wry / live
- * gwt process required, so the suite stays reliable in headless CI.
+/* SPEC-1939 Phase 13 — project-bar Index badge withdrawn. The remaining
+ * coverage exercises the per-tab dot aggregator and the Settings.Index
+ * panel (per-cell rebuild IPC) using the SPEC-2017 Kanban fixture pattern:
+ * the embedded frontend is served via `installEmbeddedRoutes`
+ * (`_helpers/embedded-frontend.ts`) and the WebSocket is stubbed with a
+ * deterministic backend that emits canned `workspace_state` +
+ * `project_index_status` events. No xvfb / wry / live gwt process required.
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Project Index status badge", () => {
+test.describe("Project Index status surface", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("repair_required surfaces the red badge as a clickable button", async ({ page }) => {
+  test("project-bar Index badge has been withdrawn (Phase 13)", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, { state: "repair_required" });
 
     await page.goto(APP_URL);
 
-    const badge = page.locator("#index-status");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
-    await expect(badge).toHaveAttribute("type", "button");
-    await expect(badge).toHaveAttribute("aria-label", /index/i);
-    await expect(badge).toContainText(/Index:\s+repair$/);
-    await expect(badge).toHaveClass(/repair_required/);
-  });
-
-  test("repairing surfaces the yellow badge with a spinner glyph", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installIndexStatusBackend(page, { state: "repairing" });
-
-    await page.goto(APP_URL);
-
-    const badge = page.locator("#index-status");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
-    await expect(badge).toContainText(/Index:\s+repairing/);
-    await expect(badge).toHaveClass(/repairing/);
-  });
-
-  test("ready surfaces the green badge with the steady-state label", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installIndexStatusBackend(page, { state: "ready" });
-
-    await page.goto(APP_URL);
-
-    const badge = page.locator("#index-status");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
-    await expect(badge).toContainText(/Index:\s+ready/);
-    await expect(badge).toHaveClass(/ready/);
-  });
-
-  test("skipped keeps the badge hidden so non-git projects do not flash chrome", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installIndexStatusBackend(page, { state: "skipped" });
-
-    await page.goto(APP_URL);
-
-    // Wait for the workspace state to settle (project tab attached, status
-    // dispatched) before asserting the badge is hidden — otherwise the
-    // assertion can race with the initial render.
+    // The project tab still mounts, but the legacy badge slot must be gone.
     await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator("#index-status")).toBeHidden();
-  });
-
-  test("error surfaces the red badge with the failure title", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installIndexStatusBackend(page, { state: "error" });
-
-    await page.goto(APP_URL);
-
-    const badge = page.locator("#index-status");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
-    await expect(badge).toContainText(/Index:\s+error/);
-    await expect(badge).toHaveClass(/error/);
-    await expect(badge).toHaveAttribute("title", /failed/i);
-  });
-
-  test("badge click dispatches settings:open with target=index (T-IDX-105)", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installIndexStatusBackend(page, { state: "repair_required" });
-
-    await page.goto(APP_URL);
-    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
-
-    const dispatched = await page.evaluate(async () => {
-      return await new Promise((resolve) => {
-        const handler = (event) => {
-          const detail = event.detail || {};
-          document.removeEventListener("settings:open", handler);
-          resolve({ target: detail.target ?? "" });
-        };
-        document.addEventListener("settings:open", handler, { once: true });
-        const badge = document.getElementById("index-status");
-        if (!badge) {
-          resolve(null);
-          return;
-        }
-        badge.click();
-        setTimeout(() => resolve(null), 2_000);
-      });
-    });
-    expect(dispatched).toEqual({ target: "index" });
-  });
-
-  test("badge transitions repair_required -> repairing -> ready over WebSocket events (T-IDX-109)", async ({
-    page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    // Initial state: repair_required.
-    await installIndexStatusBackend(page, { state: "repair_required" });
-
-    await page.goto(APP_URL);
-
-    const badge = page.locator("#index-status");
-    await expect(badge).toHaveClass(/repair_required/, { timeout: 10_000 });
-    await expect(badge).toContainText(/Index:\s+repair$/);
-
-    // Drive a repairing(1/2) update through the fixture WebSocket. The
-    // fixture exposes itself on window.__gwtFixtureWebSocket so tests can
-    // simulate orchestrator state-machine progress without a real backend.
-    await page.evaluate(() => {
-      const ws = window.__gwtFixtureWebSocket;
-      ws.emit({
-        kind: "project_index_status",
-        project_root: "/fixture",
-        status: {
-          state: "repairing",
-          detail: "",
-          progress: { scopes_done: 1, scopes_total: 2 },
-          scopes: {},
-          worktrees: {},
-        },
-      });
-    });
-    await expect(badge).toHaveClass(/repairing/, { timeout: 5_000 });
-    await expect(badge).toContainText(/Index:\s+repairing/);
-
-    // Final transition to ready.
-    await page.evaluate(() => {
-      const ws = window.__gwtFixtureWebSocket;
-      ws.emit({
-        kind: "project_index_status",
-        project_root: "/fixture",
-        status: {
-          state: "ready",
-          detail: "",
-          progress: null,
-          scopes: {},
-          worktrees: {},
-        },
-      });
-    });
-    await expect(badge).toHaveClass(/ready/, { timeout: 5_000 });
-    await expect(badge).toContainText(/Index:\s+ready/);
-    await expect(badge).not.toHaveClass(/repairing/);
+    await expect(page.locator("#index-status")).toHaveCount(0);
   });
 
   test("project tab dot reflects aggregated worktree health (T-IDX-107)", async ({ page }) => {
@@ -333,7 +198,7 @@ test.describe("Project Index status badge", () => {
     await expect(dot).toHaveAttribute("data-state", "ready", { timeout: 5_000 });
   });
 
-  test("badge click opens Settings.Index tab and renders the scope health table (T-IDX-106)", async ({
+  test("Settings.Index renders the scope health table from project_index_status (T-IDX-106)", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -361,8 +226,15 @@ test.describe("Project Index status badge", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
-    await page.locator("#index-status").click();
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+
+    // SPEC-1939 Phase 13: badge entry point is gone; tests drive the
+    // Settings.Index tab directly via the canonical `settings:open` event.
+    await page.evaluate(() => {
+      document.dispatchEvent(
+        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+      );
+    });
 
     // The Settings window mounts asynchronously after the create_window
     // round-trip. The Index panel is one of three tabs and should be
@@ -402,8 +274,12 @@ test.describe("Project Index status badge", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
-    await page.locator("#index-status").click();
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await page.evaluate(() => {
+      document.dispatchEvent(
+        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+      );
+    });
 
     const issuesRow = page
       .locator("[data-settings-panel='index'] tr[data-scope='issues']")
@@ -461,8 +337,12 @@ test.describe("Project Index status badge", () => {
     });
 
     await page.goto(APP_URL);
-    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
-    await page.locator("#index-status").click();
+    await expect(page.locator(".project-tab")).toBeVisible({ timeout: 10_000 });
+    await page.evaluate(() => {
+      document.dispatchEvent(
+        new CustomEvent("settings:open", { detail: { target: "index" }, bubbles: true }),
+      );
+    });
 
     // Wait for Settings.Index to render the row, then click the per-cell
     // Rebuild button.
@@ -498,22 +378,6 @@ test.describe("Project Index status badge", () => {
     });
   });
 
-  test("repairing click shows a progress toast (T-IDX-108)", async ({ page }) => {
-    await installEmbeddedRoutes(page);
-    await installIndexStatusBackend(page, {
-      state: "repairing",
-      progress: { scopes_done: 1, scopes_total: 4 },
-    });
-
-    await page.goto(APP_URL);
-    await expect(page.locator("#index-status")).toBeVisible({ timeout: 10_000 });
-
-    await page.locator("#index-status").click();
-
-    const toast = page.locator("#index-status-toast");
-    await expect(toast).toHaveAttribute("data-visible", "true");
-    await expect(toast).toContainText(/1 of 4 scope/);
-  });
 });
 
 async function installIndexStatusBackend(page, indexStatus) {
