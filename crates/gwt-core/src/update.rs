@@ -264,9 +264,9 @@ pub fn log_update_event(stage: &str, fields: &[(&str, &str)]) {
 }
 
 /// Compare two semver-ish versions, returning `true` when `candidate` is
-/// strictly newer than `current`. Falls back to string ordering when either
-/// side fails to parse so a malformed manifest never silently triggers a
-/// downgrade.
+/// strictly newer than `current`. Refuses to act on unparseable input on
+/// either side so a malformed manifest cannot silently authorize an apply
+/// (CodeRabbit review on PR #2630).
 pub fn pending_version_is_newer(candidate: &str, current: &str) -> bool {
     let trim = |v: &str| v.trim().trim_start_matches('v').to_string();
     let candidate_trim = trim(candidate);
@@ -276,7 +276,9 @@ pub fn pending_version_is_newer(candidate: &str, current: &str) -> bool {
         Version::parse(&current_trim),
     ) {
         (Ok(c), Ok(curr)) => c > curr,
-        _ => candidate_trim.as_str() > current_trim.as_str(),
+        // Refuse to act on unparseable input so a malformed manifest cannot
+        // silently trigger an apply.
+        _ => false,
     }
 }
 
@@ -3353,5 +3355,10 @@ mod tests {
         // Pre-release: 9.26.0-rc.1 is newer than 9.25.0 but older than 9.26.0.
         assert!(pending_version_is_newer("9.26.0-rc.1", "9.25.0"));
         assert!(!pending_version_is_newer("9.26.0-rc.1", "9.26.0"));
+        // Malformed input (either side) refuses to authorize an apply
+        // (CodeRabbit review on PR #2630).
+        assert!(!pending_version_is_newer("abc", "9.25.0"));
+        assert!(!pending_version_is_newer("9.26.0", "not-a-version"));
+        assert!(!pending_version_is_newer("abc", "def"));
     }
 }

@@ -344,10 +344,16 @@ export function createUpdateCtaController({
     modal.appendChild(panel);
   }
 
-  function renderModalFailed({ stage, reason, log_path }) {
+  function renderModalFailed({ stage, reason, log_path, message }) {
     const modal = ensureModal();
     modal.dataset.state = "failed";
     clearChildren(modal);
+
+    // Phase 19 promotes structured `reason`, but `message` is still on the
+    // wire contract for legacy callers (see UpdateApplyError optional fields
+    // in protocol.rs). Fall through so older or partial emitters still
+    // surface a useful failure (CodeRabbit review on PR #2630).
+    const displayReason = reason || message || "Unknown reason";
 
     const dl = el("dl", { className: "update-modal__details" }, [
       el("dt", { text: "Stage" }),
@@ -357,7 +363,7 @@ export function createUpdateCtaController({
       }),
       el("dt", { text: "Reason" }),
       el("dd", {
-        text: reason || "Unknown reason",
+        text: displayReason,
         data: { updateModalReason: "true" },
       }),
       el("dt", { text: "Log" }),

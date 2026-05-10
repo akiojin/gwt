@@ -1341,16 +1341,28 @@ fn update_apply_error_failed(stage: &str, reason: &str) -> BackendEvent {
 /// at the trace level.
 fn open_path_with_os_default(path: &str) -> Result<(), std::io::Error> {
     use std::process::Command;
-    let mut cmd = if cfg!(target_os = "macos") {
-        Command::new("open")
+    // Reap the spawned opener on a detached thread so repeated invocations
+    // do not accumulate zombie processes on Unix. `std::process::Child` has
+    // no Drop-time wait, so without this the PID stays in the process table
+    // until parent exit (CodeRabbit review on PR #2630).
+    let child = if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        cmd.spawn()?
     } else if cfg!(target_os = "windows") {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", "", path]);
-        return c.spawn().map(|_| ());
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "start", "", path]);
+        cmd.spawn()?
     } else {
-        Command::new("xdg-open")
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(path);
+        cmd.spawn()?
     };
-    cmd.arg(path).spawn().map(|_| ())
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn detect_dirty(project_root: &Path) -> bool {
@@ -1973,13 +1985,14 @@ impl AppRuntime {
     }
 
     /// SPEC-2041 Phase 19 (FR-055): user pressed `Cancel` mid-download.
-    /// Implementation note: `prepare_update` is currently synchronous in the
-    /// background thread, so a true mid-download abort is a no-op until the
-    /// async download landing in T-128. We still surface the cancel as a
-    /// best-effort acknowledgement so the frontend transition stays
-    /// authoritative.
+    /// `prepare_update` runs synchronously on a worker thread, so a true
+    /// mid-download abort is best-effort. We still defensively clear any
+    /// `~/.gwt/pending-update/manifest.json` that the worker may have
+    /// persisted between the user's click and the modal close — without this
+    /// guard, a race would leave the bootstrap path applying an update the
+    /// user explicitly cancelled (CodeRabbit P1 review on PR #2630).
     fn cancel_update_download_events(&self, _client_id: &str) -> Vec<OutboundEvent> {
-        // TODO(T-128): cooperatively abort the in-flight download.
+        let _ = gwt_core::update::clear_pending_update_manifest();
         vec![]
     }
 
@@ -2037,13 +2050,41 @@ impl AppRuntime {
 
     /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
     /// modal. Backend opens the log file with the OS default application.
+    /// The renderer-supplied `log_path` is treated as untrusted: the path
+    /// must canonicalize to a child of the gwt logs directory, must exist as
+    /// a file, and must not contain a URL scheme (CodeRabbit review on PR
+    /// #2630). Validation failures are silently dropped — the modal already
+    /// surfaces the in-memory `Reason` so a missing log file is not blocking.
     fn open_update_log_events(
         &self,
         _client_id: &str,
         log_path: Option<String>,
     ) -> Vec<OutboundEvent> {
-        if let Some(path) = log_path {
-            let _ = open_path_with_os_default(&path);
+        if let Some(raw) = log_path {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.contains("://") {
+                return vec![];
+            }
+            // Derive the allowed logs root from the canonical update log
+            // resolver itself. AppRuntime is not allowed to call the legacy
+            // `gwt_logs_dir()` directly (project-scoped resolver test in
+            // main.rs), so we ride on `update_log_path()`'s parent.
+            let logs_root_candidate = match gwt_core::update::update_log_path().parent() {
+                Some(p) => p.to_path_buf(),
+                None => return vec![],
+            };
+            let logs_root = match std::fs::canonicalize(&logs_root_candidate) {
+                Ok(root) => root,
+                Err(_) => return vec![],
+            };
+            let candidate = match std::fs::canonicalize(trimmed) {
+                Ok(p) => p,
+                Err(_) => return vec![],
+            };
+            if !candidate.starts_with(&logs_root) || !candidate.is_file() {
+                return vec![];
+            }
+            let _ = open_path_with_os_default(&candidate.to_string_lossy());
         }
         vec![]
     }
