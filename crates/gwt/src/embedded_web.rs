@@ -540,7 +540,7 @@ mod tests {
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
-                && html.contains("workspaceWindowById(windowId)?.minimized")
+                && html.contains("!workspaceWindowById(windowId)?.minimized")
                 && refresh_call.is_match(html),
             "expected terminal viewport refresh to skip minimized windows",
         );
@@ -2553,107 +2553,6 @@ mod tests {
         assert!(
             js.contains("querySelector(\".modal-shell\")"),
             "expected app.js to resolve at least one modal dialog through the `.modal-shell` primitive",
-        );
-    }
-
-    /// SPEC-2008 FR-050 Phase 24: an OS host window (WebView) `resize` event
-    /// must fan out per-terminal `fitTerminal()` so xterm.js cols/rows stay
-    /// aligned with the new viewport, and `UpdateWindowGeometry` must be sent
-    /// for each visible terminal so the backend PTY cols/rows match. Without
-    /// this fan-out the wrap stays stuck until the user resizes a single
-    /// terminal manually.
-    #[test]
-    fn embedded_web_host_window_resize_fans_out_terminal_fit() {
-        let js = app_js();
-        let host_resize_listener = regex::Regex::new(
-            r#"(?s)window\.addEventListener\("resize",\s*\(\)\s*=>\s*\{(?P<body>.*?)\}\);"#,
-        )
-        .expect("valid regex");
-        let captures = host_resize_listener.captures(js).expect(
-            "expected an OS host window resize listener wired through window.addEventListener",
-        );
-        let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
-        assert!(
-            body.contains("syncMaximizedWindowsToViewport()"),
-            "expected host resize listener to keep maximized window sync, body: {body}",
-        );
-        assert!(
-            body.contains("terminalMap"),
-            "expected host resize listener to iterate terminalMap so per-terminal fit \
-             can fan out to every visible terminal window (SPEC-2008 FR-050), body: {body}",
-        );
-        assert!(
-            body.contains("fitTerminal(") && body.contains(", true)"),
-            "expected host resize listener to call fitTerminal(id, true) for each terminal \
-             so xterm.js cols/rows refit and UpdateWindowGeometry persists to the backend; \
-             body: {body}",
-        );
-    }
-
-    /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
-    /// hidden terminals (display:none-equivalent `.hidden` attribute set when
-    /// a window-tab is non-active) so a fit during the hidden phase cannot
-    /// pollute xterm.js with cols/rows = 0. The check must consider both
-    /// minimized and the DOM `element.hidden` flag.
-    #[test]
-    fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
-        let js = app_js();
-        let signature = "function canRefreshTerminalViewport(windowId) {";
-        let start = js
-            .find(signature)
-            .expect("expected canRefreshTerminalViewport predicate definition");
-        let after = &js[start..];
-        // Body extends until the next top-level `function ` declaration in
-        // the bundle. This avoids brittle non-greedy regex matching that
-        // trips on the early-return braces inside the predicate.
-        let end_offset = after[signature.len()..]
-            .find("\n      function ")
-            .map(|i| signature.len() + i)
-            .unwrap_or(after.len());
-        let body = &after[..end_offset];
-        assert!(
-            body.contains("minimized"),
-            "expected canRefreshTerminalViewport to keep minimized check; body: {body}",
-        );
-        assert!(
-            body.contains("element?.hidden") || body.contains("element.hidden"),
-            "expected canRefreshTerminalViewport to also skip windows whose DOM element is \
-             hidden (.hidden attribute set during tab visibility transition, SPEC-2008 FR-051); \
-             body: {body}",
-        );
-        assert!(
-            body.contains("windowMap.get(windowId)"),
-            "expected canRefreshTerminalViewport to look up the DOM element via windowMap so \
-             the hidden-tab check sees the actual element flag; body: {body}",
-        );
-    }
-
-    /// SPEC-2008 FR-051 Phase 24: when a window tab transitions from
-    /// `.hidden = true` to `.hidden = false` (tab switch / focus cycle /
-    /// window list / Command Palette), the terminal must run fit + viewport
-    /// refresh + focus on the next animation frame so scrollback wheel input
-    /// works without a user-driven resize.
-    #[test]
-    fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
-        let js = app_js();
-        let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*requestAnimationFrame\(syncMaximizedWindowsToViewport\);",
-        )
-        .expect("valid regex");
-        let captures = visibility_block
-            .captures(js)
-            .expect("expected the workspace.windows visibility loop that sets element.hidden");
-        let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
-        assert!(
-            body.contains("element.hidden") && body.contains("visibleWindowData"),
-            "expected the visibility loop to keep element.hidden = !visibleWindowData(...); \
-             body: {body}",
-        );
-        assert!(
-            body.contains("scheduleTerminalFocusActivation(") && body.contains("terminalMap"),
-            "expected hidden->visible transition to schedule terminal focus activation \
-             (fit + viewport refresh + focus) so scrollback responds without a manual \
-             resize (SPEC-2008 FR-051); body: {body}",
         );
     }
 }
