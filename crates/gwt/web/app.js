@@ -23,6 +23,14 @@
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import { aggregateProjectTabDotState } from "/index-status-controller.js";
+      import { renderIndexSettingsPanel } from "/index-settings-panel.js";
+      import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
+      import {
+        applyVisibilityTransition,
+        attachHostResizeReflow,
+        viewportEligibleForRefresh,
+      } from "/terminal-viewport-reflow.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -77,9 +85,6 @@
       const activeWorkSummary = document.getElementById("op-active-work-summary");
       const activeWorkAgents = document.getElementById("op-active-work-agents");
       const workspaceOverviewEntry = document.getElementById("op-workspace-overview-entry");
-      const projectWorkspaceOverviewButton = document.getElementById(
-        "project-workspace-overview-button",
-      );
       const zoomOutButton = document.getElementById("zoom-out-button");
       const zoomResetButton = document.getElementById("zoom-reset-button");
       const zoomInButton = document.getElementById("zoom-in-button");
@@ -104,7 +109,6 @@
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
-      const indexStatusLabel = document.getElementById("index-status");
 
       const decoderMap = new Map();
       const pendingOutputMap = new Map();
@@ -295,28 +299,11 @@
       let projectError = "";
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
-      function renderIndexStatus() {
-        const activeProjectRoot = activeProjectTab()?.project_root || "";
-        const indexStatusState =
-          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || {
-            state: "",
-            detail: "",
-          };
-        const state = indexStatusState.state || "";
-        indexStatusLabel.hidden = !state || state === "skipped";
-        indexStatusLabel.className = `index-status ${state}`;
-        const label =
-          state === "ready"
-            ? "Index: ready"
-            : state === "repair_required"
-              ? "Index: repair"
-              : state === "error"
-                ? "Index: error"
-                : "Index: checking";
-        indexStatusLabel.textContent = label;
-        indexStatusLabel.title = indexStatusState.detail || label;
-      }
-
+      // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The
+      // aggregated payload now feeds only the per-tab dot indicator and the
+      // Settings.Index panel; the project-bar surface no longer renders an
+      // Index summary because repo-shared (issues/specs) and per-worktree
+      // (files/files-docs) scopes were being collapsed into a single state.
       function setIndexStatus(projectRoot, status) {
         if (!projectRoot) {
           return;
@@ -324,8 +311,13 @@
         indexStatusByProjectRoot.set(projectRoot, {
           state: status?.state || "",
           detail: status?.detail || "",
+          repair_started_at: status?.repair_started_at || null,
+          progress: status?.progress || null,
+          scopes: status?.scopes || {},
+          worktrees: status?.worktrees || {},
         });
-        renderIndexStatus();
+        renderIndexPanelInAllSettingsWindows();
+        refreshProjectTabDots();
       }
 
       function formatVersionLabel() {
@@ -850,6 +842,7 @@
           const button = document.createElement("div");
           button.className = "project-tab";
           button.title = tab.project_root;
+          button.dataset.projectRoot = tab.project_root || "";
           button.setAttribute("role", "button");
           button.tabIndex = 0;
           // SPEC-2356 — aria-current="page" announces the active tab to
@@ -862,10 +855,25 @@
           } else {
             button.removeAttribute("aria-current");
           }
-          button.innerHTML = `
-            <span class="project-tab-label">${tab.title}</span>
-            <button class="project-tab-close" type="button" aria-label="Close ${tab.title}">×</button>
-          `;
+          // SPEC-1939 T-IDX-107 — aggregated worktree health dot precedes
+          // the tab label.
+          const dot = document.createElement("span");
+          dot.className = "project-tab-dot";
+          dot.dataset.role = "project-tab-dot";
+          dot.dataset.state = "";
+          dot.setAttribute("aria-hidden", "true");
+          button.appendChild(dot);
+          const labelEl = document.createElement("span");
+          labelEl.className = "project-tab-label";
+          labelEl.textContent = tab.title;
+          button.appendChild(labelEl);
+          const closeEl = document.createElement("button");
+          closeEl.className = "project-tab-close";
+          closeEl.type = "button";
+          closeEl.setAttribute("aria-label", `Close ${tab.title}`);
+          closeEl.textContent = "×";
+          button.appendChild(closeEl);
+          updateProjectTabDot(button, tab.project_root);
           button.addEventListener("click", () => {
             send({ kind: "select_project_tab", tab_id: tab.id });
           });
@@ -875,13 +883,26 @@
               send({ kind: "select_project_tab", tab_id: tab.id });
             }
           });
-          button
-            .querySelector(".project-tab-close")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              send({ kind: "close_project_tab", tab_id: tab.id });
-            });
+          closeEl.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_project_tab", tab_id: tab.id });
+          });
           projectTabs.appendChild(button);
+        }
+      }
+
+      function updateProjectTabDot(buttonEl, projectRoot) {
+        const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
+        if (!dot) return;
+        const status = (projectRoot && indexStatusByProjectRoot.get(projectRoot)) || null;
+        const dotState = aggregateProjectTabDotState(status);
+        dot.dataset.state = dotState;
+      }
+
+      function refreshProjectTabDots() {
+        for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
+          const projectRoot = buttonEl.dataset.projectRoot || "";
+          updateProjectTabDot(buttonEl, projectRoot);
         }
       }
 
@@ -944,7 +965,6 @@
         setVersionState(appState.app_version, versionState.latest);
         renderProjectTabs();
         renderProjectPicker();
-        renderIndexStatus();
         updateActionAvailability();
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
@@ -1288,8 +1308,15 @@
         });
       }
 
+      // SPEC-2008 Phase 24 / T-188: a hidden tab (display:none) skips fit /
+      // refresh just like a minimized window. The shared predicate lives in
+      // `terminal-viewport-reflow.js` so the host resize controller and
+      // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
-        return !workspaceWindowById(windowId)?.minimized;
+        return viewportEligibleForRefresh({
+          element: windowMap.get(windowId),
+          workspaceWindow: workspaceWindowById(windowId),
+        });
       }
 
       function fitTerminal(windowId, persist = false) {
@@ -1429,9 +1456,15 @@
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         const counts = { active: 0, idle: 0, blocked: 0, done: 0, agents: 0 };
-        for (const el of windowMap.values()) {
+        for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;
           if (!state) continue;
+          // SPEC-2356 follow-up: only count live agent panes. Other workspace
+          // windows (Board / Workspace / Logs / Branches / etc.) carry
+          // data-agent-state for overlay/animation purposes but must not
+          // inflate the Sidebar Layers Agents row or Status Strip cells.
+          const windowData = workspaceWindowById(windowId);
+          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
           if (state in counts) counts[state] += 1;
           counts.agents += 1;
         }
@@ -1459,7 +1492,7 @@
           if (!agent?.window_id) return false;
           const windowData = workspaceWindowById(agent.window_id);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) return false;
-          const status = String(windowData.status || "running").toLowerCase();
+          const status = runtimeStateForWindow(windowData);
           return status !== "stopped" && status !== "exited" && status !== "error";
         });
       }
@@ -1495,6 +1528,24 @@
           default:
             return "Unknown";
         }
+      }
+
+      function agentRuntimeStatusLabel(agent) {
+        const windowData = workspaceWindowById(agent.window_id);
+        if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+          const runtimeState = runtimeStateForWindow(windowData);
+          return windowRuntimeLabel(runtimeState);
+        }
+        return agentStatusLabel(agent.status_category);
+      }
+
+      function liveSessionStatusLabel(session) {
+        const fallback = session.active ? "running" : "stopped";
+        const runtimeState = normalizeWindowRuntimeState(
+          session.runtime_status || fallback,
+          "agent",
+        );
+        return `${windowRuntimeLabel(runtimeState)} window`;
       }
 
       function focusActiveWorkAgentWindow(agent) {
@@ -1678,7 +1729,7 @@
           if (coordinationLabel) {
             chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
           }
-          chips.appendChild(createNode("div", "op-agent-state", agentStatusLabel(state)));
+          chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
           head.appendChild(chips);
           card.appendChild(head);
 
@@ -2539,7 +2590,6 @@
         if (!knowledgeBridgeStateMap.has(windowId)) {
           knowledgeBridgeStateMap.set(windowId, {
             kind: knowledgeKind,
-            listScope: "open",
             entries: [],
             baseEntries: [],
             selectedNumber: null,
@@ -2573,9 +2623,6 @@
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         state.kind = knowledgeKind || state.kind;
-        if (!state.listScope) {
-          state.listScope = "open";
-        }
         if (state.hideDone === undefined) {
           state.hideDone = readKanbanHideDonePreference();
         }
@@ -2805,8 +2852,6 @@
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
           refresh,
-          list_scope:
-            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -2822,14 +2867,6 @@
           state.selectedNumber =
             state.entries.length > 0 ? state.entries[0].number : null;
         }
-      }
-
-      function knowledgeEventScopeMatches(state, event) {
-        return !(
-          state.kind === "issue" &&
-          event.list_scope &&
-          event.list_scope !== state.listScope
-        );
       }
 
       function knowledgeDetailRequestMatches(state, event) {
@@ -2855,8 +2892,6 @@
           query,
           request_id: requestId,
           selected_number: state.selectedNumber ?? null,
-          list_scope:
-            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -2925,8 +2960,6 @@
           knowledge_kind: effectiveKind,
           request_id: requestId,
           number,
-          list_scope:
-            effectiveKind === "issue" ? state.listScope || "open" : null,
         });
       }
 
@@ -4445,7 +4478,7 @@
                 createNode(
                   "div",
                   "live-session-status",
-                  session.active ? "Active window" : "Running window",
+                  liveSessionStatusLabel(session),
                 ),
               );
               if (session.detail) {
@@ -5192,12 +5225,10 @@
         }
       }
 
-      function knowledgeSearchPlaceholder(kind, listScope = "open") {
+      function knowledgeSearchPlaceholder(kind) {
         switch (kind) {
           case "issue":
-            return listScope === "closed"
-              ? "Semantic search closed issues"
-              : "Semantic search open issues";
+            return "Semantic search issues";
           case "spec":
             return "Semantic search cached SPECs";
           case "pr":
@@ -5223,36 +5254,6 @@
             .toLowerCase()
             .includes(query),
         );
-      }
-
-      function switchKnowledgeListScope(windowId, nextScope) {
-        const state = ensureKnowledgeBridgeState(
-          windowId,
-          knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
-        );
-        if (state.kind !== "issue" || state.listScope === nextScope || state.loading) {
-          return;
-        }
-        if (state.pendingSearchTimer) {
-          clearTimeout(state.pendingSearchTimer);
-          state.pendingSearchTimer = null;
-        }
-        state.listScope = nextScope;
-        state.entries = [];
-        state.baseEntries = [];
-        state.selectedNumber = null;
-        state.detail = null;
-        state.detailLoading = false;
-        state.query = "";
-        state.searching = false;
-        state.refreshing = false;
-        state.searchInFlight = false;
-        state.inFlightSearchRequestId = 0;
-        state.queuedSearchQuery = "";
-        state.loadRequestId += 1;
-        state.searchRequestId += 1;
-        requestKnowledgeBridge(windowId, state.kind, false);
-        renderKnowledgeBridge(windowId);
       }
 
       function kanbanEmptyMessage(state, phase) {
@@ -5460,22 +5461,13 @@
         const status = element.querySelector(".knowledge-status");
         const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
         const searchInput = element.querySelector(".knowledge-search");
-        const scopeButtons = element.querySelectorAll("[data-knowledge-scope]");
         const hideDoneToggle = element.querySelector("[data-action='kanban-hide-done']");
         if (!board || !detailPane || !status || !refreshButton || !searchInput) {
           return;
         }
 
         refreshButton.disabled = !state.refreshEnabled || state.loading;
-        searchInput.placeholder = knowledgeSearchPlaceholder(
-          state.kind,
-          state.listScope,
-        );
-        for (const button of scopeButtons) {
-          const active = button.dataset.knowledgeScope === state.listScope;
-          button.classList.toggle("active", active);
-          button.disabled = state.loading && !active;
-        }
+        searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
         if (hideDoneToggle) {
           hideDoneToggle.checked = state.hideDone === true;
         }
@@ -6323,14 +6315,6 @@
               <div class="workspace-toolbar kanban-toolbar is-stacked">
                 <div class="workspace-toolbar-main">
                   <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
-                  ${
-                    knowledgeKind === "issue"
-                      ? `<div class="branch-filter-group">
-                  <button class="branch-filter-button" type="button" data-knowledge-scope="open">Open</button>
-                  <button class="branch-filter-button" type="button" data-knowledge-scope="closed">Closed</button>
-                </div>`
-                      : ""
-                  }
                   <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
                   <label class="kanban-hide-done-toggle" for="kanban-hide-done-${windowData.id}">
                     <input
@@ -6415,15 +6399,6 @@
               knowledgeKind,
             );
           });
-          for (const button of body.querySelectorAll("[data-knowledge-scope]")) {
-            button.addEventListener("click", (event) => {
-              event.stopPropagation();
-              frontendUnits.knowledgeSettingsSurface.switchKnowledgeListScope(
-                windowData.id,
-                button.dataset.knowledgeScope,
-              );
-            });
-          }
           body
             .querySelector("[data-action='refresh-knowledge']")
             .addEventListener("click", (event) => {
@@ -6524,6 +6499,7 @@
       };
       const settingsWindowBodies = new Set();
       let pendingAddFromPreset = null;
+      let editingCustomAgentId = null;
 
       function createDiv(className) {
         const el = document.createElement("div");
@@ -6560,6 +6536,7 @@
         tabs.setAttribute("role", "tablist");
         tabs.appendChild(buildSettingsTab("system", "System", true));
         tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+        tabs.appendChild(buildSettingsTab("index", "Index", false));
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -6579,8 +6556,15 @@
         // the Add button and agent rows.
         panelAgents.dataset.role = "settings-scroll";
 
+        const panelIndex = document.createElement("section");
+        panelIndex.className = "settings-panel hidden";
+        panelIndex.setAttribute("role", "tabpanel");
+        panelIndex.dataset.settingsPanel = "index";
+        panelIndex.dataset.role = "settings-scroll";
+
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelAgents);
+        bodyEl.appendChild(panelIndex);
 
         root.appendChild(toolbar);
         root.appendChild(bodyEl);
@@ -6616,7 +6600,57 @@
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
         }
+
+        // SPEC-1939 T-IDX-106: render the Project Index health table.
+        renderIndexPanel(panelIndex);
+
+        // Honour any pending settings:open dispatch (e.g. from the badge
+        // click) by switching to the requested tab once the panel is mounted.
+        if (pendingSettingsTabTarget) {
+          switchSettingsTab(body, pendingSettingsTabTarget);
+          pendingSettingsTabTarget = null;
+        }
       }
+
+      let pendingSettingsTabTarget = null;
+
+      function renderIndexPanel(panel) {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const status =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        renderIndexSettingsPanel({
+          panel,
+          status,
+          projectRoot: activeProjectRoot,
+          send,
+        });
+      }
+
+      function renderIndexPanelInAllSettingsWindows() {
+        for (const settingsBody of Array.from(settingsWindowBodies)) {
+          if (!settingsBody.isConnected) {
+            settingsWindowBodies.delete(settingsBody);
+            continue;
+          }
+          const panel = settingsBody.querySelector(
+            "[data-settings-panel='index']",
+          );
+          if (panel) renderIndexPanel(panel);
+        }
+      }
+
+      document.addEventListener("settings:open", (event) => {
+        const target = event?.detail?.target || "system";
+        const existingBody = Array.from(settingsWindowBodies).find(
+          (settingsBody) => settingsBody.isConnected,
+        );
+        if (existingBody) {
+          switchSettingsTab(existingBody, target);
+          return;
+        }
+        pendingSettingsTabTarget = target;
+        focusOrSpawnPreset("settings");
+      });
 
       function buildSettingsTab(id, label, selected) {
         const btn = document.createElement("button");
@@ -6807,8 +6841,37 @@
                 send({ kind: "delete_custom_agent", agent_id: agent.id });
               }
             });
+            const editBtn = document.createElement("button");
+            editBtn.className = "icon-button";
+            editBtn.setAttribute("aria-label", "Edit agent environment");
+            editBtn.title = "Edit environment";
+            editBtn.textContent = "✎";
+            editBtn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              editingCustomAgentId =
+                editingCustomAgentId === agent.id ? null : agent.id;
+              renderSettingsAgentList();
+            });
+            row.appendChild(editBtn);
             row.appendChild(delBtn);
             section.appendChild(row);
+            if (editingCustomAgentId === agent.id) {
+              section.appendChild(
+                renderCustomAgentEnvEditor({
+                  document,
+                  agent,
+                  onSave: (updatedAgent) => {
+                    editingCustomAgentId = null;
+                    setSettingsStatus("Saving custom agent…", "info");
+                    send({ kind: "update_custom_agent", agent: updatedAgent });
+                  },
+                  onCancel: () => {
+                    editingCustomAgentId = null;
+                    renderSettingsAgentList();
+                  },
+                }),
+              );
+            }
             scroll.appendChild(section);
           }
         }
@@ -7081,12 +7144,24 @@
           windowMap.delete(windowId);
         }
 
+        // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+        // for tab-grouped terminal windows so the newly visible terminal
+        // gets fit + viewport refresh + focus on the same animation frame
+        // cycle. Without this, scrollback wheel input requires a manual
+        // OS-level resize before xterm picks up the new measurement. The
+        // transition logic lives in `terminal-viewport-reflow.js` so a
+        // behavior test (linkedom + element stub) can exercise the
+        // hidden-to-visible activation path directly.
         for (const windowData of workspace.windows) {
           ensureWindow(windowData);
           const element = windowMap.get(windowData.id);
-          if (element) {
-            element.hidden = !visibleWindowData(windowData);
-          }
+          if (!element) continue;
+          applyVisibilityTransition({
+            element,
+            shouldHide: !visibleWindowData(windowData),
+            hasTerminal: terminalMap.has(windowData.id),
+            onReveal: () => scheduleTerminalFocusActivation(windowData.id),
+          });
         }
 
         requestAnimationFrame(syncMaximizedWindowsToViewport);
@@ -7197,9 +7272,7 @@
         requestKnowledgeBridge,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
-        knowledgeEventScopeMatches,
         knowledgeDetailRequestMatches,
-        switchKnowledgeListScope,
         renderKnowledgeBridge,
         renderSettingsWindow,
         renderSettingsAgentList,
@@ -7427,10 +7500,7 @@
               event.id,
               event.knowledge_kind,
             );
-            if (
-              (event.request_id && event.request_id !== state.loadRequestId) ||
-              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
-            ) {
+            if (event.request_id && event.request_id !== state.loadRequestId) {
               break;
             }
             const queuedQuery = state.query.trim();
@@ -7472,11 +7542,6 @@
             if (isInFlightResponse) {
               state.searchInFlight = false;
               state.inFlightSearchRequestId = 0;
-            }
-            if (
-              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
-            ) {
-              break;
             }
             if (
               event.request_id !== state.searchRequestId ||
@@ -7525,10 +7590,7 @@
               event.id,
               event.knowledge_kind,
             );
-            if (
-              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
-              !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event)
-            ) {
+            if (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event)) {
               break;
             }
             const matchesLoadRequest =
@@ -7683,8 +7745,7 @@
             if (
               isSearchError &&
               (event.request_id !== state.inFlightSearchRequestId ||
-                event.query !== state.query.trim() ||
-                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+                event.query !== state.query.trim())
             ) {
               if (event.request_id === state.inFlightSearchRequestId) {
                 state.searchInFlight = false;
@@ -7702,8 +7763,7 @@
             }
             if (
               !isSearchError &&
-              (!frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event) ||
-                !frontendUnits.knowledgeSettingsSurface.knowledgeEventScopeMatches(state, event))
+              !frontendUnits.knowledgeSettingsSurface.knowledgeDetailRequestMatches(state, event)
             ) {
               break;
             }
@@ -7770,6 +7830,9 @@
             customAgentsState.agents = customAgentsState.agents.filter(
               (a) => a.id !== event.agent_id,
             );
+            if (editingCustomAgentId === event.agent_id) {
+              editingCustomAgentId = null;
+            }
             setSettingsStatus(`Deleted custom agent "${event.agent_id}".`, "success");
             break;
           case "system_settings":
@@ -8165,9 +8228,6 @@
       if (workspaceOverviewEntry) {
         workspaceOverviewEntry.addEventListener("click", openWorkspaceOverview);
       }
-      if (projectWorkspaceOverviewButton) {
-        projectWorkspaceOverviewButton.addEventListener("click", openWorkspaceOverview);
-      }
       // SPEC-2356 — keyboard equivalent for clicking the modal backdrop.
       // Without this, Esc only worked for the Hotkey overlay and Command
       // Palette; users were trapped in branch-cleanup / migration / wizard
@@ -8235,9 +8295,21 @@
           event.preventDefault();
         }
       });
-      window.addEventListener("resize", () => {
-        frontendUnits.projectWorkspaceShell.renderWindowList();
-        syncMaximizedWindowsToViewport();
+      // SPEC-2008 Phase 24 / T-187: host resize must fan out `fitTerminal
+      // (persist=true)` to every visible terminal so xterm cols/rows stay
+      // aligned with the viewport and `UpdateWindowGeometry` reaches the
+      // backend PTY. The fan-out lives in `terminal-viewport-reflow.js`
+      // so the behavior is exercised by linkedom unit tests rather than
+      // only source-string contract.
+      attachHostResizeReflow({
+        window,
+        terminalIds: () => terminalMap.keys(),
+        canRefreshViewport: canRefreshTerminalViewport,
+        fitTerminal,
+        beforeFan: () => {
+          frontendUnits.projectWorkspaceShell.renderWindowList();
+          syncMaximizedWindowsToViewport();
+        },
       });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {

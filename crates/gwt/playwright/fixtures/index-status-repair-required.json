@@ -1,0 +1,26 @@
+{
+  "state": "repair_required",
+  "detail": "Playwright fixture — repair_required",
+  "scopes": {
+    "specs": {
+      "healthy": false,
+      "repair_required": true,
+      "document_count": 0,
+      "reason": "manifest_missing"
+    },
+    "files": {
+      "wtAhash": {
+        "healthy": false,
+        "repair_required": true,
+        "document_count": 0,
+        "reason": "manifest_missing"
+      }
+    }
+  },
+  "worktrees": {
+    "wtAhash": {
+      "branch": "develop",
+      "path": "/abs/wtA"
+    }
+  }
+}

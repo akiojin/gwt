@@ -109,6 +109,60 @@ struct GuiFrontDoorLaunchSurface<'a> {
     webview_url: &'a str,
 }
 
+/// Environment variable used by the Playwright CI workflow to receive the
+/// embedded server URL from a launching `gwt` instance. SPEC-1939
+/// T-IDX-109/110 / Issue #2584.
+pub(crate) const BROWSER_URL_FILE_ENV: &str = "GWT_BROWSER_URL_FILE";
+
+/// Result of [`write_browser_url_handoff_file`]; surfaced to keep the unit
+/// test free of tracing setup.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BrowserUrlHandoffOutcome {
+    Disabled,
+    Wrote(std::path::PathBuf),
+    Failed(std::path::PathBuf, String),
+}
+
+/// Persist `url` to `path` when the env-controlled handoff is enabled.
+///
+/// `path_env_value` mirrors `std::env::var(BROWSER_URL_FILE_ENV).ok()`; an
+/// empty / whitespace value is treated as disabled so production runs
+/// (no env) and explicit unset stay no-op.
+pub(crate) fn write_browser_url_handoff_file(
+    path_env_value: Option<&str>,
+    url: &str,
+) -> BrowserUrlHandoffOutcome {
+    let raw = match path_env_value {
+        Some(raw) => raw,
+        None => return BrowserUrlHandoffOutcome::Disabled,
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return BrowserUrlHandoffOutcome::Disabled;
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    match std::fs::write(&path, url) {
+        Ok(()) => {
+            tracing::info!(
+                target: "gwt::startup",
+                path = %path.display(),
+                url = %url,
+                "embedded server URL written for CI handoff"
+            );
+            BrowserUrlHandoffOutcome::Wrote(path)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::startup",
+                path = %path.display(),
+                error = %error,
+                "failed to write embedded server URL to GWT_BROWSER_URL_FILE"
+            );
+            BrowserUrlHandoffOutcome::Failed(path, error.to_string())
+        }
+    }
+}
+
 fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<'_> {
     GuiFrontDoorLaunchSurface {
         browser_url: server_url,
@@ -126,34 +180,41 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
     )]);
 }
 
-fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
-    let project_root = std::env::current_dir().ok();
-    let project_root_label = project_root
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    drop(runtime.spawn(async move {
-        let status = match project_root {
-            Some(path) => tokio::task::spawn_blocking(move || {
-                gwt::index_worker::project_index_status_for_path(&path)
-            })
-            .await
-            .unwrap_or_else(|err| {
-                gwt::ProjectIndexStatusView::new(
-                    gwt::ProjectIndexStatusState::Error,
-                    format!("Project index status task failed: {err}"),
-                )
-            }),
-            None => gwt::ProjectIndexStatusView::new(
+fn spawn_project_index_status_check(
+    _runtime: &Runtime,
+    proxy: EventLoopProxy<UserEvent>,
+    project_root: Option<PathBuf>,
+) {
+    dispatch_project_index_status_check_with(
+        AppEventProxy::new(proxy),
+        project_root,
+        |proxy, root| {
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global()
+                .spawn(proxy, root)
+        },
+    );
+}
+
+fn dispatch_project_index_status_check_with(
+    proxy: AppEventProxy,
+    project_root: Option<PathBuf>,
+    spawn_bootstrap: impl FnOnce(
+        AppEventProxy,
+        PathBuf,
+    ) -> crate::project_index_bootstrap::ProjectIndexBootstrapRequest,
+) -> Option<crate::project_index_bootstrap::ProjectIndexBootstrapRequest> {
+    let Some(project_root) = project_root else {
+        proxy.send(UserEvent::ProjectIndexStatus {
+            project_root: String::new(),
+            status: gwt::ProjectIndexStatusView::new(
                 gwt::ProjectIndexStatusState::Skipped,
                 "No current directory",
             ),
-        };
-        let _ = proxy.send_event(UserEvent::ProjectIndexStatus {
-            project_root: project_root_label,
-            status,
         });
-    }));
+        return None;
+    };
+
+    Some(spawn_bootstrap(proxy, project_root))
 }
 
 fn record_update_available(
@@ -417,16 +478,61 @@ fn spawn_board_daemon_subscriber(
     Some(
         gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
             resolver,
-            vec!["board".to_string()],
-            move |channel, _payload| {
-                if channel == "board" {
-                    let _ = proxy_for_callback.send_event(UserEvent::BoardProjectionChanged {
-                        project_root: project_root_for_callback.clone(),
-                    });
+            daemon_subscriber_channels(),
+            move |channel, payload| {
+                if let Some(event) = daemon_broadcast_user_event(
+                    &channel,
+                    payload,
+                    &project_root_for_callback,
+                    std::process::id(),
+                ) {
+                    let _ = proxy_for_callback.send_event(event);
                 }
             },
         ),
     )
+}
+
+#[cfg(unix)]
+fn daemon_subscriber_channels() -> Vec<String> {
+    vec![
+        "board".to_string(),
+        "workspace".to_string(),
+        gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL.to_string(),
+        gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL.to_string(),
+        gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL.to_string(),
+    ]
+}
+
+#[cfg(unix)]
+fn daemon_broadcast_user_event(
+    channel: &str,
+    payload: serde_json::Value,
+    project_root: &Path,
+    current_pid: u32,
+) -> Option<UserEvent> {
+    if channel == "board" {
+        return Some(UserEvent::BoardProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    if channel == "workspace" {
+        return Some(UserEvent::WorkspaceProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+
+    match gwt::runtime_daemon_events::decode_runtime_daemon_event(channel, payload, current_pid)? {
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Output { id, data } => {
+            Some(UserEvent::DaemonRuntimeOutput { id, data })
+        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Status { id, status, detail } => {
+            Some(UserEvent::DaemonRuntimeStatus { id, status, detail })
+        }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } => {
+            Some(UserEvent::DaemonRuntimeHook(event))
+        }
+    }
 }
 
 // Liveness probe shared with `cli::daemon` and `daemon_publisher`;
@@ -465,7 +571,16 @@ enum UserEvent {
         id: String,
         data: Vec<u8>,
     },
+    DaemonRuntimeOutput {
+        id: String,
+        data: Vec<u8>,
+    },
     RuntimeStatus {
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    },
+    DaemonRuntimeStatus {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
@@ -473,7 +588,11 @@ enum UserEvent {
     BoardProjectionChanged {
         project_root: PathBuf,
     },
+    WorkspaceProjectionChanged {
+        project_root: PathBuf,
+    },
     RuntimeHook(gwt::RuntimeHookEvent),
+    DaemonRuntimeHook(gwt::RuntimeHookEvent),
     LaunchProgress {
         window_id: String,
         message: String,
@@ -520,6 +639,9 @@ enum UserEvent {
         message: String,
         recovery: gwt_core::migration::RecoveryState,
     },
+    /// SPEC-1934 US-6.8: user chose Quit from the migration modal. The event
+    /// loop exits through the same cleanup path as a window close request.
+    QuitApp,
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -574,6 +696,110 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_subscriber_channels_include_runtime_h2_channels() {
+        let channels = super::daemon_subscriber_channels();
+
+        assert!(channels.iter().any(|channel| channel == "board"));
+        assert!(channels.iter().any(|channel| channel == "workspace"));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL));
+        assert!(channels
+            .iter()
+            .any(|channel| channel == gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_broadcast_runtime_payloads_map_to_non_republishing_user_events() {
+        let project_root = Path::new("/tmp/gwt-project");
+        let output_payload =
+            gwt::runtime_daemon_events::runtime_output_payload("tab-1::shell-1", b"hello", 42);
+        let status_payload = gwt::runtime_daemon_events::runtime_status_payload(
+            "tab-1::shell-1",
+            WindowProcessStatus::Error,
+            Some("boom".to_string()),
+            42,
+        );
+        let hook_event = RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("Stop".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: Some("agent-1".to_string()),
+            project_root: Some(project_root.display().to_string()),
+            branch: Some("work/runtime".to_string()),
+            status: Some("waiting".to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-05-10T00:00:00Z".to_string(),
+        };
+        let hook_payload = gwt::runtime_daemon_events::runtime_hook_payload(&hook_event, 42);
+
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
+            output_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeOutput { id, data }) => {
+                assert_eq!(id, "tab-1::shell-1");
+                assert_eq!(data, b"hello");
+            }
+            other => panic!("unexpected runtime output event: {other:?}"),
+        }
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+            status_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {
+                assert_eq!(id, "tab-1::shell-1");
+                assert_eq!(status, WindowProcessStatus::Error);
+                assert_eq!(detail.as_deref(), Some("boom"));
+            }
+            other => panic!("unexpected runtime status event: {other:?}"),
+        }
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            hook_payload.clone(),
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::DaemonRuntimeHook(event)) => {
+                assert_eq!(event, hook_event);
+            }
+            other => panic!("unexpected runtime hook event: {other:?}"),
+        }
+
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
+            output_payload,
+            project_root,
+            42,
+        )
+        .is_none());
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+            status_payload,
+            project_root,
+            42,
+        )
+        .is_none());
+        assert!(super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+            hook_payload,
+            project_root,
+            42,
+        )
+        .is_none());
     }
 
     #[test]
@@ -844,6 +1070,139 @@ mod tests {
 
         assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
         assert_eq!(surface.webview_url, "http://127.0.0.1:44557/");
+    }
+
+    #[test]
+    fn project_index_status_check_without_project_root_emits_skipped_status() {
+        let (proxy, events) = AppEventProxy::stub();
+
+        let request =
+            super::dispatch_project_index_status_check_with(proxy, None, |_proxy, _root| {
+                panic!("bootstrap must not run without an active project root");
+            });
+
+        assert_eq!(request, None);
+        let recorded = events.lock().expect("events");
+        assert!(
+            matches!(
+                recorded.as_slice(),
+                [UserEvent::ProjectIndexStatus {
+                    project_root,
+                    status,
+                }] if project_root.is_empty()
+                    && status.state == gwt::ProjectIndexStatusState::Skipped
+                    && status.detail == "No current directory"
+            ),
+            "startup without a project should emit a single skipped index status: {recorded:?}",
+        );
+    }
+
+    #[test]
+    fn project_index_status_check_delegates_project_root_to_bootstrap_path() {
+        let temp = tempdir().expect("tempdir");
+        let (proxy, events) = AppEventProxy::stub();
+        let captured_root = Arc::new(Mutex::new(None));
+        let captured_root_for_closure = captured_root.clone();
+
+        let request = super::dispatch_project_index_status_check_with(
+            proxy,
+            Some(temp.path().to_path_buf()),
+            move |proxy, project_root| {
+                *captured_root_for_closure.lock().expect("captured root") =
+                    Some(project_root.clone());
+                proxy.send(UserEvent::ProjectIndexStatus {
+                    project_root: project_root.display().to_string(),
+                    status: gwt::ProjectIndexStatusView::new(
+                        gwt::ProjectIndexStatusState::Ready,
+                        "bootstrap status",
+                    ),
+                });
+                crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned
+            },
+        );
+
+        assert_eq!(
+            request,
+            Some(crate::project_index_bootstrap::ProjectIndexBootstrapRequest::Spawned)
+        );
+        assert_eq!(
+            captured_root.lock().expect("captured root").as_deref(),
+            Some(temp.path())
+        );
+        let recorded = events.lock().expect("events");
+        assert!(
+            matches!(
+                recorded.as_slice(),
+                [UserEvent::ProjectIndexStatus {
+                    project_root,
+                    status,
+                }] if project_root == &temp.path().display().to_string()
+                    && status.state == gwt::ProjectIndexStatusState::Ready
+                    && status.detail == "bootstrap status"
+            ),
+            "startup with a project must receive the bootstrap status event: {recorded:?}",
+        );
+    }
+
+    #[test]
+    fn write_browser_url_handoff_file_is_disabled_when_env_is_unset_or_blank() {
+        // SPEC-1939 T-IDX-109/110: production paths must stay no-op when
+        // the CI handoff env var is missing, otherwise startup races
+        // could truncate user files.
+        assert_eq!(
+            super::write_browser_url_handoff_file(None, "http://127.0.0.1:1/"),
+            super::BrowserUrlHandoffOutcome::Disabled,
+        );
+        assert_eq!(
+            super::write_browser_url_handoff_file(Some(""), "http://127.0.0.1:1/"),
+            super::BrowserUrlHandoffOutcome::Disabled,
+        );
+        assert_eq!(
+            super::write_browser_url_handoff_file(Some("   "), "http://127.0.0.1:1/"),
+            super::BrowserUrlHandoffOutcome::Disabled,
+        );
+    }
+
+    #[test]
+    fn write_browser_url_handoff_file_persists_url_to_target_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("gwt-browser-url");
+        let url = "http://127.0.0.1:44557/";
+
+        let outcome = super::write_browser_url_handoff_file(Some(target.to_str().unwrap()), url);
+
+        assert_eq!(
+            outcome,
+            super::BrowserUrlHandoffOutcome::Wrote(target.clone()),
+        );
+        let written = std::fs::read_to_string(&target).expect("read back");
+        assert_eq!(
+            written, url,
+            "Playwright workflow reads this file; trailing newline / whitespace would break the URL"
+        );
+    }
+
+    #[test]
+    fn write_browser_url_handoff_file_reports_failure_when_target_directory_is_missing() {
+        // Pointing at a path whose parent does not exist must not panic;
+        // it should be reported as Failed so callers can log without
+        // aborting startup.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does/not/exist/gwt-browser-url");
+
+        let outcome =
+            super::write_browser_url_handoff_file(Some(missing.to_str().unwrap()), "http://x/");
+
+        match outcome {
+            super::BrowserUrlHandoffOutcome::Failed(path, _reason) => {
+                assert_eq!(path, missing);
+            }
+            other => panic!("expected Failed outcome, got {other:?}"),
+        }
+        assert!(
+            !missing.exists(),
+            "failure path must not leave a partial file behind",
+        );
     }
 
     #[test]
@@ -1494,21 +1853,29 @@ mod tests {
 
         let select_events = runtime.select_project_tab_events("tab-2");
 
-        assert_eq!(select_events.len(), 2);
+        assert_eq!(select_events.len(), 3);
         assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
         assert!(runtime.launch_wizard.is_none());
         assert!(matches!(
             select_events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
+        assert!(matches!(
+            select_events[2].event,
             BackendEvent::LaunchWizardState { wizard: None }
         ));
 
         runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
         let close_events = runtime.close_project_tab_events("tab-2");
 
-        assert_eq!(close_events.len(), 2);
+        assert_eq!(close_events.len(), 3);
         assert_eq!(runtime.tabs.len(), 1);
         assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
         assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            close_events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
         assert!(runtime
             .window_lookup
             .keys()
@@ -1807,7 +2174,6 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(knowledge_missing.len(), 1);
@@ -1824,7 +2190,6 @@ mod tests {
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(knowledge_wrong.len(), 1);
@@ -2410,7 +2775,6 @@ mod tests {
                     request_id: None,
                     selected_number: None,
                     refresh: false,
-                    list_scope: None,
                 },
             )
             .is_empty());
@@ -2422,7 +2786,6 @@ mod tests {
                     knowledge_kind: KnowledgeKind::Issue,
                     request_id: None,
                     number: 42,
-                    list_scope: None,
                 },
             )
             .is_empty());
@@ -4726,6 +5089,13 @@ mod tests {
 }
 
 fn main() -> wry::Result<()> {
+    // Hydrate process PATH before any subprocess can spawn. macOS GUI launches
+    // via launchd inherit a minimal PATH that omits /usr/local/bin and
+    // /opt/homebrew/bin, breaking docker / gh / claude / codex / bunx / npx
+    // resolution. This call MUST run before any thread starts and before CLI
+    // dispatch so spawned children inherit the augmented PATH.
+    gwt_agent::environment::apply_host_path_hydration_to_std_env();
+
     let argv: Vec<String> = std::env::args().collect();
     if !matches!(
         front_door_route(&argv),
@@ -4821,10 +5191,22 @@ fn main() -> wry::Result<()> {
     app.set_hook_forward_target(server.hook_forward_target());
     let front_door = gui_front_door_launch_surface(server.url());
     eprintln!("gwt browser URL: {}", front_door.browser_url);
+    // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
+    // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
+    // written to that path so the CI workflow can read it back into
+    // `GWT_PLAYWRIGHT_BASE_URL` without parsing stderr.
+    write_browser_url_handoff_file(
+        std::env::var(BROWSER_URL_FILE_ENV).ok().as_deref(),
+        front_door.browser_url,
+    );
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
-    spawn_project_index_status_check(&runtime, proxy.clone());
+    spawn_project_index_status_check(
+        &runtime,
+        proxy.clone(),
+        app.active_project_root().map(Path::to_path_buf),
+    );
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -4881,6 +5263,14 @@ fn main() -> wry::Result<()> {
                 server.shutdown();
                 *control_flow = ControlFlow::Exit;
             }
+            Event::UserEvent(UserEvent::QuitApp) => {
+                app.stop_all_runtimes();
+                board_projection_watchers.shutdown();
+                #[cfg(unix)]
+                board_daemon_subscribers.shutdown();
+                server.shutdown();
+                *control_flow = ControlFlow::Exit;
+            }
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
@@ -4892,7 +5282,11 @@ fn main() -> wry::Result<()> {
                 }
                 clients.dispatch(events);
                 if refresh_index_status {
-                    spawn_project_index_status_check(&runtime, proxy.clone());
+                    spawn_project_index_status_check(
+                        &runtime,
+                        proxy.clone(),
+                        app.active_project_root().map(Path::to_path_buf),
+                    );
                 }
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
@@ -4902,16 +5296,32 @@ fn main() -> wry::Result<()> {
                 let events = app.handle_runtime_output(id, data);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::DaemonRuntimeOutput { id, data }) => {
+                let events = app.handle_daemon_runtime_output(id, data);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::RuntimeStatus { id, status, detail }) => {
                 let events = app.handle_runtime_status(id, status, detail);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::DaemonRuntimeStatus { id, status, detail }) => {
+                let events = app.handle_daemon_runtime_status(id, status, detail);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
+                let events = app.handle_workspace_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::RuntimeHook(event)) => {
                 let events = app.handle_runtime_hook_event(event);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::DaemonRuntimeHook(event)) => {
+                let events = app.handle_daemon_runtime_hook_event(event);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {

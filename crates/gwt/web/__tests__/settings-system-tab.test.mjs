@@ -161,6 +161,24 @@ test("Custom Agents panel keeps the data-role='settings-scroll' hook for the leg
   );
 });
 
+test("Custom Agents panel wires the env editor to update_custom_agent", () => {
+  assert.match(
+    appSource,
+    /from "\/custom-agent-env-editor\.js"/,
+    "app.js must import the custom agent env editor module",
+  );
+  assert.match(
+    appSource,
+    /renderCustomAgentEnvEditor\(\{/,
+    "renderSettingsAgentList must mount the env editor",
+  );
+  assert.match(
+    appSource,
+    /kind:\s*"update_custom_agent",\s*agent:\s*updatedAgent/,
+    "env editor save must send update_custom_agent with the edited agent",
+  );
+});
+
 test("switchSettingsTab toggles aria-selected and hidden together", () => {
   // The active / hidden contract: aria-selected on the tab and the .hidden
   // class on every panel except the matching one must change in lockstep.

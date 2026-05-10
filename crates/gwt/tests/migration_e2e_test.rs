@@ -1,6 +1,9 @@
 //! End-to-end tests for the SPEC-1934 US-6 migration orchestrator.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use gwt::migration::execute_migration;
 use gwt_core::config::BareProjectConfig;
@@ -17,6 +20,20 @@ fn run_git(dir: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = gwt_core::process::hidden_command("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn init_repo_with_commit(path: &Path) {
@@ -94,6 +111,66 @@ fn t100_e2e_normal_to_nested_bare_worktree_layout() {
 }
 
 #[test]
+fn t143_e2e_remote_ahead_migration_preserves_local_head() {
+    // A real copied Workbench smoke exposed that cloning origin during
+    // migration can move the migrated worktree to a newer remote HEAD. The
+    // migration must preserve the user's local branch HEAD and restore dirty
+    // files on top of that exact commit.
+    let sandbox = tempfile::tempdir().unwrap();
+    let remote = sandbox.path().join("remote.git");
+    let seed = sandbox.path().join("seed");
+    let project = sandbox.path().join("project");
+
+    std::fs::create_dir_all(&seed).unwrap();
+    run_git(&seed, &["init", "-b", "develop", "."]);
+    run_git(&seed, &["config", "user.email", "test@example.com"]);
+    run_git(&seed, &["config", "user.name", "Test"]);
+    std::fs::write(seed.join("README.md"), "v1\n").unwrap();
+    run_git(&seed, &["add", "README.md"]);
+    run_git(&seed, &["commit", "-m", "v1"]);
+    run_git(
+        sandbox.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    run_git(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    run_git(&seed, &["push", "-u", "origin", "develop"]);
+    run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+
+    run_git(
+        sandbox.path(),
+        &["clone", remote.to_str().unwrap(), project.to_str().unwrap()],
+    );
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "Test"]);
+    let local_head_before = git_stdout(&project, &["rev-parse", "HEAD"]);
+
+    std::fs::write(seed.join("README.md"), "v2 from remote\n").unwrap();
+    run_git(&seed, &["add", "README.md"]);
+    run_git(&seed, &["commit", "-m", "v2"]);
+    run_git(&seed, &["push", "origin", "develop"]);
+
+    std::fs::write(project.join("README.md"), "local dirty\n").unwrap();
+
+    execute_migration(&project, MigrationOptions::default(), |_phase, _pct| {})
+        .expect("execute_migration");
+
+    let worktree = project.join("develop");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]),
+        local_head_before,
+        "migration must preserve the local branch HEAD, not advance to the remote HEAD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "local dirty\n",
+        "dirty file content must be restored on top of the preserved local HEAD"
+    );
+}
+
+#[test]
 fn t101_dirty_normal_repo_preserves_uncommitted_changes_after_migration() {
     // SPEC-1934 US-6.3: ファイルが modified / untracked の状態で migration し
     // ても、worktree の中身は同じファイル内容で残っている。
@@ -124,6 +201,109 @@ fn t101_dirty_normal_repo_preserves_uncommitted_changes_after_migration() {
         "untracked",
         "untracked file must be preserved"
     );
+}
+
+#[test]
+fn t102_e2e_multi_worktree_migration_preserves_each_branch_worktree() {
+    // SPEC-1934 US-6.4: a Normal Git repo with multiple linked worktrees must
+    // migrate each worktree into the nested bare layout, not fold linked
+    // worktree directories into the main branch worktree.
+    let project = tempfile::tempdir().unwrap();
+    init_repo_with_commit(project.path());
+    let main_branch = current_branch(project.path());
+    let project_dir_name = project
+        .path()
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo")
+        .to_string();
+
+    let clean_path = project.path().join("feature").join("clean");
+    run_git(
+        project.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/clean",
+            clean_path.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(clean_path.join("feature.txt"), "clean branch\n").unwrap();
+    run_git(&clean_path, &["add", "feature.txt"]);
+    run_git(&clean_path, &["commit", "-m", "feature clean"]);
+
+    let dirty_path = project.path().join("bugfix").join("dirty");
+    run_git(
+        project.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "bugfix/dirty",
+            dirty_path.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(dirty_path.join("README.md"), "# sample dirty branch\n").unwrap();
+    std::fs::write(dirty_path.join("scratch.txt"), "untracked dirty").unwrap();
+
+    let outcome = execute_migration(
+        project.path(),
+        MigrationOptions::default(),
+        |_phase, _pct| {},
+    )
+    .expect("execute_migration");
+
+    let bare = project.path().join(format!("{project_dir_name}.git"));
+    let main_target = project.path().join(&main_branch);
+    let clean_target = project.path().join("feature").join("clean");
+    let dirty_target = project.path().join("bugfix").join("dirty");
+
+    assert!(bare.is_dir(), "bare repo must exist");
+    assert!(main_target.join("README.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(clean_target.join("feature.txt")).unwrap(),
+        "clean branch\n",
+        "clean linked worktree content must stay with its branch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirty_target.join("README.md")).unwrap(),
+        "# sample dirty branch\n",
+        "dirty linked worktree modifications must survive"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dirty_target.join("scratch.txt")).unwrap(),
+        "untracked dirty",
+        "dirty linked worktree untracked files must survive"
+    );
+    assert!(
+        !main_target.join("feature").exists(),
+        "linked worktree directories must not be restored inside the main branch worktree"
+    );
+
+    let mut migrated = outcome.migrated_worktrees.clone();
+    migrated.sort();
+    let mut expected = vec![
+        main_target.clone(),
+        clean_target.clone(),
+        dirty_target.clone(),
+    ];
+    expected.sort();
+    assert_eq!(migrated, expected);
+
+    for target in [&main_target, &clean_target, &dirty_target] {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["status", "--short"])
+            .current_dir(target)
+            .output()
+            .expect("git status");
+        assert!(
+            output.status.success(),
+            "{} must be a valid migrated worktree: {}",
+            target.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -198,11 +378,13 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
     // wiped by the rollback (it should be preserved as it pre-existed).
     std::fs::write(bare_target.join("preexisting.txt"), "marker").unwrap();
 
+    let started = Instant::now();
     let result = execute_migration(
         project.path(),
         MigrationOptions::default(),
         |_phase, _pct| {},
     );
+    let elapsed = started.elapsed();
 
     let err = result.expect_err("migration must fail when bare target exists");
     assert_eq!(err.phase, MigrationPhase::Bareify);
@@ -233,6 +415,92 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
     assert!(
         !project.path().join(".gwt/project.toml").exists(),
         "no project.toml must be written when migration fails"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(30),
+        "rollback should complete within 30 seconds for the typical E2E fixture; took {elapsed:?}"
+    );
+}
+
+#[test]
+fn t108_e2e_worktree_failure_rolls_back_external_linked_worktree() {
+    // SPEC-1934 US-6.6 / FR-028: rollback must restore linked worktrees that
+    // live outside the project root. The branch name intentionally maps to the
+    // same path as the new bare repository, forcing the worktree phase to fail
+    // after the old external worktree has been evacuated and removed.
+    let sandbox = tempfile::tempdir().unwrap();
+    let project = sandbox.path().join("repo");
+    let external_parent = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    init_repo_with_commit(&project);
+
+    let project_dir_name = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .to_string();
+    let conflicting_branch = format!("{project_dir_name}.git");
+    let external_path = external_parent.path().join("external-worktree");
+
+    run_git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &conflicting_branch,
+            external_path.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        external_path.join("README.md"),
+        "# sample external dirty branch\n",
+    )
+    .unwrap();
+    std::fs::write(external_path.join("scratch.txt"), "external untracked").unwrap();
+
+    let result = execute_migration(&project, MigrationOptions::default(), |_phase, _pct| {});
+
+    let err = result.expect_err("conflicting worktree target must fail migration");
+    assert_eq!(err.phase, MigrationPhase::Worktrees);
+    assert_eq!(err.recovery, RecoveryState::RolledBack);
+
+    assert!(
+        project.join(".git").is_dir(),
+        "original project .git directory must be restored"
+    );
+    assert!(
+        !project.join(".gwt/project.toml").exists(),
+        "failed migration must not leave project.toml"
+    );
+    assert!(
+        external_path.is_dir(),
+        "external linked worktree must be restored after rollback"
+    );
+    assert!(
+        external_path.join(".git").is_file(),
+        "external linked worktree git marker must be restored"
+    );
+    assert_eq!(
+        std::fs::read_to_string(external_path.join("README.md")).unwrap(),
+        "# sample external dirty branch\n",
+        "external tracked modifications must survive rollback"
+    );
+    assert_eq!(
+        std::fs::read_to_string(external_path.join("scratch.txt")).unwrap(),
+        "external untracked",
+        "external untracked files must survive rollback"
+    );
+
+    let status = gwt_core::process::hidden_command("git")
+        .args(["status", "--short"])
+        .current_dir(&external_path)
+        .output()
+        .expect("git status");
+    assert!(
+        status.status.success(),
+        "external worktree must remain a valid Git worktree: {}",
+        String::from_utf8_lossy(&status.stderr)
     );
 }
 

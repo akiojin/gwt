@@ -2,12 +2,14 @@
 
 use gwt_core::config::BareProjectConfig;
 use gwt_core::migration::backup::{self, BACKUP_DIR_NAME};
+use gwt_core::migration::executor;
 use gwt_core::migration::rollback;
 use gwt_core::migration::validator::{
     self, check_disk_space, check_locked_worktrees, check_write_permission, evaluate_disk_space,
     ValidationError,
 };
-use gwt_core::migration::MigrationPhase;
+use gwt_core::migration::MigrationOptions;
+use gwt_core::migration::{MigrationError, MigrationPhase, RecoveryState};
 
 #[test]
 fn t013_bare_project_config_round_trip() {
@@ -220,6 +222,44 @@ fn t030_backup_create_copies_tree_into_backup_dir() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn t030_backup_create_skips_symlinks_in_project_and_nested_dirs() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("target.txt"), "target").unwrap();
+    symlink("target.txt", tmp.path().join("link.txt")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
+    std::fs::write(tmp.path().join("nested").join("inner.txt"), "inner").unwrap();
+    symlink(
+        "inner.txt",
+        tmp.path().join("nested").join("inner-link.txt"),
+    )
+    .unwrap();
+
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+
+    assert!(snapshot.backup_dir.join("target.txt").is_file());
+    assert!(
+        !snapshot.backup_dir.join("link.txt").exists(),
+        "top-level symlinks must not be copied into the backup"
+    );
+    assert!(snapshot
+        .backup_dir
+        .join("nested")
+        .join("inner.txt")
+        .is_file());
+    assert!(
+        !snapshot
+            .backup_dir
+            .join("nested")
+            .join("inner-link.txt")
+            .exists(),
+        "nested symlinks must not be copied into the backup"
+    );
+}
+
 #[test]
 fn t030_backup_create_excludes_self() {
     let tmp = tempfile::tempdir().unwrap();
@@ -230,6 +270,36 @@ fn t030_backup_create_excludes_self() {
     // The backup directory must not contain a recursive copy of itself.
     assert!(!snapshot.backup_dir.join(BACKUP_DIR_NAME).exists());
     assert!(snapshot.backup_dir.join("real.txt").is_file());
+}
+
+#[test]
+fn t030_backup_create_with_external_roots_skips_missing_and_sanitizes_names() {
+    let project = tempfile::tempdir().unwrap();
+    let external_parent = tempfile::tempdir().unwrap();
+    let external = external_parent.path().join("linked worktree@one");
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("dirty.txt"), "dirty").unwrap();
+    let missing = external_parent.path().join("missing-worktree");
+
+    let snapshot =
+        backup::create_with_external_roots(project.path(), &[missing.clone(), external.clone()])
+            .expect("backup::create_with_external_roots");
+
+    assert_eq!(snapshot.external_roots.len(), 1);
+    let external_snapshot = &snapshot.external_roots[0];
+    assert_eq!(external_snapshot.original_path, external);
+    assert!(external_snapshot
+        .backup_path
+        .ends_with("1-linked_worktree_one"));
+    assert!(external_snapshot.backup_path.join("dirty.txt").is_file());
+    assert!(
+        !snapshot
+            .backup_dir
+            .join(".external-worktrees")
+            .join("0-missing-worktree")
+            .exists(),
+        "missing external roots must be ignored instead of creating empty backups"
+    );
 }
 
 #[test]
@@ -265,6 +335,39 @@ fn t032_backup_create_renames_existing_backup() {
 }
 
 #[test]
+fn t034_backup_restore_restores_external_roots_and_removes_added_dirs() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("root.txt"), "v1").unwrap();
+    let external_parent = tempfile::tempdir().unwrap();
+    let external = external_parent.path().join("linked-worktree");
+    std::fs::create_dir_all(external.join("dir")).unwrap();
+    std::fs::write(external.join("dir").join("tracked.txt"), "before").unwrap();
+
+    let snapshot =
+        backup::create_with_external_roots(project.path(), std::slice::from_ref(&external))
+            .expect("backup::create_with_external_roots");
+
+    std::fs::remove_file(project.path().join("root.txt")).unwrap();
+    std::fs::write(project.path().join("migration-junk.txt"), "junk").unwrap();
+    std::fs::remove_dir_all(&external).unwrap();
+    std::fs::create_dir_all(external.join("new-dir")).unwrap();
+    std::fs::write(external.join("new-dir").join("junk.txt"), "junk").unwrap();
+
+    backup::restore(&snapshot).expect("backup::restore");
+
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("root.txt")).unwrap(),
+        "v1"
+    );
+    assert!(!project.path().join("migration-junk.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(external.join("dir").join("tracked.txt")).unwrap(),
+        "before"
+    );
+    assert!(!external.join("new-dir").exists());
+}
+
+#[test]
 fn t034_backup_restore_returns_files_to_project_root() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("keep.txt"), "v1").unwrap();
@@ -297,6 +400,24 @@ fn t034_backup_restore_returns_files_to_project_root() {
 }
 
 #[test]
+fn t035_backup_discard_removes_existing_snapshot_and_ignores_missing_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "alpha").unwrap();
+    let snapshot = backup::create(tmp.path()).expect("backup::create");
+    let backup_dir = snapshot.backup_dir.clone();
+
+    backup::discard(snapshot).expect("discard existing backup");
+    assert!(!backup_dir.exists());
+
+    let missing_snapshot = backup::BackupSnapshot {
+        project_root: tmp.path().to_path_buf(),
+        backup_dir,
+        external_roots: Vec::new(),
+    };
+    backup::discard(missing_snapshot).expect("discard missing backup is a no-op");
+}
+
+#[test]
 fn t036_rollback_uses_backup_to_restore_partial_changes() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a"), "1").unwrap();
@@ -317,6 +438,72 @@ fn t036_rollback_uses_backup_to_restore_partial_changes() {
         !tmp.path().join("partial.bin").exists(),
         "rollback must clear partial files"
     );
+}
+
+#[test]
+fn t036_rollback_surfaces_backup_restore_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let snapshot = backup::BackupSnapshot {
+        project_root: tmp.path().join("missing-project-root"),
+        backup_dir: tmp.path().join("missing-backup"),
+        external_roots: Vec::new(),
+    };
+
+    let err = rollback::rollback_migration(&snapshot).expect_err("rollback must fail");
+    let message = err.to_string();
+    assert!(message.contains("rollback failed: backup io error:"));
+}
+
+#[test]
+fn t040_executor_stub_returns_untouched_confirm_error() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let err = executor::execute_migration(tmp.path(), MigrationOptions::default(), |_, _| {
+        panic!("stub executor must not emit progress")
+    })
+    .expect_err("stub executor must return the explicit not-implemented error");
+
+    assert_eq!(err.phase, MigrationPhase::Confirm);
+    assert_eq!(err.recovery, RecoveryState::Untouched);
+    assert!(err.message.contains("execute_migration is not implemented"));
+    assert!(err
+        .to_string()
+        .contains("migration failed at phase confirm"));
+}
+
+#[test]
+fn t040_migration_error_display_includes_phase_recovery_and_message() {
+    let err = MigrationError {
+        phase: MigrationPhase::Backup,
+        message: "disk failed".to_string(),
+        recovery: RecoveryState::Partial,
+    };
+
+    assert_eq!(
+        err.to_string(),
+        "migration failed at phase backup (recovery: Partial): disk failed"
+    );
+}
+
+#[test]
+fn t020_validation_error_display_and_io_conversion_are_stable() {
+    let disk = ValidationError::InsufficientDiskSpace {
+        required: 20,
+        available: 10,
+    };
+    assert_eq!(
+        disk.to_string(),
+        "insufficient disk space: required 20 bytes, available 10 bytes"
+    );
+
+    let locked = ValidationError::LockedWorktrees(vec!["/tmp/wt".into()]);
+    assert!(locked.to_string().contains("locked worktrees:"));
+
+    let denied = ValidationError::WritePermissionDenied("/tmp/project".into());
+    assert_eq!(denied.to_string(), "write permission denied: /tmp/project");
+
+    let io_error: ValidationError = std::io::Error::other("boom").into();
+    assert_eq!(io_error.to_string(), "validator io error: boom");
 }
 
 #[test]

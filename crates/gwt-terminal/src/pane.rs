@@ -29,8 +29,12 @@ pub struct Pane {
     parser: vt100::Parser,
     scrollback: ScrollbackStorage,
     status: PaneStatus,
-    /// Accumulator for incomplete lines from raw PTY output.
-    line_buf: String,
+    /// Accumulator for incomplete lines from raw PTY output. Holds raw bytes
+    /// (including SGR escape sequences) until a `\n` boundary is reached, then
+    /// the completed line is split off and pushed into `scrollback` with both
+    /// a plain-text rendering and the original byte stream so SGR formatting
+    /// can be replayed later (SPEC-1919 FR-003j).
+    line_buf: Vec<u8>,
 }
 
 fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
@@ -76,7 +80,7 @@ impl Pane {
             parser,
             scrollback,
             status: PaneStatus::Running,
-            line_buf: String::new(),
+            line_buf: Vec::new(),
         })
     }
 
@@ -108,17 +112,18 @@ impl Pane {
         // Update vt100 screen state
         self.parser.process(data);
 
-        // Capture lines for scrollback
-        let text = String::from_utf8_lossy(data);
-        self.line_buf.push_str(&text);
+        // Capture raw bytes for scrollback. SGR escape sequences (CSI ... m)
+        // never contain `\n`, so byte-level newline splitting preserves both
+        // the visible text and the SGR formatting in `formatted`.
+        self.line_buf.extend_from_slice(data);
 
-        // Split on newlines and push completed lines into the ring buffer.
-        // Uses drain to avoid repeated allocation from slicing.
-        while let Some(pos) = self.line_buf.find('\n') {
-            let line: String = self.line_buf.drain(..pos).collect();
+        while let Some(pos) = self.line_buf.iter().position(|b| *b == b'\n') {
+            let raw: Vec<u8> = self.line_buf.drain(..pos).collect();
             self.line_buf.drain(..1); // consume the '\n'
+            let text = String::from_utf8_lossy(&raw).into_owned();
             self.scrollback.push_line(ScrollbackLine {
-                text: line,
+                text,
+                formatted: raw,
                 wrapped: false,
             });
         }

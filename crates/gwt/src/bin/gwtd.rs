@@ -221,7 +221,7 @@ fn format_board_help() -> String {
         "  show [--json]                           Print the Board snapshot",
         "  post --kind <kind> (--body <text> | -f <file>)",
         "       [--title-summary <text>] [--parent <id>] [--topic <t>]*",
-        "       [--owner <n>]* [--target <id>]*",
+        "       [--owner <n>]* [--target <id>]* [--mention <kind:id>]*",
         "                                          Append a Board entry",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
@@ -443,4 +443,44 @@ fn parse_owner_repo(value: &str) -> Option<(String, String)> {
         return None;
     }
     Some((owner.to_string(), repo.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_board_help_documents_mention_flag() {
+        // Regression: PR #2600 missed `--mention` from the board post help text
+        // even though the parser at `cli/board.rs` accepts it. The parser also
+        // collects `--mention` repeatedly (BoardPostCommand::mentions is a
+        // Vec<String>), so the help token must keep the `*` repetition marker.
+        // Asserting the closing-bracket-then-star form prevents future drift
+        // where the marker is accidentally trimmed but the bare flag survives.
+        let help = format_board_help();
+        assert!(
+            help.contains("[--mention <kind:id>]*"),
+            "board help must document repeatable --mention flag (parser accepts it). help:\n{help}",
+        );
+    }
+
+    #[test]
+    fn format_board_help_documents_post_audience_flags() {
+        // Each entry pairs the bracketed flag token with its expected
+        // repetition marker. `--parent` is singular per the parser; the rest
+        // are Vec<String> in BoardPostCommand and must keep the `*` marker so
+        // operators know they can pass each flag multiple times.
+        let help = format_board_help();
+        for expected in [
+            "[--target <id>]*",
+            "[--owner <n>]*",
+            "[--topic <t>]*",
+            "[--parent <id>]",
+        ] {
+            assert!(
+                help.contains(expected),
+                "board help must document {expected}. help:\n{help}",
+            );
+        }
+    }
 }

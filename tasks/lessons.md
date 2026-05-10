@@ -1,5 +1,165 @@
 # Lessons Learned
 
+## 2026-05-10 — SPEC section edits must preserve section markers and avoid concurrent writes
+
+### 事象
+
+SPEC-2021 の spec/plan/tasks section を複数 `gwtd issue spec --edit ...`
+で並列更新したところ、GitHub Issue body の `sections` metadata と comment
+section の内容が競合し、`--section tasks` が一時的に読めなくなった。
+その後 SPEC-1784 tasks comment を `gh api PATCH` で直接修正した際も、
+`<!-- artifact:tasks BEGIN/END -->` marker を付けずに comment body を
+置き換えてしまい、`gwtd issue spec 1784 --section tasks` が
+`comment ... does not contain section 'tasks'` で壊れた。
+
+### 原因
+
+SPEC section は GitHub Issue body の section index と、body/comment 内の
+artifact marker の組み合わせで成立している。並列 edit は同じ index map の
+read/modify/write 競合を起こす。さらに `gh api` で comment を直接 PATCH
+する場合、section file 本文だけでは artifact marker が不足し、gwtd parser
+が section を識別できない。
+
+### 再発防止策
+
+1. 同一 Issue の `gwtd issue spec --edit <section>` は必ず逐次実行し、
+   並列化しない。並列化してよいのは section read / grep などの読み取りだけ。
+2. 書き込み後は `gwtd issue spec <n> --section <section>` を必ず読み直し、
+   対象 section が parse できることと、変更行が反映されたことを確認する。
+3. `gh api` で section comment を直接 PATCH する必要がある場合は、本文を
+   `<!-- artifact:<section> BEGIN --> ... <!-- artifact:<section> END -->`
+   で包む。marker なしの raw section body を送らない。
+
+## 2026-05-10 — Auto-merge can fire before review-feedback corrections land
+
+### 事象
+
+PR #2602 で CodeRabbit からの指摘 (`PRRT_kwDOPLof2M6A4N7G`: `format_board_help_documents_mention_flag` assertion が `*` 反復マーカーを要求していない) を修正する commit (`2a8853f6`) を push した直後、auto-merge が一つ前の SHA (`c3ec646a`) に対して既に発火しており、PR #2602 は強化前のテストのまま develop に landed した。CodeRabbit suggestion を適用したつもりが、その commit は次の PR (#2603) で別途 land させる必要が生じた。
+
+### 原因
+
+`Auto Merge PR` workflow は「PR の checks が全部 green になった瞬間」に発火する。CodeRabbit が PR にコメントしてから、こちらが修正 commit を push して新しい checks が走り始めるまでの空白期間に、prior commit の checks が完了して auto-merge が prior SHA で merge を実行してしまう競合が発生し得る。auto-merge は SHA-pinned ではないため、新 commit は merge 後に取り残される。
+
+### 再発防止策
+
+1. CodeRabbit / Codex review でアクション可能な提案を受けたら、修正 commit を push する **前** に PR の auto-merge 進行度を確認する (`gwtd pr checks <n>` で `Enable auto-merge` 状態確認)。すでに大半が SUCCESS になっている場合、修正 commit を push しても auto-merge が prior SHA を選ぶ余地が残る。
+2. もしどうしても prior commit が先に merge してしまうリスクがあるなら、修正 commit は **次の PR で land させる前提** で書く (本 PR #2603 はその対応)。同時に、その follow-up を必ず開くことを reviewer 通知の reply に明記する。
+3. `gwtd pr edit <n> --add-label hold` などで auto-merge を一時的に無効化する手段があれば優先する (現時点で gwtd には専用 flag はないので、修正 commit + immediate watch を運用ルールにする)。
+
+## 2026-05-10 — Verify CLI commands and flags against the parser, not just the help text
+
+### 事象
+
+`docs/spec-1939-phase-12-manual-smoke.md` (PR #2599 で develop merged) に、
+実在しないサブコマンド `gwtd start-work develop /tmp/...` を含めてしまい、
+follow-up PR #2600 で修正したものの、その PR で「`gwtd board post` には
+`--mention` フラグは存在しない」と誤った claim を書いてしまった。実際に
+は `crates/gwt/src/cli/board.rs:234` の parser に `--mention <kind:id>` が
+landing 済みで、tests (`board_family_parse_post_collects_typed_mentions`)
+でも `--mention user:akiojin` 形式が gating されていたため、Codex review
+(PRRT_kwDOPLof2M6A4JHA) で指摘され、二度目の follow-up が必要になった。
+
+### 原因
+
+最初の修正で `gwtd --help board post` (実体は `crates/gwt/src/bin/gwtd.rs::
+format_board_help()`) の出力だけを根拠にし、parser source (`cli/board.rs`)
+や cli.rs の集中 usage 文字列を読まなかった。`bin/gwtd.rs` の subcommand
+help は手書きで cli.rs / parser から自動生成されておらず、`--mention` の
+ように後から landing したフラグが反映されていない場合がある。help text
+を「正本」と仮定してしまったのが事故の構造的原因。
+
+### 再発防止策
+
+1. CLI flag / subcommand の有無を doc / lesson に固定する場合、`gwtd
+   <subcommand> --help` だけでなく、parser 側 (`crates/gwt/src/cli/*.rs`
+   の `--flag` arm) と test (`board_family_parse_post_*` 等) の両方で
+   確認する。help 文字列は手書きのため、フラグの抜けが発生する。
+2. user 向け手順に CLI snippet を埋め込む際は、commit 前に **実 invocation
+   で reproduce** してから snippet を確定する (例: 実際に `gwtd board post
+   --mention user:akiojin --body 'test'` を投げて成功するかを board entry
+   で確認)。help 文字列は古い場合がある。
+3. もし help と parser に乖離があったら、help 側も合わせて修正する
+   (`crates/gwt/src/bin/gwtd.rs::format_*_help()`)。ドキュメントを書く
+   作業の副産物として help 同期も行うことで、次の reviewer が同じ事故を
+   踏まなくなる。
+4. 既存 doc / 既存テストの flag 列挙 (parser の `--mention` arm、cli.rs
+   の集中 usage 文字列) を参照元として優先し、help の subcommand 出力は
+   second-source 扱いとする。
+
+## 2026-05-10 — Read tasks/lessons.md before designing tests for window interaction features
+
+### 事象
+
+SPEC-2008 Phase 24 (terminal viewport reflow) を `crates/gwt/web/app.js` に
+実装した PR #2588 で、frontend test を全て source-string regex assertion で
+書いた。直後に「2026-05-07 — Window interaction features need behavior
+tests」の lesson と矛盾している指摘を別 Agent から受け、後追いで behavior
+test ベースの follow-up PR #2590 を作成する手戻りが発生した。
+
+### 原因
+
+実装着手前に `tasks/lessons.md` を確認しなかった。ホット領域の lesson は
+過去の同種失敗をまとめており、参照すれば即座に適切なテスト設計を選べる。
+2026-05-07 lesson は「window interaction features は behavior test で操作
+可能性を検証する。source-string contract は配線漏れ検出に限定する」と
+明示していたが、これを参照せずに既存 helper の延長で source-string
+assertion だけを書いてしまった。
+
+### 再発防止策
+
+1. `crates/gwt/web/` の interaction (resize / drag / hidden→visible / click
+   dispatch / keyboard / pointer) を変更する作業では、最初に
+   `tasks/lessons.md` の関連 lesson (特に 2026-05-07 window interaction)
+   を読んで、test 設計を確定してからコードに着手する。
+2. test 設計時は behavior test を default、source-string assertion は
+   wiring 漏れ検出限定で 1〜2 件に留める。
+3. 同種の問題ドメインで複数 lesson が並ぶ場合 (2026-05-07 が 2 件あった
+   ように)、AGENTS.md の `Self-Improvement Loop` に従い該当領域の lesson
+   をすべて並べて読み返す。
+
+## 2026-05-10 — gwt-build-spec must preflight Board active claims
+
+### 事象
+
+ユーザー報告のターミナル安定化 3 症状を SPEC-1919 (TTY) と SPEC-2008
+(Window host) に分割して並行実装するため、別セッションで
+SPEC-1919 PR #2587 を merge 後、続いて SPEC-2008 Phase 24 を
+`gwt-build-spec` で着手し PR #2589 を作成した。同時刻に別 Claude Code
+セッション (work/20260509-1639) も SPEC-2008 Phase 24 を Board claim
+済みで実装し、PR #2588 として先に CI 完走 → auto-merge した。結果
+PR #2589 は `merge: CONFLICTING` の重複 PR になり、SUPERSEDED 扱いで
+close 待ちとなった。
+
+### 原因
+
+`gwt-build-spec` の Phase 1 (Context Load) が SPEC tasks セクションは
+読むが、対象 SPEC に対して **他 agent が active claim を持っているか
+を Board から確認するステップを持たない**。SPEC-1935 FR-014b/c の
+`board-reminder` は SessionStart / UserPromptSubmit に最近の Board
+posts を注入するが、注入のタイミングと skill 起動のタイミングが一致
+せず、別セッションの SessionStart context には PR #2588 の claim
+post が含まれていなかった。結果として、先行 claim の存在を検知でき
+ないまま並行実装に入り、merge 段階で重複が露呈した。
+
+### 再発防止策
+
+1. `gwt-build-spec` / `gwt-plan-spec` / `gwt-discussion` 起動直後
+   (Phase 1 内、対象 SPEC 番号確定後) に `gwtd board show` を読み、
+   対象 SPEC owner / Phase に対する `[active]` claim を持つ別 session
+   が存在するかをチェックする。存在する場合は当該 session への合流
+   提案 (handoff request) または work split の議論に切り替える。
+2. 上記チェックを skill 内マニュアル運用ではなく `gwtd build start`
+   / `gwtd plan start` / `gwtd discuss start` 等のライフサイクル CLI
+   側でも実行し、stderr に warning を出すことを検討する (実装は別
+   Issue で議論)。
+3. 並行作業を意図的に許可するケース (例: 同 SPEC 内で disjoint なファ
+   イル境界が明示されている) は Board claim の `Boundary:` 行で明示
+   する運用を継続し、preflight はあくまで "知らずに重複する" を防
+   ぐためのものとする。
+4. Issue として "[skill-preflight] gwt-build-spec / gwt-plan-spec /
+   gwt-discussion must check Board active claims before starting"
+   を別途登録し追跡する (本 lesson とリンク)。
+
 ## 2026-05-07 — Hook fixes must separate diagnostics from shipped behavior
 
 ### 事象
@@ -4875,3 +5035,92 @@ embedded serving と unit test は追加したが、`package.json` の
 2. frontend module 分割の差分レビューでは、`rg "from \"/.*\\.js\""`
    で root import を確認し、配信・syntax check・unit test の3点が
    揃っているかを見る。
+
+## 2026-05-10 — Agent カウントは `windowMap` 走査ではなく preset で判定する
+
+### 事象
+
+Sidebar Layers の Agents 行が、実 Agent pane 数 (2) ではなく
+全 workspace window 数 (Agent 2 + Board / Workspace 等 2 = 4) を
+表示していた。`recomputeOperatorTelemetry()` が `windowMap.values()`
+を走査し、`data-agent-state` を持つ window をすべて `counts.agents`
+に加算していた。
+
+### 原因
+
+`data-agent-state` は CSS overlay / animation 用に **全 window** へ
+打たれる DOM marker であり、agent 種別を表すものではない。Agent 判定の
+真実源は `presetSupportsWaitingStatus(preset)` (`agent | claude | codex`)
+だが、`recomputeOperatorTelemetry` ではこの述語を呼ばずに DOM の
+data 属性だけで判定していた。同じく `activeWorkProjection` 由来の
+`Math.max(counts.agents, activeAgents + blockedAgents)` も二重計上の
+温床になり得る。
+
+### 再発防止策
+
+1. `windowMap.values()` / `.entries()` を走査して "agent らしさ" を
+   集計する箇所では、必ず `presetSupportsWaitingStatus(preset)` を経由
+   する。`workspaceWindowById(windowId)` で `windowData.preset` を解決
+   してから判定する。
+2. `data-agent-state` は CSS / overlay 用途であり、agent 判定の
+   primary signal として使わない。差分レビューでは
+   `rg "dataset.agentState" crates/gwt/web` で利用箇所を確認する。
+3. Sidebar / Status Strip / Mission Briefing が共有する集計関数は、
+   regression を `operator-chrome-structure` 等の source-level
+   assertion で固定し、preset filter の脱落を CI で拾う。
+
+## 2026-05-10 — Git read-only 判定は subcommand 名だけで許可しない
+
+### 事象
+
+title-summary 未設定時の read-only exploration allowlist が `git config` と
+`git remote` を subcommand 名だけで許可していたため、`git config user.name ...`
+や `git remote add ...` のような変更系 command が title-summary gate を通過した。
+
+### 原因
+
+Git の subcommand は同じ名前でも読み取りと変更の両方を持つものがあるが、
+`is_read_only_git_subcommand` が引数を見ずに `config` / `remote` / `branch`
+全体を read-only として扱っていた。allowlist の単位が粗く、guard の目的
+である「作業開始前の変更を止める」契約と一致していなかった。
+
+### 再発防止策
+
+1. Hook guard の read-only 判定では command 名だけでなく引数まで見る。
+2. `git config` / `git remote` / `git branch` のように読み書きが混在する
+   subcommand は、明示的な読み取り形式だけを allowlist する。ただし
+   `git branch --contains <commit>` や `git branch --list <pattern>` のように
+   読み取り flag が positional value を取る形を「裸の引数」と誤判定しない。
+   short flag でも `-l` / `-i` のような read-only alias を漏らさない。
+   ただし `--no-list` のように read-only mode を解除する flag は、単純な
+   valueless read flag として扱わず、`-l` / `--list` で立った list mode を
+   明示的に解除する state transition として検証する。解除後の positional
+   value は作成対象へ戻るため block する。Git option は後方に置かれても
+   先行 positional operand の解釈を変えるため、positional value は見つけた
+   時点ではなく最終的な list mode で判定する。
+3. allowlist を広げる場合は、読み取り positive test と変更 blocking test
+   を必ず対で追加する。
+
+## 2026-05-10 — GitHub コメント本文を shell 引数に直書きしない
+
+### 事象
+
+`gh issue close --comment "..."` の本文に Markdown backtick を含めたため、
+zsh が command substitution として解釈し、本文中の `target/debug/gwt` や
+`cargo test ...` などを余計に実行した。Issue は閉じられたが、初回コメント
+本文にコマンド出力が混入し、後から GitHub API で修正する必要が出た。
+
+### 原因
+
+Markdown のコード表記を shell の double-quoted argument に直接入れた。
+GitHub コメント本文は shell 評価を通すべきではないデータだが、本文作成と
+CLI 実行を同じ quoting context に混ぜてしまった。
+
+### 再発防止策
+
+1. GitHub Issue / PR コメント本文に backtick、`$`、改行、ANSI 出力などを
+   含む場合は、`--body-file` または `gh api --input -` を使う。
+2. 一時本文ファイルを作る場合は repo 外 (`/tmp`) か既存の local task file
+   を使い、Markdown 本文を shell double quote に直接埋め込まない。
+3. `gh issue close --comment` を使う場合でも、本文は単一引用符で安全に
+   表現できる短文だけに限定する。複数行の検証ログは別途ファイル入力にする。

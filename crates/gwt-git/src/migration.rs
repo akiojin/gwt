@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gwt_core::{process::hidden_command, GwtError, Result};
+use gwt_core::{migration::WorktreeMigration, process::hidden_command, GwtError, Result};
 
 /// Clone a Normal repository's `origin` URL into `<target>` as a bare repo
 /// (FR-021). The full history is preserved so subsequent worktree adds resolve
@@ -120,6 +120,126 @@ pub fn copy_hooks_to_bare(source_dot_git: &Path, bare: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Parse `git worktree list --porcelain` output into migration worktree
+/// records. Detached worktrees are ignored because the migration layout is
+/// branch-addressed.
+pub fn parse_worktree_list_porcelain(stdout: &str, project_root: &Path) -> Vec<WorktreeMigration> {
+    #[derive(Default)]
+    struct Entry {
+        path: Option<PathBuf>,
+        branch: Option<String>,
+        is_locked: bool,
+    }
+
+    fn flush(
+        entries: &mut Vec<WorktreeMigration>,
+        current: &mut Entry,
+        project_root: &Path,
+        canonical_project_root: Option<&Path>,
+    ) {
+        let Some(path) = current.path.take() else {
+            *current = Entry::default();
+            return;
+        };
+        let Some(branch) = current.branch.take() else {
+            *current = Entry::default();
+            return;
+        };
+        let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let is_main_repo = canonical_project_root
+            .map(|root| canonical_path == root)
+            .unwrap_or_else(|| path == project_root);
+        entries.push(WorktreeMigration {
+            path,
+            branch,
+            is_main_repo,
+            is_dirty: false,
+            is_locked: current.is_locked,
+        });
+        *current = Entry::default();
+    }
+
+    let canonical_project_root = std::fs::canonicalize(project_root).ok();
+    let mut entries = Vec::new();
+    let mut current = Entry::default();
+
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            flush(
+                &mut entries,
+                &mut current,
+                project_root,
+                canonical_project_root.as_deref(),
+            );
+            current.path = Some(PathBuf::from(rest.trim()));
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            let branch = rest
+                .trim()
+                .strip_prefix("refs/heads/")
+                .unwrap_or_else(|| rest.trim())
+                .to_string();
+            if !branch.is_empty() {
+                current.branch = Some(branch);
+            }
+        } else if line.starts_with("locked") {
+            current.is_locked = true;
+        } else if line.is_empty() {
+            flush(
+                &mut entries,
+                &mut current,
+                project_root,
+                canonical_project_root.as_deref(),
+            );
+        }
+    }
+    flush(
+        &mut entries,
+        &mut current,
+        project_root,
+        canonical_project_root.as_deref(),
+    );
+
+    entries
+}
+
+/// List branch-backed worktrees for a Normal repository and mark their current
+/// dirty state.
+pub fn list_worktrees(project_root: &Path) -> Result<Vec<WorktreeMigration>> {
+    let output = hidden_command("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| GwtError::Git(format!("git worktree list: {e}")))?;
+    if !output.status.success() {
+        return Err(GwtError::Git(format!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut worktrees = parse_worktree_list_porcelain(&stdout, project_root);
+    for worktree in &mut worktrees {
+        worktree.is_dirty = worktree_dirty(&worktree.path).unwrap_or(false);
+    }
+    Ok(worktrees)
+}
+
+fn worktree_dirty(path: &Path) -> Result<bool> {
+    let output = hidden_command("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| GwtError::Git(format!("git status --porcelain: {e}")))?;
+    if !output.status.success() {
+        return Err(GwtError::Git(format!(
+            "git status --porcelain failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 /// File-system entries that must never be moved by the dirty-file

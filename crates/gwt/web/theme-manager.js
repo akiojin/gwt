@@ -42,6 +42,7 @@ export function createThemeManager(env) {
     getEffective() { return lastEffective; },
     setTheme(next) {
       const normalized = normalize(next);
+      const previousPreference = preference;
       preference = normalized;
       if (normalized === "auto") storage.delete(STORAGE_KEY);
       else storage.set(STORAGE_KEY, normalized);
@@ -52,6 +53,7 @@ export function createThemeManager(env) {
         notify(eff);
       } else {
         applyDocument(eff); // make sure document attr is correct even when no change
+        if (normalized !== previousPreference) notify(eff);
       }
     },
     subscribe(fn) {

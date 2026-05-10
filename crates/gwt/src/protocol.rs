@@ -10,7 +10,7 @@ use crate::{
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
     file_tree::FileTreeEntry,
-    knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem, KnowledgeListScope},
+    knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
         CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
@@ -150,7 +150,6 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         selected_number: Option<u64>,
         refresh: bool,
-        list_scope: Option<KnowledgeListScope>,
     },
     SearchKnowledgeBridge {
         id: String,
@@ -158,7 +157,6 @@ pub enum FrontendEvent {
         query: String,
         request_id: u64,
         selected_number: Option<u64>,
-        list_scope: Option<KnowledgeListScope>,
     },
     SelectKnowledgeBridgeEntry {
         id: String,
@@ -166,7 +164,6 @@ pub enum FrontendEvent {
         #[serde(default)]
         request_id: Option<u64>,
         number: u64,
-        list_scope: Option<KnowledgeListScope>,
     },
     /// SPEC-2017 US-8 — Kanban D&D writes a phase change back to the
     /// owning GitHub Issue. `target_phase=None` means Backlog (every
@@ -189,6 +186,17 @@ pub enum FrontendEvent {
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
+    },
+    /// SPEC-1939 US-5: trigger a per-cell index rebuild for
+    /// `(project_root, scope, worktree_hash?)`. The backend funnels this
+    /// through the same orchestrator + `.lock` path as the auto-rebuild
+    /// orchestrator and `gwt index rebuild` CLI so concurrent invocations
+    /// dedup.
+    RebuildIndexCell {
+        project_root: String,
+        scope: crate::IndexRebuildScope,
+        #[serde(default)]
+        worktree_hash: Option<String>,
     },
     PostBoardEntry {
         id: String,
@@ -505,7 +513,6 @@ pub enum BackendEvent {
         id: String,
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
-        list_scope: Option<KnowledgeListScope>,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
@@ -516,7 +523,6 @@ pub enum BackendEvent {
         knowledge_kind: KnowledgeKind,
         query: String,
         request_id: u64,
-        list_scope: Option<KnowledgeListScope>,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
@@ -526,7 +532,6 @@ pub enum BackendEvent {
         id: String,
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
-        list_scope: Option<KnowledgeListScope>,
         detail: KnowledgeDetailView,
     },
     /// SPEC-2017 US-8 — Result of an
@@ -569,7 +574,6 @@ pub enum BackendEvent {
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
         query: Option<String>,
-        list_scope: Option<KnowledgeListScope>,
         message: String,
     },
     ProjectOpenError {

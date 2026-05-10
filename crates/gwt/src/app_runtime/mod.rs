@@ -75,7 +75,6 @@ pub struct KnowledgeSearchRequest<'a> {
     pub(crate) query: &'a str,
     pub(crate) request_id: u64,
     pub(crate) selected_number: Option<u64>,
-    pub(crate) list_scope: gwt::KnowledgeListScope,
 }
 
 pub struct KnowledgeLoadRequest<'a> {
@@ -84,7 +83,6 @@ pub struct KnowledgeLoadRequest<'a> {
     pub(crate) request_id: Option<u64>,
     pub(crate) selected_number: Option<u64>,
     pub(crate) refresh: bool,
-    pub(crate) list_scope: gwt::KnowledgeListScope,
 }
 
 struct KnowledgeRefreshTask {
@@ -95,7 +93,6 @@ struct KnowledgeRefreshTask {
     request_id: Option<u64>,
     selected_number: Option<u64>,
     force: bool,
-    list_scope: gwt::KnowledgeListScope,
 }
 
 struct KnowledgeSearchTask {
@@ -106,7 +103,6 @@ struct KnowledgeSearchTask {
     query: String,
     request_id: u64,
     selected_number: Option<u64>,
-    list_scope: gwt::KnowledgeListScope,
 }
 
 pub struct WindowRuntime {
@@ -477,14 +473,12 @@ fn knowledge_error_event(
     message: impl Into<String>,
     request_id: Option<u64>,
     query: Option<String>,
-    list_scope: Option<gwt::KnowledgeListScope>,
 ) -> BackendEvent {
     BackendEvent::KnowledgeError {
         id: id.into(),
         knowledge_kind: kind,
         request_id,
         query,
-        list_scope,
         message: message.into(),
     }
 }
@@ -510,7 +504,6 @@ fn knowledge_view_events(
     id: String,
     kind: KnowledgeKind,
     request_id: Option<u64>,
-    list_scope: gwt::KnowledgeListScope,
     view: gwt::KnowledgeBridgeView,
 ) -> Vec<OutboundEvent> {
     vec![
@@ -520,7 +513,6 @@ fn knowledge_view_events(
                 id: id.clone(),
                 knowledge_kind: kind,
                 request_id,
-                list_scope: Some(list_scope),
                 entries: view.entries,
                 selected_number: view.selected_number,
                 empty_message: view.empty_message,
@@ -533,7 +525,6 @@ fn knowledge_view_events(
                 id,
                 knowledge_kind: kind,
                 request_id,
-                list_scope: Some(list_scope),
                 detail: view.detail,
             },
         ),
@@ -698,6 +689,33 @@ fn active_work_projection_from_saved_with_journal(
         journal_entries,
         cleanup_candidate,
         agents,
+    }
+}
+
+fn empty_active_work_projection_view(
+    tab_id: &str,
+    tab: &ProjectTabRuntime,
+) -> gwt::ActiveWorkProjectionView {
+    gwt::ActiveWorkProjectionView {
+        id: tab_id.to_string(),
+        title: format!("{} workspace", tab.title),
+        status_category: "idle".to_string(),
+        status_text: String::new(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: None,
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        pr_created_at: None,
+        board_refs: Vec::new(),
+        journal_entries: Vec::new(),
+        cleanup_candidate: None,
+        agents: Vec::new(),
     }
 }
 
@@ -1567,7 +1585,6 @@ impl AppRuntime {
                 request_id,
                 selected_number,
                 refresh,
-                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 KnowledgeLoadRequest {
@@ -1576,7 +1593,6 @@ impl AppRuntime {
                     request_id,
                     selected_number,
                     refresh,
-                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
             ),
             FrontendEvent::SearchKnowledgeBridge {
@@ -1585,7 +1601,6 @@ impl AppRuntime {
                 query,
                 request_id,
                 selected_number,
-                list_scope,
             } => self.search_knowledge_bridge_events(
                 &client_id,
                 KnowledgeSearchRequest {
@@ -1594,7 +1609,6 @@ impl AppRuntime {
                     query: &query,
                     request_id,
                     selected_number,
-                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
             ),
             FrontendEvent::SelectKnowledgeBridgeEntry {
@@ -1602,7 +1616,6 @@ impl AppRuntime {
                 knowledge_kind,
                 request_id,
                 number,
-                list_scope,
             } => self.load_knowledge_bridge_events(
                 &client_id,
                 KnowledgeLoadRequest {
@@ -1611,7 +1624,6 @@ impl AppRuntime {
                     request_id,
                     selected_number: Some(number),
                     refresh: false,
-                    list_scope: list_scope.unwrap_or(gwt::KnowledgeListScope::Open),
                 },
             ),
             FrontendEvent::UpdateKnowledgeBridgePhase {
@@ -1635,6 +1647,11 @@ impl AppRuntime {
                 branch,
                 delete_remote,
             } => self.run_workspace_cleanup_events(&client_id, &branch, delete_remote),
+            FrontendEvent::RebuildIndexCell {
+                project_root,
+                scope,
+                worktree_hash,
+            } => self.rebuild_index_cell_events(project_root, scope, worktree_hash),
             FrontendEvent::PostBoardEntry {
                 id,
                 entry_kind,
@@ -1879,10 +1896,17 @@ impl AppRuntime {
             .runtimes
             .iter()
             .filter_map(|(id, runtime)| {
+                // SPEC-1919 FR-001a: snapshot replay must reproduce SGR
+                // attributes (color, bold, italic, underline, inverse) so
+                // tab switch / focus cycle / WebSocket reconnect do not
+                // collapse colored history into default-color text. Use
+                // vt100 `Screen::contents_formatted()` which emits a CSI
+                // escape stream xterm.js can replay verbatim, instead of
+                // `Screen::contents()` which strips formatting.
                 let snapshot = runtime
                     .pane
                     .lock()
-                    .map(|pane| pane.screen().contents().into_bytes())
+                    .map(|pane| pane.screen().contents_formatted())
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot))
             })
@@ -1905,6 +1929,7 @@ impl AppRuntime {
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
         events.extend(self.migration_detected_replies(client_id));
+        events.extend(self.migration_recovery_replies(client_id));
         events
     }
 
@@ -1924,6 +1949,23 @@ impl AppRuntime {
         let tab_id = self.active_tab_id.as_ref()?;
         let tab = self.tab(tab_id)?;
         let projection = self.active_work_projection_for_tab(tab_id, tab)?;
+        Some(OutboundEvent::broadcast(
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
+        ))
+    }
+
+    /// Like `active_work_projection_broadcast_for_active_tab`, but always emits an event
+    /// when an active tab exists — falling back to an empty projection so that frontends
+    /// clear stale per-project data when the tab focus moves to a project without
+    /// any saved projection or live agent sessions.
+    fn active_work_projection_broadcast_on_tab_change(&self) -> Option<OutboundEvent> {
+        let tab_id = self.active_tab_id.as_ref()?;
+        let tab = self.tab(tab_id)?;
+        let projection = self
+            .active_work_projection_for_tab(tab_id, tab)
+            .unwrap_or_else(|| empty_active_work_projection_view(tab_id, tab));
         Some(OutboundEvent::broadcast(
             BackendEvent::ActiveWorkProjection {
                 projection: Box::new(projection),
@@ -2031,6 +2073,9 @@ impl AppRuntime {
         match self.open_project_path(path) {
             Ok(wizard_closed) => {
                 let mut events = vec![self.workspace_state_broadcast()];
+                if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                    events.push(event);
+                }
                 if wizard_closed {
                     events.push(self.launch_wizard_state_broadcast(None));
                 }
@@ -2038,6 +2083,7 @@ impl AppRuntime {
                 // layout, surface the confirmation modal alongside the regular
                 // workspace broadcast.
                 events.extend(self.migration_detected_broadcasts());
+                events.extend(self.migration_recovery_broadcasts());
                 events
             }
             Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
@@ -2090,6 +2136,30 @@ impl AppRuntime {
         }
     }
 
+    fn has_migration_backup(tab: &ProjectTabRuntime) -> bool {
+        tab.project_root
+            .join(gwt_core::migration::backup::BACKUP_DIR_NAME)
+            .is_dir()
+    }
+
+    fn migration_backup_error_event_for(&self, tab: &ProjectTabRuntime) -> BackendEvent {
+        let backup_path = tab
+            .project_root
+            .join(gwt_core::migration::backup::BACKUP_DIR_NAME);
+        BackendEvent::MigrationError {
+            tab_id: tab.id.clone(),
+            phase: gwt_core::migration::MigrationPhase::Backup
+                .as_str()
+                .to_string(),
+            message: format!(
+                "Previous migration backup found at {}. A migration may have been interrupted before cleanup; inspect or restore the backup before starting another migration.",
+                backup_path.display()
+            ),
+            recovery: recovery_state_label(gwt_core::migration::RecoveryState::Partial)
+                .to_string(),
+        }
+    }
+
     /// SPEC-1934 US-6.1 broadcast variant: used by `open_project_path_events`
     /// to inform every connected frontend that a tab needs migration.
     pub(crate) fn migration_detected_broadcasts(&self) -> Vec<OutboundEvent> {
@@ -2097,6 +2167,17 @@ impl AppRuntime {
             .iter()
             .filter(|tab| tab.migration_pending)
             .map(|tab| OutboundEvent::broadcast(self.migration_detected_event_for(tab)))
+            .collect()
+    }
+
+    /// SPEC-1934 US-6.6/T-085: if a previous migration was interrupted after
+    /// Backup, surface the leftover snapshot on launch so the user does not
+    /// start another destructive migration over an unresolved backup.
+    pub(crate) fn migration_recovery_broadcasts(&self) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
+            .map(|tab| OutboundEvent::broadcast(self.migration_backup_error_event_for(tab)))
             .collect()
     }
 
@@ -2108,6 +2189,14 @@ impl AppRuntime {
             .iter()
             .filter(|tab| tab.migration_pending)
             .map(|tab| OutboundEvent::reply(client_id, self.migration_detected_event_for(tab)))
+            .collect()
+    }
+
+    pub(crate) fn migration_recovery_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
+            .map(|tab| OutboundEvent::reply(client_id, self.migration_backup_error_event_for(tab)))
             .collect()
     }
 
@@ -2135,6 +2224,9 @@ impl AppRuntime {
         let wizard_closed = self.set_active_tab(tab_id.to_string());
         let _ = self.persist();
         let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+            events.push(event);
+        }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -2183,6 +2275,9 @@ impl AppRuntime {
         let _ = self.persist();
 
         let mut events = vec![self.workspace_state_broadcast()];
+        if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+            events.push(event);
+        }
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
@@ -2631,6 +2726,82 @@ impl AppRuntime {
         events
     }
 
+    pub(crate) fn handle_workspace_projection_changed_events(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let Ok(Some(projection)) =
+            gwt_core::workspace_projection::load_workspace_projection(project_root)
+        else {
+            return Vec::new();
+        };
+        self.sync_agent_window_titles_from_workspace_projection(project_root, &projection);
+
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                same_worktree_path(&tab.project_root, project_root)
+                    && self.active_tab_id.as_deref() == Some(tab.id.as_str())
+            })
+            .map(|tab| tab.id.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return Vec::new();
+        };
+        let Some(projection) = self.active_work_projection_for_tab(&tab_id, tab) else {
+            return Vec::new();
+        };
+        vec![OutboundEvent::broadcast(
+            BackendEvent::ActiveWorkProjection {
+                projection: Box::new(projection),
+            },
+        )]
+    }
+
+    fn sync_agent_window_titles_from_workspace_projection(
+        &mut self,
+        project_root: &Path,
+        projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    ) {
+        let updates = projection
+            .agents
+            .iter()
+            .filter_map(|agent| {
+                let title = agent
+                    .title_summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                let (window_id, session) = self
+                    .active_agent_sessions
+                    .iter()
+                    .find(|(_, session)| session.session_id == agent.session_id)?;
+                if !same_worktree_path(&session.worktree_path, project_root) {
+                    return None;
+                }
+                Some((
+                    window_id.clone(),
+                    title.to_string(),
+                    agent.current_focus.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        for (window_id, title, detail) in updates {
+            let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                continue;
+            };
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                continue;
+            };
+            tab.workspace
+                .set_dynamic_title_with_detail(&address.raw_id, Some(title), detail);
+        }
+    }
+
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -2641,40 +2812,19 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    "Window not found",
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, "Window not found", request.request_id, None),
             )];
         };
         let Some(tab) = self.tab(&address.tab_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    "Project tab not found",
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, "Project tab not found", request.request_id, None),
             )];
         };
         let Some(window) = tab.workspace.window(&address.raw_id) else {
             return vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    "Window not found",
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, "Window not found", request.request_id, None),
             )];
         };
         if knowledge_kind_for_preset(window.preset) != Some(kind) {
@@ -2686,7 +2836,6 @@ impl AppRuntime {
                     "Window is not a knowledge bridge",
                     request.request_id,
                     None,
-                    Some(request.list_scope),
                 ),
             )];
         }
@@ -2700,18 +2849,11 @@ impl AppRuntime {
                 request_id: request.request_id,
                 selected_number: request.selected_number,
                 force: true,
-                list_scope: request.list_scope,
             });
             return Vec::new();
         }
 
-        match load_knowledge_bridge(
-            &tab.project_root,
-            kind,
-            request.selected_number,
-            false,
-            request.list_scope,
-        ) {
+        match load_knowledge_bridge(&tab.project_root, kind, request.selected_number, false) {
             Ok(view) => {
                 if request.request_id.is_some() && view.refresh_enabled {
                     self.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
@@ -2722,7 +2864,6 @@ impl AppRuntime {
                         request_id: request.request_id,
                         selected_number: request.selected_number,
                         force: false,
-                        list_scope: request.list_scope,
                     });
                 }
                 knowledge_view_events(
@@ -2730,20 +2871,12 @@ impl AppRuntime {
                     id.to_string(),
                     kind,
                     request.request_id,
-                    request.list_scope,
                     view,
                 )
             }
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
-                knowledge_error_event(
-                    id,
-                    kind,
-                    error,
-                    request.request_id,
-                    None,
-                    Some(request.list_scope),
-                ),
+                knowledge_error_event(id, kind, error, request.request_id, None),
             )],
         }
     }
@@ -2757,7 +2890,6 @@ impl AppRuntime {
             request_id,
             selected_number,
             force,
-            list_scope,
         } = task;
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
@@ -2767,14 +2899,7 @@ impl AppRuntime {
                     if force {
                         proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                             client_id,
-                            knowledge_error_event(
-                                id,
-                                kind,
-                                error,
-                                request_id,
-                                None,
-                                Some(list_scope),
-                            ),
+                            knowledge_error_event(id, kind, error, request_id, None),
                         )]));
                     }
                     return;
@@ -2783,21 +2908,14 @@ impl AppRuntime {
             if !force && !refreshed {
                 return;
             }
-            let event = match gwt::load_knowledge_bridge(
-                &project_root,
-                kind,
-                selected_number,
-                false,
-                list_scope,
-            ) {
-                Ok(view) => {
-                    knowledge_view_events(client_id, id, kind, request_id, list_scope, view)
-                }
-                Err(error) => vec![OutboundEvent::reply(
-                    client_id,
-                    knowledge_error_event(id, kind, error, request_id, None, Some(list_scope)),
-                )],
-            };
+            let event =
+                match gwt::load_knowledge_bridge(&project_root, kind, selected_number, false) {
+                    Ok(view) => knowledge_view_events(client_id, id, kind, request_id, view),
+                    Err(error) => vec![OutboundEvent::reply(
+                        client_id,
+                        knowledge_error_event(id, kind, error, request_id, None),
+                    )],
+                };
             proxy.send(UserEvent::Dispatch(event));
         });
     }
@@ -2818,7 +2936,6 @@ impl AppRuntime {
                     "Window not found",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         };
@@ -2831,7 +2948,6 @@ impl AppRuntime {
                     "Project tab not found",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         };
@@ -2844,7 +2960,6 @@ impl AppRuntime {
                     "Window not found",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         };
@@ -2857,7 +2972,6 @@ impl AppRuntime {
                     "Window is not a knowledge bridge",
                     Some(request.request_id),
                     Some(request.query.to_string()),
-                    Some(request.list_scope),
                 ),
             )];
         }
@@ -2870,7 +2984,6 @@ impl AppRuntime {
             query: request.query.to_string(),
             request_id: request.request_id,
             selected_number: request.selected_number,
-            list_scope: request.list_scope,
         });
         Vec::new()
     }
@@ -2884,37 +2997,25 @@ impl AppRuntime {
             query,
             request_id,
             selected_number,
-            list_scope,
         } = task;
         let proxy = self.proxy.clone();
         self.blocking_tasks.spawn(move || {
-            let event = match gwt::search_knowledge_bridge(
-                &project_root,
-                kind,
-                &query,
-                selected_number,
-                list_scope,
-            ) {
-                Ok(view) => BackendEvent::KnowledgeSearchResults {
-                    id: id.clone(),
-                    knowledge_kind: kind,
-                    query: query.clone(),
-                    request_id,
-                    list_scope: Some(list_scope),
-                    entries: view.entries,
-                    selected_number: view.selected_number,
-                    empty_message: view.empty_message,
-                    refresh_enabled: view.refresh_enabled,
-                },
-                Err(error) => knowledge_error_event(
-                    id,
-                    kind,
-                    error,
-                    Some(request_id),
-                    Some(query),
-                    Some(list_scope),
-                ),
-            };
+            let event =
+                match gwt::search_knowledge_bridge(&project_root, kind, &query, selected_number) {
+                    Ok(view) => BackendEvent::KnowledgeSearchResults {
+                        id: id.clone(),
+                        knowledge_kind: kind,
+                        query: query.clone(),
+                        request_id,
+                        entries: view.entries,
+                        selected_number: view.selected_number,
+                        empty_message: view.empty_message,
+                        refresh_enabled: view.refresh_enabled,
+                    },
+                    Err(error) => {
+                        knowledge_error_event(id, kind, error, Some(request_id), Some(query))
+                    }
+                };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                 client_id, event,
             )]));
@@ -3100,6 +3201,28 @@ impl AppRuntime {
             self.active_session_branches_for_tab(tab_id),
             branch.to_string(),
             delete_remote,
+        );
+        Vec::new()
+    }
+
+    /// SPEC-1939 US-5 / T-IDX-102: handle a per-cell rebuild request from the
+    /// frontend. Spawns the rebuild via the global bootstrap service so the
+    /// in-flight set is shared with the orchestrator and CLI.
+    pub(crate) fn rebuild_index_cell_events(
+        &self,
+        project_root: String,
+        scope: gwt::IndexRebuildScope,
+        worktree_hash: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let project_root = std::path::PathBuf::from(project_root);
+        let service =
+            crate::project_index_bootstrap::ProjectIndexBootstrapService::global().clone();
+        let _request = crate::project_index_bootstrap::spawn_per_cell_rebuild(
+            service,
+            self.proxy.clone(),
+            project_root,
+            scope,
+            worktree_hash,
         );
         Vec::new()
     }
@@ -3315,6 +3438,9 @@ impl AppRuntime {
                 name: session.display_name.clone(),
                 detail: Some(session.worktree_path.display().to_string()),
                 active: true,
+                runtime_status: self
+                    .window_status(&session.window_id)
+                    .unwrap_or(WindowProcessStatus::Running),
             })
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -3337,8 +3463,30 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        if !self.window_lookup.contains_key(&id) {
+        self.handle_runtime_output_inner(id, data, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_output(
+        &mut self,
+        id: String,
+        data: Vec<u8>,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_output_inner(id, data, false)
+    }
+
+    fn handle_runtime_output_inner(
+        &mut self,
+        id: String,
+        data: Vec<u8>,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(&id).cloned() else {
             return Vec::new();
+        };
+        if publish_to_daemon {
+            if let Some(tab) = self.tab(&address.tab_id) {
+                publish_runtime_output_change(&tab.project_root, &id, &data);
+            }
         }
         vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
             id,
@@ -3352,6 +3500,25 @@ impl AppRuntime {
         status: WindowProcessStatus,
         detail: Option<String>,
     ) -> Vec<OutboundEvent> {
+        self.handle_runtime_status_inner(id, status, detail, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_status(
+        &mut self,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_status_inner(id, status, detail, false)
+    }
+
+    fn handle_runtime_status_inner(
+        &mut self,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
         let Some(_address) = self.window_lookup.get(&id).cloned() else {
             self.remove_window_state_tracking(&id);
             self.deregister_pty_writer(&id);
@@ -3359,6 +3526,13 @@ impl AppRuntime {
             self.window_details.remove(&id);
             return Vec::new();
         };
+        if publish_to_daemon {
+            if let Some(address) = self.window_lookup.get(&id) {
+                if let Some(tab) = self.tab(&address.tab_id) {
+                    publish_runtime_status_change(&tab.project_root, &id, status, detail.clone());
+                }
+            }
+        }
 
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
@@ -3417,6 +3591,26 @@ impl AppRuntime {
         &mut self,
         event: gwt::RuntimeHookEvent,
     ) -> Vec<OutboundEvent> {
+        self.handle_runtime_hook_event_inner(event, true)
+    }
+
+    pub(crate) fn handle_daemon_runtime_hook_event(
+        &mut self,
+        event: gwt::RuntimeHookEvent,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_hook_event_inner(event, false)
+    }
+
+    fn handle_runtime_hook_event_inner(
+        &mut self,
+        event: gwt::RuntimeHookEvent,
+        publish_to_daemon: bool,
+    ) -> Vec<OutboundEvent> {
+        if publish_to_daemon {
+            if let Some(project_root) = event.project_root.as_deref().map(PathBuf::from) {
+                publish_runtime_hook_change(&project_root, &event);
+            }
+        }
         let mut events = vec![OutboundEvent::broadcast(BackendEvent::RuntimeHookEvent {
             event: event.clone(),
         })];
@@ -4399,6 +4593,12 @@ impl AppRuntime {
         self.tabs.iter().find(|tab| tab.id == tab_id)
     }
 
+    pub(crate) fn active_project_root(&self) -> Option<&Path> {
+        let active_tab_id = self.active_tab_id.as_ref()?;
+        self.tab(active_tab_id)
+            .map(|tab| tab.project_root.as_path())
+    }
+
     pub(crate) fn tab_mut(&mut self, tab_id: &str) -> Option<&mut ProjectTabRuntime> {
         self.tabs.iter_mut().find(|tab| tab.id == tab_id)
     }
@@ -4801,6 +5001,209 @@ fn update_issue_branch_link_with_cache_dir(
         .map_err(|error| format!("failed to write issue linkage store: {error}"))
 }
 
+#[cfg(unix)]
+const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
+
+#[cfg(unix)]
+enum RuntimeDaemonPublish {
+    Output {
+        project_root: PathBuf,
+        id: String,
+        data: Vec<u8>,
+    },
+    Status {
+        project_root: PathBuf,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    },
+    Hook {
+        project_root: PathBuf,
+        event: gwt::RuntimeHookEvent,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeDaemonPublishEnqueueError {
+    Full,
+    Disconnected,
+}
+
+#[cfg(unix)]
+static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
+    Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+fn runtime_daemon_publish_sender() -> Option<&'static std_mpsc::SyncSender<RuntimeDaemonPublish>> {
+    RUNTIME_DAEMON_PUBLISH_QUEUE
+        .get_or_init(|| {
+            let (sender, receiver) = std_mpsc::sync_channel(RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY);
+            match std::thread::Builder::new()
+                .name("gwt-runtime-daemon-publish-worker".to_string())
+                .spawn(move || run_runtime_daemon_publish_worker(receiver))
+            {
+                Ok(_handle) => Some(sender),
+                Err(err) => {
+                    tracing::debug!(error = %err, "runtime daemon publish worker spawn failed");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+#[cfg(unix)]
+fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
+    for publish in receiver {
+        publish_runtime_daemon_event(publish);
+    }
+}
+
+#[cfg(unix)]
+fn try_enqueue_runtime_daemon_publish(
+    sender: &std_mpsc::SyncSender<RuntimeDaemonPublish>,
+    publish: RuntimeDaemonPublish,
+) -> Result<(), RuntimeDaemonPublishEnqueueError> {
+    sender.try_send(publish).map_err(|err| match err {
+        std_mpsc::TrySendError::Full(_) => RuntimeDaemonPublishEnqueueError::Full,
+        std_mpsc::TrySendError::Disconnected(_) => RuntimeDaemonPublishEnqueueError::Disconnected,
+    })
+}
+
+#[cfg(unix)]
+fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
+    let Some(sender) = runtime_daemon_publish_sender() else {
+        return;
+    };
+    if let Err(err) = try_enqueue_runtime_daemon_publish(sender, publish) {
+        tracing::debug!(
+            ?err,
+            "runtime daemon publish queue rejected event (non-fatal)"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
+    match publish {
+        RuntimeDaemonPublish::Output {
+            project_root,
+            id,
+            data,
+        } => {
+            let payload =
+                gwt::runtime_daemon_events::runtime_output_payload(&id, &data, std::process::id());
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root,
+                gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root.display(),
+                    window_id = %id,
+                    "runtime output daemon publish failed (non-fatal)"
+                );
+            }
+        }
+        RuntimeDaemonPublish::Status {
+            project_root,
+            id,
+            status,
+            detail,
+        } => {
+            let payload = gwt::runtime_daemon_events::runtime_status_payload(
+                &id,
+                status,
+                detail,
+                std::process::id(),
+            );
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root,
+                gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root.display(),
+                    window_id = %id,
+                    "runtime status daemon publish failed (non-fatal)"
+                );
+            }
+        }
+        RuntimeDaemonPublish::Hook {
+            project_root,
+            event,
+        } => {
+            let payload =
+                gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root,
+                gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root.display(),
+                    "runtime hook daemon publish failed (non-fatal)"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
+    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
+        project_root: project_root.to_path_buf(),
+        id: id.to_string(),
+        data: data.to_vec(),
+    });
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_output_change(_project_root: &Path, _id: &str, _data: &[u8]) {}
+
+#[cfg(unix)]
+fn publish_runtime_status_change(
+    project_root: &Path,
+    id: &str,
+    status: WindowProcessStatus,
+    detail: Option<String>,
+) {
+    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Status {
+        project_root: project_root.to_path_buf(),
+        id: id.to_string(),
+        status,
+        detail,
+    });
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_status_change(
+    _project_root: &Path,
+    _id: &str,
+    _status: WindowProcessStatus,
+    _detail: Option<String>,
+) {
+}
+
+#[cfg(unix)]
+fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
+    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Hook {
+        project_root: project_root.to_path_buf(),
+        event: event.clone(),
+    });
+}
+
+#[cfg(not(unix))]
+fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -4848,6 +5251,35 @@ mod tests {
         WorkspaceResumeContext,
     };
     use crate::{combined_window_id, geometry_to_pty_size, same_worktree_path, PtyWriterRegistry};
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let project_root = PathBuf::from("/tmp/gwt-project");
+
+        assert!(super::try_enqueue_runtime_daemon_publish(
+            &sender,
+            super::RuntimeDaemonPublish::Output {
+                project_root: project_root.clone(),
+                id: "tab-1::shell-1".to_string(),
+                data: b"first".to_vec(),
+            },
+        )
+        .is_ok());
+        assert!(matches!(
+            super::try_enqueue_runtime_daemon_publish(
+                &sender,
+                super::RuntimeDaemonPublish::Status {
+                    project_root,
+                    id: "tab-1::shell-1".to_string(),
+                    status: WindowProcessStatus::Running,
+                    detail: None,
+                },
+            ),
+            Err(super::RuntimeDaemonPublishEnqueueError::Full)
+        ));
+    }
 
     #[derive(Debug, Clone)]
     struct CapturedTracingEvent {
@@ -6003,6 +6435,88 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+        let mut pane = Pane::new(
+            window_id.clone(),
+            command,
+            args,
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("pane");
+        // Write red foreground + bold "ALERT" then reset, then default-color text.
+        pane.process_bytes(b"\x1b[31;1mALERT\x1b[0m normal\n");
+
+        runtime.runtimes.insert(
+            window_id.clone(),
+            WindowRuntime {
+                pane: Arc::new(Mutex::new(pane)),
+                output_thread: None,
+                status_thread: None,
+            },
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let snapshot = events.iter().find_map(|event| match &event.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => {
+                Some(data_base64)
+            }
+            _ => None,
+        });
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(snapshot.expect("terminal snapshot event"))
+            .expect("decode terminal snapshot");
+        // Visible text must be present.
+        assert!(
+            String::from_utf8_lossy(&decoded).contains("ALERT"),
+            "expected ALERT text in snapshot bytes, got: {:?}",
+            String::from_utf8_lossy(&decoded)
+        );
+        // SGR escape sequence introducing a styled run (CSI ... m) must be present
+        // so that xterm.js can replay foreground / bold / etc. from the snapshot.
+        let has_sgr = decoded.windows(2).enumerate().any(|(idx, win)| {
+            win == [0x1b, b'['] && {
+                let tail = &decoded[idx + 2..];
+                tail.iter().take(16).any(|b| *b == b'm')
+            }
+        });
+        assert!(
+            has_sgr,
+            "expected SGR escape (CSI ... m) in TerminalSnapshot bytes so xterm.js can replay color/style; raw snapshot bytes: {:?}",
+            decoded
+        );
+    }
+
+    #[test]
     fn app_runtime_dock_window_tab_resizes_group_runtimes() {
         let temp = tempdir().expect("tempdir");
         let tab = sample_project_tab(
@@ -6161,7 +6675,7 @@ exit 0
 
         let events = runtime.select_project_tab_events("tab-2");
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(matches!(events[0].target, DispatchTarget::Broadcast));
         assert!(matches!(
             events[0].event,
@@ -6170,8 +6684,96 @@ exit 0
         assert!(matches!(events[1].target, DispatchTarget::Broadcast));
         assert!(matches!(
             events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
+        assert!(matches!(events[2].target, DispatchTarget::Broadcast));
+        assert!(matches!(
+            events[2].event,
             BackendEvent::LaunchWizardState { wizard: None }
         ));
+    }
+
+    #[test]
+    fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_tab() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other).expect("create other");
+        let tabs = vec![
+            sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+            sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+
+        let events = runtime.select_project_tab_events("tab-2");
+
+        let projection = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+                _ => None,
+            })
+            .expect("ActiveWorkProjection broadcast for newly selected tab");
+        assert_eq!(
+            projection.id, "tab-2",
+            "projection must reflect the newly active tab"
+        );
+    }
+
+    #[test]
+    fn app_runtime_close_project_tab_emits_active_work_projection_when_active_changes() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let other = temp.path().join("other");
+        fs::create_dir_all(&repo).expect("create repo");
+        fs::create_dir_all(&other).expect("create other");
+        let tabs = vec![
+            sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]),
+            sample_project_tab("tab-2", "Other", other, ProjectKind::NonRepo, &[]),
+        ];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+
+        let events = runtime.close_project_tab_events("tab-1");
+
+        let projection = events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::ActiveWorkProjection { projection } => Some(projection),
+                _ => None,
+            })
+            .expect("ActiveWorkProjection broadcast after closing the active tab");
+        assert_eq!(
+            projection.id, "tab-2",
+            "projection must reflect the new active tab after close"
+        );
+    }
+
+    #[test]
+    fn app_runtime_open_project_path_emits_active_work_projection_for_new_tab() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tabs = vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo,
+            ProjectKind::NonRepo,
+            &[],
+        )];
+        let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
+
+        let other = temp.path().join("other-project");
+        fs::create_dir_all(&other).expect("create other");
+
+        let events = runtime.open_project_path_events(other.clone());
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.event, BackendEvent::ActiveWorkProjection { .. })),
+            "opening a new project must emit ActiveWorkProjection for the new active tab"
+        );
     }
 
     #[test]
@@ -6374,6 +6976,39 @@ exit 0
         assert!(view.show_branch_controls);
         assert_eq!(view.live_sessions.len(), 1);
         assert_eq!(view.live_sessions[0].name, "Codex");
+    }
+
+    #[test]
+    fn app_runtime_live_sessions_report_composed_waiting_runtime_status() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "agent-1",
+            WindowPreset::Codex,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260504-1234".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: PathBuf::from("E:/gwt/test-repo"),
+                agent_project_root: "E:/gwt/test-repo".to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
+        let sessions = runtime.live_sessions_for_branch("tab-1", "work/20260504-1234");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].runtime_status, WindowProcessStatus::Waiting);
     }
 
     #[test]
@@ -8087,7 +8722,6 @@ exit 0
                 request_id: None,
                 selected_number: Some(42),
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(issue_events.len(), 2);
@@ -8122,7 +8756,6 @@ exit 0
                 request_id: None,
                 selected_number: Some(1930),
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
         assert_eq!(spec_events.len(), 2);
@@ -8172,7 +8805,6 @@ exit 0
                 query: "semantic query",
                 request_id: 9,
                 selected_number: None,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
 
@@ -8236,7 +8868,6 @@ exit 0
                 query: "semantic query".to_string(),
                 request_id: 9,
                 selected_number: None,
-                list_scope: Some(gwt::KnowledgeListScope::Open),
             },
         );
 
@@ -8313,7 +8944,6 @@ exit 0
                 request_id: Some(31),
                 selected_number: Some(43),
                 refresh: true,
-                list_scope: Some(gwt::KnowledgeListScope::Open),
             },
         );
 
@@ -8402,7 +9032,6 @@ exit 0
                 request_id: Some(32),
                 selected_number: None,
                 refresh: true,
-                list_scope: Some(gwt::KnowledgeListScope::Closed),
             },
         );
 
@@ -8422,13 +9051,11 @@ exit 0
                                     id,
                                     knowledge_kind,
                                     request_id,
-                                    list_scope,
                                     message,
                                     ..
                                 } if id == &window_id
                                     && *knowledge_kind == gwt::KnowledgeKind::Issue
                                     && *request_id == Some(32)
-                                    && *list_scope == Some(gwt::KnowledgeListScope::Closed)
                                     && message.contains("gh refresh failed")
                             )
                         })
@@ -8476,7 +9103,6 @@ exit 0
             request_id: Some(33),
             selected_number: None,
             force: false,
-            list_scope: gwt::KnowledgeListScope::Open,
         });
         wait_for_path("stale knowledge refresh gh invocation", &marker);
         assert!(
@@ -8496,7 +9122,6 @@ exit 0
             request_id: Some(34),
             selected_number: Some(43),
             force: false,
-            list_scope: gwt::KnowledgeListScope::Open,
         });
         thread::sleep(Duration::from_millis(250));
         assert!(
@@ -8529,7 +9154,6 @@ exit 0
                 request_id: None,
                 selected_number: None,
                 refresh: false,
-                list_scope: gwt::KnowledgeListScope::Open,
             },
         );
 
@@ -9736,6 +10360,89 @@ exit 0
     }
 
     #[test]
+    fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let mut tab_workspace = empty_workspace_state();
+        let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Running);
+        agent.title = "Codex".to_string();
+        tab_workspace.windows.push(agent);
+        tab_workspace.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(tab_workspace),
+            migration_pending: false,
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        runtime.active_agent_sessions.insert(
+            window_id.clone(),
+            ActiveAgentSession {
+                window_id: window_id.clone(),
+                session_id: "session-1".to_string(),
+                agent_id: "codex".to_string(),
+                branch_name: "work/20260510-0900".to_string(),
+                display_name: "Codex".to_string(),
+                worktree_path: repo.clone(),
+                agent_project_root: repo.display().to_string(),
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                tab_id: "tab-1".to_string(),
+            },
+        );
+
+        let mut projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        projection.status_category =
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+        projection
+            .agents
+            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+                session_id: "session-1".to_string(),
+                window_id: Some(window_id),
+                agent_id: "codex".to_string(),
+                display_name: "Codex".to_string(),
+                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                current_focus: Some(
+                    "Implement mandatory Agent title summary updates for Workspace".to_string(),
+                ),
+                title_summary: Some("Agent title summary guard".to_string()),
+                worktree_path: Some(repo.clone()),
+                branch: Some("work/20260510-0900".to_string()),
+                last_board_entry_id: None,
+                last_board_entry_kind: None,
+                coordination_scope: None,
+                updated_at: chrono::Utc::now(),
+            });
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        let events = runtime.handle_workspace_projection_changed_events(&repo);
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })));
+        let tab = runtime.tab("tab-1").expect("tab");
+        let agent_window = tab.workspace.window("agent-1").expect("agent window");
+        assert_eq!(
+            agent_window.dynamic_title.as_deref(),
+            Some("Agent title summary guard")
+        );
+        assert_eq!(
+            agent_window.dynamic_title_detail.as_deref(),
+            Some("Implement mandatory Agent title summary updates for Workspace")
+        );
+    }
+
+    #[test]
     fn app_runtime_runtime_hook_state_does_not_update_agent_window_dynamic_title() {
         let temp = tempdir().expect("tempdir");
         let mut tab = sample_project_tab_with_window(
@@ -9983,5 +10690,120 @@ exit 0
         let events = runtime.skip_migration_events("tab-1");
         assert!(events.is_empty(), "skip must not emit events itself");
         assert!(!runtime.tabs[0].migration_pending);
+    }
+
+    #[test]
+    fn skip_migration_events_keeps_normal_git_and_redetects_on_next_launch() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        init_repo(&project);
+
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let open_events = runtime.open_project_path_events(project.clone());
+        let tab_id = runtime.active_tab_id.clone().expect("active tab");
+
+        assert!(open_events.iter().any(|event| matches!(
+            event,
+            OutboundEvent {
+                target: DispatchTarget::Broadcast,
+                event: BackendEvent::MigrationDetected { .. },
+            }
+        )));
+
+        let skip_events = runtime.skip_migration_events(&tab_id);
+        assert!(skip_events.is_empty(), "skip must not mutate repository");
+        assert!(matches!(
+            gwt_git::detect_repo_type(&project),
+            gwt_git::RepoType::Normal {
+                needs_migration: true,
+                ..
+            }
+        ));
+
+        let mut next_runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let next_events = next_runtime.open_project_path_events(project);
+
+        assert!(
+            next_events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::MigrationDetected { .. },
+                }
+            )),
+            "skip is launch-local; the modal must be shown again next launch"
+        );
+    }
+
+    #[test]
+    fn quit_migration_events_requests_app_quit_without_repository_changes() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        init_repo(&project);
+
+        let tab = migration_pending_tab("tab-1", project.clone());
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+        let events = runtime.quit_migration_events("tab-1");
+
+        assert!(
+            events.is_empty(),
+            "quit is delivered through the event proxy"
+        );
+        let recorded_events = recorded_events.lock().expect("recorded events");
+        assert!(recorded_events
+            .iter()
+            .any(|event| matches!(event, UserEvent::QuitApp)));
+        assert!(matches!(
+            gwt_git::detect_repo_type(&project),
+            gwt_git::RepoType::Normal {
+                needs_migration: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn open_project_with_existing_migration_backup_emits_recovery_error() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        init_repo(&project);
+        fs::create_dir_all(project.join(gwt_core::migration::backup::BACKUP_DIR_NAME))
+            .expect("migration backup dir");
+
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let events = runtime.open_project_path_events(project.clone());
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::MigrationDetected { .. },
+                }
+            )),
+            "Normal Git layout should still open a migration-pending tab"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::MigrationError {
+                        phase,
+                        recovery,
+                        message,
+                        ..
+                    },
+                } if phase == "backup"
+                    && recovery == "partial"
+                    && message.contains(".gwt-migration-backup")
+            )),
+            "existing migration backup must be surfaced as a recovery error"
+        );
     }
 }

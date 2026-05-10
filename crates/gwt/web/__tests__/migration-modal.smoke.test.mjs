@@ -40,7 +40,7 @@ function makeState(overrides = {}) {
       open: true,
       stage: "confirm",
       tabId: "tab-1",
-      projectRoot: "/Users/akiojin/Workbench/llmlb",
+      projectRoot: "/Users/akiojin/Workbench/gwt",
       branch: "develop",
       hasDirty: false,
       hasLocked: false,
@@ -93,7 +93,7 @@ test("confirm stage paints title, project root, and three action buttons", () =>
     /Migrate to Bare \+ Worktree layout/,
     "header should be present",
   );
-  assert.match(dialogEl.textContent, /llmlb/);
+  assert.match(dialogEl.textContent, /gwt/);
   const buttons = dialogEl.querySelectorAll("button");
   assert.equal(buttons.length, 3, "Quit / Skip / Migrate buttons");
   const labels = Array.from(buttons).map((b) => b.textContent);
@@ -161,4 +161,52 @@ test("error stage exposes the failing phase, message, and recovery hint", () => 
   const buttons = dialogEl.querySelectorAll("button");
   assert.equal(buttons.length, 1, "only Close button");
   assert.equal(buttons[0].textContent, "Close");
+});
+
+test("running and error stages expose selectable DOM text without overlay copy shim", () => {
+  const { modalEl, dialogEl, createNode } = mount();
+  renderMigrationModal({
+    modalEl,
+    dialogEl,
+    state: makeState({ stage: "running", phase: "bareify", percent: 42 }),
+    createNode,
+    onMigrate: noop,
+    onSkip: noop,
+    onQuit: noop,
+  });
+
+  assert.match(dialogEl.textContent, /Building bare repository/);
+  assert.ok(
+    dialogEl.querySelector(".migration-modal-phase-label"),
+    "running phase label must be plain DOM text for native WebView selection",
+  );
+  assert.equal(
+    dialogEl.querySelector(".overlay-copy-button"),
+    null,
+    "migration modal must not install the terminal overlay copy shim",
+  );
+
+  renderMigrationModal({
+    modalEl,
+    dialogEl,
+    state: makeState({
+      stage: "error",
+      phase: "worktrees",
+      message: "git worktree add failed",
+      recovery: "rolled_back",
+    }),
+    createNode,
+    onMigrate: noop,
+    onSkip: noop,
+    onQuit: noop,
+  });
+
+  const errorMessage = dialogEl.querySelector(".migration-modal-error-message");
+  assert.ok(errorMessage, "error message must render as a DOM text node");
+  assert.equal(errorMessage.textContent, "git worktree add failed");
+  assert.equal(
+    dialogEl.querySelector(".overlay-copy-button"),
+    null,
+    "error modal must rely on native selection instead of an overlay copy shim",
+  );
 });

@@ -122,6 +122,32 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
+test("Sidebar Layers Agents counter filters non-agent preset windows", () => {
+  // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
+  // without checking preset, so every workspace window with data-agent-state
+  // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
+  // the Sidebar Layers "Agents" row showed e.g. 4 when only 2 agent panes
+  // were live. The DOM walk must scope to presets that represent agent panes.
+  const fnMatch = appSource.match(
+    /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
+  );
+  assert.ok(
+    fnMatch,
+    "expected recomputeOperatorTelemetry definition in app.js",
+  );
+  const body = fnMatch[0];
+  assert.match(
+    body,
+    /windowMap\.entries\(\)/,
+    "recomputeOperatorTelemetry must iterate windowMap.entries() so it can resolve each window's preset before counting it as an agent",
+  );
+  assert.match(
+    body,
+    /presetSupportsWaitingStatus/,
+    "recomputeOperatorTelemetry must filter via presetSupportsWaitingStatus(preset) so non-agent windows do not inflate the Sidebar Agents counter",
+  );
+});
+
 test("Workspace sidebar exposes active work and per-agent overview", () => {
   assert.ok(
     document.querySelector("#op-active-work"),
@@ -333,6 +359,16 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
     /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
     "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
   );
+  assert.match(
+    appSource,
+    /function\s+agentRuntimeStatusLabel\(agent\)[\s\S]+runtimeStateForWindow\(windowData\)[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+agentStatusLabel\(agent\.status_category\)/,
+    "expected Active Work agent cards to derive their visible runtime label from the live window state before falling back to workspace category",
+  );
+  assert.match(
+    appSource,
+    /createNode\("div",\s*"op-agent-state",\s*agentRuntimeStatusLabel\(agent\)\)/,
+    "Active Work must render Waiting from WindowState even when workspace status_category remains active",
+  );
   assert.doesNotMatch(
     appSource,
     /createNode\("div",\s*"op-agent-state",\s*state\)/,
@@ -345,19 +381,32 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
   );
 });
 
+test("Launch Wizard live sessions render window runtime status", () => {
+  assert.match(
+    appSource,
+    /function\s+liveSessionStatusLabel\(session\)[\s\S]+session\.runtime_status[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+window/,
+    "expected live-session rows to label Running/Waiting/Error from runtime_status",
+  );
+  assert.match(
+    appSource,
+    /createNode\(\s*"div",\s*"live-session-status",\s*liveSessionStatusLabel\(session\),?\s*\)/,
+    "expected Launch Wizard live-session status copy to use runtime_status instead of active boolean copy",
+  );
+});
+
 test("Workspace Overview is separate from live-only Active Work", () => {
   assert.ok(
     document.querySelector("#op-workspace-overview-entry"),
     "expected Sidebar to expose a Workspace Overview entry even when Active Work is hidden",
   );
   assert.ok(
-    document.querySelector("#project-workspace-overview-button"),
-    "expected Project Bar to expose Workspace Overview",
+    !document.querySelector("#project-workspace-overview-button"),
+    "Workspace Overview is per-project content and must live in the Sidebar, not the global Project Bar",
   );
   assert.match(
     appSource,
     /function\s+openWorkspaceOverview\(/,
-    "expected a shared opener for Sidebar and Project Bar",
+    "expected a shared opener for the Sidebar entry",
   );
   assert.match(
     appSource,
@@ -368,11 +417,6 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     appSource,
     /op-workspace-overview-entry[\s\S]+openWorkspaceOverview/,
     "expected Sidebar Workspace Overview entry to open the overview",
-  );
-  assert.match(
-    appSource,
-    /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
-    "expected Project Bar Workspace Overview button to open the same overview",
   );
 });
 
@@ -1041,6 +1085,33 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
       );
     }
   }
+});
+
+test("WebView modal text uses native selection and terminal overlays use explicit copy", () => {
+  const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[\s\S]*?\}/);
+  assert.ok(modalShellRule, "expected shared modal shell CSS rule");
+  assert.doesNotMatch(
+    modalShellRule[0],
+    /user-select\s*:\s*none/,
+    "modal shells must not disable browser-native text selection",
+  );
+
+  const visibleOverlayRule = inlineStyle.match(
+    /\.terminal-overlay\.visible\s*\{[\s\S]*?\}/,
+  );
+  assert.ok(visibleOverlayRule, "expected visible terminal overlay CSS rule");
+  assert.match(visibleOverlayRule[0], /pointer-events:\s*auto/);
+  assert.match(visibleOverlayRule[0], /user-select:\s*text/);
+
+  const overlayMessageRule = inlineStyle.match(/\.overlay-message\s*\{[\s\S]*?\}/);
+  assert.ok(overlayMessageRule, "expected terminal overlay message CSS rule");
+  assert.match(overlayMessageRule[0], /user-select:\s*text/);
+  assert.match(appSource, /copyButton\.className\s*=\s*"overlay-copy-button"/);
+  assert.match(
+    appSource,
+    /copyButton\.addEventListener\("click"[\s\S]*copyTerminalOverlayMessage\(windowData\.id\)/,
+    "terminal overlays must use an explicit copy button instead of modal-shell auto-copy",
+  );
 });
 
 test("Every keyframes-driven animation has a prefers-reduced-motion override", () => {

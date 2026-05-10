@@ -40,6 +40,12 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         }
         i += 2;
     }
+    if agent_session.is_none() && (current_focus.is_some() || title_summary.is_some()) {
+        return Err(CliParseError::MissingFlag("--agent-session"));
+    }
+    if let Some(value) = title_summary.as_deref() {
+        super::validate_title_summary_work_name("--title-summary", value)?;
+    }
     Ok(WorkspaceCommand::Update {
         title,
         status,
@@ -87,11 +93,31 @@ pub(super) fn run<E: CliEnv>(
             };
             let entry = update_workspace_projection_with_journal(env.repo_path(), update)
                 .map_err(|error| string_error(error.to_string()))?;
+            publish_workspace_change(env.repo_path());
             out.push_str(&format!("workspace updated: {}\n", entry.id));
             Ok(0)
         }
     }
 }
+
+#[cfg(unix)]
+fn publish_workspace_change(project_root: &std::path::Path) {
+    let result = crate::daemon_publisher::publish_event(
+        project_root,
+        "workspace",
+        serde_json::json!({"projection": "updated"}),
+    );
+    if let Err(err) = result {
+        tracing::debug!(
+            error = %err,
+            project_root = %project_root.display(),
+            "gwtd workspace update: daemon publish failed (non-fatal)"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn publish_workspace_change(_project_root: &std::path::Path) {}
 
 fn parse_status_category(value: &str) -> Result<WorkspaceStatusCategory, String> {
     match value {
@@ -175,5 +201,36 @@ mod tests {
                 title_summary: Some("Title summary contract".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn parse_workspace_update_requires_agent_session_for_agent_title_summary() {
+        let err = parse(&[
+            s("update"),
+            s("--title-summary"),
+            s("Title summary contract"),
+        ])
+        .expect_err("agent title summary requires agent session");
+
+        assert!(matches!(err, CliParseError::MissingFlag("--agent-session")));
+    }
+
+    #[test]
+    fn parse_workspace_update_rejects_status_like_agent_title_summary() {
+        let err = parse(&[
+            s("update"),
+            s("--agent-session"),
+            s("session-1"),
+            s("--current-focus"),
+            s("Finished implementing the Agent title improvement"),
+            s("--title-summary"),
+            s("エージェントタイトル改善完了"),
+        ])
+        .expect_err("title-summary must describe the work, not its status");
+
+        let message = err.to_string();
+        assert!(message.contains("--title-summary"), "{message}");
+        assert!(message.contains("work name"), "{message}");
+        assert!(message.contains("status"), "{message}");
     }
 }

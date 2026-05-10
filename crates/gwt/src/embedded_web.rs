@@ -82,6 +82,26 @@ pub fn focus_trap_js() -> &'static str {
     include_str!("../web/focus-trap.js")
 }
 
+// SPEC-1939 Phase 12 — index status badge controller.
+pub fn index_status_controller_js() -> &'static str {
+    include_str!("../web/index-status-controller.js")
+}
+
+// SPEC-1939 Phase 12 / T-IDX-106 — Settings.Index tab renderer.
+pub fn index_settings_panel_js() -> &'static str {
+    include_str!("../web/index-settings-panel.js")
+}
+
+// SPEC-2008 Phase 24 — terminal viewport reflow primitives.
+pub fn terminal_viewport_reflow_js() -> &'static str {
+    include_str!("../web/terminal-viewport-reflow.js")
+}
+
+// SPEC-1921 T231 — Settings.Custom Agents env editor.
+pub fn custom_agent_env_editor_js() -> &'static str {
+    include_str!("../web/custom-agent-env-editor.js")
+}
+
 pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
     RootJsModuleAsset {
         path: "/branch-cleanup-modal.js",
@@ -142,6 +162,26 @@ pub const ROOT_JS_MODULE_ASSETS: &[RootJsModuleAsset] = &[
         path: "/focus-trap.js",
         source: focus_trap_js,
         marker: "createFocusTrap",
+    },
+    RootJsModuleAsset {
+        path: "/index-status-controller.js",
+        source: index_status_controller_js,
+        marker: "aggregateProjectTabDotState",
+    },
+    RootJsModuleAsset {
+        path: "/index-settings-panel.js",
+        source: index_settings_panel_js,
+        marker: "renderIndexSettingsPanel",
+    },
+    RootJsModuleAsset {
+        path: "/terminal-viewport-reflow.js",
+        source: terminal_viewport_reflow_js,
+        marker: "attachHostResizeReflow",
+    },
+    RootJsModuleAsset {
+        path: "/custom-agent-env-editor.js",
+        source: custom_agent_env_editor_js,
+        marker: "renderCustomAgentEnvEditor",
     },
 ];
 
@@ -520,9 +560,9 @@ mod tests {
         );
         assert!(
             html.contains("function canRefreshTerminalViewport(windowId)")
-                && html.contains("!workspaceWindowById(windowId)?.minimized")
+                && html.contains("viewportEligibleForRefresh({")
                 && refresh_call.is_match(html),
-            "expected terminal viewport refresh to skip minimized windows",
+            "expected terminal viewport refresh predicate to delegate to viewportEligibleForRefresh",
         );
         assert!(
             !html.contains(
@@ -865,22 +905,48 @@ mod tests {
     }
 
     #[test]
-    fn embedded_web_project_bar_renders_index_status_badge() {
+    fn embedded_web_project_bar_omits_index_status_badge() {
         let html = index_html();
         let js = app_js();
 
+        // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The badge
+        // surface and its supporting controller / progress-toast wiring must
+        // not ship in the embedded assets. The aggregated payload still
+        // drives the per-tab dot and the Settings.Index panel.
         assert!(
-            html.contains("id=\"index-status\""),
-            "expected project bar to expose project index status badge",
+            !html.contains("id=\"index-status\""),
+            "SPEC-1939 Phase 13: project-bar Index badge must be removed",
         );
         assert!(
-            html.contains(".index-status.ready") && html.contains(".index-status.error"),
-            "expected embedded css to define index health states",
+            !html.contains(".index-status ")
+                && !html.contains(".index-status.")
+                && !html.contains(".index-status-toast"),
+            "SPEC-1939 Phase 13: index-status / toast CSS rules must be removed",
+        );
+        assert!(
+            !html.contains("animation: index-status-spin"),
+            "SPEC-1939 Phase 13: badge spinner animation must be removed",
+        );
+        assert!(
+            !js.contains("formatIndexStatusLabel")
+                && !js.contains("indexStatusLabel")
+                && !js.contains("showRepairingProgressToast")
+                && !js.contains("renderIndexStatus("),
+            "SPEC-1939 Phase 13: badge formatter / toast helpers must be removed from app.js",
         );
         assert!(
             js.contains("function setIndexStatus(projectRoot, status)")
                 && js.contains("case \"project_index_status\""),
-            "expected frontend to consume project_index_status events",
+            "frontend must still consume project_index_status events for the dot + Settings panel",
+        );
+        assert!(
+            js.contains("buildSettingsTab(\"index\", \"Index\", false)")
+                && js.contains("renderIndexSettingsPanel({"),
+            "SPEC-1939 T-IDX-106: Settings window must keep the Index tab + panel",
+        );
+        assert!(
+            html.contains(".project-tab-dot") && js.contains("aggregateProjectTabDotState(status)"),
+            "SPEC-1939 T-IDX-107: project tab must keep its aggregated worktree health dot",
         );
     }
 
@@ -1353,6 +1419,7 @@ mod tests {
             "/operator-shell.js",
             "/focus-trap.js",
             "/terminal-context-menu.js",
+            "/custom-agent-env-editor.js",
         ] {
             assert!(
                 registry_paths.contains(&module_path),
@@ -1426,13 +1493,12 @@ mod tests {
             "expected knowledge bridge refresh affordance to describe cache-backed reloads",
         );
         assert!(
-            html.contains("data-knowledge-scope=\"open\"")
-                && html.contains("data-knowledge-scope=\"closed\""),
-            "expected issue knowledge bridge surface to expose open and closed cache tabs",
+            !html.contains("data-knowledge-scope="),
+            "expected Kanban bridge to remove legacy open/closed cache tabs",
         );
         assert!(
-            html.contains("list_scope"),
-            "expected knowledge bridge requests to carry the active issue list scope",
+            !html.contains("list_scope"),
+            "expected Kanban bridge requests to omit legacy issue list scope",
         );
         assert!(
             html.contains("Loading cache-backed data"),
@@ -2504,6 +2570,115 @@ mod tests {
         assert!(
             js.contains("querySelector(\".modal-shell\")"),
             "expected app.js to resolve at least one modal dialog through the `.modal-shell` primitive",
+        );
+    }
+
+    /// SPEC-2008 FR-050 Phase 24: an OS host window (WebView) `resize` event
+    /// must fan out per-terminal `fitTerminal()` so xterm.js cols/rows stay
+    /// aligned with the new viewport, and `UpdateWindowGeometry` must be sent
+    /// for each visible terminal so the backend PTY cols/rows match. Without
+    /// this fan-out the wrap stays stuck until the user resizes a single
+    /// terminal manually.
+    #[test]
+    fn embedded_web_host_window_resize_fans_out_terminal_fit() {
+        let js = app_js();
+        // After SPEC-2008 Phase 24 follow-up (PR #2590), the host resize
+        // fan-out is dispatched through `attachHostResizeReflow` from
+        // `terminal-viewport-reflow.js`. The behaviour assertion lives in
+        // `__tests__/terminal-viewport-reflow.test.mjs`; this Rust contract
+        // only confirms the wiring stays in the bundle.
+        let attach_call = regex::Regex::new(r#"(?s)attachHostResizeReflow\(\{(?P<body>.*?)\}\);"#)
+            .expect("valid regex");
+        let captures = attach_call
+            .captures(js)
+            .expect("expected attachHostResizeReflow wiring for host window.resize");
+        let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
+        assert!(
+            body.contains("terminalIds: () => terminalMap.keys()")
+                || body.contains("terminalMap.keys()"),
+            "expected attachHostResizeReflow to iterate terminalMap so per-terminal fit \
+             can fan out to every visible terminal window (SPEC-2008 FR-050), body: {body}",
+        );
+        assert!(
+            body.contains("fitTerminal,"),
+            "expected attachHostResizeReflow to receive fitTerminal so cols/rows refit and \
+             UpdateWindowGeometry persists to the backend; body: {body}",
+        );
+        assert!(
+            body.contains("syncMaximizedWindowsToViewport()"),
+            "expected attachHostResizeReflow.beforeFan to keep maximized window sync, body: {body}",
+        );
+    }
+
+    /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
+    /// hidden terminals (display:none-equivalent `.hidden` attribute set when
+    /// a window-tab is non-active) so a fit during the hidden phase cannot
+    /// pollute xterm.js with cols/rows = 0. The check must consider both
+    /// minimized and the DOM `element.hidden` flag.
+    #[test]
+    fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
+        let js = app_js();
+        let signature = "function canRefreshTerminalViewport(windowId) {";
+        let start = js
+            .find(signature)
+            .expect("expected canRefreshTerminalViewport predicate definition");
+        let after = &js[start..];
+        let end_offset = after[signature.len()..]
+            .find("\n      function ")
+            .map(|i| signature.len() + i)
+            .unwrap_or(after.len());
+        let body = &after[..end_offset];
+        // After SPEC-2008 Phase 24 follow-up, the predicate delegates to
+        // `viewportEligibleForRefresh` in `terminal-viewport-reflow.js`.
+        // Behaviour (.hidden short-circuit + minimised short-circuit) is
+        // pinned by `__tests__/terminal-viewport-reflow.test.mjs`; this
+        // Rust contract only confirms the wiring stays in the bundle.
+        assert!(
+            body.contains("viewportEligibleForRefresh({"),
+            "expected canRefreshTerminalViewport to delegate to viewportEligibleForRefresh \
+             (SPEC-2008 FR-051 + Phase 24 follow-up); body: {body}",
+        );
+        assert!(
+            body.contains("windowMap.get(windowId)") && body.contains("workspaceWindowById"),
+            "expected predicate to forward both the DOM element and the workspace window \
+             so the helper can short-circuit on .hidden / minimized; body: {body}",
+        );
+    }
+
+    /// SPEC-2008 FR-051 Phase 24: when a window tab transitions from
+    /// `.hidden = true` to `.hidden = false` (tab switch / focus cycle /
+    /// window list / Command Palette), the terminal must run fit + viewport
+    /// refresh + focus on the next animation frame so scrollback wheel input
+    /// works without a user-driven resize.
+    #[test]
+    fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
+        let js = app_js();
+        let visibility_block = regex::Regex::new(
+            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*requestAnimationFrame\(syncMaximizedWindowsToViewport\);",
+        )
+        .expect("valid regex");
+        let captures = visibility_block
+            .captures(js)
+            .expect("expected the workspace.windows visibility loop that sets element.hidden");
+        let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
+        // After SPEC-2008 Phase 24 follow-up, the loop delegates to
+        // `applyVisibilityTransition` from `terminal-viewport-reflow.js`.
+        // Hidden->visible behaviour is pinned by the linkedom behaviour
+        // test; here we only assert the wiring is intact.
+        assert!(
+            body.contains("applyVisibilityTransition({"),
+            "expected the visibility loop to delegate to applyVisibilityTransition \
+             so element.hidden mutation + reveal hook share one helper; body: {body}",
+        );
+        assert!(
+            body.contains("visibleWindowData(windowData)"),
+            "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
+        );
+        assert!(
+            body.contains("scheduleTerminalFocusActivation(") && body.contains("terminalMap"),
+            "expected hidden->visible transition to schedule terminal focus activation \
+             (fit + viewport refresh + focus) so scrollback responds without a manual \
+             resize (SPEC-2008 FR-051); body: {body}",
         );
     }
 }

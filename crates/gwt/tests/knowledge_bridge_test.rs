@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs};
 
-use gwt::{load_knowledge_bridge, KnowledgeKind, KnowledgeListScope};
+use gwt::{load_knowledge_bridge, KnowledgeKind};
 use gwt_core::{paths::gwt_cache_dir, repo_hash::detect_repo_hash};
 use gwt_github::{
     Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
@@ -72,14 +72,8 @@ fn load_knowledge_bridge_filters_plain_issues_and_counts_linked_branches() {
         HashMap::from([("feature/issue-bridge".to_string(), 42)]),
     );
 
-    let loaded = load_knowledge_bridge(
-        &repo_path,
-        KnowledgeKind::Issue,
-        Some(42),
-        false,
-        KnowledgeListScope::Open,
-    )
-    .expect("load");
+    let loaded =
+        load_knowledge_bridge(&repo_path, KnowledgeKind::Issue, Some(42), false).expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Issue);
     assert_eq!(loaded.entries.len(), 1);
@@ -128,14 +122,8 @@ fn load_knowledge_bridge_filters_specs_and_exposes_cached_sections() {
         ))
         .expect("write spec");
 
-    let loaded = load_knowledge_bridge(
-        &repo_path,
-        KnowledgeKind::Spec,
-        Some(2017),
-        false,
-        KnowledgeListScope::Open,
-    )
-    .expect("load");
+    let loaded =
+        load_knowledge_bridge(&repo_path, KnowledgeKind::Spec, Some(2017), false).expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Spec);
     assert_eq!(loaded.entries.len(), 1);
@@ -163,14 +151,7 @@ fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists(
     fs::create_dir_all(&repo_path).expect("create repo");
     init_repo(&repo_path);
 
-    let loaded = load_knowledge_bridge(
-        &repo_path,
-        KnowledgeKind::Pr,
-        None,
-        false,
-        KnowledgeListScope::Open,
-    )
-    .expect("load");
+    let loaded = load_knowledge_bridge(&repo_path, KnowledgeKind::Pr, None, false).expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Pr);
     assert!(loaded.entries.is_empty());
@@ -187,7 +168,7 @@ fn load_knowledge_bridge_returns_disabled_pr_surface_until_cache_support_exists(
 }
 
 #[test]
-fn load_knowledge_bridge_separates_open_and_closed_issue_lists() {
+fn load_knowledge_bridge_includes_open_and_closed_issues_for_kanban() {
     let dir = tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo");
@@ -215,29 +196,18 @@ fn load_knowledge_bridge_separates_open_and_closed_issue_lists() {
         ))
         .expect("write closed issue");
 
-    let open_view = load_knowledge_bridge(
-        &repo_path,
-        KnowledgeKind::Issue,
-        None,
-        false,
-        KnowledgeListScope::Open,
-    )
-    .expect("load open issues");
-    assert_eq!(open_view.entries.len(), 1);
-    assert_eq!(open_view.entries[0].number, 42);
-    assert_eq!(open_view.detail.number, Some(42));
-
-    let closed_view = load_knowledge_bridge(
-        &repo_path,
-        KnowledgeKind::Issue,
-        None,
-        false,
-        KnowledgeListScope::Closed,
-    )
-    .expect("load closed issues");
-    assert_eq!(closed_view.entries.len(), 1);
-    assert_eq!(closed_view.entries[0].number, 43);
-    assert_eq!(closed_view.detail.number, Some(43));
+    let view =
+        load_knowledge_bridge(&repo_path, KnowledgeKind::Issue, None, false).expect("load issues");
+    assert_eq!(view.entries.len(), 2);
+    assert_eq!(
+        view.entries
+            .iter()
+            .map(|entry| entry.number)
+            .collect::<Vec<_>>(),
+        vec![42, 43],
+    );
+    assert!(view.entries.iter().any(|entry| entry.state == "closed"));
+    assert_eq!(view.detail.number, Some(42));
 }
 
 fn init_repo(repo_path: &std::path::Path) {
