@@ -231,6 +231,20 @@
         display: none;
       }
 
+      .op-sidebar__section--project-status {
+        padding: 0;
+      }
+
+      .op-sidebar__section--project-status .index-status {
+        display: flex;
+        width: 100%;
+        justify-content: center;
+      }
+
+      .op-sidebar__section--project-status:has(.index-status[hidden]) {
+        display: none;
+      }
+
       /* SPEC-1939 T-IDX-107 — per-worktree health dot on project tabs. */
       .project-tab-dot {
         display: inline-block;
@@ -3146,17 +3160,7 @@
         <div class="project-bar">
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
-            <button
-              type="button"
-              class="index-status"
-              id="index-status"
-              aria-label="Project index health"
-              hidden
-            ></button>
             <span class="app-version" id="app-version" hidden></span>
-            <button class="arrange-button" id="project-workspace-overview-button" aria-label="Workspace overview">
-              Workspace
-            </button>
             <button class="arrange-button" id="open-project-button" aria-label="Open project">
               Open Project
             </button>
@@ -3261,6 +3265,15 @@
               <div class="op-work-empty">No active work</div>
             </div>
             <div class="op-agent-list" id="op-active-work-agents"></div>
+          </div>
+          <div class="op-sidebar__section op-sidebar__section--project-status">
+            <button
+              type="button"
+              class="index-status"
+              id="index-status"
+              aria-label="Project index health"
+              hidden
+            ></button>
           </div>
         </aside>
         <div class="canvas-area">

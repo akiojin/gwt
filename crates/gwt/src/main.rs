@@ -1777,21 +1777,29 @@ mod tests {
 
         let select_events = runtime.select_project_tab_events("tab-2");
 
-        assert_eq!(select_events.len(), 2);
+        assert_eq!(select_events.len(), 3);
         assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-2"));
         assert!(runtime.launch_wizard.is_none());
         assert!(matches!(
             select_events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
+        assert!(matches!(
+            select_events[2].event,
             BackendEvent::LaunchWizardState { wizard: None }
         ));
 
         runtime.launch_wizard = Some(sample_launch_wizard_session("tab-2", &other));
         let close_events = runtime.close_project_tab_events("tab-2");
 
-        assert_eq!(close_events.len(), 2);
+        assert_eq!(close_events.len(), 3);
         assert_eq!(runtime.tabs.len(), 1);
         assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
         assert!(runtime.launch_wizard.is_none());
+        assert!(matches!(
+            close_events[1].event,
+            BackendEvent::ActiveWorkProjection { .. }
+        ));
         assert!(runtime
             .window_lookup
             .keys()

@@ -400,13 +400,13 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     "expected Sidebar to expose a Workspace Overview entry even when Active Work is hidden",
   );
   assert.ok(
-    document.querySelector("#project-workspace-overview-button"),
-    "expected Project Bar to expose Workspace Overview",
+    !document.querySelector("#project-workspace-overview-button"),
+    "Workspace Overview is per-project content and must live in the Sidebar, not the global Project Bar",
   );
   assert.match(
     appSource,
     /function\s+openWorkspaceOverview\(/,
-    "expected a shared opener for Sidebar and Project Bar",
+    "expected a shared opener for the Sidebar entry",
   );
   assert.match(
     appSource,
@@ -417,11 +417,6 @@ test("Workspace Overview is separate from live-only Active Work", () => {
     appSource,
     /op-workspace-overview-entry[\s\S]+openWorkspaceOverview/,
     "expected Sidebar Workspace Overview entry to open the overview",
-  );
-  assert.match(
-    appSource,
-    /project-workspace-overview-button[\s\S]+openWorkspaceOverview/,
-    "expected Project Bar Workspace Overview button to open the same overview",
   );
 });
 
