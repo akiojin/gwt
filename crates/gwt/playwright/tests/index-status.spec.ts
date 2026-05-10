@@ -1,9 +1,20 @@
 /* SPEC-1939 Phase 12 / T-IDX-109 + T-IDX-110 — Playwright e2e for the
  * Project Index status badge.
  *
- * The CI workflow boots gwt with `GWT_INDEX_TEST_FIXTURE=<json>` so the
- * aggregator returns a deterministic `ProjectIndexStatusView` instead of
- * running real Python. Two fixtures cover the two scenarios:
+ * CI orchestration:
+ *   1. Boot gwt (release build) under xvfb with the env vars
+ *      `GWT_INDEX_TEST_FIXTURE=<fixture-json>` (aggregator seam) and
+ *      `GWT_BROWSER_URL_FILE=<tmp-file>` (URL handoff seam).
+ *   2. Wait for `<tmp-file>` to materialise; read its content.
+ *   3. Export it as `GWT_PLAYWRIGHT_BASE_URL=<url>` and run
+ *      `npm run test:visual`.
+ *   4. Tear gwt down after the suite completes.
+ *
+ * Both seams ship with `gwt` (`crates/gwt/src/main.rs` writes the URL,
+ * `crates/gwt/src/index_worker.rs` reads the fixture) so this spec only
+ * needs the env vars to be set externally.
+ *
+ * The CI fixtures cover the two scenarios:
  *
  *   crates/gwt/playwright/fixtures/index-status-repair-required.json
  *     — initial `repair_required` so we can observe the auto-rebuild

@@ -4835,6 +4835,29 @@ fn main() -> wry::Result<()> {
     app.set_hook_forward_target(server.hook_forward_target());
     let front_door = gui_front_door_launch_surface(server.url());
     eprintln!("gwt browser URL: {}", front_door.browser_url);
+    // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
+    // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
+    // written to that path so the CI workflow can read it back into
+    // `GWT_PLAYWRIGHT_BASE_URL` without parsing stderr.
+    if let Ok(path) = std::env::var("GWT_BROWSER_URL_FILE") {
+        if !path.trim().is_empty() {
+            if let Err(error) = std::fs::write(&path, front_door.browser_url) {
+                tracing::warn!(
+                    target: "gwt::startup",
+                    path = %path,
+                    error = %error,
+                    "failed to write embedded server URL to GWT_BROWSER_URL_FILE"
+                );
+            } else {
+                tracing::info!(
+                    target: "gwt::startup",
+                    path = %path,
+                    url = %front_door.browser_url,
+                    "embedded server URL written for CI handoff"
+                );
+            }
+        }
+    }
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());

@@ -16,6 +16,9 @@ PLANS.md
 # Rust
 /target/
 **/*.rs.bk
+# llvm-cov / cargo-llvm-cov instrumented runs leave .profraw files next to
+# the test binaries; they are huge and should never be committed.
+**/*.profraw
 
 # npm wrapper (for bunx distribution)
 node_modules/
