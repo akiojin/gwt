@@ -70,10 +70,16 @@ pub(super) fn run<E: CliEnv>(
                 }
             };
             let current_session = current_session_from_env().ok().flatten();
+            // SPEC-1974: GWT_SESSION_ID が無い CLI 呼出 (E2E テストやスクリプト)
+            // を `AuthorKind::User` + name="user" にフォールバックさせると、
+            // 実ユーザーの GUI 投稿 (`AuthorKind::User` + name="You") と区別が
+            // つかなくなり、リーダーが Board 上で agent posts を user posts と
+            // 誤認する。ここでは明確に synthetic な agent identity を割り当て
+            // て impersonation を防ぐ。
             let (author_kind, author) = current_session
                 .as_ref()
                 .map(|session| (AuthorKind::Agent, session.display_name.clone()))
-                .unwrap_or((AuthorKind::User, "user".to_string()));
+                .unwrap_or((AuthorKind::Agent, "cli".to_string()));
             let mut entry = BoardEntry::new(
                 author_kind,
                 author,
@@ -588,6 +594,61 @@ mod tests {
     fn board_family_rejects_card_subcommand() {
         let err = parse(&[s("card"), s("set"), s("--status"), s("running")]).unwrap_err();
         assert_eq!(err, CliParseError::UnknownSubcommand("card".into()));
+    }
+
+    // SPEC-1974: GWT_SESSION_ID 環境変数が設定されていない CLI 呼出
+    // (E2E テスト・スクリプト経由など) は、実ユーザーの GUI 投稿
+    // (`AuthorKind::User` + name="You") と区別がつくよう、明示的に synthetic
+    // な agent identity (`AuthorKind::Agent` + name="cli") として記録される
+    // ことを固定する。これにより `[user @ - / -]` 表示で実ユーザー投稿と
+    // 誤認させる impersonation 経路を塞ぐ。
+    #[test]
+    fn board_family_run_post_uses_synthetic_agent_identity_when_session_env_missing() {
+        let _env_lock = fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("test post without session env".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let snapshot = load_snapshot(tmp.path()).unwrap();
+        let entry = &snapshot.board.entries[0];
+        assert_eq!(
+            entry.author_kind,
+            AuthorKind::Agent,
+            "missing GWT_SESSION_ID must not be attributed as a real user"
+        );
+        assert_eq!(
+            entry.author, "cli",
+            "fallback identity must be a clearly synthetic agent label"
+        );
+        assert!(
+            entry.origin_branch.is_none(),
+            "no session means no origin_branch"
+        );
+        assert!(
+            entry.origin_session_id.is_none(),
+            "no session means no origin_session_id"
+        );
     }
 
     #[test]
