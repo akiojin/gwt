@@ -158,7 +158,13 @@ export function createUpdateCtaController({
 
   function handleUpdateApplyError(payload) {
     if (!payload) return;
-    if (status === "applying") {
+    // SPEC-2041 Phase 19 (FR-064 follow-up, CodeRabbit review on PR #2635):
+    // Later can fail when commit_update_later_pending detects the persisted
+    // manifest is gone. The CTA was already morphed to `ready` by then, so
+    // surface the failure modal even in the `ready` state — silently dropping
+    // the error would leave the user believing Restart is safe when it isn't.
+    if (status === "applying" || status === "ready") {
+      renderCta("applying", "Applying update...");
       renderModalFailed(payload);
     }
   }
