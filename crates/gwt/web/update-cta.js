@@ -1,12 +1,25 @@
+// SPEC-2041 Phase 19 — Post-click modal & restart UX (FR-052..066).
+//
+// The CTA hands user clicks to #update-modal. The modal owns three states:
+// `downloading` (progress bar + Cancel), `ready` (Later / Restart now),
+// `failed` (Stage / Reason / Log + Open log / Retry / Close). The CTA itself
+// has four observable statuses: `available` | `applying` | `ready` | `error`,
+// where `applying` means a modal is mounted on top of it.
+
 export function createUpdateCtaController({
   document,
   send,
-  confirmUpdate,
+  // Phase 14's window.confirm gating is gone; the modal supersedes it.
+  // The option survives only so existing callers do not break.
+  confirmUpdate: _confirmUpdate,
   setVersionState = () => {},
 }) {
   const shellId = "update-cta-shell";
+  const modalId = "update-modal";
   let latestVersion = null;
+  let pendingVersion = null;
   let status = "idle";
+  let lastProgress = null;
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -53,7 +66,7 @@ export function createUpdateCtaController({
       dismiss.type = "button";
       dismiss.className = "update-cta__dismiss";
       dismiss.dataset.updateCtaDismiss = "true";
-      dismiss.textContent = "\u00d7";
+      dismiss.textContent = "×";
       dismiss.title = "Dismiss update notification";
       dismiss.setAttribute("aria-label", "Dismiss update notification");
       dismiss.onclick = dismissCta;
@@ -71,12 +84,14 @@ export function createUpdateCtaController({
     }
   }
 
-  function render(nextStatus, text) {
+  function renderCta(nextStatus, text) {
     status = nextStatus;
     const shell = ensureShell();
     const cta = ensureCta(shell);
     cta.dataset.status = nextStatus;
-    cta.className = nextStatus === "available" ? "update-cta" : `update-cta is-${nextStatus}`;
+    const stateClass =
+      nextStatus === "available" ? "update-cta" : `update-cta is-${nextStatus}`;
+    cta.className = stateClass;
     cta.title = text;
     cta.setAttribute("aria-label", text);
     cta.disabled = nextStatus === "applying";
@@ -93,12 +108,19 @@ export function createUpdateCtaController({
     if (!version) return null;
     removeLegacyUpdateSurfaces();
     latestVersion = version;
-    return render("available", `Update available: v${version} - Click to update`);
+    return renderCta("available", `Update available: v${version} - Click to update`);
+  }
+
+  function showReadyPending(version) {
+    if (!version) return null;
+    removeLegacyUpdateSurfaces();
+    pendingVersion = version;
+    return renderCta("ready", `Update v${version} ready — Restart now`);
   }
 
   function showError(message) {
     const detail = message || "Failed to start the update.";
-    return render("error", `Update failed: ${detail} Click to retry.`);
+    return renderCta("error", `Update failed: ${detail} Click to retry.`);
   }
 
   function handleUpdateState(event) {
@@ -110,11 +132,45 @@ export function createUpdateCtaController({
     if (status === "applying" && latestVersion === event.latest) {
       return;
     }
+    if (status === "ready" && pendingVersion === event.latest) {
+      return;
+    }
     showAvailable(event.latest);
+  }
+
+  function handleUpdateProgress(payload) {
+    if (!payload) return;
+    lastProgress = payload;
+    const modal = document.getElementById(modalId);
+    if (!modal || modal.dataset.state !== "downloading") {
+      return;
+    }
+    updateProgressDisplay(payload);
+  }
+
+  function handleUpdateReady(payload) {
+    if (!payload || !payload.version) return;
+    pendingVersion = payload.version;
+    if (status === "applying") {
+      renderModalReady(payload.version);
+    }
+  }
+
+  function handleUpdateApplyError(payload) {
+    if (!payload) return;
+    if (status === "applying") {
+      renderModalFailed(payload);
+    }
+  }
+
+  function handleUpdateApplyPendingPersisted(payload) {
+    if (!payload || !payload.version) return;
+    showReadyPending(payload.version);
   }
 
   function dismissCta(event) {
     event?.stopPropagation();
+    closeModal();
     const shell = document.getElementById(shellId);
     if (shell) {
       shell.remove();
@@ -123,20 +179,300 @@ export function createUpdateCtaController({
   }
 
   function handleClick() {
-    if (status === "applying" || !latestVersion) {
+    if (status === "applying") return;
+    if (status === "ready" && pendingVersion) {
+      // Re-open the modal at the ready panel; no second download.
+      renderCta("applying", "Applying update...");
+      renderModalReady(pendingVersion);
       return;
     }
-    if (!confirmUpdate(latestVersion)) {
+    if (!latestVersion) return;
+    renderCta("applying", "Applying update...");
+    renderModalDownloading(latestVersion);
+    send({ kind: "apply_update_start" });
+  }
+
+  // ---- Modal builders (uses createElement/appendChild only) ----
+
+  function ensureModal() {
+    let modal = document.getElementById(modalId);
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = modalId;
+      modal.className = "update-modal";
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+      modal.setAttribute("aria-labelledby", "update-modal-title");
+      document.body.appendChild(modal);
+    }
+    return modal;
+  }
+
+  function clearChildren(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
+
+  function el(tag, props = {}, children = []) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (v == null) continue;
+      if (k === "className") {
+        node.className = v;
+      } else if (k === "text") {
+        node.textContent = v;
+      } else if (k === "data") {
+        for (const [dk, dv] of Object.entries(v)) {
+          node.dataset[dk] = String(dv);
+        }
+      } else if (k === "attrs") {
+        for (const [ak, av] of Object.entries(v)) {
+          node.setAttribute(ak, String(av));
+        }
+      } else if (k === "onClick") {
+        node.addEventListener("click", v);
+      } else {
+        node.setAttribute(k, String(v));
+      }
+    }
+    for (const child of children) {
+      if (child == null) continue;
+      node.appendChild(child);
+    }
+    return node;
+  }
+
+  function closeModal() {
+    const modal = document.getElementById(modalId);
+    if (modal) {
+      modal.remove();
+    }
+  }
+
+  function renderModalDownloading(version) {
+    const modal = ensureModal();
+    modal.dataset.state = "downloading";
+    clearChildren(modal);
+
+    const fill = el("div", { className: "update-modal__progress-fill" });
+    const progress = el(
+      "div",
+      {
+        className: "update-modal__progress",
+        attrs: {
+          role: "progressbar",
+          "aria-valuemin": "0",
+          "aria-valuemax": "100",
+          "aria-valuenow": "0",
+        },
+        data: { updateModalProgress: "true" },
+      },
+      [fill],
+    );
+    const counter = el("p", {
+      className: "update-modal__bytes",
+      text: "0.0 MB / 0.0 MB",
+      data: { updateModalByteCounter: "true" },
+    });
+    const cancel = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Cancel",
+      data: { updateModalCancel: "true" },
+      onClick: onCancelDownload,
+    });
+
+    const panel = el(
+      "div",
+      { className: "update-modal__panel", data: { state: "downloading" } },
+      [
+        el("h2", { id: "update-modal-title", text: "Updating gwt" }),
+        el("p", {
+          className: "update-modal__version",
+          text: `Downloading v${version || ""}`,
+          data: { updateModalVersion: "true" },
+        }),
+        progress,
+        counter,
+        el("div", { className: "update-modal__actions" }, [cancel]),
+      ],
+    );
+    modal.appendChild(panel);
+
+    if (lastProgress) {
+      updateProgressDisplay(lastProgress);
+    }
+  }
+
+  function renderModalReady(version) {
+    const modal = ensureModal();
+    modal.dataset.state = "ready";
+    clearChildren(modal);
+
+    const later = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Later",
+      data: { updateModalLater: "true" },
+      onClick: onApplyLater,
+    });
+    const restartNow = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--primary",
+      text: "Restart now",
+      data: { updateModalRestartNow: "true" },
+      onClick: onApplyRestartNow,
+    });
+
+    const panel = el(
+      "div",
+      { className: "update-modal__panel", data: { state: "ready" } },
+      [
+        el("h2", { id: "update-modal-title", text: "Update ready" }),
+        el("p", {
+          className: "update-modal__version",
+          text: `v${version} is ready to install.`,
+        }),
+        el("p", {
+          className: "update-modal__hint",
+          text: "Restart now to launch the new version.",
+        }),
+        el("div", { className: "update-modal__actions" }, [later, restartNow]),
+      ],
+    );
+    modal.appendChild(panel);
+  }
+
+  function renderModalFailed({ stage, reason, log_path }) {
+    const modal = ensureModal();
+    modal.dataset.state = "failed";
+    clearChildren(modal);
+
+    const dl = el("dl", { className: "update-modal__details" }, [
+      el("dt", { text: "Stage" }),
+      el("dd", {
+        text: stage || "Unknown stage",
+        data: { updateModalStage: "true" },
+      }),
+      el("dt", { text: "Reason" }),
+      el("dd", {
+        text: reason || "Unknown reason",
+        data: { updateModalReason: "true" },
+      }),
+      el("dt", { text: "Log" }),
+      el("dd", {
+        text: log_path || "",
+        data: { updateModalLog: "true" },
+      }),
+    ]);
+
+    const openLog = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Open log",
+      data: { updateModalOpenLog: "true" },
+      onClick: () => {
+        const message = { kind: "open_update_log" };
+        if (log_path) message.log_path = log_path;
+        send(message);
+      },
+    });
+    const retry = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Retry",
+      data: { updateModalRetry: "true" },
+      onClick: onRetryFailed,
+    });
+    const closeBtn = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Close",
+      data: { updateModalClose: "true" },
+      onClick: onCloseFailed,
+    });
+
+    const panel = el(
+      "div",
+      { className: "update-modal__panel", data: { state: "failed" } },
+      [
+        el("h2", { id: "update-modal-title", text: "⚠ Update failed" }),
+        dl,
+        el("div", { className: "update-modal__actions" }, [openLog, retry, closeBtn]),
+      ],
+    );
+    modal.appendChild(panel);
+  }
+
+  function updateProgressDisplay({ downloaded, total }) {
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    const progress = modal.querySelector("[data-update-modal-progress]");
+    const counter = modal.querySelector("[data-update-modal-byte-counter]");
+    if (progress) {
+      const percent = total
+        ? Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)))
+        : 0;
+      progress.setAttribute("aria-valuenow", String(percent));
+      const fill = progress.querySelector(".update-modal__progress-fill");
+      if (fill) {
+        fill.style.width = `${percent}%`;
+      }
+    }
+    if (counter) {
+      counter.textContent = `${formatBytes(downloaded)} / ${formatBytes(total)}`;
+    }
+  }
+
+  function onCancelDownload() {
+    send({ kind: "cancel_update_download" });
+    lastProgress = null;
+    closeModal();
+    if (latestVersion) {
       showAvailable(latestVersion);
-      return;
     }
-    render("applying", "Applying update...");
-    send({ kind: "apply_update" });
+  }
+
+  function onApplyLater() {
+    send({ kind: "apply_update_later" });
+    closeModal();
+    if (pendingVersion) {
+      showReadyPending(pendingVersion);
+    }
+  }
+
+  function onApplyRestartNow() {
+    send({ kind: "apply_update_restart_now" });
+    // Modal is intentionally left in place; the parent process will exit.
+  }
+
+  function onRetryFailed() {
+    lastProgress = null;
+    renderModalDownloading(latestVersion || pendingVersion || "");
+    send({ kind: "apply_update_start" });
+  }
+
+  function onCloseFailed() {
+    closeModal();
+    if (latestVersion) {
+      showAvailable(latestVersion);
+    }
+  }
+
+  function formatBytes(bytes) {
+    const mb = (bytes ?? 0) / (1024 * 1024);
+    return `${mb.toFixed(1)} MB`;
   }
 
   return {
     handleUpdateState,
+    handleUpdateProgress,
+    handleUpdateReady,
+    handleUpdateApplyError,
+    handleUpdateApplyPendingPersisted,
     showAvailable,
+    showReadyPending,
     showError,
   };
 }

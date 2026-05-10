@@ -1311,6 +1311,48 @@ fn read_head_branch(project_root: &Path) -> Option<String> {
 /// `true` when `git status --porcelain` reports any entry. Failures are
 /// treated as "not dirty" since the backend can fall through to the regular
 /// validator pass.
+/// Build a Phase 14 message-only [`BackendEvent::UpdateApplyError`].
+/// New callers should prefer [`update_apply_error_failed`] which also fills
+/// the structured Phase 19 fields.
+fn update_apply_error_message(message: &str) -> BackendEvent {
+    BackendEvent::UpdateApplyError {
+        message: Some(message.to_string()),
+        stage: None,
+        reason: None,
+        log_path: None,
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-063): structured update failure event with stage
+/// and reason. The legacy `message` field is populated with `reason` for
+/// frontends that still read it.
+fn update_apply_error_failed(stage: &str, reason: &str) -> BackendEvent {
+    BackendEvent::UpdateApplyError {
+        message: Some(reason.to_string()),
+        stage: Some(stage.to_string()),
+        reason: Some(reason.to_string()),
+        log_path: None,
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-065): launch the platform default opener
+/// (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows). Errors are
+/// silently dropped so the modal does not surface noise; the path is logged
+/// at the trace level.
+fn open_path_with_os_default(path: &str) -> Result<(), std::io::Error> {
+    use std::process::Command;
+    let mut cmd = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", path]);
+        return c.spawn().map(|_| ());
+    } else {
+        Command::new("xdg-open")
+    };
+    cmd.arg(path).spawn().map(|_| ())
+}
+
 fn detect_dirty(project_root: &Path) -> bool {
     gwt_core::process::hidden_command("git")
         .args(["status", "--porcelain"])
@@ -1724,6 +1766,15 @@ impl AppRuntime {
                 self.handle_launch_wizard_action(action, bounds)
             }
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
+            FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
+            FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
+            FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
+            FrontendEvent::ApplyUpdateRestartNow => {
+                self.apply_update_restart_now_events(&client_id)
+            }
+            FrontendEvent::OpenUpdateLog { log_path } => {
+                self.open_update_log_events(&client_id, log_path)
+            }
             FrontendEvent::ListCustomAgents => vec![OutboundEvent::reply(
                 client_id,
                 gwt::custom_agents_dispatch::list_event(),
@@ -1855,32 +1906,138 @@ impl AppRuntime {
             }
             Some(gwt_core::update::UpdateState::Available { .. }) => vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::UpdateApplyError {
-                    message: "No applicable update asset is available for this platform."
-                        .to_string(),
-                },
+                update_apply_error_message(
+                    "No applicable update asset is available for this platform.",
+                ),
             )],
             Some(gwt_core::update::UpdateState::UpToDate { .. }) => vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::UpdateApplyError {
-                    message: "No pending update is available.".to_string(),
-                },
+                update_apply_error_message("No pending update is available."),
             )],
             Some(gwt_core::update::UpdateState::Failed { message, .. }) => {
                 vec![OutboundEvent::reply(
                     client_id,
-                    BackendEvent::UpdateApplyError {
-                        message: format!("Update check failed: {message}"),
-                    },
+                    update_apply_error_message(&format!("Update check failed: {message}")),
                 )]
             }
             None => vec![OutboundEvent::reply(
                 client_id,
-                BackendEvent::UpdateApplyError {
-                    message: "No pending update is available.".to_string(),
-                },
+                update_apply_error_message("No pending update is available."),
             )],
         }
+    }
+
+    /// SPEC-2041 Phase 19 (FR-052): user clicked the update CTA and the modal
+    /// is opening in the `downloading` state. Backend kicks off
+    /// `prepare_update` on a worker thread and emits
+    /// [`BackendEvent::UpdateReady`] (or [`BackendEvent::UpdateApplyError`])
+    /// without exiting the parent process.
+    fn apply_update_start_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+        match self.pending_update.clone() {
+            Some(
+                state @ gwt_core::update::UpdateState::Available {
+                    asset_url: Some(_), ..
+                },
+            ) => {
+                self.proxy.send(UserEvent::ApplyUpdateStart {
+                    state,
+                    client_id: client_id.to_string(),
+                });
+                vec![]
+            }
+            Some(gwt_core::update::UpdateState::Available { .. }) => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed(
+                    "Download asset",
+                    "No applicable update asset is available for this platform.",
+                ),
+            )],
+            Some(gwt_core::update::UpdateState::UpToDate { .. }) => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed("Download asset", "No pending update is available."),
+            )],
+            Some(gwt_core::update::UpdateState::Failed { message, .. }) => {
+                vec![OutboundEvent::reply(
+                    client_id,
+                    update_apply_error_failed(
+                        "Update check",
+                        &format!("Update check failed: {message}"),
+                    ),
+                )]
+            }
+            None => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed("Download asset", "No pending update is available."),
+            )],
+        }
+    }
+
+    /// SPEC-2041 Phase 19 (FR-055): user pressed `Cancel` mid-download.
+    /// Implementation note: `prepare_update` is currently synchronous in the
+    /// background thread, so a true mid-download abort is a no-op until the
+    /// async download landing in T-128. We still surface the cancel as a
+    /// best-effort acknowledgement so the frontend transition stays
+    /// authoritative.
+    fn cancel_update_download_events(&self, _client_id: &str) -> Vec<OutboundEvent> {
+        // TODO(T-128): cooperatively abort the in-flight download.
+        vec![]
+    }
+
+    /// SPEC-2041 Phase 19 (FR-059..061): user pressed `Later`. Emit
+    /// [`BackendEvent::UpdateApplyPendingPersisted`] so the CTA morphs to
+    /// ready state. Persistence to `~/.gwt/pending-update/` is wired in T-129
+    /// / T-133; for now the prepared payload remains in `prepared_update_path`
+    /// until the parent process exits.
+    fn apply_update_later_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+        let version = match self.pending_update.as_ref() {
+            Some(gwt_core::update::UpdateState::Available { latest, .. }) => latest.clone(),
+            _ => return vec![],
+        };
+        vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::UpdateApplyPendingPersisted { version },
+        )]
+    }
+
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend
+    /// commits the prepared payload via the helper subprocess and exits the
+    /// parent. Falls back to the legacy `apply_update_state_and_exit` path
+    /// when no prepared payload exists yet (e.g. user manually re-clicked CTA
+    /// before download completed).
+    fn apply_update_restart_now_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+        match self.pending_update.clone() {
+            Some(
+                state @ gwt_core::update::UpdateState::Available {
+                    asset_url: Some(_), ..
+                },
+            ) => {
+                self.proxy.send(UserEvent::ApplyUpdateRestartNow {
+                    state,
+                    client_id: client_id.to_string(),
+                });
+                vec![]
+            }
+            _ => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed(
+                    "Restart now",
+                    "No prepared update available for restart.",
+                ),
+            )],
+        }
+    }
+
+    /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
+    /// modal. Backend opens the log file with the OS default application.
+    fn open_update_log_events(
+        &self,
+        _client_id: &str,
+        log_path: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        if let Some(path) = log_path {
+            let _ = open_path_with_os_default(&path);
+        }
+        vec![]
     }
 
     pub(crate) fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
@@ -6362,7 +6519,7 @@ exit 0
         assert!(outbound.iter().any(|event| {
             matches!(
                 &event.event,
-                BackendEvent::UpdateApplyError { message }
+                BackendEvent::UpdateApplyError { message: Some(message), .. }
                     if message.contains("No applicable update asset")
             )
         }));
