@@ -363,6 +363,22 @@ impl UpdateManager {
     }
 
     pub fn prepare_update(&self, latest: &str, asset_url: &str) -> Result<PreparedPayload, String> {
+        // SPEC-2041 Phase 19 backward-compat shim: callers that don't need
+        // download progress (CLI `gwt update`, legacy GUI flow) reuse the
+        // chunked downloader via a no-op callback.
+        self.prepare_update_with_progress(latest, asset_url, &mut |_, _| {})
+    }
+
+    /// SPEC-2041 Phase 19 (FR-054): like [`Self::prepare_update`] but invokes
+    /// `progress` for every download chunk. The callback receives `(downloaded
+    /// bytes so far, advertised total if any)`. The final invocation sees
+    /// `downloaded == total` whenever the server provided `Content-Length`.
+    pub fn prepare_update_with_progress(
+        &self,
+        latest: &str,
+        asset_url: &str,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<PreparedPayload, String> {
         let update_dir = self
             .updates_dir
             .join(format!("v{}", latest.trim().trim_start_matches('v')));
@@ -371,7 +387,7 @@ impl UpdateManager {
         let asset_name = asset_name_from_url(asset_url).unwrap_or_else(|| "gwt-update".to_string());
         let dest = update_dir.join(&asset_name);
 
-        self.download_asset(asset_url, &dest)?;
+        self.download_asset_with_progress(asset_url, &dest, progress)?;
 
         let dest_str = dest.to_string_lossy().to_string();
         if dest_str.ends_with(".tar.gz") || dest_str.ends_with(".zip") {
@@ -491,6 +507,26 @@ impl UpdateManager {
     }
 
     fn download_asset(&self, asset_url: &str, dest: &Path) -> Result<(), String> {
+        // Phase 19 backward-compat: callers that don't need byte-level
+        // progress (Docker bundle install, legacy CLI flow) tunnel through
+        // the chunked downloader with a no-op callback.
+        self.download_asset_with_progress(asset_url, dest, &mut |_, _| {})
+    }
+
+    /// SPEC-2041 Phase 19 (FR-054): chunked downloader that drives a progress
+    /// callback. Reads the response in 64 KiB chunks so the callback fires
+    /// frequently enough to render a smooth progress bar without overwhelming
+    /// the WebSocket. The callback receives `(downloaded bytes so far,
+    /// `Content-Length` if the server advertised one)`. The first invocation
+    /// always fires with `(0, total)` so frontends can size the progress bar
+    /// before any bytes arrive.
+    fn download_asset_with_progress(
+        &self,
+        asset_url: &str,
+        dest: &Path,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<(), String> {
+        use std::io::{Read, Write};
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("Failed to create payload dir: {e}"))?;
         }
@@ -504,10 +540,29 @@ impl UpdateManager {
             return Err(format!("Download failed with status {}", res.status()));
         }
 
+        let total = res.content_length();
+        progress(0, total);
+
         let mut file =
             fs::File::create(dest).map_err(|e| format!("Failed to create payload file: {e}"))?;
         let mut reader = res;
-        io::copy(&mut reader, &mut file).map_err(|e| format!("Failed to write payload: {e}"))?;
+        let mut buffer = [0u8; 64 * 1024];
+        let mut downloaded: u64 = 0;
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|e| format!("Failed to read payload chunk: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buffer[..n])
+                .map_err(|e| format!("Failed to write payload: {e}"))?;
+            downloaded = downloaded.saturating_add(n as u64);
+            progress(downloaded, total);
+        }
+        // Ensure the final progress tick reflects the actual on-disk size,
+        // even when the server omitted Content-Length.
+        progress(downloaded, total.or(Some(downloaded)));
 
         let size = fs::metadata(dest).map(|m| m.len()).unwrap_or_default();
         if size == 0 {
@@ -809,7 +864,10 @@ fn parse_tag_version(tag: &str) -> Option<Version> {
     Version::parse(v).ok()
 }
 
-fn asset_name_from_url(url: &str) -> Option<String> {
+/// Extract the asset filename from a release URL. Used by Phase 19
+/// download-progress broadcasts to populate `BackendEvent::UpdateProgress.asset`
+/// so the modal can show "Downloading gwt-macos-arm64.tar.gz".
+pub fn asset_name_from_url(url: &str) -> Option<String> {
     url.split('/')
         .next_back()
         .map(str::trim)

@@ -306,8 +306,23 @@ impl PreparedUpdate {
 /// helper, and never mutates the running binary. T-130 will eventually replace
 /// `apply_update_state_and_exit` entirely with this + a separate
 /// `commit_update_restart_now` once Phase 19 stabilizes.
+/// Convenience wrapper that drops download-progress events. Kept on the
+/// public API for future non-streaming callers (CLI, automated tests) so the
+/// progress-aware variant does not have to be re-discovered.
+#[allow(dead_code)]
 pub fn prepare_update_payload(
     state: gwt_core::update::UpdateState,
+) -> Result<PreparedUpdate, String> {
+    prepare_update_payload_with_progress(state, &mut |_, _| {})
+}
+
+/// SPEC-2041 Phase 19 (FR-054): like [`prepare_update_payload`] but routes
+/// download chunk progress to `progress`. The closure must be cheap because
+/// it fires once per 64 KiB of payload; callers that broadcast progress over
+/// WebSocket should throttle inside the closure (e.g. by `Instant::elapsed`).
+pub fn prepare_update_payload_with_progress(
+    state: gwt_core::update::UpdateState,
+    progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<PreparedUpdate, String> {
     let (latest, asset_url) = match state {
         gwt_core::update::UpdateState::Available {
@@ -325,9 +340,9 @@ pub fn prepare_update_payload(
             return Err(format!("Update check failed: {message}"));
         }
     };
-    let mut ops = RealUpdateApplyOps::default();
-    let payload = ops
-        .prepare_update(&latest, &asset_url)
+    let mgr = gwt_core::update::UpdateManager::new();
+    let payload = mgr
+        .prepare_update_with_progress(&latest, &asset_url, progress)
         .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
     Ok(PreparedUpdate {
         latest,

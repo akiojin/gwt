@@ -5402,8 +5402,51 @@ fn main() -> wry::Result<()> {
             }
             Event::UserEvent(UserEvent::ApplyUpdateStart { state, client_id }) => {
                 let apply_proxy = proxy.clone();
+                let version_for_progress = match &state {
+                    gwt_core::update::UpdateState::Available { latest, .. } => Some(latest.clone()),
+                    _ => None,
+                };
+                let asset_for_progress = match &state {
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: Some(url),
+                        ..
+                    } => gwt_core::update::asset_name_from_url(url),
+                    _ => None,
+                };
                 std::thread::spawn(move || {
-                    match update_front_door::prepare_update_payload(state) {
+                    // SPEC-2041 Phase 19 FR-054: stream chunk-level progress
+                    // back to the modal. Throttle to ~200 ms or the
+                    // completion tick (`downloaded >= total`) so the
+                    // WebSocket does not see one event per 64 KiB.
+                    let throttle_interval = std::time::Duration::from_millis(200);
+                    let progress_proxy = apply_proxy.clone();
+                    let version_for_closure = version_for_progress.clone();
+                    let asset_for_closure = asset_for_progress.clone();
+                    let mut last_emit = std::time::Instant::now();
+                    let mut emitted_first = false;
+                    let mut progress = move |downloaded: u64, total: Option<u64>| {
+                        let is_complete = total.map(|t| downloaded >= t).unwrap_or(false);
+                        let now = std::time::Instant::now();
+                        let should_emit = !emitted_first
+                            || is_complete
+                            || now.duration_since(last_emit) >= throttle_interval;
+                        if should_emit {
+                            emitted_first = true;
+                            last_emit = now;
+                            let _ = progress_proxy.send_event(UserEvent::Dispatch(vec![
+                                OutboundEvent::broadcast(BackendEvent::UpdateProgress {
+                                    downloaded,
+                                    total,
+                                    asset: asset_for_closure.clone(),
+                                    version: version_for_closure.clone(),
+                                }),
+                            ]));
+                        }
+                    };
+                    match update_front_door::prepare_update_payload_with_progress(
+                        state,
+                        &mut progress,
+                    ) {
                         Ok(prepared) => {
                             let asset_path = prepared.payload_path();
                             let version = prepared.latest;
