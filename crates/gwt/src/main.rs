@@ -180,8 +180,11 @@ fn broadcast_log_entry(clients: &ClientHub, entry: gwt_core::logging::LogEvent) 
     )]);
 }
 
-fn spawn_project_index_status_check(runtime: &Runtime, proxy: EventLoopProxy<UserEvent>) {
-    let project_root = std::env::current_dir().ok();
+fn spawn_project_index_status_check(
+    runtime: &Runtime,
+    proxy: EventLoopProxy<UserEvent>,
+    project_root: Option<PathBuf>,
+) {
     let project_root_label = project_root
         .as_ref()
         .map(|path| path.display().to_string())
@@ -4957,7 +4960,11 @@ fn main() -> wry::Result<()> {
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
-    spawn_project_index_status_check(&runtime, proxy.clone());
+    spawn_project_index_status_check(
+        &runtime,
+        proxy.clone(),
+        app.active_project_root().map(Path::to_path_buf),
+    );
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -5025,7 +5032,11 @@ fn main() -> wry::Result<()> {
                 }
                 clients.dispatch(events);
                 if refresh_index_status {
-                    spawn_project_index_status_check(&runtime, proxy.clone());
+                    spawn_project_index_status_check(
+                        &runtime,
+                        proxy.clone(),
+                        app.active_project_root().map(Path::to_path_buf),
+                    );
                 }
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {

@@ -213,6 +213,9 @@ impl ProjectIndexStatusView {
 }
 
 pub fn project_index_status_for_path(project_root: &Path) -> ProjectIndexStatusView {
+    if let Some(fixture) = load_test_fixture_status() {
+        return fixture;
+    }
     match project_index_status_for_path_inner(project_root) {
         Ok(status) => status,
         Err(error) => ProjectIndexStatusView::new(ProjectIndexStatusState::Error, error),
@@ -1348,6 +1351,26 @@ mod tests {
         );
         let _fixture_env = FixtureEnvGuard::set(&fixture_path);
         let view = aggregate_project_index_status_for_path(temp.path());
+
+        assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
+        assert_eq!(view.detail, "fixture-driven repair_required");
+        assert!(view.scopes.specs.is_some());
+    }
+
+    #[test]
+    fn project_index_status_uses_test_fixture_when_env_var_set() {
+        let _lock = GWT_INDEX_TEST_FIXTURE_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture_path = write_status_fixture(
+            temp.path(),
+            ProjectIndexStatusState::RepairRequired,
+            "fixture-driven repair_required",
+        );
+        let _fixture_env = FixtureEnvGuard::set(&fixture_path);
+
+        let view = project_index_status_for_path(temp.path());
 
         assert_eq!(view.state, ProjectIndexStatusState::RepairRequired);
         assert_eq!(view.detail, "fixture-driven repair_required");
