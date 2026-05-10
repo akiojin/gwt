@@ -102,6 +102,7 @@ pub struct LaunchWizardLiveSessionView {
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+    pub runtime_status: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -237,6 +238,7 @@ pub struct LiveSessionEntry {
     pub name: String,
     pub detail: Option<String>,
     pub active: bool,
+    pub runtime_status: crate::WindowProcessStatus,
 }
 
 impl QuickStartEntry {
@@ -1526,6 +1528,7 @@ impl LaunchWizardState {
                 name: entry.name.clone(),
                 detail: entry.detail.clone(),
                 active: entry.active,
+                runtime_status: window_status_wire(entry.runtime_status).to_string(),
             })
             .collect()
     }
@@ -3068,6 +3071,15 @@ fn runtime_target_value(target: gwt_agent::LaunchRuntimeTarget) -> &'static str 
     }
 }
 
+fn window_status_wire(status: crate::WindowProcessStatus) -> &'static str {
+    match status {
+        crate::WindowProcessStatus::Running => "running",
+        crate::WindowProcessStatus::Waiting => "waiting",
+        crate::WindowProcessStatus::Stopped => "stopped",
+        crate::WindowProcessStatus::Error => "error",
+    }
+}
+
 fn docker_lifecycle_value(intent: gwt_agent::DockerLifecycleIntent) -> &'static str {
     match intent {
         gwt_agent::DockerLifecycleIntent::Connect => "connect",
@@ -3842,6 +3854,7 @@ mod tests {
             name: "Codex".to_string(),
             detail: Some("/tmp/repo".to_string()),
             active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
         }];
 
         let mut state = LaunchWizardState::open_with(
@@ -3884,6 +3897,27 @@ mod tests {
     }
 
     #[test]
+    fn live_sessions_view_exposes_window_runtime_status() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "gwt-session-1".to_string(),
+            window_id: "window-1".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+            runtime_status: crate::WindowProcessStatus::Waiting,
+        }];
+
+        let state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
+        let view = state.view();
+
+        assert_eq!(view.live_sessions.len(), 1);
+        assert_eq!(view.live_sessions[0].runtime_status, "waiting");
+    }
+
+    #[test]
     fn quick_start_start_new_keeps_live_window_available_but_does_not_focus_it() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.live_sessions = vec![LiveSessionEntry {
@@ -3894,6 +3928,7 @@ mod tests {
             name: "Codex".to_string(),
             detail: Some("/tmp/repo".to_string()),
             active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
         }];
 
         let mut state = LaunchWizardState::open_with(
@@ -4506,6 +4541,7 @@ mod tests {
             name: "Codex".to_string(),
             detail: Some("/tmp/repo".to_string()),
             active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
         }];
         let mut state = LaunchWizardState::open_with(ctx, sample_agent_options(), Vec::new());
 
@@ -5363,6 +5399,7 @@ mod tests {
             name: "Codex".to_string(),
             detail: Some("/tmp/repo".to_string()),
             active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
         }];
         ctx.docker_context = Some(DockerWizardContext {
             services: vec!["api".to_string(), "worker".to_string()],
@@ -5506,6 +5543,7 @@ mod tests {
             name: "Codex".to_string(),
             detail: Some("/tmp/repo".to_string()),
             active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
         }];
         let mut state = LaunchWizardState::open_with(
             quick_ctx,
