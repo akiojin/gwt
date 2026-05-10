@@ -60,6 +60,7 @@ tasks/todo.md
 coverage/
 *.lcov
 lcov.info
+crates/gwt/playwright/test-results/
 
 # Temporary folders
 tmp/
