@@ -85,13 +85,6 @@ pub enum KnowledgeKind {
     Pr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KnowledgeListScope {
-    Open,
-    Closed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeListItem {
     pub number: u64,
@@ -244,7 +237,6 @@ pub fn load_knowledge_bridge(
     kind: KnowledgeKind,
     selected_number: Option<u64>,
     refresh: bool,
-    list_scope: KnowledgeListScope,
 ) -> Result<KnowledgeBridgeView, String> {
     if !repo_path.is_dir() {
         return Err(format!(
@@ -267,9 +259,7 @@ pub fn load_knowledge_bridge(
     let entries = load_local_cache_entries_for_repo(repo_path)?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(match kind {
-        KnowledgeKind::Issue => {
-            build_issue_view(entries, linked_branches, selected_number, list_scope)
-        }
+        KnowledgeKind::Issue => build_issue_view(entries, linked_branches, selected_number),
         KnowledgeKind::Spec => build_spec_view(entries, linked_branches, selected_number),
         KnowledgeKind::Pr => disabled_pr_view(),
     })
@@ -293,14 +283,12 @@ pub fn search_knowledge_bridge(
     kind: KnowledgeKind,
     query: &str,
     selected_number: Option<u64>,
-    list_scope: KnowledgeListScope,
 ) -> Result<KnowledgeBridgeView, String> {
     search_knowledge_bridge_with_client(
         repo_path,
         kind,
         query,
         selected_number,
-        list_scope,
         &RunnerSemanticSearchClient,
     )
 }
@@ -420,12 +408,11 @@ pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Siz
     kind: KnowledgeKind,
     query: &str,
     selected_number: Option<u64>,
-    list_scope: KnowledgeListScope,
     client: &C,
 ) -> Result<KnowledgeBridgeView, String> {
     let query = query.trim();
     if query.is_empty() {
-        return load_knowledge_bridge(repo_path, kind, selected_number, false, list_scope);
+        return load_knowledge_bridge(repo_path, kind, selected_number, false);
     }
     if !repo_path.is_dir() {
         return Err(format!(
@@ -442,7 +429,7 @@ pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Siz
 
     let mut entries = load_local_cache_entries_for_repo(repo_path)?
         .into_iter()
-        .filter(|entry| candidate_matches_kind_and_scope(entry, kind, list_scope))
+        .filter(|entry| candidate_matches_kind(entry, kind))
         .collect::<Vec<_>>();
     entries.sort_by(issue_entry_sort);
     let linked_branches = load_linked_branches(repo_path);
@@ -523,13 +510,8 @@ fn build_issue_view(
     mut entries: Vec<CacheEntry>,
     linked_branches: HashMap<u64, Vec<String>>,
     selected_number: Option<u64>,
-    list_scope: KnowledgeListScope,
 ) -> KnowledgeBridgeView {
     entries.retain(|entry| !is_spec_entry(entry));
-    entries.retain(|entry| match list_scope {
-        KnowledgeListScope::Open => entry.snapshot.state == IssueState::Open,
-        KnowledgeListScope::Closed => entry.snapshot.state == IssueState::Closed,
-    });
     entries.sort_by(issue_entry_sort);
 
     let list_items = entries
@@ -650,19 +632,9 @@ fn empty_detail(title: &str, body: &str) -> KnowledgeDetailView {
     }
 }
 
-fn candidate_matches_kind_and_scope(
-    entry: &CacheEntry,
-    kind: KnowledgeKind,
-    list_scope: KnowledgeListScope,
-) -> bool {
+fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
     match kind {
-        KnowledgeKind::Issue => {
-            !is_spec_entry(entry)
-                && match list_scope {
-                    KnowledgeListScope::Open => entry.snapshot.state == IssueState::Open,
-                    KnowledgeListScope::Closed => entry.snapshot.state == IssueState::Closed,
-                }
-        }
+        KnowledgeKind::Issue => !is_spec_entry(entry),
         KnowledgeKind::Spec => is_spec_entry(entry),
         KnowledgeKind::Pr => false,
     }
@@ -1133,14 +1105,8 @@ Extra context.
     fn load_knowledge_bridge_returns_non_repo_and_disabled_pr_views() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let issue_view = load_knowledge_bridge(
-            dir.path(),
-            KnowledgeKind::Issue,
-            None,
-            false,
-            KnowledgeListScope::Open,
-        )
-        .expect("issue view");
+        let issue_view = load_knowledge_bridge(dir.path(), KnowledgeKind::Issue, None, false)
+            .expect("issue view");
         assert_eq!(issue_view.kind, KnowledgeKind::Issue);
         assert!(!issue_view.refresh_enabled);
         assert_eq!(
@@ -1148,14 +1114,8 @@ Extra context.
             Some("Knowledge Bridge is available only for Git projects.")
         );
 
-        let pr_view = load_knowledge_bridge(
-            dir.path(),
-            KnowledgeKind::Pr,
-            Some(12),
-            false,
-            KnowledgeListScope::Open,
-        )
-        .expect("pr view");
+        let pr_view =
+            load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
         assert_eq!(pr_view.kind, KnowledgeKind::Pr);
         assert!(!pr_view.refresh_enabled);
         assert_eq!(pr_view.detail.title, "PR Bridge");
@@ -1201,14 +1161,8 @@ Extra context.
             ],
         );
 
-        let issue_view = load_knowledge_bridge(
-            &repo,
-            KnowledgeKind::Issue,
-            Some(11),
-            false,
-            KnowledgeListScope::Open,
-        )
-        .expect("issue bridge");
+        let issue_view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(11), false)
+            .expect("issue bridge");
         let issue_entry = issue_view
             .entries
             .iter()
@@ -1234,14 +1188,8 @@ Extra context.
             .any(|section| section.title == "Linked branches"
                 && section.body == "- `feature/coverage`\n- `feature/coverage-followup`"));
 
-        let spec_view = load_knowledge_bridge(
-            &repo,
-            KnowledgeKind::Spec,
-            Some(22),
-            false,
-            KnowledgeListScope::Open,
-        )
-        .expect("spec bridge");
+        let spec_view = load_knowledge_bridge(&repo, KnowledgeKind::Spec, Some(22), false)
+            .expect("spec bridge");
         let spec_entry = spec_view
             .entries
             .iter()
@@ -1291,7 +1239,7 @@ Extra context.
     }
 
     #[test]
-    fn semantic_issue_search_respects_scope_filters_specs_and_scores_results() {
+    fn semantic_issue_search_filters_specs_and_scores_open_and_closed_results() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1334,7 +1282,6 @@ Extra context.
             KnowledgeKind::Issue,
             "semantic search",
             None,
-            KnowledgeListScope::Open,
             &FakeSemanticSearchClient {
                 hits: vec![
                     SemanticSearchHit {
@@ -1354,10 +1301,14 @@ Extra context.
         )
         .expect("search view");
 
-        assert_eq!(view.entries.len(), 1);
-        assert_eq!(view.entries[0].number, 11);
-        assert_eq!(view.entries[0].match_score, Some(80));
-        assert_eq!(view.selected_number, Some(11));
+        assert_eq!(view.entries.len(), 2);
+        assert_eq!(view.entries[0].number, 12);
+        assert_eq!(view.entries[0].state, "closed");
+        assert_eq!(view.entries[0].match_score, Some(98));
+        assert_eq!(view.entries[1].number, 11);
+        assert_eq!(view.entries[1].state, "open");
+        assert_eq!(view.entries[1].match_score, Some(80));
+        assert_eq!(view.selected_number, Some(12));
     }
 
     #[test]
@@ -1407,7 +1358,6 @@ Extra context.
             KnowledgeKind::Issue,
             "semantic search",
             None,
-            KnowledgeListScope::Open,
             &FakeSemanticSearchClient {
                 hits: vec![SemanticSearchHit {
                     number: 11,
@@ -1466,14 +1416,8 @@ Extra context.
         }
         let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
 
-        let view = load_knowledge_bridge(
-            &repo,
-            KnowledgeKind::Issue,
-            Some(11),
-            false,
-            KnowledgeListScope::Open,
-        )
-        .expect("issue bridge");
+        let view = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(11), false)
+            .expect("issue bridge");
 
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.selected_number, Some(11));
@@ -1518,7 +1462,6 @@ Extra context.
             KnowledgeKind::Spec,
             "#22",
             None,
-            KnowledgeListScope::Open,
             &FakeSemanticSearchClient {
                 hits: vec![
                     SemanticSearchHit {
