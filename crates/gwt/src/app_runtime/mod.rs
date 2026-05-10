@@ -4904,29 +4904,168 @@ fn update_issue_branch_link_with_cache_dir(
 }
 
 #[cfg(unix)]
-fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
-    let project_root_owned = project_root.to_path_buf();
-    let id = id.to_string();
-    let data = data.to_vec();
-    let _ = std::thread::Builder::new()
-        .name("gwt-runtime-output-daemon-publish".to_string())
-        .spawn(move || {
+const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
+
+#[cfg(unix)]
+enum RuntimeDaemonPublish {
+    Output {
+        project_root: PathBuf,
+        id: String,
+        data: Vec<u8>,
+    },
+    Status {
+        project_root: PathBuf,
+        id: String,
+        status: WindowProcessStatus,
+        detail: Option<String>,
+    },
+    Hook {
+        project_root: PathBuf,
+        event: gwt::RuntimeHookEvent,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeDaemonPublishEnqueueError {
+    Full,
+    Disconnected,
+}
+
+#[cfg(unix)]
+static RUNTIME_DAEMON_PUBLISH_QUEUE: std::sync::OnceLock<
+    Option<std_mpsc::SyncSender<RuntimeDaemonPublish>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(unix)]
+fn runtime_daemon_publish_sender() -> Option<&'static std_mpsc::SyncSender<RuntimeDaemonPublish>> {
+    RUNTIME_DAEMON_PUBLISH_QUEUE
+        .get_or_init(|| {
+            let (sender, receiver) = std_mpsc::sync_channel(RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY);
+            match std::thread::Builder::new()
+                .name("gwt-runtime-daemon-publish-worker".to_string())
+                .spawn(move || run_runtime_daemon_publish_worker(receiver))
+            {
+                Ok(_handle) => Some(sender),
+                Err(err) => {
+                    tracing::debug!(error = %err, "runtime daemon publish worker spawn failed");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+#[cfg(unix)]
+fn run_runtime_daemon_publish_worker(receiver: std_mpsc::Receiver<RuntimeDaemonPublish>) {
+    for publish in receiver {
+        publish_runtime_daemon_event(publish);
+    }
+}
+
+#[cfg(unix)]
+fn try_enqueue_runtime_daemon_publish(
+    sender: &std_mpsc::SyncSender<RuntimeDaemonPublish>,
+    publish: RuntimeDaemonPublish,
+) -> Result<(), RuntimeDaemonPublishEnqueueError> {
+    sender.try_send(publish).map_err(|err| match err {
+        std_mpsc::TrySendError::Full(_) => RuntimeDaemonPublishEnqueueError::Full,
+        std_mpsc::TrySendError::Disconnected(_) => RuntimeDaemonPublishEnqueueError::Disconnected,
+    })
+}
+
+#[cfg(unix)]
+fn enqueue_runtime_daemon_publish(publish: RuntimeDaemonPublish) {
+    let Some(sender) = runtime_daemon_publish_sender() else {
+        return;
+    };
+    if let Err(err) = try_enqueue_runtime_daemon_publish(sender, publish) {
+        tracing::debug!(
+            ?err,
+            "runtime daemon publish queue rejected event (non-fatal)"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn publish_runtime_daemon_event(publish: RuntimeDaemonPublish) {
+    match publish {
+        RuntimeDaemonPublish::Output {
+            project_root,
+            id,
+            data,
+        } => {
             let payload =
                 gwt::runtime_daemon_events::runtime_output_payload(&id, &data, std::process::id());
             let result = gwt::daemon_publisher::publish_event(
-                &project_root_owned,
+                &project_root,
                 gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL,
                 payload,
             );
             if let Err(err) = result {
                 tracing::debug!(
                     error = %err,
-                    project_root = %project_root_owned.display(),
+                    project_root = %project_root.display(),
                     window_id = %id,
                     "runtime output daemon publish failed (non-fatal)"
                 );
             }
-        });
+        }
+        RuntimeDaemonPublish::Status {
+            project_root,
+            id,
+            status,
+            detail,
+        } => {
+            let payload = gwt::runtime_daemon_events::runtime_status_payload(
+                &id,
+                status,
+                detail,
+                std::process::id(),
+            );
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root,
+                gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root.display(),
+                    window_id = %id,
+                    "runtime status daemon publish failed (non-fatal)"
+                );
+            }
+        }
+        RuntimeDaemonPublish::Hook {
+            project_root,
+            event,
+        } => {
+            let payload =
+                gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
+            let result = gwt::daemon_publisher::publish_event(
+                &project_root,
+                gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
+                payload,
+            );
+            if let Err(err) = result {
+                tracing::debug!(
+                    error = %err,
+                    project_root = %project_root.display(),
+                    "runtime hook daemon publish failed (non-fatal)"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn publish_runtime_output_change(project_root: &Path, id: &str, data: &[u8]) {
+    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Output {
+        project_root: project_root.to_path_buf(),
+        id: id.to_string(),
+        data: data.to_vec(),
+    });
 }
 
 #[cfg(not(unix))]
@@ -4939,31 +5078,12 @@ fn publish_runtime_status_change(
     status: WindowProcessStatus,
     detail: Option<String>,
 ) {
-    let project_root_owned = project_root.to_path_buf();
-    let id = id.to_string();
-    let _ = std::thread::Builder::new()
-        .name("gwt-runtime-status-daemon-publish".to_string())
-        .spawn(move || {
-            let payload = gwt::runtime_daemon_events::runtime_status_payload(
-                &id,
-                status,
-                detail,
-                std::process::id(),
-            );
-            let result = gwt::daemon_publisher::publish_event(
-                &project_root_owned,
-                gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL,
-                payload,
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root_owned.display(),
-                    window_id = %id,
-                    "runtime status daemon publish failed (non-fatal)"
-                );
-            }
-        });
+    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Status {
+        project_root: project_root.to_path_buf(),
+        id: id.to_string(),
+        status,
+        detail,
+    });
 }
 
 #[cfg(not(unix))]
@@ -4977,26 +5097,10 @@ fn publish_runtime_status_change(
 
 #[cfg(unix)]
 fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
-    let project_root_owned = project_root.to_path_buf();
-    let event = event.clone();
-    let _ = std::thread::Builder::new()
-        .name("gwt-runtime-hook-daemon-publish".to_string())
-        .spawn(move || {
-            let payload =
-                gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
-            let result = gwt::daemon_publisher::publish_event(
-                &project_root_owned,
-                gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
-                payload,
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root_owned.display(),
-                    "runtime hook daemon publish failed (non-fatal)"
-                );
-            }
-        });
+    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Hook {
+        project_root: project_root.to_path_buf(),
+        event: event.clone(),
+    });
 }
 
 #[cfg(not(unix))]
@@ -5049,6 +5153,35 @@ mod tests {
         WorkspaceResumeContext,
     };
     use crate::{combined_window_id, geometry_to_pty_size, same_worktree_path, PtyWriterRegistry};
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let project_root = PathBuf::from("/tmp/gwt-project");
+
+        assert!(super::try_enqueue_runtime_daemon_publish(
+            &sender,
+            super::RuntimeDaemonPublish::Output {
+                project_root: project_root.clone(),
+                id: "tab-1::shell-1".to_string(),
+                data: b"first".to_vec(),
+            },
+        )
+        .is_ok());
+        assert!(matches!(
+            super::try_enqueue_runtime_daemon_publish(
+                &sender,
+                super::RuntimeDaemonPublish::Status {
+                    project_root,
+                    id: "tab-1::shell-1".to_string(),
+                    status: WindowProcessStatus::Running,
+                    detail: None,
+                },
+            ),
+            Err(super::RuntimeDaemonPublishEnqueueError::Full)
+        ));
+    }
 
     #[derive(Debug, Clone)]
     struct CapturedTracingEvent {
