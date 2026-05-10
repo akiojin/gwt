@@ -1539,7 +1539,7 @@
           if (!agent?.window_id) return false;
           const windowData = workspaceWindowById(agent.window_id);
           if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) return false;
-          const status = String(windowData.status || "running").toLowerCase();
+          const status = runtimeStateForWindow(windowData);
           return status !== "stopped" && status !== "exited" && status !== "error";
         });
       }
@@ -1575,6 +1575,24 @@
           default:
             return "Unknown";
         }
+      }
+
+      function agentRuntimeStatusLabel(agent) {
+        const windowData = workspaceWindowById(agent.window_id);
+        if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+          const runtimeState = runtimeStateForWindow(windowData);
+          return windowRuntimeLabel(runtimeState);
+        }
+        return agentStatusLabel(agent.status_category);
+      }
+
+      function liveSessionStatusLabel(session) {
+        const fallback = session.active ? "running" : "stopped";
+        const runtimeState = normalizeWindowRuntimeState(
+          session.runtime_status || fallback,
+          "agent",
+        );
+        return `${windowRuntimeLabel(runtimeState)} window`;
       }
 
       function focusActiveWorkAgentWindow(agent) {
@@ -1758,7 +1776,7 @@
           if (coordinationLabel) {
             chips.appendChild(createNode("div", "op-agent-kind", coordinationLabel));
           }
-          chips.appendChild(createNode("div", "op-agent-state", agentStatusLabel(state)));
+          chips.appendChild(createNode("div", "op-agent-state", agentRuntimeStatusLabel(agent)));
           head.appendChild(chips);
           card.appendChild(head);
 
@@ -4525,7 +4543,7 @@
                 createNode(
                   "div",
                   "live-session-status",
-                  session.active ? "Active window" : "Running window",
+                  liveSessionStatusLabel(session),
                 ),
               );
               if (session.detail) {

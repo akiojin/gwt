@@ -359,6 +359,16 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
     /function\s+agentStatusLabel\(state\)[\s\S]+Running[\s\S]+Blocked[\s\S]+Idle[\s\S]+Done/,
     "expected raw active/blocked/idle/done status values to be mapped to user-facing labels",
   );
+  assert.match(
+    appSource,
+    /function\s+agentRuntimeStatusLabel\(agent\)[\s\S]+runtimeStateForWindow\(windowData\)[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+agentStatusLabel\(agent\.status_category\)/,
+    "expected Active Work agent cards to derive their visible runtime label from the live window state before falling back to workspace category",
+  );
+  assert.match(
+    appSource,
+    /createNode\("div",\s*"op-agent-state",\s*agentRuntimeStatusLabel\(agent\)\)/,
+    "Active Work must render Waiting from WindowState even when workspace status_category remains active",
+  );
   assert.doesNotMatch(
     appSource,
     /createNode\("div",\s*"op-agent-state",\s*state\)/,
@@ -368,6 +378,19 @@ test("Active Work sidebar only renders while live Agent windows are focusable", 
     appSource,
     /function\s+renderAppState\(nextState\)[\s\S]+renderActiveWorkOverview\(\)/,
     "expected workspace changes to re-evaluate whether Active Work agents are still focusable",
+  );
+});
+
+test("Launch Wizard live sessions render window runtime status", () => {
+  assert.match(
+    appSource,
+    /function\s+liveSessionStatusLabel\(session\)[\s\S]+session\.runtime_status[\s\S]+windowRuntimeLabel\(runtimeState\)[\s\S]+window/,
+    "expected live-session rows to label Running/Waiting/Error from runtime_status",
+  );
+  assert.match(
+    appSource,
+    /createNode\(\s*"div",\s*"live-session-status",\s*liveSessionStatusLabel\(session\),?\s*\)/,
+    "expected Launch Wizard live-session status copy to use runtime_status instead of active boolean copy",
   );
 });
 
