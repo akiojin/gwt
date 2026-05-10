@@ -171,7 +171,7 @@ fn handle_poll_outcome(
                 _ => return state.on_success_uptodate(),
             };
             let (should_publish, next) = state.on_success_available(&latest);
-            if should_publish {
+            if should_publish && !pending_manifest_covers(&latest) {
                 let _ = update_proxy.send_event(UserEvent::UpdateAvailable(outcome));
             }
             next
@@ -179,6 +179,16 @@ fn handle_poll_outcome(
         StartupUpdateAction::Stop => state.on_success_uptodate(),
         StartupUpdateAction::Retry => state.on_failure(),
     }
+}
+
+/// SPEC-2041 Phase 19 (T-134): suppress polling broadcasts for versions the
+/// user has already deferred via `Later`. Without this guard the same release
+/// would re-pop the CTA every 5 minutes even though the binary is already
+/// staged in `~/.gwt/pending-update/`.
+fn pending_manifest_covers(latest: &str) -> bool {
+    gwt_core::update::load_pending_update_manifest()
+        .map(|m| m.version == latest)
+        .unwrap_or(false)
 }
 
 trait UpdateApplyOps {
@@ -399,6 +409,30 @@ fn start_update_apply_with_ops(
     let payload = ops
         .prepare_update(&latest, &asset_url)
         .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
+    apply_prepared_payload_with_ops(
+        ops,
+        &latest,
+        payload,
+        current_exe,
+        restart_args,
+        old_pid,
+        use_helper_copy,
+    )
+}
+
+/// SPEC-2041 Phase 19 (T-130): commit an already-prepared update by writing
+/// the restart-args file, optionally creating a helper copy on Windows, and
+/// spawning the helper subprocess. Caller is responsible for `exit(0)` once
+/// this returns `Ok` so the helper sees the parent close.
+fn apply_prepared_payload_with_ops(
+    ops: &mut impl UpdateApplyOps,
+    latest: &str,
+    payload: gwt_core::update::PreparedPayload,
+    current_exe: &Path,
+    restart_args: Vec<String>,
+    old_pid: u32,
+    use_helper_copy: bool,
+) -> Result<(), String> {
     let args_file = (match &payload {
         gwt_core::update::PreparedPayload::PortableBinary { path }
         | gwt_core::update::PreparedPayload::Installer { path, .. } => {
@@ -409,7 +443,7 @@ fn start_update_apply_with_ops(
     ops.write_restart_args_file(&args_file, restart_args)
         .map_err(|err| format!("Failed to write update restart args: {err}"))?;
     let helper_exe = if use_helper_copy {
-        ops.make_helper_copy(current_exe, &latest)
+        ops.make_helper_copy(current_exe, latest)
             .map_err(|err| format!("Failed to prepare update helper: {err}"))?
     } else {
         current_exe.to_path_buf()
@@ -428,6 +462,69 @@ fn start_update_apply_with_ops(
                 &args_file,
             )
             .map_err(|err| format!("Failed to start update installer: {err}")),
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-058/062): consume an already-persisted manifest.
+/// Used both by `Restart now` (when the user clicked through the modal) and
+/// by the bootstrap path (when a previous run wrote the manifest via
+/// `Later`). After the helper subprocess is spawned the manifest is removed
+/// so a future launch does not re-apply the same payload.
+pub fn apply_pending_manifest_and_exit(
+    manifest: gwt_core::update::PendingUpdateManifest,
+) -> Result<(), String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
+    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    let latest = manifest.version.clone();
+    let payload = manifest.payload.clone();
+    let mut ops = RealUpdateApplyOps::default();
+    apply_prepared_payload_with_ops(
+        &mut ops,
+        &latest,
+        payload,
+        &current_exe,
+        restart_args,
+        std::process::id(),
+        cfg!(windows),
+    )?;
+    // Best-effort cleanup so the next launch starts from a clean state. The
+    // helper has already been spawned so failures here are not fatal.
+    let _ = gwt_core::update::clear_pending_update_manifest();
+    std::process::exit(0);
+}
+
+/// SPEC-2041 Phase 19 (T-133): bootstrap-time swap. Returns `true` when a
+/// pending manifest was found, applied, and the parent process is about to
+/// `exit(0)` (caller should not return). Returns `false` when there is no
+/// applicable pending update so the caller continues normal startup.
+///
+/// Intentionally `pub` so `crates/gwt/src/main.rs` can call this before
+/// any window setup. Stale manifests (older than the running binary, or
+/// pointing at a missing payload) are quietly cleared so they don't keep
+/// rewinding launches.
+pub fn try_apply_pending_update_at_bootstrap() -> bool {
+    let manifest = match gwt_core::update::load_pending_update_manifest() {
+        Some(m) => m,
+        None => return false,
+    };
+    let current_version = env!("CARGO_PKG_VERSION");
+    if !gwt_core::update::pending_version_is_newer(&manifest.version, current_version) {
+        // The pending payload is for our current (or older) version. Drop it
+        // so we don't loop forever.
+        let _ = gwt_core::update::clear_pending_update_manifest();
+        return false;
+    }
+    match apply_pending_manifest_and_exit(manifest) {
+        Ok(()) => true, // unreachable: apply_pending_manifest_and_exit calls exit(0)
+        Err(err) => {
+            // Apply failed before exit. Clear the manifest so we don't loop.
+            // Tracing isn't initialized this early in main(), so log via stderr
+            // for post-mortem inspection.
+            eprintln!("gwt bootstrap pending-update apply failed: {err}");
+            let _ = gwt_core::update::clear_pending_update_manifest();
+            false
+        }
     }
 }
 

@@ -103,17 +103,181 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstallerKind {
     MacDmg,
     MacPkg,
     WindowsMsi,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PreparedPayload {
     PortableBinary { path: PathBuf },
     Installer { path: PathBuf, kind: InstallerKind },
+}
+
+/// SPEC-2041 Phase 19 (FR-056/059/062): on-disk manifest pointing at a
+/// download that is ready to apply but has not been committed (helper-spawn +
+/// exit) yet. Written when the user defers the apply with `Later` and read by
+/// the bootstrap path on the next gwt launch so the new version takes effect
+/// transparently.
+///
+/// The manifest lives at `~/.gwt/pending-update/manifest.json` and is the
+/// single source of truth for "is there a pending apply". Removing the file
+/// (e.g. after the apply succeeds, or because the manifest is stale) is how
+/// the flow returns to the regular polling loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingUpdateManifest {
+    /// Target version (without the leading `v`).
+    pub version: String,
+    /// Source release URL the asset was downloaded from.
+    pub asset_url: String,
+    /// Prepared payload on disk (extracted binary or installer file).
+    pub payload: PreparedPayload,
+    /// RFC3339 timestamp of when the download finished.
+    pub downloaded_at: String,
+}
+
+/// `~/.gwt/pending-update/`. Created on demand by
+/// [`persist_pending_update_manifest`].
+pub fn pending_update_dir() -> PathBuf {
+    crate::paths::gwt_home().join("pending-update")
+}
+
+/// `~/.gwt/pending-update/manifest.json`. Single source of truth for "is there
+/// a pending apply ready for the next launch".
+pub fn pending_update_manifest_path() -> PathBuf {
+    pending_update_dir().join("manifest.json")
+}
+
+/// SPEC-2041 Phase 19 (FR-059): atomically write the manifest. Callers should
+/// invoke this after `Later` so the next launch sees the pending payload.
+pub fn persist_pending_update_manifest(manifest: &PendingUpdateManifest) -> Result<(), String> {
+    persist_pending_update_manifest_in(&pending_update_dir(), manifest)
+}
+
+/// Test-friendly variant: write the manifest into an explicit directory. The
+/// production path uses [`persist_pending_update_manifest`] which targets
+/// [`pending_update_dir`].
+pub fn persist_pending_update_manifest_in(
+    dir: &Path,
+    manifest: &PendingUpdateManifest,
+) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("Failed to create pending-update dir: {e}"))?;
+    let path = dir.join("manifest.json");
+    let tmp = dir.join("manifest.json.tmp");
+    let json = serde_json::to_string_pretty(manifest)
+        .map_err(|e| format!("Failed to serialize pending manifest: {e}"))?;
+    fs::write(&tmp, json).map_err(|e| format!("Failed to write pending manifest: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit pending manifest: {e}"))?;
+    Ok(())
+}
+
+/// SPEC-2041 Phase 19 (FR-062): load the manifest if it exists. Returns `None`
+/// when the file is absent, malformed, or the referenced payload no longer
+/// exists on disk (so callers don't have to repeat that check).
+pub fn load_pending_update_manifest() -> Option<PendingUpdateManifest> {
+    load_pending_update_manifest_in(&pending_update_dir())
+}
+
+/// Test-friendly variant: load from an explicit directory.
+pub fn load_pending_update_manifest_in(dir: &Path) -> Option<PendingUpdateManifest> {
+    let path = dir.join("manifest.json");
+    let bytes = fs::read(&path).ok()?;
+    let manifest: PendingUpdateManifest = serde_json::from_slice(&bytes).ok()?;
+    let payload_path = match &manifest.payload {
+        PreparedPayload::PortableBinary { path } | PreparedPayload::Installer { path, .. } => path,
+    };
+    if !payload_path.exists() {
+        return None;
+    }
+    Some(manifest)
+}
+
+/// Best-effort: remove the manifest. Failures are silently ignored because
+/// this is called from cleanup paths (post-apply, post-stale-detect) where
+/// retrying is not useful.
+pub fn clear_pending_update_manifest() -> Result<(), String> {
+    clear_pending_update_manifest_in(&pending_update_dir())
+}
+
+/// Test-friendly variant: clear from an explicit directory.
+pub fn clear_pending_update_manifest_in(dir: &Path) -> Result<(), String> {
+    let path = dir.join("manifest.json");
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("Failed to remove pending manifest: {err}")),
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-065): per-day log file for the post-click update
+/// flow. Stages and failure reasons append as JSONL entries so the failure
+/// modal's `[Open log]` button has a stable target. Format:
+/// `~/.gwt/logs/update-YYYY-MM-DD.log`.
+pub fn update_log_path() -> PathBuf {
+    update_log_path_for(chrono::Utc::now())
+}
+
+/// Test-friendly variant: derive the log filename from a fixed timestamp.
+pub fn update_log_path_for<Tz>(now: chrono::DateTime<Tz>) -> PathBuf
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let date = now.format("%Y-%m-%d").to_string();
+    crate::paths::gwt_logs_dir().join(format!("update-{date}.log"))
+}
+
+/// SPEC-2041 Phase 19 (FR-065): append a structured stage entry to the
+/// per-day update log. Failures are silently dropped because logging must
+/// never block the apply path. Each line is a JSON object so downstream
+/// tooling (and the frontend `[Open log]` action) can parse it.
+pub fn log_update_event(stage: &str, fields: &[(&str, &str)]) {
+    let path = update_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "ts".to_string(),
+        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    entry.insert(
+        "stage".to_string(),
+        serde_json::Value::String(stage.to_string()),
+    );
+    for (k, v) in fields {
+        entry.insert(
+            (*k).to_string(),
+            serde_json::Value::String((*v).to_string()),
+        );
+    }
+    let line = match serde_json::to_string(&entry) {
+        Ok(s) => format!("{s}\n"),
+        Err(_) => return,
+    };
+    use std::io::Write;
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Compare two semver-ish versions, returning `true` when `candidate` is
+/// strictly newer than `current`. Falls back to string ordering when either
+/// side fails to parse so a malformed manifest never silently triggers a
+/// downgrade.
+pub fn pending_version_is_newer(candidate: &str, current: &str) -> bool {
+    let trim = |v: &str| v.trim().trim_start_matches('v').to_string();
+    let candidate_trim = trim(candidate);
+    let current_trim = trim(current);
+    match (
+        Version::parse(&candidate_trim),
+        Version::parse(&current_trim),
+    ) {
+        (Ok(c), Ok(curr)) => c > curr,
+        _ => candidate_trim.as_str() > current_trim.as_str(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3034,5 +3198,74 @@ mod tests {
         )
         .unwrap_err();
         assert!(mac_dmg_err.contains("mac_dmg installer can only run on macOS"));
+    }
+
+    // SPEC-2041 Phase 19 (T-126): pending-update manifest round trip.
+    #[test]
+    fn pending_manifest_persist_load_clear_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write a fake payload so load_pending_update_manifest's existence
+        // check passes.
+        let payload_path = dir.path().join("v9.26.0").join("gwt");
+        fs::create_dir_all(payload_path.parent().unwrap()).unwrap();
+        fs::write(&payload_path, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let manifest = PendingUpdateManifest {
+            version: "9.26.0".to_string(),
+            asset_url: "https://example.invalid/v9.26.0/gwt-macos-arm64.tar.gz".to_string(),
+            payload: PreparedPayload::PortableBinary {
+                path: payload_path.clone(),
+            },
+            downloaded_at: "2026-05-10T13:00:00Z".to_string(),
+        };
+
+        // Persist + load returns the same manifest.
+        persist_pending_update_manifest_in(dir.path(), &manifest).expect("persist");
+        let loaded = load_pending_update_manifest_in(dir.path()).expect("load");
+        assert_eq!(loaded, manifest);
+
+        // Clear removes it; subsequent loads return None.
+        clear_pending_update_manifest_in(dir.path()).expect("clear");
+        assert!(load_pending_update_manifest_in(dir.path()).is_none());
+
+        // Clear is idempotent on missing manifest.
+        clear_pending_update_manifest_in(dir.path()).expect("clear-idempotent");
+    }
+
+    #[test]
+    fn pending_manifest_load_returns_none_when_payload_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing_payload = dir.path().join("missing").join("gwt");
+        let manifest = PendingUpdateManifest {
+            version: "9.26.0".to_string(),
+            asset_url: "https://example.invalid/asset.tar.gz".to_string(),
+            payload: PreparedPayload::PortableBinary {
+                path: missing_payload,
+            },
+            downloaded_at: "2026-05-10T13:00:00Z".to_string(),
+        };
+        persist_pending_update_manifest_in(dir.path(), &manifest).expect("persist");
+        // Stale manifest (payload not on disk) is treated as absent so the
+        // bootstrap path doesn't loop forever on a missing file.
+        assert!(load_pending_update_manifest_in(dir.path()).is_none());
+    }
+
+    #[test]
+    fn pending_manifest_load_returns_none_when_file_malformed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("manifest.json"), b"{not json").unwrap();
+        assert!(load_pending_update_manifest_in(dir.path()).is_none());
+    }
+
+    #[test]
+    fn pending_version_is_newer_compares_semver() {
+        assert!(pending_version_is_newer("9.26.0", "9.25.0"));
+        assert!(pending_version_is_newer("v9.26.0", "v9.25.0"));
+        assert!(pending_version_is_newer("10.0.0", "9.99.99"));
+        assert!(!pending_version_is_newer("9.25.0", "9.25.0"));
+        assert!(!pending_version_is_newer("9.24.0", "9.25.0"));
+        // Pre-release: 9.26.0-rc.1 is newer than 9.25.0 but older than 9.26.0.
+        assert!(pending_version_is_newer("9.26.0-rc.1", "9.25.0"));
+        assert!(!pending_version_is_newer("9.26.0-rc.1", "9.26.0"));
     }
 }
