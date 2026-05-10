@@ -36,13 +36,24 @@ pub fn execute_migration(
     })?;
 
     progress(MigrationPhase::Backup, 0);
-    let snapshot = backup::create(project_root).map_err(|e| MigrationError {
-        phase: MigrationPhase::Backup,
-        message: e.to_string(),
-        recovery: RecoveryState::Untouched,
-    })?;
+    let planned_worktrees = git_migration::list_worktrees(project_root).unwrap_or_default();
+    let external_roots = external_worktree_roots(project_root, &planned_worktrees);
+    let snapshot =
+        backup::create_with_external_roots(project_root, &external_roots).map_err(|e| {
+            MigrationError {
+                phase: MigrationPhase::Backup,
+                message: e.to_string(),
+                recovery: RecoveryState::Untouched,
+            }
+        })?;
 
-    let outcome = run_post_backup(project_root, &options, &snapshot, &mut progress);
+    let outcome = run_post_backup(
+        project_root,
+        &options,
+        &snapshot,
+        &planned_worktrees,
+        &mut progress,
+    );
 
     match outcome {
         Ok(out) => {
@@ -74,6 +85,7 @@ fn run_post_backup(
     project_root: &Path,
     options: &MigrationOptions,
     snapshot: &BackupSnapshot,
+    planned_worktrees: &[WorktreeMigration],
     progress: &mut impl FnMut(MigrationPhase, u8),
 ) -> Result<MigrationOutcome, MigrationError> {
     progress(MigrationPhase::Bareify, 0);
@@ -104,7 +116,13 @@ fn run_post_backup(
     })?;
 
     progress(MigrationPhase::Worktrees, 0);
-    let mut worktrees = migration_worktrees(project_root, &dot_git, &bare_repo_path, options)?;
+    let mut worktrees = migration_worktrees(
+        project_root,
+        &dot_git,
+        &bare_repo_path,
+        options,
+        planned_worktrees,
+    )?;
     worktrees.sort_by_key(|worktree| !worktree.is_main_repo);
     remove_copied_worktree_metadata(&bare_repo_path).map_err(|e| MigrationError {
         phase: MigrationPhase::Worktrees,
@@ -222,12 +240,32 @@ fn run_post_backup(
     })
 }
 
+fn external_worktree_roots(project_root: &Path, worktrees: &[WorktreeMigration]) -> Vec<PathBuf> {
+    worktrees
+        .iter()
+        .filter(|worktree| !worktree.is_main_repo)
+        .filter(|worktree| !path_is_inside(&worktree.path, project_root))
+        .map(|worktree| worktree.path.clone())
+        .collect()
+}
+
+fn path_is_inside(path: &Path, root: &Path) -> bool {
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let canonical_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical_path == canonical_root || canonical_path.starts_with(&canonical_root)
+}
+
 fn migration_worktrees(
     project_root: &Path,
     dot_git: &Path,
     bare_repo_path: &Path,
     options: &MigrationOptions,
+    planned_worktrees: &[WorktreeMigration],
 ) -> Result<Vec<WorktreeMigration>, MigrationError> {
+    if !planned_worktrees.is_empty() {
+        return Ok(planned_worktrees.to_vec());
+    }
+
     match git_migration::list_worktrees(project_root) {
         Ok(worktrees) if !worktrees.is_empty() => Ok(worktrees),
         Ok(_) | Err(_) => {

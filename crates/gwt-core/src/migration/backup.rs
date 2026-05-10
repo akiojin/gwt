@@ -31,12 +31,21 @@ impl From<io::Error> for BackupError {
 
 /// The directory name reserved for migration backups under `<project_root>`.
 pub const BACKUP_DIR_NAME: &str = ".gwt-migration-backup";
+const EXTERNAL_BACKUPS_DIR_NAME: &str = ".external-worktrees";
 
 /// Snapshot returned by [`create`]; used by rollback to find the source.
 #[derive(Debug, Clone)]
 pub struct BackupSnapshot {
     pub project_root: PathBuf,
     pub backup_dir: PathBuf,
+    pub external_roots: Vec<ExternalBackupSnapshot>,
+}
+
+/// Backup copy for a linked worktree that lives outside `project_root`.
+#[derive(Debug, Clone)]
+pub struct ExternalBackupSnapshot {
+    pub original_path: PathBuf,
+    pub backup_path: PathBuf,
 }
 
 /// Create a full snapshot of `project_root` into
@@ -44,6 +53,15 @@ pub struct BackupSnapshot {
 /// is renamed with a UTC timestamp suffix so the previous attempt is not
 /// silently overwritten.
 pub fn create(project_root: &Path) -> Result<BackupSnapshot, BackupError> {
+    create_with_external_roots(project_root, &[])
+}
+
+/// Create a full project snapshot plus explicit copies of linked worktrees that
+/// live outside `project_root`.
+pub fn create_with_external_roots(
+    project_root: &Path,
+    external_roots: &[PathBuf],
+) -> Result<BackupSnapshot, BackupError> {
     let backup_dir = project_root.join(BACKUP_DIR_NAME);
 
     if backup_dir.exists() {
@@ -57,9 +75,25 @@ pub fn create(project_root: &Path) -> Result<BackupSnapshot, BackupError> {
     fs::create_dir_all(&backup_dir)?;
     copy_dir_contents(project_root, &backup_dir, &[BACKUP_DIR_NAME])?;
 
+    let mut external_snapshots = Vec::with_capacity(external_roots.len());
+    for (index, external_root) in external_roots.iter().enumerate() {
+        if !external_root.exists() {
+            continue;
+        }
+        let backup_path = backup_dir
+            .join(EXTERNAL_BACKUPS_DIR_NAME)
+            .join(format!("{index}-{}", backup_name(external_root)));
+        copy_dir_contents(external_root, &backup_path, &[])?;
+        external_snapshots.push(ExternalBackupSnapshot {
+            original_path: external_root.clone(),
+            backup_path,
+        });
+    }
+
     Ok(BackupSnapshot {
         project_root: project_root.to_path_buf(),
         backup_dir,
+        external_roots: external_snapshots,
     })
 }
 
@@ -93,7 +127,15 @@ pub fn restore(snapshot: &BackupSnapshot) -> Result<(), BackupError> {
     }
 
     // Step 2: copy backup contents back to project root.
-    copy_dir_contents(backup_dir, project_root, &[])?;
+    copy_dir_contents(backup_dir, project_root, &[EXTERNAL_BACKUPS_DIR_NAME])?;
+
+    for external in &snapshot.external_roots {
+        remove_path_if_exists(&external.original_path)?;
+        if let Some(parent) = external.original_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        copy_dir_contents(&external.backup_path, &external.original_path, &[])?;
+    }
 
     Ok(())
 }
@@ -155,4 +197,33 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> io::Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path)
+    } else if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        Ok(())
+    }
+}
+
+fn backup_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("worktree")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

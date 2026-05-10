@@ -340,6 +340,88 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
 }
 
 #[test]
+fn t108_e2e_worktree_failure_rolls_back_external_linked_worktree() {
+    // SPEC-1934 US-6.6 / FR-028: rollback must restore linked worktrees that
+    // live outside the project root. The branch name intentionally maps to the
+    // same path as the new bare repository, forcing the worktree phase to fail
+    // after the old external worktree has been evacuated and removed.
+    let sandbox = tempfile::tempdir().unwrap();
+    let project = sandbox.path().join("repo");
+    let external_parent = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    init_repo_with_commit(&project);
+
+    let project_dir_name = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap()
+        .to_string();
+    let conflicting_branch = format!("{project_dir_name}.git");
+    let external_path = external_parent.path().join("external-worktree");
+
+    run_git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &conflicting_branch,
+            external_path.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(
+        external_path.join("README.md"),
+        "# sample external dirty branch\n",
+    )
+    .unwrap();
+    std::fs::write(external_path.join("scratch.txt"), "external untracked").unwrap();
+
+    let result = execute_migration(&project, MigrationOptions::default(), |_phase, _pct| {});
+
+    let err = result.expect_err("conflicting worktree target must fail migration");
+    assert_eq!(err.phase, MigrationPhase::Worktrees);
+    assert_eq!(err.recovery, RecoveryState::RolledBack);
+
+    assert!(
+        project.join(".git").is_dir(),
+        "original project .git directory must be restored"
+    );
+    assert!(
+        !project.join(".gwt/project.toml").exists(),
+        "failed migration must not leave project.toml"
+    );
+    assert!(
+        external_path.is_dir(),
+        "external linked worktree must be restored after rollback"
+    );
+    assert!(
+        external_path.join(".git").is_file(),
+        "external linked worktree git marker must be restored"
+    );
+    assert_eq!(
+        std::fs::read_to_string(external_path.join("README.md")).unwrap(),
+        "# sample external dirty branch\n",
+        "external tracked modifications must survive rollback"
+    );
+    assert_eq!(
+        std::fs::read_to_string(external_path.join("scratch.txt")).unwrap(),
+        "external untracked",
+        "external untracked files must survive rollback"
+    );
+
+    let status = gwt_core::process::hidden_command("git")
+        .args(["status", "--short"])
+        .current_dir(&external_path)
+        .output()
+        .expect("git status");
+    assert!(
+        status.status.success(),
+        "external worktree must remain a valid Git worktree: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+#[test]
 fn t107_repo_hash_remains_stable_across_migration() {
     // SPEC-2021 / SC-019: project_scope_hash is computed from the origin URL
     // (or the path when no origin exists). Migration must not move the
