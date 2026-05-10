@@ -353,14 +353,20 @@ pub(crate) fn spawn_per_cell_rebuild_with(
         dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static,
     >,
 ) -> ProjectIndexBootstrapRequest {
-    let project_root_label = project_root.display().to_string();
-    let project_root_for_closure = project_root.clone();
+    // Canonicalise so the proxy events share the same project_root key the
+    // bootstrap path uses (`spawn_with` -> `normalize_project_root`).
+    // Without this, the frontend `indexStatusByProjectRoot` would keep two
+    // separate entries for the same project (raw vs canonical path),
+    // breaking Settings.Index real-time updates after a per-cell rebuild.
+    let canonical_project_root = normalize_project_root(&project_root);
+    let project_root_label = canonical_project_root.display().to_string();
+    let project_root_for_closure = canonical_project_root.clone();
     let worktree_hash_for_closure = worktree_hash.clone();
     let proxy_for_closure = proxy.clone();
     let rebuild_runner_for_closure = rebuild_runner.clone();
     let final_status_for_closure = final_status_provider.clone();
 
-    service.spawn_rebuild_with(project_root, scope, worktree_hash, move || {
+    service.spawn_rebuild_with(canonical_project_root, scope, worktree_hash, move || {
         let started_at = chrono::Utc::now();
         // Optimistic transition: switch the badge to `repairing(0/1)`
         // immediately so observers see auto-rebuild start before the
@@ -610,6 +616,140 @@ mod tests {
             gwt::ProjectIndexStatusState::Ready,
         );
         assert_eq!(status.detail, "retry ready");
+    }
+
+    #[test]
+    fn spawn_per_cell_rebuild_emits_repairing_then_final_status_via_proxy() {
+        // SPEC-1939 T-IDX-109 (subset): exercise the per-cell IPC path
+        // end-to-end by injecting a fake runner + final-status provider so
+        // the test does not invoke real Python. The recorded proxy events
+        // must follow `Repairing(0/1)` -> final, mirroring what the
+        // frontend `setIndexStatus` consumes from WebSocket.
+        let service = super::ProjectIndexBootstrapService::new_for_test();
+        let temp = tempdir().expect("tempdir");
+        let project_root = temp.path().to_path_buf();
+        // spawn_per_cell_rebuild_with canonicalises the project root so
+        // proxy events share a key with the bootstrap path.
+        let project_root_label = dunce::canonicalize(&project_root)
+            .unwrap_or_else(|_| project_root.clone())
+            .display()
+            .to_string();
+        let (proxy, events) = AppEventProxy::stub();
+
+        let runner_calls = Arc::new(AtomicUsize::new(0));
+        let runner_calls_handle = runner_calls.clone();
+        let rebuild_runner: Arc<gwt::IndexRebuildRunnerFn> =
+            Arc::new(move |_root, scope, worktree_hash| {
+                assert_eq!(scope, IndexRebuildScope::Files);
+                assert_eq!(worktree_hash, Some("wtAhash"));
+                runner_calls_handle.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        let final_status_provider: Arc<
+            dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static,
+        > = Arc::new(|_path| {
+            gwt::ProjectIndexStatusView::new(
+                gwt::ProjectIndexStatusState::Ready,
+                "ready after IPC rebuild",
+            )
+        });
+
+        let request = super::spawn_per_cell_rebuild_with(
+            service,
+            proxy,
+            project_root.clone(),
+            IndexRebuildScope::Files,
+            Some("wtAhash".to_string()),
+            rebuild_runner,
+            final_status_provider,
+        );
+        assert_eq!(request, super::ProjectIndexBootstrapRequest::Spawned);
+
+        let final_view = wait_for_project_status(
+            &events,
+            &project_root_label,
+            gwt::ProjectIndexStatusState::Ready,
+        );
+        assert_eq!(final_view.detail, "ready after IPC rebuild");
+        assert_eq!(runner_calls.load(Ordering::SeqCst), 1);
+
+        // The transient Repairing event must have been emitted before the
+        // Ready event.
+        let recorded = events.lock().expect("events");
+        let mut saw_repairing_before_ready = false;
+        for event in recorded.iter() {
+            if let UserEvent::ProjectIndexStatus {
+                project_root,
+                status,
+            } = event
+            {
+                if project_root != &project_root_label {
+                    continue;
+                }
+                if status.state == gwt::ProjectIndexStatusState::Repairing {
+                    saw_repairing_before_ready = true;
+                    let progress = status.progress.expect("progress on repairing");
+                    assert_eq!(progress.scopes_total, 1);
+                }
+                if status.state == gwt::ProjectIndexStatusState::Ready {
+                    assert!(
+                        saw_repairing_before_ready,
+                        "Ready must follow at least one Repairing event"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_per_cell_rebuild_emits_error_state_when_runner_fails() {
+        // SPEC-1939 T-IDX-110 (subset): runner failure surfaces as `error`
+        // with the rebuild reason, mirroring what the badge / Settings.Index
+        // shows on auto-rebuild failure.
+        let service = super::ProjectIndexBootstrapService::new_for_test();
+        let temp = tempdir().expect("tempdir");
+        let project_root = temp.path().to_path_buf();
+        // spawn_per_cell_rebuild_with canonicalises the project root so
+        // proxy events share a key with the bootstrap path.
+        let project_root_label = dunce::canonicalize(&project_root)
+            .unwrap_or_else(|_| project_root.clone())
+            .display()
+            .to_string();
+        let (proxy, events) = AppEventProxy::stub();
+
+        let rebuild_runner: Arc<gwt::IndexRebuildRunnerFn> =
+            Arc::new(|_root, _scope, _worktree_hash| Err("synthetic IPC failure".to_string()));
+        let final_status_provider: Arc<
+            dyn Fn(&Path) -> gwt::ProjectIndexStatusView + Send + Sync + 'static,
+        > = Arc::new(|_path| {
+            gwt::ProjectIndexStatusView::new(
+                gwt::ProjectIndexStatusState::Ready,
+                "should not be used",
+            )
+        });
+
+        let request = super::spawn_per_cell_rebuild_with(
+            service,
+            proxy,
+            project_root.clone(),
+            IndexRebuildScope::Specs,
+            None,
+            rebuild_runner,
+            final_status_provider,
+        );
+        assert_eq!(request, super::ProjectIndexBootstrapRequest::Spawned);
+
+        let final_view = wait_for_project_status(
+            &events,
+            &project_root_label,
+            gwt::ProjectIndexStatusState::Error,
+        );
+        assert!(
+            final_view.detail.contains("synthetic IPC failure"),
+            "detail should carry the failure reason: {}",
+            final_view.detail
+        );
     }
 
     #[test]
