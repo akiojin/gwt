@@ -43,7 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.detect.outputs.should_run == 'true'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.detect.outputs.should_run == 'true'
         with:
           node-version: '20'
@@ -74,7 +74,7 @@ jobs:
 
       - name: Upload diff artifacts on failure
         if: failure() && steps.detect.outputs.should_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-diff
           path: |
