@@ -509,7 +509,7 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
         None => return false,
     };
     let current_version = env!("CARGO_PKG_VERSION");
-    if !gwt_core::update::pending_version_is_newer(&manifest.version, current_version) {
+    if !should_apply_pending_at_bootstrap(&manifest.version, current_version) {
         // The pending payload is for our current (or older) version. Drop it
         // so we don't loop forever.
         let _ = gwt_core::update::clear_pending_update_manifest();
@@ -526,6 +526,14 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
             false
         }
     }
+}
+
+/// SPEC-2041 Phase 19 (T-127 / FR-062): pure decision predicate the bootstrap
+/// path uses to decide whether to swap. Lifted out of
+/// [`try_apply_pending_update_at_bootstrap`] so unit tests can exercise it
+/// without touching `~/.gwt/pending-update/` or invoking `exit(0)`.
+fn should_apply_pending_at_bootstrap(pending_version: &str, current_version: &str) -> bool {
+    gwt_core::update::pending_version_is_newer(pending_version, current_version)
 }
 
 #[cfg(test)]
@@ -757,5 +765,54 @@ mod poll_state_tests {
         assert!(ops.wrote_restart_args);
         assert!(ops.spawned_portable);
         assert!(!ops.spawned_installer);
+    }
+
+    // SPEC-2041 Phase 19 (T-127): bootstrap pending-update decision tests.
+    //
+    // The full bootstrap path ends in `exit(0)` so it cannot be unit-tested
+    // directly. We instead exercise the pure decision predicate
+    // (`should_apply_pending_at_bootstrap`) and the manifest cleanup helper
+    // contract that the bootstrap path relies on.
+
+    #[test]
+    fn bootstrap_decision_swaps_only_when_pending_is_newer() {
+        use super::should_apply_pending_at_bootstrap;
+        assert!(should_apply_pending_at_bootstrap("9.26.0", "9.25.0"));
+        assert!(should_apply_pending_at_bootstrap("v9.26.0", "v9.25.0"));
+        assert!(!should_apply_pending_at_bootstrap("9.25.0", "9.25.0"));
+        assert!(!should_apply_pending_at_bootstrap("9.24.0", "9.25.0"));
+    }
+
+    #[test]
+    fn bootstrap_clears_stale_manifest_in_tempdir() {
+        // Stage a stale manifest pointing at a real on-disk payload so
+        // load_pending_update_manifest_in returns Some, then verify the
+        // cleanup helper wipes it. This exercises the same cleanup contract
+        // the bootstrap path uses for "pending version <= current".
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let payload = tempdir.path().join("v9.20.0").join("gwt");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "9.20.0".to_string(),
+            asset_url: "https://example.invalid/v9.20.0.tar.gz".to_string(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+            downloaded_at: "2026-05-10T12:00:00Z".to_string(),
+        };
+        gwt_core::update::persist_pending_update_manifest_in(tempdir.path(), &manifest)
+            .expect("persist");
+        assert!(
+            gwt_core::update::load_pending_update_manifest_in(tempdir.path()).is_some(),
+            "manifest must be discoverable before cleanup",
+        );
+
+        // Bootstrap would call clear_pending_update_manifest_in when the
+        // pending version is not newer than current.
+        gwt_core::update::clear_pending_update_manifest_in(tempdir.path()).expect("clear succeeds");
+        assert!(
+            gwt_core::update::load_pending_update_manifest_in(tempdir.path()).is_none(),
+            "manifest must be gone after cleanup",
+        );
     }
 }
