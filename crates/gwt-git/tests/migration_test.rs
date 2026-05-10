@@ -6,8 +6,8 @@
 
 use gwt_git::migration::{
     add_worktree_clean, add_worktree_no_checkout, bareify_local, clone_bare_from_normal,
-    copy_hooks_to_bare, evacuate_dirty_files, init_submodules, restore_evacuated_files,
-    set_upstream,
+    copy_hooks_to_bare, evacuate_dirty_files, init_submodules, parse_worktree_list_porcelain,
+    restore_evacuated_files, set_upstream,
 };
 use gwt_git::repository::{detect_repo_type, install_develop_protection, RepoType};
 
@@ -242,6 +242,28 @@ fn t052_dirty_worktree_evacuate_no_checkout_restore_round_trip() {
         std::fs::read_to_string(new_worktree.join("nested").join("note.md")).unwrap(),
         "still here"
     );
+}
+
+#[test]
+fn t054_parse_worktree_list_porcelain_identifies_branch_worktrees() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let stdout = format!(
+        "worktree {root}\nHEAD abc\nbranch refs/heads/main\n\nworktree {root}/feature/clean\nHEAD def\nbranch refs/heads/feature/clean\n\nworktree {root}/detached\nHEAD 123\ndetached\n\n",
+        root = root.display()
+    );
+
+    let worktrees = parse_worktree_list_porcelain(&stdout, root);
+
+    assert_eq!(
+        worktrees.len(),
+        2,
+        "detached worktree is not branch-addressed"
+    );
+    assert!(worktrees[0].is_main_repo);
+    assert_eq!(worktrees[0].branch, "main");
+    assert!(!worktrees[1].is_main_repo);
+    assert_eq!(worktrees[1].branch, "feature/clean");
 }
 
 #[test]
