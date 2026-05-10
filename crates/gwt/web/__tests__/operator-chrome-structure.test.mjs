@@ -1087,6 +1087,33 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   }
 });
 
+test("WebView modal text uses native selection and terminal overlays use explicit copy", () => {
+  const modalShellRule = inlineStyle.match(/\.modal-shell\s*\{[\s\S]*?\}/);
+  assert.ok(modalShellRule, "expected shared modal shell CSS rule");
+  assert.doesNotMatch(
+    modalShellRule[0],
+    /user-select\s*:\s*none/,
+    "modal shells must not disable browser-native text selection",
+  );
+
+  const visibleOverlayRule = inlineStyle.match(
+    /\.terminal-overlay\.visible\s*\{[\s\S]*?\}/,
+  );
+  assert.ok(visibleOverlayRule, "expected visible terminal overlay CSS rule");
+  assert.match(visibleOverlayRule[0], /pointer-events:\s*auto/);
+  assert.match(visibleOverlayRule[0], /user-select:\s*text/);
+
+  const overlayMessageRule = inlineStyle.match(/\.overlay-message\s*\{[\s\S]*?\}/);
+  assert.ok(overlayMessageRule, "expected terminal overlay message CSS rule");
+  assert.match(overlayMessageRule[0], /user-select:\s*text/);
+  assert.match(appSource, /copyButton\.className\s*=\s*"overlay-copy-button"/);
+  assert.match(
+    appSource,
+    /copyButton\.addEventListener\("click"[\s\S]*copyTerminalOverlayMessage\(windowData\.id\)/,
+    "terminal overlays must use an explicit copy button instead of modal-shell auto-copy",
+  );
+});
+
 test("Every keyframes-driven animation has a prefers-reduced-motion override", () => {
   // Catch the gap where someone adds a new @keyframes + animation without
   // pairing it with a reduced-motion override. Approach: for each

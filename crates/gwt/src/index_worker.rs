@@ -240,6 +240,14 @@ pub struct WorktreeProbeOutcome {
     pub status_payload: Result<serde_json::Value, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitWorktreeListEntry {
+    path: PathBuf,
+    branch: Option<String>,
+    bare: bool,
+    prunable: bool,
+}
+
 /// Translate a single scope sub-payload from the runner status JSON into a
 /// [`ScopeHealthView`]. Returns `None` if the payload is not an object.
 pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView> {
@@ -496,27 +504,85 @@ pub fn list_worktree_probe_inputs(repo_root: &Path) -> Result<Vec<WorktreeProbeI
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
 
-    let mut inputs = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_branch: Option<String> = None;
+    parse_worktree_probe_inputs(&String::from_utf8_lossy(&output.stdout))
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines().chain(std::iter::once("")) {
-        if let Some(rest) = line.strip_prefix("worktree ") {
-            if let Some(path) = current_path.take() {
-                push_worktree_probe_input(&mut inputs, path, current_branch.take())?;
-            }
-            current_path = Some(canonicalize_path(PathBuf::from(rest)));
-        } else if let Some(branch) = line.strip_prefix("branch ") {
-            current_branch = Some(branch.trim_start_matches("refs/heads/").to_string());
-        } else if line.is_empty() {
-            if let Some(path) = current_path.take() {
-                push_worktree_probe_input(&mut inputs, path, current_branch.take())?;
-            }
+fn parse_worktree_probe_inputs(stdout: &str) -> Result<Vec<WorktreeProbeInput>, String> {
+    let mut inputs = Vec::new();
+    for entry in parse_git_worktree_porcelain(stdout) {
+        if !git_worktree_entry_is_active(&entry) {
+            continue;
         }
+        push_worktree_probe_input(&mut inputs, entry.path, entry.branch)?;
     }
 
     Ok(inputs)
+}
+
+fn parse_git_worktree_paths(stdout: &str) -> Vec<PathBuf> {
+    parse_git_worktree_porcelain(stdout)
+        .into_iter()
+        .filter(git_worktree_entry_is_active)
+        .map(|entry| entry.path)
+        .collect()
+}
+
+fn git_worktree_entry_is_active(entry: &GitWorktreeListEntry) -> bool {
+    !entry.bare && !entry.prunable && entry.path.exists()
+}
+
+fn parse_git_worktree_porcelain(stdout: &str) -> Vec<GitWorktreeListEntry> {
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    let mut current_bare = false;
+    let mut current_prunable = false;
+
+    let flush = |entries: &mut Vec<GitWorktreeListEntry>,
+                 current_path: &mut Option<PathBuf>,
+                 current_branch: &mut Option<String>,
+                 current_bare: &mut bool,
+                 current_prunable: &mut bool| {
+        if let Some(path) = current_path.take() {
+            entries.push(GitWorktreeListEntry {
+                path,
+                branch: current_branch.take(),
+                bare: *current_bare,
+                prunable: *current_prunable,
+            });
+        }
+        *current_bare = false;
+        *current_prunable = false;
+    };
+
+    for line in stdout.lines().chain(std::iter::once("")) {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut current_bare,
+                &mut current_prunable,
+            );
+            current_path = Some(canonicalize_path(PathBuf::from(rest)));
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            current_branch = Some(branch.trim_start_matches("refs/heads/").to_string());
+        } else if line == "bare" {
+            current_bare = true;
+        } else if line.starts_with("prunable") {
+            current_prunable = true;
+        } else if line.is_empty() {
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut current_bare,
+                &mut current_prunable,
+            );
+        }
+    }
+
+    entries
 }
 
 fn push_worktree_probe_input(
@@ -1005,12 +1071,7 @@ fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> 
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
 
-    let mut worktrees = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(path) = line.strip_prefix("worktree ") {
-            worktrees.push(canonicalize_path(PathBuf::from(path)));
-        }
-    }
+    let mut worktrees = parse_git_worktree_paths(&String::from_utf8_lossy(&output.stdout));
 
     if worktrees.is_empty() {
         worktrees.push(canonicalize_path(project_root.to_path_buf()));
@@ -1060,6 +1121,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn worktree_probe_input_parser_skips_bare_prunable_and_missing_worktrees() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bare = temp.path().join("gwt.git");
+        let develop = temp.path().join("develop");
+        let work = temp.path().join("work");
+        let missing = temp.path().join("stale");
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        std::fs::create_dir_all(&develop).expect("develop dir");
+        std::fs::create_dir_all(&work).expect("work dir");
+        let stdout = format!(
+            "\
+worktree {bare}
+bare
+
+worktree {missing}
+HEAD 1111111111111111111111111111111111111111
+prunable gitdir file points to non-existent location
+
+worktree {develop}
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/develop
+
+worktree {work}
+HEAD 3333333333333333333333333333333333333333
+detached
+
+",
+            bare = bare.display(),
+            missing = missing.display(),
+            develop = develop.display(),
+            work = work.display(),
+        );
+
+        let inputs = parse_worktree_probe_inputs(&stdout).expect("parse probe inputs");
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].path, canonicalize_path(develop.clone()));
+        assert_eq!(inputs[0].branch, "develop");
+        assert_eq!(
+            inputs[0].worktree_hash,
+            compute_worktree_hash(&canonicalize_path(develop.clone()))
+                .expect("develop hash")
+                .to_string()
+        );
+        assert_eq!(inputs[1].path, canonicalize_path(work.clone()));
+        assert_eq!(inputs[1].branch, "(detached)");
+        assert_eq!(
+            parse_git_worktree_paths(&stdout),
+            vec![canonicalize_path(develop), canonicalize_path(work)]
+        );
     }
 
     struct PanicRunnerSpawner;

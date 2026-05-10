@@ -23,11 +23,7 @@
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
-      import {
-        aggregateProjectTabDotState,
-        dispatchOpenIndexSettings,
-        formatIndexStatusLabel,
-      } from "/index-status-controller.js";
+      import { aggregateProjectTabDotState } from "/index-status-controller.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -113,7 +109,6 @@
       const connectionDot = document.getElementById("connection-dot");
       const connectionLabel = document.getElementById("connection-label");
       const appVersionLabel = document.getElementById("app-version");
-      const indexStatusLabel = document.getElementById("index-status");
 
       const decoderMap = new Map();
       const pendingOutputMap = new Map();
@@ -304,61 +299,11 @@
       let projectError = "";
       const TERMINAL_SELECTION_DRAG_THRESHOLD = 4;
 
-      function renderIndexStatus() {
-        const activeProjectRoot = activeProjectTab()?.project_root || "";
-        const indexStatusState =
-          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || {
-            state: "",
-            detail: "",
-          };
-        const state = indexStatusState.state || "";
-        const formatted = formatIndexStatusLabel(state);
-        indexStatusLabel.hidden = formatted.hidden;
-        indexStatusLabel.className = formatted.className;
-        indexStatusLabel.textContent = formatted.label;
-        indexStatusLabel.title = indexStatusState.detail || formatted.title;
-      }
-
-      indexStatusLabel.addEventListener("click", () => {
-        if (indexStatusLabel.hidden) return;
-        const activeProjectRoot = activeProjectTab()?.project_root || "";
-        const status =
-          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
-        if (status?.state === "repairing") {
-          showRepairingProgressToast(status);
-          return;
-        }
-        dispatchOpenIndexSettings(indexStatusLabel);
-      });
-
-      // SPEC-1939 T-IDX-108: while badge is `repairing`, click shows a
-      // progress toast sourced from the aggregated payload's `progress`
-      // field. No cancel button is provided because plan.md keeps the
-      // failure path visible (one shot per scope, then `error` for retry).
-      function showRepairingProgressToast(status) {
-        const progress = status?.progress || {};
-        const done = Number.isFinite(progress.scopes_done) ? progress.scopes_done : 0;
-        const total = Number.isFinite(progress.scopes_total) ? progress.scopes_total : 0;
-        const text = total > 0
-          ? `Rebuilding project index: ${done} of ${total} scope(s) completed`
-          : "Rebuilding project index…";
-        let toast = document.getElementById("index-status-toast");
-        if (!toast) {
-          toast = document.createElement("div");
-          toast.id = "index-status-toast";
-          toast.className = "index-status-toast";
-          toast.setAttribute("role", "status");
-          toast.setAttribute("aria-live", "polite");
-          document.body.appendChild(toast);
-        }
-        toast.textContent = text;
-        toast.dataset.visible = "true";
-        if (toast._hideTimer) clearTimeout(toast._hideTimer);
-        toast._hideTimer = setTimeout(() => {
-          toast.dataset.visible = "false";
-        }, 3500);
-      }
-
+      // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The
+      // aggregated payload now feeds only the per-tab dot indicator and the
+      // Settings.Index panel; the project-bar surface no longer renders an
+      // Index summary because repo-shared (issues/specs) and per-worktree
+      // (files/files-docs) scopes were being collapsed into a single state.
       function setIndexStatus(projectRoot, status) {
         if (!projectRoot) {
           return;
@@ -371,7 +316,6 @@
           scopes: status?.scopes || {},
           worktrees: status?.worktrees || {},
         });
-        renderIndexStatus();
         renderIndexPanelInAllSettingsWindows();
         refreshProjectTabDots();
       }
@@ -1021,7 +965,6 @@
         setVersionState(appState.app_version, versionState.latest);
         renderProjectTabs();
         renderProjectPicker();
-        renderIndexStatus();
         updateActionAvailability();
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
