@@ -302,10 +302,7 @@ fn is_read_only_segment(segment: &str) -> bool {
         "env" => tokens
             .get(1)
             .is_none_or(|token| is_read_only_command_token(token)),
-        "git" => tokens
-            .get(1)
-            .copied()
-            .is_some_and(is_read_only_git_subcommand),
+        "git" => is_read_only_git_tokens(&tokens[1..]),
         "gwtd" => is_read_only_gwtd_tokens(&tokens[1..]),
         _ => false,
     }
@@ -374,21 +371,79 @@ fn normalize_command_name(token: &str) -> String {
         .to_string()
 }
 
-fn is_read_only_git_subcommand(subcommand: &str) -> bool {
-    matches!(
-        subcommand,
-        "branch"
-            | "cat-file"
-            | "config"
-            | "diff"
-            | "log"
-            | "ls-files"
-            | "ls-tree"
-            | "remote"
-            | "rev-parse"
-            | "show"
-            | "status"
-    )
+fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
+    match tokens {
+        ["cat-file" | "diff" | "log" | "ls-files" | "ls-tree" | "rev-parse" | "show" | "status", ..] => {
+            true
+        }
+        ["branch", rest @ ..] => is_read_only_git_branch_args(rest),
+        ["config", rest @ ..] => is_read_only_git_config_args(rest),
+        ["remote", rest @ ..] => is_read_only_git_remote_args(rest),
+        _ => false,
+    }
+}
+
+fn is_read_only_git_branch_args(args: &[&str]) -> bool {
+    const MUTATING_FLAGS: &[&str] = &[
+        "-c",
+        "-C",
+        "-d",
+        "-D",
+        "-m",
+        "-M",
+        "-u",
+        "--copy",
+        "--delete",
+        "--edit-description",
+        "--move",
+        "--set-upstream-to",
+        "--track",
+        "--unset-upstream",
+    ];
+    if args.iter().any(|arg| {
+        MUTATING_FLAGS.contains(arg)
+            || arg
+                .split_once('=')
+                .is_some_and(|(flag, _)| MUTATING_FLAGS.contains(&flag))
+    }) {
+        return false;
+    }
+    args.iter().all(|arg| arg.starts_with('-'))
+}
+
+fn is_read_only_git_config_args(args: &[&str]) -> bool {
+    const READ_FLAGS: &[&str] = &[
+        "--get",
+        "--get-all",
+        "--get-color",
+        "--get-colorbool",
+        "--get-regexp",
+        "--get-urlmatch",
+        "--list",
+        "--name-only",
+        "-l",
+    ];
+    const MUTATING_FLAGS: &[&str] = &[
+        "--add",
+        "--edit",
+        "--remove-section",
+        "--rename-section",
+        "--replace-all",
+        "--set",
+        "--unset",
+        "--unset-all",
+    ];
+    args.iter().any(|arg| READ_FLAGS.contains(arg))
+        && !args.iter().any(|arg| {
+            MUTATING_FLAGS.contains(arg)
+                || arg
+                    .split_once('=')
+                    .is_some_and(|(flag, _)| MUTATING_FLAGS.contains(&flag))
+        })
+}
+
+fn is_read_only_git_remote_args(args: &[&str]) -> bool {
+    matches!(args, [] | ["-v" | "--verbose"] | ["show" | "get-url", ..])
 }
 
 fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
@@ -682,6 +737,40 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_read_only_git_config() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git config --list --show-origin"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_read_only_git_remote() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git remote -v"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
     fn title_summary_guard_blocks_mutating_exploration_like_sed_in_place() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
@@ -704,6 +793,40 @@ Coverage requirements.
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
                 "command": "find target -name '*.tmp' -delete"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_mutating_git_config() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git config user.name Codex"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_mutating_git_remote() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git remote add origin https://example.com/repo.git"
             })),
             transcript_path: None,
             cwd: None,
