@@ -526,6 +526,48 @@ test("phase19: update_apply_pending_persisted morphs CTA directly to ready state
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
 });
 
+// SPEC-2041 Phase 19 (FR-064 follow-up, CodeRabbit review on PR #2635):
+// Later -> commit_update_later_pending can detect that the manifest persisted
+// by ApplyUpdateStart's worker thread vanished (external cleanup, disk-full
+// race). In that case backend emits update_apply_error AFTER the CTA has
+// already morphed to "ready". The frontend must surface the failure modal
+// even though status === "ready" so the user is not silently misled.
+test("phase19: update_apply_error in ready state re-opens failed modal", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+
+  // Simulate the post-Later state that the next-launch path lands in.
+  controller.handleUpdateApplyPendingPersisted({ version: "9.26.0" });
+  const ctaBefore = fixture.document.getElementById("update-cta");
+  assert.equal(ctaBefore.dataset.status, "ready");
+
+  // Backend reports the persisted manifest is gone.
+  controller.handleUpdateApplyError({
+    stage: "Persist pending",
+    reason: "Pending update manifest is missing; download did not persist.",
+    log_path: "/Users/x/.gwt/logs/update-2026-05-10.log",
+  });
+
+  const modal = fixture.document.getElementById("update-modal");
+  assert.ok(modal, "modal must reopen so the failure is visible");
+  assert.equal(modal.dataset.state, "failed");
+  assert.match(
+    modal.querySelector("[data-update-modal-stage]").textContent,
+    /Persist pending/,
+  );
+  assert.match(
+    modal.querySelector("[data-update-modal-reason]").textContent,
+    /manifest is missing/,
+  );
+
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(
+    cta.dataset.status,
+    "applying",
+    "CTA flips to applying so the modal sits visually on top",
+  );
+});
+
 test("phase19: controller exposes the Phase 19 event handlers required by app.js wiring", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
