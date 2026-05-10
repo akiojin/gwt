@@ -43,7 +43,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.detect.outputs.should_run == 'true'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.detect.outputs.should_run == 'true'
         with:
           node-version: '20'
