@@ -38,6 +38,19 @@ test("setTheme persists and notifies subscribers", () => {
   assert.equal(env.documentTheme, "light");
 });
 
+test("setTheme notifies subscribers when preference changes but effective theme is unchanged", () => {
+  const env = makeEnv({ stored: null, prefersDark: true });
+  const mgr = createThemeManager(env);
+  const events = [];
+  mgr.subscribe((eff) => events.push({ eff, pref: mgr.getPreference() }));
+
+  mgr.setTheme("dark");
+
+  assert.equal(env.storage.get("gwt:ui:theme"), "dark");
+  assert.equal(env.documentTheme, "dark");
+  assert.deepEqual(events, [{ eff: "dark", pref: "dark" }]);
+});
+
 test("setTheme rejects invalid values, falling back to auto", () => {
   const env = makeEnv({ stored: null, prefersDark: false });
   const mgr = createThemeManager(env);
