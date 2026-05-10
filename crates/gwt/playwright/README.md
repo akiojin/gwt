@@ -72,3 +72,22 @@ kill "$GWT_PID"
 |---|---|---|
 | `index-status-repair-required.json` | `repair_required` | T-IDX-109 happy-path badge transitions |
 | `index-status-error.json` | `error` | T-IDX-110 manual-retry path (set `GWT_INDEX_FIXTURE_KIND=error`) |
+
+### CI failure triage
+
+If the `Project Index status (Playwright)` workflow fails, follow this
+order:
+
+1. Download the `gwt-runtime-log` artifact (uploaded on failure) and look
+   for `embedded server URL written for CI handoff` (success), Tao/wry
+   panic stacks (display issue), or repeated bootstrap failures (fixture
+   path issue).
+2. Confirm the Boot step printed `gwt embedded server URL: …`. If not,
+   the URL handoff timed out — gwt likely never reached the embedded
+   server (build error, missing GTK/WebKit dep, xvfb crash).
+3. If the URL was captured but the spec still failed, jump straight to
+   the Playwright trace: each test runs with `trace: "on-first-retry"`,
+   so the second-retry attempt records the full DOM + WebSocket flow.
+4. Reproduce locally with the steps above (only macOS / native-display
+   Linux supported); fixtures live next to the spec so the dev
+   experience matches CI.
