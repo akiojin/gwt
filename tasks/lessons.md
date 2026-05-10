@@ -1,37 +1,44 @@
 # Lessons Learned
 
-## 2026-05-10 — Verify CLI commands and flags exist before shipping them in docs
+## 2026-05-10 — Verify CLI commands and flags against the parser, not just the help text
 
 ### 事象
 
 `docs/spec-1939-phase-12-manual-smoke.md` (PR #2599 で develop merged) に、
-実在しないサブコマンド `gwtd start-work develop /tmp/...` と、存在しない
-フラグ `--mention user:akiojin` を含めてしまった。reviewer が checklist
-通りに手を動かすと両方とも即詰まる状態で、follow-up PR #2600 でドキュ
-メントを修正する手戻りが発生した。
+実在しないサブコマンド `gwtd start-work develop /tmp/...` を含めてしまい、
+follow-up PR #2600 で修正したものの、その PR で「`gwtd board post` には
+`--mention` フラグは存在しない」と誤った claim を書いてしまった。実際に
+は `crates/gwt/src/cli/board.rs:234` の parser に `--mention <kind:id>` が
+landing 済みで、tests (`board_family_parse_post_collects_typed_mentions`)
+でも `--mention user:akiojin` 形式が gating されていたため、Codex review
+(PRRT_kwDOPLof2M6A4JHA) で指摘され、二度目の follow-up が必要になった。
 
 ### 原因
 
-reviewer 向けの手順を書く際、command line snippet を「自分の記憶」だけで
-書き起こし、`gwtd --help` / `gwtd --help <subcommand>` で実在を確認しな
-かった。`gwtd` のサブコマンドは `issue / pr / actions / board / hook /
-index / discuss / plan / build / pane / workspace / update / daemon` のみ
-で、worktree 作成は GUI の Start Work flow が責任を持つ設計 (AGENTS.md
-の「`git checkout -b`、`git switch -c`、`git branch -D`、`git worktree
-add/remove` は禁止」と整合) になっている。`gwtd board post` の audience
-flag は `--target <id>` のみで、`--mention` は存在しない。
+最初の修正で `gwtd --help board post` (実体は `crates/gwt/src/bin/gwtd.rs::
+format_board_help()`) の出力だけを根拠にし、parser source (`cli/board.rs`)
+や cli.rs の集中 usage 文字列を読まなかった。`bin/gwtd.rs` の subcommand
+help は手書きで cli.rs / parser から自動生成されておらず、`--mention` の
+ように後から landing したフラグが反映されていない場合がある。help text
+を「正本」と仮定してしまったのが事故の構造的原因。
 
 ### 再発防止策
 
-1. user 向け手順 (docs / README / lesson テンプレ / SPEC sample) に CLI
-   snippet を埋め込む際は、commit 前に `gwtd --help <subcommand>` または
-   `gwtd <subcommand> --help` で全 flag / subcommand の実在を確認する。
-2. agent 自身が普段叩かないサブコマンド (CI 出力、Board 投稿、Issue 操
-   作の組み合わせ等) を doc に固定する場合は、必ず実 invocation で
-   reproduce してから snippet を確定する。
-3. 既存 doc を参考にする場合でも、過去の typo がそのまま伝播する可能性
-   があるので、参照元の commit / PR で実際に動いた証跡 (CI ログ・成功し
-   た board entry など) を一度確認する。
+1. CLI flag / subcommand の有無を doc / lesson に固定する場合、`gwtd
+   <subcommand> --help` だけでなく、parser 側 (`crates/gwt/src/cli/*.rs`
+   の `--flag` arm) と test (`board_family_parse_post_*` 等) の両方で
+   確認する。help 文字列は手書きのため、フラグの抜けが発生する。
+2. user 向け手順に CLI snippet を埋め込む際は、commit 前に **実 invocation
+   で reproduce** してから snippet を確定する (例: 実際に `gwtd board post
+   --mention user:akiojin --body 'test'` を投げて成功するかを board entry
+   で確認)。help 文字列は古い場合がある。
+3. もし help と parser に乖離があったら、help 側も合わせて修正する
+   (`crates/gwt/src/bin/gwtd.rs::format_*_help()`)。ドキュメントを書く
+   作業の副産物として help 同期も行うことで、次の reviewer が同じ事故を
+   踏まなくなる。
+4. 既存 doc / 既存テストの flag 列挙 (parser の `--mention` arm、cli.rs
+   の集中 usage 文字列) を参照元として優先し、help の subcommand 出力は
+   second-source 扱いとする。
 
 ## 2026-05-10 — Read tasks/lessons.md before designing tests for window interaction features
 

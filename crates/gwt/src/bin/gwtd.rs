@@ -221,7 +221,7 @@ fn format_board_help() -> String {
         "  show [--json]                           Print the Board snapshot",
         "  post --kind <kind> (--body <text> | -f <file>)",
         "       [--title-summary <text>] [--parent <id>] [--topic <t>]*",
-        "       [--owner <n>]* [--target <id>]*",
+        "       [--owner <n>]* [--target <id>]* [--mention <kind:id>]*",
         "                                          Append a Board entry",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
@@ -443,4 +443,38 @@ fn parse_owner_repo(value: &str) -> Option<(String, String)> {
         return None;
     }
     Some((owner.to_string(), repo.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_board_help_documents_mention_flag() {
+        // Regression: PR #2600 missed `--mention` from the board post help text
+        // even though the parser at `cli/board.rs` accepts it. This assertion
+        // keeps the user-visible help in sync with the parser surface so
+        // operators do not assume an audience flag is missing.
+        let help = format_board_help();
+        assert!(
+            help.contains("--mention <kind:id>"),
+            "board help must document --mention flag (parser accepts it). help:\n{help}",
+        );
+    }
+
+    #[test]
+    fn format_board_help_documents_post_audience_flags() {
+        let help = format_board_help();
+        for flag in [
+            "--target <id>",
+            "--owner <n>",
+            "--topic <t>",
+            "--parent <id>",
+        ] {
+            assert!(
+                help.contains(flag),
+                "board help must document {flag}. help:\n{help}",
+            );
+        }
+    }
 }
