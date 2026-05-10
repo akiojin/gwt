@@ -411,7 +411,13 @@ fn is_read_only_git_branch_args(args: &[&str]) -> bool {
             pending_read_value = !has_inline_value;
             continue;
         }
-        if is_valueless_git_branch_read_flag(flag) || is_read_only_git_branch_short_flags(flag) {
+        if let Some(shorts) = read_only_git_branch_short_flags(flag) {
+            if shorts.contains('l') {
+                list_mode = true;
+            }
+            continue;
+        }
+        if is_valueless_git_branch_read_flag(flag) {
             continue;
         }
         return false;
@@ -469,6 +475,8 @@ fn is_valueless_git_branch_read_flag(flag: &str) -> bool {
         flag,
         "--all"
             | "--ignore-case"
+            | "--no-ignore-case"
+            | "--no-list"
             | "--no-abbrev"
             | "--no-color"
             | "--no-column"
@@ -480,10 +488,14 @@ fn is_valueless_git_branch_read_flag(flag: &str) -> bool {
     )
 }
 
-fn is_read_only_git_branch_short_flags(flag: &str) -> bool {
+fn read_only_git_branch_short_flags(flag: &str) -> Option<&str> {
     flag.strip_prefix('-')
         .filter(|shorts| !shorts.is_empty() && !shorts.starts_with('-'))
-        .is_some_and(|shorts| shorts.chars().all(|ch| matches!(ch, 'a' | 'q' | 'r' | 'v')))
+        .filter(|shorts| {
+            shorts
+                .chars()
+                .all(|ch| matches!(ch, 'a' | 'i' | 'l' | 'q' | 'r' | 'v'))
+        })
 }
 
 fn is_read_only_git_config_args(args: &[&str]) -> bool {
@@ -858,6 +870,8 @@ Coverage requirements.
             "git branch -a",
             "git branch -v",
             "git branch -avv --contains HEAD",
+            "git branch -l 'work/*'",
+            "git branch -i --list 'foo*'",
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
