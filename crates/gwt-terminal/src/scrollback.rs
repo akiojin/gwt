@@ -4,10 +4,21 @@
 //! Memory-efficient: each entry is text + basic attributes.
 
 /// A single stored line with text content and optional attributes.
-#[derive(Debug, Clone)]
+///
+/// `formatted` carries the SGR-bearing escape stream (`\x1b[...m...`) that
+/// reproduces the original cell foreground / background color, bold, italic,
+/// underline, and inverse attributes when written verbatim into a terminal
+/// emulator (e.g. xterm.js). `text` keeps the plain text rendering for
+/// search / contents export paths that do not understand escape codes.
+/// SPEC-1919 FR-003j / SC-005b require both representations so scrollback
+/// replay does not collapse colored history into default-color text.
+#[derive(Debug, Clone, Default)]
 pub struct ScrollbackLine {
-    /// Plain text content of the line.
+    /// Plain text content of the line (formatting stripped).
     pub text: String,
+    /// SGR-bearing byte stream suitable for replay into a terminal emulator.
+    /// Empty when no formatting information is available.
+    pub formatted: Vec<u8>,
     /// Whether the line was wrapped (soft wrap) vs. explicit newline.
     pub wrapped: bool,
 }
@@ -122,6 +133,7 @@ mod tests {
         s.push_line(ScrollbackLine {
             text: "hello".to_string(),
             wrapped: false,
+            ..Default::default()
         });
         assert_eq!(s.len(), 1);
         let lines = s.get_lines(0, 1);
@@ -137,6 +149,7 @@ mod tests {
             s.push_line(ScrollbackLine {
                 text: format!("line-{i}"),
                 wrapped: false,
+                ..Default::default()
             });
         }
         assert_eq!(s.len(), 5);
@@ -154,6 +167,7 @@ mod tests {
             s.push_line(ScrollbackLine {
                 text: format!("line-{i}"),
                 wrapped: false,
+                ..Default::default()
             });
         }
         // Capacity 3, pushed 5 -> oldest 2 evicted, remaining: line-2, line-3, line-4
@@ -172,6 +186,7 @@ mod tests {
             s.push_line(ScrollbackLine {
                 text: format!("line-{i}"),
                 wrapped: false,
+                ..Default::default()
             });
         }
         let lines = s.get_lines(2, 2);
@@ -187,6 +202,7 @@ mod tests {
             s.push_line(ScrollbackLine {
                 text: format!("line-{i}"),
                 wrapped: false,
+                ..Default::default()
             });
         }
         let lines = s.get_lines(1, 100);
@@ -201,6 +217,7 @@ mod tests {
         s.push_line(ScrollbackLine {
             text: "a".to_string(),
             wrapped: false,
+            ..Default::default()
         });
         let lines = s.get_lines(5, 1);
         assert!(lines.is_empty());
@@ -212,6 +229,7 @@ mod tests {
         s.push_line(ScrollbackLine {
             text: "a".to_string(),
             wrapped: false,
+            ..Default::default()
         });
         let lines = s.get_lines(0, 0);
         assert!(lines.is_empty());
@@ -224,6 +242,7 @@ mod tests {
             s.push_line(ScrollbackLine {
                 text: format!("line-{i}"),
                 wrapped: false,
+                ..Default::default()
             });
         }
         assert_eq!(s.len(), 5);
@@ -254,6 +273,7 @@ mod tests {
             s.push_line(ScrollbackLine {
                 text: format!("L{i}"),
                 wrapped: false,
+                ..Default::default()
             });
         }
         assert_eq!(s.len(), cap);
@@ -271,8 +291,44 @@ mod tests {
         s.push_line(ScrollbackLine {
             text: "wrapped line".to_string(),
             wrapped: true,
+            ..Default::default()
         });
         let lines = s.get_lines(0, 1);
         assert!(lines[0].wrapped);
+    }
+
+    #[test]
+    fn test_sgr_attributes_preserved_in_formatted_bytes() {
+        // SPEC-1919 FR-003j / SC-005b: scrollback push_line must retain the
+        // SGR-bearing escape stream so a later replay can reconstruct the
+        // original foreground / background / bold / italic / underline /
+        // inverse cell attributes; storing only plain text + wrap flag would
+        // lose color on scroll-back through xterm.js.
+        let mut s = ScrollbackStorage::new(10);
+        let formatted = b"\x1b[31;1mALERT\x1b[0m normal".to_vec();
+        s.push_line(ScrollbackLine {
+            text: "ALERT normal".to_string(),
+            formatted: formatted.clone(),
+            wrapped: false,
+        });
+        let lines = s.get_lines(0, 1);
+        assert_eq!(lines[0].text, "ALERT normal");
+        assert_eq!(
+            lines[0].formatted, formatted,
+            "expected SGR-bearing formatted bytes to round-trip through scrollback"
+        );
+        // CSI introducer + final 'm' byte must be present so the line can be
+        // replayed verbatim into xterm.js without losing color/style.
+        let has_csi_m = lines[0].formatted.windows(2).enumerate().any(|(idx, win)| {
+            win == [0x1b, b'['] && {
+                let tail = &lines[0].formatted[idx + 2..];
+                tail.iter().take(16).any(|b| *b == b'm')
+            }
+        });
+        assert!(
+            has_csi_m,
+            "scrollback line should retain at least one CSI ... m SGR escape; got {:?}",
+            lines[0].formatted
+        );
     }
 }
