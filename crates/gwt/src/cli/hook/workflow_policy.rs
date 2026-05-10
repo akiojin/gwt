@@ -476,7 +476,6 @@ fn is_valueless_git_branch_read_flag(flag: &str) -> bool {
         "--all"
             | "--ignore-case"
             | "--no-ignore-case"
-            | "--no-list"
             | "--no-abbrev"
             | "--no-color"
             | "--no-column"
@@ -964,6 +963,7 @@ Coverage requirements.
             "git branch new-work",
             "git branch -D old-work",
             "git branch -df old-work",
+            "git branch -l --no-list new-work",
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
