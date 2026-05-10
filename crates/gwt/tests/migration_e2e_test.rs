@@ -1,6 +1,9 @@
 //! End-to-end tests for the SPEC-1934 US-6 migration orchestrator.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use gwt::migration::execute_migration;
 use gwt_core::config::BareProjectConfig;
@@ -301,11 +304,13 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
     // wiped by the rollback (it should be preserved as it pre-existed).
     std::fs::write(bare_target.join("preexisting.txt"), "marker").unwrap();
 
+    let started = Instant::now();
     let result = execute_migration(
         project.path(),
         MigrationOptions::default(),
         |_phase, _pct| {},
     );
+    let elapsed = started.elapsed();
 
     let err = result.expect_err("migration must fail when bare target exists");
     assert_eq!(err.phase, MigrationPhase::Bareify);
@@ -336,6 +341,10 @@ fn t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout() {
     assert!(
         !project.path().join(".gwt/project.toml").exists(),
         "no project.toml must be written when migration fails"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(30),
+        "rollback should complete within 30 seconds for the typical E2E fixture; took {elapsed:?}"
     );
 }
 

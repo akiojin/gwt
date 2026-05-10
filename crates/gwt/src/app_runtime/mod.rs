@@ -1902,6 +1902,7 @@ impl AppRuntime {
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
         events.extend(self.migration_detected_replies(client_id));
+        events.extend(self.migration_recovery_replies(client_id));
         events
     }
 
@@ -2035,6 +2036,7 @@ impl AppRuntime {
                 // layout, surface the confirmation modal alongside the regular
                 // workspace broadcast.
                 events.extend(self.migration_detected_broadcasts());
+                events.extend(self.migration_recovery_broadcasts());
                 events
             }
             Err(error) => vec![OutboundEvent::broadcast(BackendEvent::ProjectOpenError {
@@ -2087,6 +2089,30 @@ impl AppRuntime {
         }
     }
 
+    fn has_migration_backup(tab: &ProjectTabRuntime) -> bool {
+        tab.project_root
+            .join(gwt_core::migration::backup::BACKUP_DIR_NAME)
+            .is_dir()
+    }
+
+    fn migration_backup_error_event_for(&self, tab: &ProjectTabRuntime) -> BackendEvent {
+        let backup_path = tab
+            .project_root
+            .join(gwt_core::migration::backup::BACKUP_DIR_NAME);
+        BackendEvent::MigrationError {
+            tab_id: tab.id.clone(),
+            phase: gwt_core::migration::MigrationPhase::Backup
+                .as_str()
+                .to_string(),
+            message: format!(
+                "Previous migration backup found at {}. A migration may have been interrupted before cleanup; inspect or restore the backup before starting another migration.",
+                backup_path.display()
+            ),
+            recovery: recovery_state_label(gwt_core::migration::RecoveryState::Partial)
+                .to_string(),
+        }
+    }
+
     /// SPEC-1934 US-6.1 broadcast variant: used by `open_project_path_events`
     /// to inform every connected frontend that a tab needs migration.
     pub(crate) fn migration_detected_broadcasts(&self) -> Vec<OutboundEvent> {
@@ -2094,6 +2120,17 @@ impl AppRuntime {
             .iter()
             .filter(|tab| tab.migration_pending)
             .map(|tab| OutboundEvent::broadcast(self.migration_detected_event_for(tab)))
+            .collect()
+    }
+
+    /// SPEC-1934 US-6.6/T-085: if a previous migration was interrupted after
+    /// Backup, surface the leftover snapshot on launch so the user does not
+    /// start another destructive migration over an unresolved backup.
+    pub(crate) fn migration_recovery_broadcasts(&self) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
+            .map(|tab| OutboundEvent::broadcast(self.migration_backup_error_event_for(tab)))
             .collect()
     }
 
@@ -2105,6 +2142,14 @@ impl AppRuntime {
             .iter()
             .filter(|tab| tab.migration_pending)
             .map(|tab| OutboundEvent::reply(client_id, self.migration_detected_event_for(tab)))
+            .collect()
+    }
+
+    pub(crate) fn migration_recovery_replies(&self, client_id: &str) -> Vec<OutboundEvent> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.migration_pending && Self::has_migration_backup(tab))
+            .map(|tab| OutboundEvent::reply(client_id, self.migration_backup_error_event_for(tab)))
             .collect()
     }
 
@@ -10504,5 +10549,46 @@ exit 0
         let events = runtime.skip_migration_events("tab-1");
         assert!(events.is_empty(), "skip must not emit events itself");
         assert!(!runtime.tabs[0].migration_pending);
+    }
+
+    #[test]
+    fn open_project_with_existing_migration_backup_emits_recovery_error() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).expect("project dir");
+        init_repo(&project);
+        fs::create_dir_all(project.join(gwt_core::migration::backup::BACKUP_DIR_NAME))
+            .expect("migration backup dir");
+
+        let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+        let events = runtime.open_project_path_events(project.clone());
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::MigrationDetected { .. },
+                }
+            )),
+            "Normal Git layout should still open a migration-pending tab"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                OutboundEvent {
+                    target: DispatchTarget::Broadcast,
+                    event: BackendEvent::MigrationError {
+                        phase,
+                        recovery,
+                        message,
+                        ..
+                    },
+                } if phase == "backup"
+                    && recovery == "partial"
+                    && message.contains(".gwt-migration-backup")
+            )),
+            "existing migration backup must be surfaced as a recovery error"
+        );
     }
 }
