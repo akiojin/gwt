@@ -1,5 +1,36 @@
 # Lessons Learned
 
+## 2026-05-10 — Read tasks/lessons.md before designing tests for window interaction features
+
+### 事象
+
+SPEC-2008 Phase 24 (terminal viewport reflow) を `crates/gwt/web/app.js` に
+実装した PR #2588 で、frontend test を全て source-string regex assertion で
+書いた。直後に「2026-05-07 — Window interaction features need behavior
+tests」の lesson と矛盾している指摘を別 Agent から受け、後追いで behavior
+test ベースの follow-up PR #2590 を作成する手戻りが発生した。
+
+### 原因
+
+実装着手前に `tasks/lessons.md` を確認しなかった。ホット領域の lesson は
+過去の同種失敗をまとめており、参照すれば即座に適切なテスト設計を選べる。
+2026-05-07 lesson は「window interaction features は behavior test で操作
+可能性を検証する。source-string contract は配線漏れ検出に限定する」と
+明示していたが、これを参照せずに既存 helper の延長で source-string
+assertion だけを書いてしまった。
+
+### 再発防止策
+
+1. `crates/gwt/web/` の interaction (resize / drag / hidden→visible / click
+   dispatch / keyboard / pointer) を変更する作業では、最初に
+   `tasks/lessons.md` の関連 lesson (特に 2026-05-07 window interaction)
+   を読んで、test 設計を確定してからコードに着手する。
+2. test 設計時は behavior test を default、source-string assertion は
+   wiring 漏れ検出限定で 1〜2 件に留める。
+3. 同種の問題ドメインで複数 lesson が並ぶ場合 (2026-05-07 が 2 件あった
+   ように)、AGENTS.md の `Self-Improvement Loop` に従い該当領域の lesson
+   をすべて並べて読み返す。
+
 ## 2026-05-07 — Hook fixes must separate diagnostics from shipped behavior
 
 ### 事象
