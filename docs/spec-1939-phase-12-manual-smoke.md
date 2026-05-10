@@ -24,11 +24,11 @@ SPEC-1939 Issue #2584 can close.
    cargo build -p gwt --release
    ```
 3. A multi-worktree project with at least 2 active worktrees. The gwt
-   repo itself works; otherwise:
-   ```bash
-   gwtd start-work develop /tmp/gwt-smoke-a
-   gwtd start-work develop /tmp/gwt-smoke-b
-   ```
+   repo itself works (this repository's `develop` worktree plus any
+   feature worktree). Otherwise, materialise additional worktrees from
+   the gwt GUI's *Start Work* flow against an existing project — agent
+   CLIs do not create worktrees, so do not invoke `git worktree add`
+   from automation.
 4. Optional: pre-seed an unhealthy index scope by deleting one
    worktree's chroma store under `~/.gwt/index/<repo-hash>/worktrees/
    <wt-hash>/files/`. This forces the bootstrap path into
@@ -85,7 +85,7 @@ deferred — no Windows host` in the Board, and rely on the
 After running the checklist, post a status update:
 
 ```bash
-gwtd board post --kind status --mention user:akiojin --body $'\
+gwtd board post --kind status --owner SPEC-1939 --topic phase-12-smoke --body $'\
 SPEC-1939 Phase 12 macOS smoke (T-IDX-111) 完了:\n\
 - 1: pass\n\
 - 2: pass\n\
@@ -97,6 +97,11 @@ SPEC-1939 Phase 12 macOS smoke (T-IDX-111) 完了:\n\
 \n\
 Windows (T-IDX-112): <pass | best-effort deferred>'
 ```
+
+(`gwtd board post --help` lists the valid flags: `--kind`, `--body | -f`,
+`--title-summary`, `--parent`, `--topic`, `--owner`, `--target`. Use
+`--target <session-id|branch|agent-id>` to highlight the post for
+specific agents — there is no user-mention flag.)
 
 When the smoke passes on macOS, comment on Issue #2584 with the Board
 link to close the Phase 12 verification follow-up.
