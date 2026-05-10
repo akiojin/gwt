@@ -1,6 +1,129 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.25.0] - 2026-05-10
+
+### Bug Fixes
+
+- **gui:** Count only agent presets in Sidebar Layers telemetry
+- **gui:** Preserve grouped window geometry across tab switches
+- **launch:** Hydrate process PATH at startup for macOS GUI launches
+- **launch:** Guard PATH hydration against empty values and non-Unicode env
+- Activate hidden window tabs during focus cycle
+- **board:** Prevent CLI impersonation when GWT_SESSION_ID missing
+- **workspace:** Require agent title summaries
+- **workspace:** Keep title summaries as work names
+- **workspace:** Block mutating git title guard bypass
+- **test:** Stabilize project_index_bootstrap parallel coalesce test
+- **workspace:** Allow read-only git branch title guard queries
+- **workspace:** Allow git branch short read flags
+- **workspace:** Block git branch no-list title guard bypass
+- **workspace:** Preserve read-only git branch no-list queries
+- **workspace:** Evaluate git branch list mode after args
+- **gui:** Canonicalize per-cell rebuild project root for proxy events
+- Show waiting agent status in aggregate surfaces
+- **terminal:** Preserve SGR through snapshot replay and scrollback
+- **gui:** Fan out terminal fit on host resize and tab visibility
+- **ci:** Skip index bootstrap for fixture e2e
+- **ci:** Show index fixture status on active project
+- **gui:** Refresh theme toggle preference state
+- **runtime:** Serialize daemon publishes
+- **migration:** Restore external worktrees on rollback
+- **migration:** Detect interrupted migration backups
+- **migration:** Honor migration quit action
+- **gui:** Scope Workspace Overview to active project on tab transitions
+- **migration:** Preserve local refs during bare migration
+- Repair GUI project index bootstrap status
+
+### Documentation
+
+- **lessons:** Record preset filter for agent counting
+- **lessons:** Record source-string vs behavior test lesson for terminal viewport reflow
+- **lessons:** Record gwt-build-spec preflight gap from duplicate PR
+- **skills:** Add Board claim preflight
+- **playwright:** Document SPEC-1939 Phase 12 e2e seams + local reproduction
+- **playwright:** Add CI failure triage steps for Index Status e2e workflow
+- **playwright:** Rewrite test layout to match the actual spec set
+- Add SPEC-1939 Phase 12 manual smoke checklist for T-IDX-111/112
+- Correct manual smoke prerequisites and Board flags
+- **lessons:** Record CLI snippet verification rule for user-facing docs
+- Restore --mention flag in board post documentation
+- **cli:** Align BoardCommand::Post docstring with full flag surface
+- **lessons:** Record auto-merge race window with CodeRabbit feedback
+- **lessons:** Record spec section edit safeguards
+- **playwright:** Align README test names with actual spec test() titles
+- **smoke:** Add concrete recipe for seeding repair_required state
+- Record safe GitHub comment workflow
+- Document hook forward bridge
+- **skills:** Align release quick reference
+
+### Features
+
+- **gui:** Wire auto-rebuild orchestrator + aggregated index status payload
+- **gui:** Replace Index: repair badge with clickable repairing UX
+- **gui:** Settings.Index tab + worktree tab dot + repairing progress toast
+- **launch:** Add info-level structured logging across launch agent flow
+- **gui:** Reflow terminal viewport on host resize and tab activation
+- **gui:** Add GWT_INDEX_TEST_FIXTURE seam for Playwright e2e seeds
+- **gui:** Expose embedded server URL via GWT_BROWSER_URL_FILE for CI
+- **gui:** Add custom agent env editor
+- **runtime:** Bridge runtime events through daemon
+- **migration:** Migrate linked worktrees
+- **gui:** Drop project-bar Index badge (SPEC-1939 Phase 13)
+
+### Miscellaneous Tasks
+
+- **ci:** Make Operator Design System Playwright check skip-friendly for backend-only PRs
+- **ci:** Re-trigger CI for PR #2569
+- Merge origin/develop into work branch
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop after PR #2599 was merged
+- Merge origin develop
+- Merge origin develop after PR #2600 was merged
+- Merge origin develop after PR #2602 was merged
+- Merge origin/develop
+- **deps-dev:** Bump @commitlint/config-conventional
+- **deps-dev:** Bump @commitlint/cli from 20.5.3 to 21.0.0
+- Merge origin/develop into work branch
+
+### Refactor
+
+- **gui:** Extract terminal viewport reflow primitives + behavior tests
+- **gui:** Remove legacy Knowledge Bridge list scope
+- **playwright:** Extract embedded frontend route helper to shared module
+- **cli:** Restore family split size budget
+
+### Testing
+
+- Add board storage 100k smoke
+- **workspace:** Cover git branch title guard flags
+- **gui:** Align bundle assertions with reflow controller refactor
+- **gwt:** Drop SPEC-2008 Phase 24 Rust contract guards (deferred to #2590)
+- **gui:** Add Playwright e2e skeleton for Index status badge (T-IDX-109/110)
+- **gui:** Cover GWT_BROWSER_URL_FILE handoff with focused unit tests
+- **gui:** Bump index-status badge timeout to 30s for CI cold start
+- **gui:** Wait for index-status badge visibility before click in click-path spec
+- **gui:** Add Kanban visual snapshots
+- **gui:** Cover merged frontend module in visual fixture
+- **gui:** Split Kanban snapshots by platform
+- **gui:** Switch index-status spec to kanban-style fixture (no live gwt)
+- **gui:** Cover ready / skipped badge states in index-status spec
+- **gui:** Add badge transition spec covering repair_required -> repairing -> ready
+- **gui:** Cover Settings.Index tab e2e via fixture create_window handler
+- **gui:** Cover project tab dot transitions over WebSocket events (T-IDX-107)
+- **gui:** Cover multi-worktree dot aggregation transitions in e2e (T-IDX-111 prep)
+- **gui:** Cover Settings.Index per-cell Rebuild IPC dispatch (T-IDX-102/T-IDX-110)
+- **gui:** Cover Settings.Index scope-row Rebuild all dispatch
+- **gwtd:** Tighten board help regression to require * repetition marker
+- **migration:** Cover core migration fallbacks
+- Cover WebView modal selection contract
+
+### Ci
+
+- **workflows:** Add Index Status e2e workflow gating Playwright spec
+- **workflows:** Seed throwaway git repo so gwt opens a project tab in e2e
+
 ## [9.24.2] - 2026-05-09
 
 ### Bug Fixes
