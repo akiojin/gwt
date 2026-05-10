@@ -24,9 +24,11 @@
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
       import {
+        aggregateProjectTabDotState,
         dispatchOpenIndexSettings,
         formatIndexStatusLabel,
       } from "/index-status-controller.js";
+      import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -316,8 +318,43 @@
 
       indexStatusLabel.addEventListener("click", () => {
         if (indexStatusLabel.hidden) return;
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const status =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        if (status?.state === "repairing") {
+          showRepairingProgressToast(status);
+          return;
+        }
         dispatchOpenIndexSettings(indexStatusLabel);
       });
+
+      // SPEC-1939 T-IDX-108: while badge is `repairing`, click shows a
+      // progress toast sourced from the aggregated payload's `progress`
+      // field. No cancel button is provided because plan.md keeps the
+      // failure path visible (one shot per scope, then `error` for retry).
+      function showRepairingProgressToast(status) {
+        const progress = status?.progress || {};
+        const done = Number.isFinite(progress.scopes_done) ? progress.scopes_done : 0;
+        const total = Number.isFinite(progress.scopes_total) ? progress.scopes_total : 0;
+        const text = total > 0
+          ? `Rebuilding project index: ${done} of ${total} scope(s) completed`
+          : "Rebuilding project index…";
+        let toast = document.getElementById("index-status-toast");
+        if (!toast) {
+          toast = document.createElement("div");
+          toast.id = "index-status-toast";
+          toast.className = "index-status-toast";
+          toast.setAttribute("role", "status");
+          toast.setAttribute("aria-live", "polite");
+          document.body.appendChild(toast);
+        }
+        toast.textContent = text;
+        toast.dataset.visible = "true";
+        if (toast._hideTimer) clearTimeout(toast._hideTimer);
+        toast._hideTimer = setTimeout(() => {
+          toast.dataset.visible = "false";
+        }, 3500);
+      }
 
       function setIndexStatus(projectRoot, status) {
         if (!projectRoot) {
@@ -326,8 +363,14 @@
         indexStatusByProjectRoot.set(projectRoot, {
           state: status?.state || "",
           detail: status?.detail || "",
+          repair_started_at: status?.repair_started_at || null,
+          progress: status?.progress || null,
+          scopes: status?.scopes || {},
+          worktrees: status?.worktrees || {},
         });
         renderIndexStatus();
+        renderIndexPanelInAllSettingsWindows();
+        refreshProjectTabDots();
       }
 
       function formatVersionLabel() {
@@ -852,6 +895,7 @@
           const button = document.createElement("div");
           button.className = "project-tab";
           button.title = tab.project_root;
+          button.dataset.projectRoot = tab.project_root || "";
           button.setAttribute("role", "button");
           button.tabIndex = 0;
           // SPEC-2356 — aria-current="page" announces the active tab to
@@ -864,10 +908,25 @@
           } else {
             button.removeAttribute("aria-current");
           }
-          button.innerHTML = `
-            <span class="project-tab-label">${tab.title}</span>
-            <button class="project-tab-close" type="button" aria-label="Close ${tab.title}">×</button>
-          `;
+          // SPEC-1939 T-IDX-107 — aggregated worktree health dot precedes
+          // the tab label.
+          const dot = document.createElement("span");
+          dot.className = "project-tab-dot";
+          dot.dataset.role = "project-tab-dot";
+          dot.dataset.state = "";
+          dot.setAttribute("aria-hidden", "true");
+          button.appendChild(dot);
+          const labelEl = document.createElement("span");
+          labelEl.className = "project-tab-label";
+          labelEl.textContent = tab.title;
+          button.appendChild(labelEl);
+          const closeEl = document.createElement("button");
+          closeEl.className = "project-tab-close";
+          closeEl.type = "button";
+          closeEl.setAttribute("aria-label", `Close ${tab.title}`);
+          closeEl.textContent = "×";
+          button.appendChild(closeEl);
+          updateProjectTabDot(button, tab.project_root);
           button.addEventListener("click", () => {
             send({ kind: "select_project_tab", tab_id: tab.id });
           });
@@ -877,13 +936,26 @@
               send({ kind: "select_project_tab", tab_id: tab.id });
             }
           });
-          button
-            .querySelector(".project-tab-close")
-            .addEventListener("click", (event) => {
-              event.stopPropagation();
-              send({ kind: "close_project_tab", tab_id: tab.id });
-            });
+          closeEl.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "close_project_tab", tab_id: tab.id });
+          });
           projectTabs.appendChild(button);
+        }
+      }
+
+      function updateProjectTabDot(buttonEl, projectRoot) {
+        const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
+        if (!dot) return;
+        const status = (projectRoot && indexStatusByProjectRoot.get(projectRoot)) || null;
+        const dotState = aggregateProjectTabDotState(status);
+        dot.dataset.state = dotState;
+      }
+
+      function refreshProjectTabDots() {
+        for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
+          const projectRoot = buttonEl.dataset.projectRoot || "";
+          updateProjectTabDot(buttonEl, projectRoot);
         }
       }
 
@@ -6586,6 +6658,7 @@
         tabs.setAttribute("role", "tablist");
         tabs.appendChild(buildSettingsTab("system", "System", true));
         tabs.appendChild(buildSettingsTab("custom-agents", "Custom Agents", false));
+        tabs.appendChild(buildSettingsTab("index", "Index", false));
 
         toolbar.appendChild(heading);
         toolbar.appendChild(tabs);
@@ -6605,8 +6678,15 @@
         // the Add button and agent rows.
         panelAgents.dataset.role = "settings-scroll";
 
+        const panelIndex = document.createElement("section");
+        panelIndex.className = "settings-panel hidden";
+        panelIndex.setAttribute("role", "tabpanel");
+        panelIndex.dataset.settingsPanel = "index";
+        panelIndex.dataset.role = "settings-scroll";
+
         bodyEl.appendChild(panelSystem);
         bodyEl.appendChild(panelAgents);
+        bodyEl.appendChild(panelIndex);
 
         root.appendChild(toolbar);
         root.appendChild(bodyEl);
@@ -6642,7 +6722,57 @@
           customAgentsState.loading = true;
           send({ kind: "list_custom_agents" });
         }
+
+        // SPEC-1939 T-IDX-106: render the Project Index health table.
+        renderIndexPanel(panelIndex);
+
+        // Honour any pending settings:open dispatch (e.g. from the badge
+        // click) by switching to the requested tab once the panel is mounted.
+        if (pendingSettingsTabTarget) {
+          switchSettingsTab(body, pendingSettingsTabTarget);
+          pendingSettingsTabTarget = null;
+        }
       }
+
+      let pendingSettingsTabTarget = null;
+
+      function renderIndexPanel(panel) {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        const status =
+          (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+        renderIndexSettingsPanel({
+          panel,
+          status,
+          projectRoot: activeProjectRoot,
+          send,
+        });
+      }
+
+      function renderIndexPanelInAllSettingsWindows() {
+        for (const settingsBody of Array.from(settingsWindowBodies)) {
+          if (!settingsBody.isConnected) {
+            settingsWindowBodies.delete(settingsBody);
+            continue;
+          }
+          const panel = settingsBody.querySelector(
+            "[data-settings-panel='index']",
+          );
+          if (panel) renderIndexPanel(panel);
+        }
+      }
+
+      document.addEventListener("settings:open", (event) => {
+        const target = event?.detail?.target || "system";
+        const existingBody = Array.from(settingsWindowBodies).find(
+          (settingsBody) => settingsBody.isConnected,
+        );
+        if (existingBody) {
+          switchSettingsTab(existingBody, target);
+          return;
+        }
+        pendingSettingsTabTarget = target;
+        focusOrSpawnPreset("settings");
+      });
 
       function buildSettingsTab(id, label, selected) {
         const btn = document.createElement("button");

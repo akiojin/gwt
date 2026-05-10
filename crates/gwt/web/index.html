@@ -231,6 +231,96 @@
         display: none;
       }
 
+      /* SPEC-1939 T-IDX-107 — per-worktree health dot on project tabs. */
+      .project-tab-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+        background: transparent;
+        border: 1px solid transparent;
+      }
+      .project-tab-dot[data-state="ready"] {
+        background: var(--color-state-active);
+      }
+      .project-tab-dot[data-state="error"] {
+        background: var(--color-state-blocked);
+      }
+      .project-tab-dot[data-state="repairing"] {
+        background: var(--agent-claude);
+      }
+
+      /* SPEC-1939 T-IDX-108 — progress toast for repairing badge click. */
+      .index-status-toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        max-width: 480px;
+        padding: 10px 14px;
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        box-shadow: var(--shadow-glow-active, 0 4px 16px rgba(0, 0, 0, 0.2));
+        font-size: var(--type-xs);
+        font-family: var(--font-mono);
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: opacity 200ms ease, transform 200ms ease;
+        z-index: 50;
+      }
+      .index-status-toast[data-visible="true"] {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      /* SPEC-1939 T-IDX-106 — Settings.Index health table. */
+      .settings-index-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: var(--type-sm);
+      }
+      .settings-index-table th,
+      .settings-index-table td {
+        padding: 8px 10px;
+        border: 1px solid var(--color-border);
+        text-align: left;
+        vertical-align: top;
+      }
+      .settings-index-cell.unhealthy {
+        background: color-mix(in oklab, var(--color-state-blocked) 12%, transparent);
+      }
+      .settings-index-cell.ready {
+        background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
+      }
+      .settings-index-cell-status {
+        font-weight: 600;
+      }
+      .settings-index-cell-meta {
+        margin-top: 2px;
+        display: flex;
+        gap: 12px;
+        color: var(--color-text-muted);
+        font-size: var(--type-xs);
+      }
+      .settings-index-rebuild,
+      .settings-index-rebuild-all {
+        margin-top: 6px;
+        font-size: var(--type-xs);
+        padding: 4px 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-sm);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        cursor: pointer;
+      }
+      .settings-index-rebuild-all {
+        margin-left: 8px;
+        margin-top: 0;
+      }
+
       .canvas-area {
         position: relative;
         flex: 1;
