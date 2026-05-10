@@ -109,6 +109,60 @@ struct GuiFrontDoorLaunchSurface<'a> {
     webview_url: &'a str,
 }
 
+/// Environment variable used by the Playwright CI workflow to receive the
+/// embedded server URL from a launching `gwt` instance. SPEC-1939
+/// T-IDX-109/110 / Issue #2584.
+pub(crate) const BROWSER_URL_FILE_ENV: &str = "GWT_BROWSER_URL_FILE";
+
+/// Result of [`write_browser_url_handoff_file`]; surfaced to keep the unit
+/// test free of tracing setup.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BrowserUrlHandoffOutcome {
+    Disabled,
+    Wrote(std::path::PathBuf),
+    Failed(std::path::PathBuf, String),
+}
+
+/// Persist `url` to `path` when the env-controlled handoff is enabled.
+///
+/// `path_env_value` mirrors `std::env::var(BROWSER_URL_FILE_ENV).ok()`; an
+/// empty / whitespace value is treated as disabled so production runs
+/// (no env) and explicit unset stay no-op.
+pub(crate) fn write_browser_url_handoff_file(
+    path_env_value: Option<&str>,
+    url: &str,
+) -> BrowserUrlHandoffOutcome {
+    let raw = match path_env_value {
+        Some(raw) => raw,
+        None => return BrowserUrlHandoffOutcome::Disabled,
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return BrowserUrlHandoffOutcome::Disabled;
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    match std::fs::write(&path, url) {
+        Ok(()) => {
+            tracing::info!(
+                target: "gwt::startup",
+                path = %path.display(),
+                url = %url,
+                "embedded server URL written for CI handoff"
+            );
+            BrowserUrlHandoffOutcome::Wrote(path)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "gwt::startup",
+                path = %path.display(),
+                error = %error,
+                "failed to write embedded server URL to GWT_BROWSER_URL_FILE"
+            );
+            BrowserUrlHandoffOutcome::Failed(path, error.to_string())
+        }
+    }
+}
+
 fn gui_front_door_launch_surface(server_url: &str) -> GuiFrontDoorLaunchSurface<'_> {
     GuiFrontDoorLaunchSurface {
         browser_url: server_url,
@@ -851,6 +905,67 @@ mod tests {
 
         assert_eq!(surface.browser_url, "http://127.0.0.1:44557/");
         assert_eq!(surface.webview_url, "http://127.0.0.1:44557/");
+    }
+
+    #[test]
+    fn write_browser_url_handoff_file_is_disabled_when_env_is_unset_or_blank() {
+        // SPEC-1939 T-IDX-109/110: production paths must stay no-op when
+        // the CI handoff env var is missing, otherwise startup races
+        // could truncate user files.
+        assert_eq!(
+            super::write_browser_url_handoff_file(None, "http://127.0.0.1:1/"),
+            super::BrowserUrlHandoffOutcome::Disabled,
+        );
+        assert_eq!(
+            super::write_browser_url_handoff_file(Some(""), "http://127.0.0.1:1/"),
+            super::BrowserUrlHandoffOutcome::Disabled,
+        );
+        assert_eq!(
+            super::write_browser_url_handoff_file(Some("   "), "http://127.0.0.1:1/"),
+            super::BrowserUrlHandoffOutcome::Disabled,
+        );
+    }
+
+    #[test]
+    fn write_browser_url_handoff_file_persists_url_to_target_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("gwt-browser-url");
+        let url = "http://127.0.0.1:44557/";
+
+        let outcome = super::write_browser_url_handoff_file(Some(target.to_str().unwrap()), url);
+
+        assert_eq!(
+            outcome,
+            super::BrowserUrlHandoffOutcome::Wrote(target.clone()),
+        );
+        let written = std::fs::read_to_string(&target).expect("read back");
+        assert_eq!(
+            written, url,
+            "Playwright workflow reads this file; trailing newline / whitespace would break the URL"
+        );
+    }
+
+    #[test]
+    fn write_browser_url_handoff_file_reports_failure_when_target_directory_is_missing() {
+        // Pointing at a path whose parent does not exist must not panic;
+        // it should be reported as Failed so callers can log without
+        // aborting startup.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does/not/exist/gwt-browser-url");
+
+        let outcome =
+            super::write_browser_url_handoff_file(Some(missing.to_str().unwrap()), "http://x/");
+
+        match outcome {
+            super::BrowserUrlHandoffOutcome::Failed(path, _reason) => {
+                assert_eq!(path, missing);
+            }
+            other => panic!("expected Failed outcome, got {other:?}"),
+        }
+        assert!(
+            !missing.exists(),
+            "failure path must not leave a partial file behind",
+        );
     }
 
     #[test]
@@ -4839,25 +4954,10 @@ fn main() -> wry::Result<()> {
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
     // written to that path so the CI workflow can read it back into
     // `GWT_PLAYWRIGHT_BASE_URL` without parsing stderr.
-    if let Ok(path) = std::env::var("GWT_BROWSER_URL_FILE") {
-        if !path.trim().is_empty() {
-            if let Err(error) = std::fs::write(&path, front_door.browser_url) {
-                tracing::warn!(
-                    target: "gwt::startup",
-                    path = %path,
-                    error = %error,
-                    "failed to write embedded server URL to GWT_BROWSER_URL_FILE"
-                );
-            } else {
-                tracing::info!(
-                    target: "gwt::startup",
-                    path = %path,
-                    url = %front_door.browser_url,
-                    "embedded server URL written for CI handoff"
-                );
-            }
-        }
-    }
+    write_browser_url_handoff_file(
+        std::env::var(BROWSER_URL_FILE_ENV).ok().as_deref(),
+        front_door.browser_url,
+    );
 
     // Startup update check (T-031): keep only the wiring here.
     spawn_startup_update_check(&runtime, clients.clone(), proxy.clone());
