@@ -1,5 +1,38 @@
 # Lessons Learned
 
+## 2026-05-10 — Verify CLI commands and flags exist before shipping them in docs
+
+### 事象
+
+`docs/spec-1939-phase-12-manual-smoke.md` (PR #2599 で develop merged) に、
+実在しないサブコマンド `gwtd start-work develop /tmp/...` と、存在しない
+フラグ `--mention user:akiojin` を含めてしまった。reviewer が checklist
+通りに手を動かすと両方とも即詰まる状態で、follow-up PR #2600 でドキュ
+メントを修正する手戻りが発生した。
+
+### 原因
+
+reviewer 向けの手順を書く際、command line snippet を「自分の記憶」だけで
+書き起こし、`gwtd --help` / `gwtd --help <subcommand>` で実在を確認しな
+かった。`gwtd` のサブコマンドは `issue / pr / actions / board / hook /
+index / discuss / plan / build / pane / workspace / update / daemon` のみ
+で、worktree 作成は GUI の Start Work flow が責任を持つ設計 (AGENTS.md
+の「`git checkout -b`、`git switch -c`、`git branch -D`、`git worktree
+add/remove` は禁止」と整合) になっている。`gwtd board post` の audience
+flag は `--target <id>` のみで、`--mention` は存在しない。
+
+### 再発防止策
+
+1. user 向け手順 (docs / README / lesson テンプレ / SPEC sample) に CLI
+   snippet を埋め込む際は、commit 前に `gwtd --help <subcommand>` または
+   `gwtd <subcommand> --help` で全 flag / subcommand の実在を確認する。
+2. agent 自身が普段叩かないサブコマンド (CI 出力、Board 投稿、Issue 操
+   作の組み合わせ等) を doc に固定する場合は、必ず実 invocation で
+   reproduce してから snippet を確定する。
+3. 既存 doc を参考にする場合でも、過去の typo がそのまま伝播する可能性
+   があるので、参照元の commit / PR で実際に動いた証跡 (CI ログ・成功し
+   た board entry など) を一度確認する。
+
 ## 2026-05-10 — Read tasks/lessons.md before designing tests for window interaction features
 
 ### 事象
