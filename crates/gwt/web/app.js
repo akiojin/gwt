@@ -23,6 +23,10 @@
       import { createWorkspaceKanbanSurface } from "/workspace-kanban-surface.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createTerminalContextMenuController } from "/terminal-context-menu.js";
+      import {
+        dispatchOpenIndexSettings,
+        formatIndexStatusLabel,
+      } from "/index-status-controller.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -303,19 +307,17 @@
             detail: "",
           };
         const state = indexStatusState.state || "";
-        indexStatusLabel.hidden = !state || state === "skipped";
-        indexStatusLabel.className = `index-status ${state}`;
-        const label =
-          state === "ready"
-            ? "Index: ready"
-            : state === "repair_required"
-              ? "Index: repair"
-              : state === "error"
-                ? "Index: error"
-                : "Index: checking";
-        indexStatusLabel.textContent = label;
-        indexStatusLabel.title = indexStatusState.detail || label;
+        const formatted = formatIndexStatusLabel(state);
+        indexStatusLabel.hidden = formatted.hidden;
+        indexStatusLabel.className = formatted.className;
+        indexStatusLabel.textContent = formatted.label;
+        indexStatusLabel.title = indexStatusState.detail || formatted.title;
       }
+
+      indexStatusLabel.addEventListener("click", () => {
+        if (indexStatusLabel.hidden) return;
+        dispatchOpenIndexSettings(indexStatusLabel);
+      });
 
       function setIndexStatus(projectRoot, status) {
         if (!projectRoot) {

@@ -1387,6 +1387,7 @@ kbd.op-kbd {
 :root[data-theme] .index-status.ready { color: var(--color-state-active); border-color: var(--color-state-active); }
 :root[data-theme] .index-status.repair_required,
 :root[data-theme] .index-status.error { color: var(--color-state-blocked); border-color: var(--color-state-blocked); }
+:root[data-theme] .index-status.repairing { color: var(--agent-claude); border-color: var(--agent-claude); }
 
 :root[data-theme] .hint {
   color: var(--color-text-muted);
