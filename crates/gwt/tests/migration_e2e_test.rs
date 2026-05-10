@@ -22,6 +22,20 @@ fn run_git(dir: &Path, args: &[&str]) {
     );
 }
 
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = gwt_core::process::hidden_command("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn init_repo_with_commit(path: &Path) {
     run_git(path, &["init", "."]);
     // Configure a deterministic identity so commits succeed in CI sandboxes.
@@ -94,6 +108,66 @@ fn t100_e2e_normal_to_nested_bare_worktree_layout() {
     // Outcome reflects the layout.
     assert_eq!(outcome.bare_repo_path, bare);
     assert_eq!(outcome.branch_worktree_path, worktree);
+}
+
+#[test]
+fn t143_e2e_remote_ahead_migration_preserves_local_head() {
+    // A real copied Workbench smoke exposed that cloning origin during
+    // migration can move the migrated worktree to a newer remote HEAD. The
+    // migration must preserve the user's local branch HEAD and restore dirty
+    // files on top of that exact commit.
+    let sandbox = tempfile::tempdir().unwrap();
+    let remote = sandbox.path().join("remote.git");
+    let seed = sandbox.path().join("seed");
+    let project = sandbox.path().join("project");
+
+    std::fs::create_dir_all(&seed).unwrap();
+    run_git(&seed, &["init", "-b", "develop", "."]);
+    run_git(&seed, &["config", "user.email", "test@example.com"]);
+    run_git(&seed, &["config", "user.name", "Test"]);
+    std::fs::write(seed.join("README.md"), "v1\n").unwrap();
+    run_git(&seed, &["add", "README.md"]);
+    run_git(&seed, &["commit", "-m", "v1"]);
+    run_git(
+        sandbox.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    run_git(
+        &seed,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    run_git(&seed, &["push", "-u", "origin", "develop"]);
+    run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/develop"]);
+
+    run_git(
+        sandbox.path(),
+        &["clone", remote.to_str().unwrap(), project.to_str().unwrap()],
+    );
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "Test"]);
+    let local_head_before = git_stdout(&project, &["rev-parse", "HEAD"]);
+
+    std::fs::write(seed.join("README.md"), "v2 from remote\n").unwrap();
+    run_git(&seed, &["add", "README.md"]);
+    run_git(&seed, &["commit", "-m", "v2"]);
+    run_git(&seed, &["push", "origin", "develop"]);
+
+    std::fs::write(project.join("README.md"), "local dirty\n").unwrap();
+
+    execute_migration(&project, MigrationOptions::default(), |_phase, _pct| {})
+        .expect("execute_migration");
+
+    let worktree = project.join("develop");
+    assert_eq!(
+        git_stdout(&worktree, &["rev-parse", "HEAD"]),
+        local_head_before,
+        "migration must preserve the local branch HEAD, not advance to the remote HEAD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "local dirty\n",
+        "dirty file content must be restored on top of the preserved local HEAD"
+    );
 }
 
 #[test]
