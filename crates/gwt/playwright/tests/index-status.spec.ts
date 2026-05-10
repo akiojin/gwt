@@ -43,7 +43,10 @@ test.describe("Project Index status badge (SPEC-1939 Phase 12)", () => {
     // `repair_required` view immediately so the badge becomes visible
     // without waiting on the real Python runner.
     const badge = page.locator("#index-status");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
+    // CI cold-start (xvfb + gwt build + bootstrap + WebSocket round-trip)
+    // can take longer than 10s on shared runners. 30s gives the bootstrap
+    // path plenty of headroom while still failing fast on real regressions.
+    await expect(badge).toBeVisible({ timeout: 30_000 });
     await expect(badge).toHaveAttribute("type", "button");
     await expect(badge).toHaveAttribute("aria-label", /index/i);
     await expect(badge).toContainText(/Index:\s+(repair|repairing|ready)/);
@@ -86,7 +89,10 @@ test.describe("Project Index status badge (SPEC-1939 Phase 12)", () => {
 
     await page.goto(BASE);
     const badge = page.locator("#index-status");
-    await expect(badge).toBeVisible({ timeout: 10_000 });
+    // CI cold-start (xvfb + gwt build + bootstrap + WebSocket round-trip)
+    // can take longer than 10s on shared runners. 30s gives the bootstrap
+    // path plenty of headroom while still failing fast on real regressions.
+    await expect(badge).toBeVisible({ timeout: 30_000 });
     await expect(badge).toHaveClass(/error/);
     await expect(badge).toContainText(/Index:\s+error/);
 
