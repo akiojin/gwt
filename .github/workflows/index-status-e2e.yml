@@ -1,0 +1,124 @@
+name: Index Status e2e
+
+# SPEC-1939 Phase 12 / T-IDX-109 + T-IDX-110 — Playwright e2e for the
+# Project Index status badge. Boots gwt under xvfb with the
+# `GWT_INDEX_TEST_FIXTURE` aggregator seam + `GWT_BROWSER_URL_FILE`
+# URL handoff seam, then runs `crates/gwt/playwright/tests/index-status.spec.ts`.
+#
+# This is a separate workflow from `visual-regression.yml` so the lifecycle
+# (xvfb + gwt background process) and PR-trigger paths stay isolated. The
+# job is non-required by branch protection until it has stabilised on
+# develop; it surfaces failures as a CI signal without blocking auto-merge.
+
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "crates/gwt/src/index_worker.rs"
+      - "crates/gwt/src/main.rs"
+      - "crates/gwt/web/index-status-controller.js"
+      - "crates/gwt/web/index-settings-panel.js"
+      - "crates/gwt/playwright/tests/index-status.spec.ts"
+      - "crates/gwt/playwright/fixtures/**"
+      - ".github/workflows/index-status-e2e.yml"
+
+jobs:
+  e2e:
+    name: Project Index status (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install host packages (xvfb + WebView)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install npm dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Build gwt (release)
+        run: cargo build -p gwt --release
+
+      - name: Boot gwt with index fixture
+        env:
+          # SPEC-1939 T-IDX-109 fixture seeds a deterministic
+          # `repair_required` view so the badge becomes visible without
+          # running the real Python runner.
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          GWT_BROWSER_URL_FILE: /tmp/gwt-browser-url
+        run: |
+          set -euo pipefail
+          export GWT_INDEX_TEST_FIXTURE="$WORKSPACE_ROOT/crates/gwt/playwright/fixtures/index-status-repair-required.json"
+          # Headless display for tao + wry.
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x720x24 &
+          XVFB_PID=$!
+          echo "XVFB_PID=$XVFB_PID" >> "$GITHUB_ENV"
+          sleep 2
+
+          # Run gwt outside any git worktree so the project picker is the
+          # entry surface; the index status seam still applies because the
+          # aggregator is invoked via the bootstrap path.
+          mkdir -p /tmp/gwt-runtime
+          cd /tmp/gwt-runtime
+
+          rm -f "$GWT_BROWSER_URL_FILE"
+          "$WORKSPACE_ROOT/target/release/gwt" >/tmp/gwt.log 2>&1 &
+          echo "GWT_PID=$!" >> "$GITHUB_ENV"
+
+          # Wait up to 60s for the URL file to materialise.
+          for i in $(seq 1 60); do
+            if [ -s "$GWT_BROWSER_URL_FILE" ]; then
+              break
+            fi
+            sleep 1
+          done
+          if [ ! -s "$GWT_BROWSER_URL_FILE" ]; then
+            echo "::error::gwt did not write GWT_BROWSER_URL_FILE within 60s"
+            tail -100 /tmp/gwt.log || true
+            exit 1
+          fi
+
+          URL="$(cat "$GWT_BROWSER_URL_FILE")"
+          echo "GWT_PLAYWRIGHT_BASE_URL=$URL" >> "$GITHUB_ENV"
+          echo "gwt embedded server URL: $URL"
+
+      - name: Run Playwright index-status spec
+        run: npx playwright test --config crates/gwt/playwright/playwright.config.ts crates/gwt/playwright/tests/index-status.spec.ts
+
+      - name: Capture gwt log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwt-runtime-log
+          path: /tmp/gwt.log
+          if-no-files-found: ignore
+
+      - name: Tear down gwt
+        if: always()
+        run: |
+          if [ -n "${GWT_PID:-}" ]; then
+            kill "$GWT_PID" 2>/dev/null || true
+            wait "$GWT_PID" 2>/dev/null || true
+          fi
+          if [ -n "${XVFB_PID:-}" ]; then
+            kill "$XVFB_PID" 2>/dev/null || true
+          fi
