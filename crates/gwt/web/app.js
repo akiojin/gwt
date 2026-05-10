@@ -1362,7 +1362,16 @@
         });
       }
 
+      // SPEC-2008 Phase 24 / T-188: extend the predicate so a hidden tab
+      // (display:none on the window element) is treated the same as a
+      // minimized window. xterm.js's fit / refresh do nothing useful while
+      // the host is invisible, and skipping here prevents stale measurement
+      // from leaking into the next visible cycle.
       function canRefreshTerminalViewport(windowId) {
+        const element = windowMap.get(windowId);
+        if (element && element.hidden) {
+          return false;
+        }
         return !workspaceWindowById(windowId)?.minimized;
       }
 
@@ -7237,12 +7246,26 @@
           windowMap.delete(windowId);
         }
 
+        // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
+        // for tab-grouped terminal windows so the newly visible terminal
+        // gets fit + viewport refresh + focus on the same animation frame
+        // cycle. Without this, scrollback wheel input requires a manual
+        // OS-level resize before xterm picks up the new measurement.
+        const reflowAfterActivation = [];
         for (const windowData of workspace.windows) {
           ensureWindow(windowData);
           const element = windowMap.get(windowData.id);
           if (element) {
-            element.hidden = !visibleWindowData(windowData);
+            const wasHidden = element.hidden;
+            const shouldHide = !visibleWindowData(windowData);
+            element.hidden = shouldHide;
+            if (wasHidden && !shouldHide && terminalMap.has(windowData.id)) {
+              reflowAfterActivation.push(windowData.id);
+            }
           }
+        }
+        for (const windowId of reflowAfterActivation) {
+          scheduleTerminalFocusActivation(windowId);
         }
 
         requestAnimationFrame(syncMaximizedWindowsToViewport);
@@ -8394,6 +8417,18 @@
       window.addEventListener("resize", () => {
         frontendUnits.projectWorkspaceShell.renderWindowList();
         syncMaximizedWindowsToViewport();
+        // SPEC-2008 Phase 24 / T-187: window.resize must fan out
+        // `fitTerminal(persist=true)` to every visible terminal window so
+        // xterm cols/rows stay aligned with the host viewport and the
+        // backend PTY is informed via UpdateWindowGeometry. Skipping here
+        // is what kept text wrapping fixed at the previous viewport width
+        // until the user manually resized each window.
+        for (const windowId of terminalMap.keys()) {
+          if (!canRefreshTerminalViewport(windowId)) {
+            continue;
+          }
+          fitTerminal(windowId, true);
+        }
       });
       window.addEventListener("pointerdown", (event) => {
         if (!windowListOpen) {
