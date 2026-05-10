@@ -1884,10 +1884,17 @@ impl AppRuntime {
             .runtimes
             .iter()
             .filter_map(|(id, runtime)| {
+                // SPEC-1919 FR-001a: snapshot replay must reproduce SGR
+                // attributes (color, bold, italic, underline, inverse) so
+                // tab switch / focus cycle / WebSocket reconnect do not
+                // collapse colored history into default-color text. Use
+                // vt100 `Screen::contents_formatted()` which emits a CSI
+                // escape stream xterm.js can replay verbatim, instead of
+                // `Screen::contents()` which strips formatting.
                 let snapshot = runtime
                     .pane
                     .lock()
-                    .map(|pane| pane.screen().contents().into_bytes())
+                    .map(|pane| pane.screen().contents_formatted())
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot))
             })
@@ -6106,6 +6113,88 @@ exit 0
             .decode(snapshot.expect("terminal snapshot event"))
             .expect("decode terminal snapshot");
         assert!(String::from_utf8_lossy(&decoded).contains("hello from frontend ready"));
+    }
+
+    #[test]
+    fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
+        let temp = tempdir().expect("tempdir");
+        let tab = sample_project_tab_with_window(
+            "tab-1",
+            "shell-1",
+            WindowPreset::Shell,
+            WindowProcessStatus::Ready,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "shell-1");
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+        let mut pane = Pane::new(
+            window_id.clone(),
+            command,
+            args,
+            80,
+            24,
+            HashMap::new(),
+            None,
+        )
+        .expect("pane");
+        // Write red foreground + bold "ALERT" then reset, then default-color text.
+        pane.process_bytes(b"\x1b[31;1mALERT\x1b[0m normal\n");
+
+        runtime.runtimes.insert(
+            window_id.clone(),
+            WindowRuntime {
+                pane: Arc::new(Mutex::new(pane)),
+                output_thread: None,
+                status_thread: None,
+            },
+        );
+
+        let events =
+            runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
+
+        let snapshot = events.iter().find_map(|event| match &event.event {
+            BackendEvent::TerminalSnapshot { id, data_base64 } if id == &window_id => {
+                Some(data_base64)
+            }
+            _ => None,
+        });
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(snapshot.expect("terminal snapshot event"))
+            .expect("decode terminal snapshot");
+        // Visible text must be present.
+        assert!(
+            String::from_utf8_lossy(&decoded).contains("ALERT"),
+            "expected ALERT text in snapshot bytes, got: {:?}",
+            String::from_utf8_lossy(&decoded)
+        );
+        // SGR escape sequence introducing a styled run (CSI ... m) must be present
+        // so that xterm.js can replay foreground / bold / etc. from the snapshot.
+        let has_sgr = decoded.windows(2).enumerate().any(|(idx, win)| {
+            win == [0x1b, b'['] && {
+                let tail = &decoded[idx + 2..];
+                tail.iter().take(16).any(|b| *b == b'm')
+            }
+        });
+        assert!(
+            has_sgr,
+            "expected SGR escape (CSI ... m) in TerminalSnapshot bytes so xterm.js can replay color/style; raw snapshot bytes: {:?}",
+            decoded
+        );
     }
 
     #[test]
