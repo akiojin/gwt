@@ -4908,3 +4908,26 @@ data 属性だけで判定していた。同じく `activeWorkProjection` 由来
 3. Sidebar / Status Strip / Mission Briefing が共有する集計関数は、
    regression を `operator-chrome-structure` 等の source-level
    assertion で固定し、preset filter の脱落を CI で拾う。
+
+## 2026-05-10 — Git read-only 判定は subcommand 名だけで許可しない
+
+### 事象
+
+title-summary 未設定時の read-only exploration allowlist が `git config` と
+`git remote` を subcommand 名だけで許可していたため、`git config user.name ...`
+や `git remote add ...` のような変更系 command が title-summary gate を通過した。
+
+### 原因
+
+Git の subcommand は同じ名前でも読み取りと変更の両方を持つものがあるが、
+`is_read_only_git_subcommand` が引数を見ずに `config` / `remote` / `branch`
+全体を read-only として扱っていた。allowlist の単位が粗く、guard の目的
+である「作業開始前の変更を止める」契約と一致していなかった。
+
+### 再発防止策
+
+1. Hook guard の read-only 判定では command 名だけでなく引数まで見る。
+2. `git config` / `git remote` / `git branch` のように読み書きが混在する
+   subcommand は、明示的な読み取り形式だけを allowlist する。
+3. allowlist を広げる場合は、読み取り positive test と変更 blocking test
+   を必ず対で追加する。
