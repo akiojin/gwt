@@ -635,6 +635,9 @@ enum UserEvent {
         message: String,
         recovery: gwt_core::migration::RecoveryState,
     },
+    /// SPEC-1934 US-6.8: user chose Quit from the migration modal. The event
+    /// loop exits through the same cleanup path as a window close request.
+    QuitApp,
     #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
 }
@@ -5169,6 +5172,14 @@ fn main() -> wry::Result<()> {
             } => {
                 // Kill every PTY / agent before the event loop exits so no
                 // child process outlives the window.
+                app.stop_all_runtimes();
+                board_projection_watchers.shutdown();
+                #[cfg(unix)]
+                board_daemon_subscribers.shutdown();
+                server.shutdown();
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(UserEvent::QuitApp) => {
                 app.stop_all_runtimes();
                 board_projection_watchers.shutdown();
                 #[cfg(unix)]

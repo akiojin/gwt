@@ -127,12 +127,10 @@ impl AppRuntime {
         })]
     }
 
-    /// SPEC-1934 US-6.8: user chose Quit. Phase 10.4 will translate this into
-    /// a `UserEvent::QuitApp` once the runtime helper lands (T-097); the
-    /// frontend already closes the modal optimistically.
+    /// SPEC-1934 US-6.8: user chose Quit. Leave the repository untouched and
+    /// ask the GUI event loop to exit through the normal shutdown path.
     pub(crate) fn quit_migration_events(&mut self, _tab_id: &str) -> Vec<OutboundEvent> {
-        // TODO(T-097): proxy.send(UserEvent::QuitApp) once the dispatch
-        // helper lands.
+        self.proxy.send(UserEvent::QuitApp);
         Vec::new()
     }
 }
