@@ -58,14 +58,14 @@ The spec covers (chromium-dark + chromium-light):
 | `ready surfaces the green badge with the steady-state label` | T-IDX-104 green |
 | `skipped keeps the badge hidden so non-git projects do not flash chrome` | T-IDX-104 hidden 分岐 |
 | `error surfaces the red badge with the failure title` | T-IDX-104 error title |
-| `badge click dispatches settings:open with target=index` | T-IDX-105 dispatch |
-| `badge transitions repair_required -> repairing -> ready over WebSocket events` | T-IDX-109 state machine |
-| `project tab dot reflects aggregated worktree health` | T-IDX-107 single-worktree |
+| `badge click dispatches settings:open with target=index (T-IDX-105)` | T-IDX-105 dispatch |
+| `badge transitions repair_required -> repairing -> ready over WebSocket events (T-IDX-109)` | T-IDX-109 state machine |
+| `project tab dot reflects aggregated worktree health (T-IDX-107)` | T-IDX-107 single-worktree |
 | `multi-worktree dot aggregates: unhealthy in one worktree turns the dot red` | T-IDX-107 multi-worktree |
-| `badge click opens Settings.Index tab and renders the scope health table` | T-IDX-106 panel + table |
+| `badge click opens Settings.Index tab and renders the scope health table (T-IDX-106)` | T-IDX-106 panel + table |
 | `Settings.Index scope-row Rebuild all dispatches without worktree_hash` | T-IDX-102 scope-row dispatch |
-| `Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC` | T-IDX-102 per-cell / T-IDX-110 retry |
-| `repairing click shows a progress toast` | T-IDX-108 toast |
+| `Settings.Index per-cell Rebuild dispatches rebuild_index_cell IPC (T-IDX-102/T-IDX-110)` | T-IDX-102 per-cell / T-IDX-110 retry |
+| `repairing click shows a progress toast (T-IDX-108)` | T-IDX-108 toast |
 
 ### Optional production debugging seams
 
