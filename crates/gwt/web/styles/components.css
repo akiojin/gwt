@@ -296,7 +296,9 @@ body::after {
 .update-modal__details dd {
   margin: 0;
   color: var(--color-text-primary);
-  word-break: break-word;
+  /* `word-break: break-word` is deprecated; modern equivalent
+     for long words is `overflow-wrap: anywhere` (CodeRabbit review). */
+  overflow-wrap: anywhere;
 }
 
 .update-modal__actions {

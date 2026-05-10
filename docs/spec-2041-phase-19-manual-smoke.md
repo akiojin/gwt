@@ -30,9 +30,11 @@ Phase 19 (FR-066, SC-014d).
    rm -rf ~/.gwt/pending-update
    ```
 4. Optional — if testing against the local mock server in lieu of a
-   real release:
+   real release. Pass **bare semver** to `--version` (the script prepends
+   `v` itself, so `--version v1.2.3` would emit `vv1.2.3` and the updater's
+   `parse_tag_version` would reject the tag):
    ```sh
-   node scripts/mock-update-server.cjs --port 18080 --version <vN+1> \
+   node scripts/mock-update-server.cjs --port 18080 --version 9.99.0 \
      --asset path/to/real/gwt-macos-arm64.tar.gz
    GWT_UPDATE_API_BASE_URL=http://127.0.0.1:18080 ./target/release/gwt
    ```
@@ -80,9 +82,10 @@ Phase 19 (FR-066, SC-014d).
 
 1. Re-install `vN`.
 2. Launch the mock server with no `--asset` so it returns 32 bytes of
-   garbage:
+   garbage. Pass `--version` as bare semver (e.g. `9.99.0`) — the
+   script prepends `v` itself:
    ```sh
-   node scripts/mock-update-server.cjs --port 18080 --version <vN+1>
+   node scripts/mock-update-server.cjs --port 18080 --version 9.99.0
    GWT_UPDATE_API_BASE_URL=http://127.0.0.1:18080 ./target/release/gwt
    ```
 3. Click the CTA. **Verify**: progress reaches 100 % (32 / 32 bytes)

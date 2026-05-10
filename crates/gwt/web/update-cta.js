@@ -158,7 +158,13 @@ export function createUpdateCtaController({
 
   function handleUpdateApplyError(payload) {
     if (!payload) return;
-    if (status === "applying") {
+    // SPEC-2041 Phase 19 (FR-064 follow-up, CodeRabbit review on PR #2635):
+    // Later can fail when commit_update_later_pending detects the persisted
+    // manifest is gone. The CTA was already morphed to `ready` by then, so
+    // surface the failure modal even in the `ready` state — silently dropping
+    // the error would leave the user believing Restart is safe when it isn't.
+    if (status === "applying" || status === "ready") {
+      renderCta("applying", "Applying update...");
       renderModalFailed(payload);
     }
   }
@@ -344,10 +350,16 @@ export function createUpdateCtaController({
     modal.appendChild(panel);
   }
 
-  function renderModalFailed({ stage, reason, log_path }) {
+  function renderModalFailed({ stage, reason, log_path, message }) {
     const modal = ensureModal();
     modal.dataset.state = "failed";
     clearChildren(modal);
+
+    // Phase 19 promotes structured `reason`, but `message` is still on the
+    // wire contract for legacy callers (see UpdateApplyError optional fields
+    // in protocol.rs). Fall through so older or partial emitters still
+    // surface a useful failure (CodeRabbit review on PR #2630).
+    const displayReason = reason || message || "Unknown reason";
 
     const dl = el("dl", { className: "update-modal__details" }, [
       el("dt", { text: "Stage" }),
@@ -357,7 +369,7 @@ export function createUpdateCtaController({
       }),
       el("dt", { text: "Reason" }),
       el("dd", {
-        text: reason || "Unknown reason",
+        text: displayReason,
         data: { updateModalReason: "true" },
       }),
       el("dt", { text: "Log" }),

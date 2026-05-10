@@ -72,14 +72,16 @@ Then run gwt with:
 }
 
 let assetBuffer;
-let assetName = pickAssetName(process.platform, process.arch);
+// Always advertise the canonical asset name for this platform so the updater's
+// release-contract matcher (`scripts/release-assets.cjs::releaseAssetName`)
+// finds the asset regardless of the local file the operator points at.
+const assetName = pickAssetName(process.platform, process.arch);
 if (opts.asset) {
   if (!fs.existsSync(opts.asset)) {
     console.error(`[mock] --asset path does not exist: ${opts.asset}`);
     process.exit(1);
   }
   assetBuffer = fs.readFileSync(opts.asset);
-  assetName = path.basename(opts.asset);
 } else {
   // 32 bytes of random payload so the download progress callback fires at
   // least once and the persist path runs. The eventual extract_archive will
@@ -108,8 +110,12 @@ const server = http.createServer((req, res) => {
     url.pathname.endsWith("/releases/latest")
   ) {
     const baseUrl = `http://127.0.0.1:${opts.port}`;
+    // Strip a single leading `v` from --version so passing either `9.26.0` or
+    // `v9.26.0` yields the canonical `vN.N.N` tag the updater's
+    // `parse_tag_version` accepts (it tolerates exactly one `v` prefix).
+    const normalizedVersion = String(opts.version).replace(/^v/, "");
     const release = {
-      tag_name: `v${opts.version}`,
+      tag_name: `v${normalizedVersion}`,
       html_url: `${baseUrl}/release-page`,
       assets: [
         {
@@ -137,10 +143,11 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(opts.port, "127.0.0.1", () => {
+  const advertisedTag = `v${String(opts.version).replace(/^v/, "")}`;
   console.log(
     `[mock] update server listening on http://127.0.0.1:${opts.port}`,
   );
-  console.log(`[mock] advertising tag v${opts.version} (asset: ${assetName})`);
+  console.log(`[mock] advertising tag ${advertisedTag} (asset: ${assetName})`);
   console.log("[mock] run gwt with:");
   console.log(
     `  GWT_UPDATE_API_BASE_URL=http://127.0.0.1:${opts.port} ./target/release/gwt`,
