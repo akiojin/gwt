@@ -389,6 +389,7 @@ fn is_read_only_git_branch_args(args: &[&str]) -> bool {
     }
 
     let mut list_mode = false;
+    let mut has_branch_positionals = false;
     let mut pending_read_value = false;
     for arg in args {
         if pending_read_value {
@@ -396,10 +397,8 @@ fn is_read_only_git_branch_args(args: &[&str]) -> bool {
             continue;
         }
         if !arg.starts_with('-') {
-            if list_mode {
-                continue;
-            }
-            return false;
+            has_branch_positionals = true;
+            continue;
         }
 
         let (flag, has_inline_value) = split_flag_value(arg);
@@ -429,7 +428,7 @@ fn is_read_only_git_branch_args(args: &[&str]) -> bool {
         }
         return false;
     }
-    true
+    !has_branch_positionals || list_mode
 }
 
 fn split_flag_value(arg: &str) -> (&str, bool) {
@@ -880,6 +879,7 @@ Coverage requirements.
             "git branch -i --list 'foo*'",
             "git branch --no-list",
             "git branch -l --no-list",
+            "git branch new-work --list",
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
@@ -973,6 +973,8 @@ Coverage requirements.
             "git branch -D old-work",
             "git branch -df old-work",
             "git branch -l --no-list new-work",
+            "git branch -l new-work HEAD --no-list",
+            "git branch --list new-work --no-list",
         ] {
             let event = HookEvent {
                 tool_name: Some("Bash".to_string()),
