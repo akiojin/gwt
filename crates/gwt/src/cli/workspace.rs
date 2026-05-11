@@ -3,8 +3,9 @@ use gwt_core::workspace_projection::{
     load_or_default_workspace_projection, load_or_synthesize_workspace_work_items,
     record_workspace_work_event, save_workspace_projection,
     update_workspace_projection_with_journal, WorkspaceAgentAffiliationStatus,
-    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
-    WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind, WorkspaceWorkItem,
+    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjection,
+    WorkspaceProjectionUpdate, WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind,
+    WorkspaceWorkItem,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -17,6 +18,7 @@ pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         "candidates" => parse_candidates(rest),
         "join" => parse_join(rest),
         "create" => parse_create(rest),
+        "ensure" => parse_ensure(rest),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
 }
@@ -180,6 +182,93 @@ fn parse_create(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         split_from,
         boundary,
     })
+}
+
+fn parse_ensure(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
+    let mut agent_session = None;
+    let mut title_summary = None;
+    let mut current_focus = None;
+    let mut spec = None;
+    let mut issue = None;
+    let mut topic = None;
+    let mut boundary = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agent-session" => {
+                agent_session = Some(parse_required_value(args, i, "--agent-session")?)
+            }
+            "--title-summary" => {
+                title_summary = Some(parse_required_value(args, i, "--title-summary")?)
+            }
+            "--current-focus" => {
+                current_focus = Some(parse_required_value(args, i, "--current-focus")?)
+            }
+            "--spec" => {
+                spec = Some(
+                    parse_required_value(args, i, "--spec")?
+                        .parse::<u64>()
+                        .map_err(|_| CliParseError::Usage)?,
+                );
+            }
+            "--issue" => {
+                issue = Some(
+                    parse_required_value(args, i, "--issue")?
+                        .parse::<u64>()
+                        .map_err(|_| CliParseError::Usage)?,
+                );
+            }
+            "--topic" => topic = Some(parse_required_value(args, i, "--topic")?),
+            "--boundary" => boundary = Some(parse_required_value(args, i, "--boundary")?),
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+        i += 2;
+    }
+    let title_summary = title_summary.ok_or(CliParseError::MissingFlag("--title-summary"))?;
+    super::validate_title_summary_work_name("--title-summary", &title_summary)?;
+    Ok(WorkspaceCommand::Ensure {
+        agent_session: agent_session.ok_or(CliParseError::MissingFlag("--agent-session"))?,
+        title_summary,
+        current_focus,
+        spec,
+        issue,
+        topic,
+        boundary,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WorkspaceEnsureInput {
+    pub agent_session: String,
+    pub title_summary: String,
+    pub current_focus: Option<String>,
+    pub spec: Option<u64>,
+    pub issue: Option<u64>,
+    pub topic: Option<String>,
+    pub boundary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspaceEnsureDisposition {
+    AlreadyAssigned,
+    Joined,
+    Created,
+}
+
+impl WorkspaceEnsureDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            WorkspaceEnsureDisposition::AlreadyAssigned => "already-assigned",
+            WorkspaceEnsureDisposition::Joined => "joined",
+            WorkspaceEnsureDisposition::Created => "created",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WorkspaceEnsureResult {
+    pub workspace_id: String,
+    pub disposition: WorkspaceEnsureDisposition,
 }
 
 pub(super) fn run<E: CliEnv>(
@@ -385,6 +474,243 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(&format!("workspace created: {workspace_id}\n"));
             Ok(0)
         }
+        WorkspaceCommand::Ensure {
+            agent_session,
+            title_summary,
+            current_focus,
+            spec,
+            issue,
+            topic,
+            boundary,
+        } => {
+            let result = ensure_workspace_for_agent(
+                env.repo_path(),
+                WorkspaceEnsureInput {
+                    agent_session,
+                    title_summary,
+                    current_focus,
+                    spec,
+                    issue,
+                    topic,
+                    boundary,
+                },
+            )?;
+            out.push_str(&format!(
+                "workspace ensured: {} ({})\n",
+                result.workspace_id,
+                result.disposition.as_str()
+            ));
+            Ok(0)
+        }
+    }
+}
+
+pub(super) fn ensure_workspace_for_agent(
+    repo_path: &std::path::Path,
+    input: WorkspaceEnsureInput,
+) -> Result<WorkspaceEnsureResult, SpecOpsError> {
+    let mut projection = load_or_default_workspace_projection(repo_path).map_err(core_error)?;
+    let Some(agent) = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == input.agent_session)
+        .cloned()
+    else {
+        return Err(string_error(format!(
+            "agent session not found: {}",
+            input.agent_session
+        )));
+    };
+    let owner = owner_from_spec_or_issue(input.spec, input.issue);
+    if agent.is_assigned() {
+        if let Some(workspace_id) = agent.workspace_id.as_deref() {
+            if let Some(item) = workspace_item_by_id(repo_path, workspace_id)?
+                .filter(WorkspaceWorkItem::is_incomplete)
+            {
+                apply_workspace_item_to_projection(&mut projection, &item);
+            }
+            assign_agent_to_workspace(
+                &mut projection,
+                &input.agent_session,
+                workspace_id,
+                input.current_focus,
+                Some(input.title_summary),
+            )?;
+            save_workspace_projection(repo_path, &projection).map_err(core_error)?;
+            publish_workspace_change(repo_path);
+            return Ok(WorkspaceEnsureResult {
+                workspace_id: workspace_id.to_string(),
+                disposition: WorkspaceEnsureDisposition::AlreadyAssigned,
+            });
+        }
+    }
+
+    let existing = load_or_synthesize_workspace_work_items(repo_path).map_err(core_error)?;
+    let ensure_text = workspace_ensure_text(&input, owner.as_deref());
+    if let Some(item) = best_workspace_candidate(&existing.work_items, &ensure_text) {
+        let workspace_id = item.id.clone();
+        record_workspace_join_event(repo_path, &workspace_id, &input, owner.clone(), &agent)?;
+        assign_agent_to_workspace(
+            &mut projection,
+            &input.agent_session,
+            &workspace_id,
+            input.current_focus,
+            Some(input.title_summary),
+        )?;
+        apply_workspace_item_to_projection(&mut projection, item);
+        save_workspace_projection(repo_path, &projection).map_err(core_error)?;
+        publish_workspace_change(repo_path);
+        return Ok(WorkspaceEnsureResult {
+            workspace_id,
+            disposition: WorkspaceEnsureDisposition::Joined,
+        });
+    }
+
+    let workspace_id =
+        create_workspace_for_agent(repo_path, &mut projection, &input, owner, &agent)?;
+    save_workspace_projection(repo_path, &projection).map_err(core_error)?;
+    publish_workspace_change(repo_path);
+    Ok(WorkspaceEnsureResult {
+        workspace_id,
+        disposition: WorkspaceEnsureDisposition::Created,
+    })
+}
+
+fn owner_from_spec_or_issue(spec: Option<u64>, issue: Option<u64>) -> Option<String> {
+    spec.map(|number| format!("SPEC-{number}"))
+        .or_else(|| issue.map(|number| format!("Issue #{number}")))
+}
+
+fn workspace_ensure_text(input: &WorkspaceEnsureInput, owner: Option<&str>) -> String {
+    [
+        Some(input.title_summary.as_str()),
+        input.current_focus.as_deref(),
+        input.topic.as_deref(),
+        owner,
+        input.boundary.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn best_workspace_candidate<'a>(
+    work_items: &'a [WorkspaceWorkItem],
+    ensure_text: &str,
+) -> Option<&'a WorkspaceWorkItem> {
+    work_items
+        .iter()
+        .filter(|item| item.is_incomplete())
+        .map(|item| {
+            let score = workspace_similarity_score(ensure_text, &workspace_item_text(item));
+            (score, item)
+        })
+        .filter(|(score, _)| *score >= 2)
+        .max_by(|(left_score, left), (right_score, right)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+        })
+        .map(|(_, item)| item)
+}
+
+fn record_workspace_join_event(
+    repo_path: &std::path::Path,
+    workspace_id: &str,
+    input: &WorkspaceEnsureInput,
+    owner: Option<String>,
+    agent: &WorkspaceAgentSummary,
+) -> Result<(), SpecOpsError> {
+    let now = Utc::now();
+    let mut event =
+        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Claim, workspace_id.to_string(), now);
+    event.intent = input.current_focus.clone();
+    event.summary = Some(format!("Joined Workspace: {}", input.title_summary));
+    event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = owner;
+    event.next_action = input
+        .boundary
+        .as_deref()
+        .map(|boundary| format!("Boundary: {boundary}"));
+    event.agent_session_id = Some(input.agent_session.clone());
+    event.agent_id = Some(agent.agent_id.clone());
+    event.display_name = Some(agent.display_name.clone());
+    event.execution_container = Some(workspace_execution_container_from_agent(agent));
+    record_workspace_work_event(repo_path, event).map_err(core_error)
+}
+
+fn create_workspace_for_agent(
+    repo_path: &std::path::Path,
+    projection: &mut WorkspaceProjection,
+    input: &WorkspaceEnsureInput,
+    owner: Option<String>,
+    agent: &WorkspaceAgentSummary,
+) -> Result<String, SpecOpsError> {
+    let workspace_id = format!("workspace-{}", Utc::now().timestamp_millis());
+    let now = Utc::now();
+    let mut event =
+        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, workspace_id.clone(), now);
+    event.title = Some(input.title_summary.clone());
+    event.intent = input
+        .current_focus
+        .clone()
+        .or_else(|| Some(input.title_summary.clone()));
+    event.summary = input
+        .current_focus
+        .clone()
+        .or_else(|| Some(input.title_summary.clone()));
+    event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = owner.clone();
+    event.next_action = Some(
+        input
+            .boundary
+            .as_deref()
+            .map(|boundary| format!("Boundary: {boundary}"))
+            .unwrap_or_else(|| "Coordinate on Board before implementation".to_string()),
+    );
+    event.agent_session_id = Some(input.agent_session.clone());
+    event.agent_id = Some(agent.agent_id.clone());
+    event.display_name = Some(agent.display_name.clone());
+    event.execution_container = Some(workspace_execution_container_from_agent(agent));
+    record_workspace_work_event(repo_path, event).map_err(core_error)?;
+
+    projection.id = workspace_id.clone();
+    projection.title = input.title_summary.clone();
+    projection.status_category = WorkspaceStatusCategory::Active;
+    projection.status_text = input
+        .current_focus
+        .clone()
+        .unwrap_or_else(|| "Workspace created".to_string());
+    projection.summary = input.current_focus.clone();
+    projection.owner = owner;
+    projection.next_action = Some(
+        input
+            .boundary
+            .as_deref()
+            .map(|boundary| format!("Boundary: {boundary}"))
+            .unwrap_or_else(|| "Coordinate on Board before implementation".to_string()),
+    );
+    assign_agent_to_workspace(
+        projection,
+        &input.agent_session,
+        &workspace_id,
+        input.current_focus.clone(),
+        Some(input.title_summary.clone()),
+    )?;
+    projection.updated_at = now;
+    Ok(workspace_id)
+}
+
+fn workspace_execution_container_from_agent(
+    agent: &WorkspaceAgentSummary,
+) -> WorkspaceExecutionContainerRef {
+    WorkspaceExecutionContainerRef {
+        branch: agent.branch.clone(),
+        worktree_path: agent.worktree_path.clone(),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
     }
 }
 
@@ -766,6 +1092,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_workspace_ensure_accepts_materialization_fields() {
+        let parsed = parse(&[
+            s("ensure"),
+            s("--agent-session"),
+            s("session-1"),
+            s("--title-summary"),
+            s("Workspace materialization"),
+            s("--current-focus"),
+            s("Ensure actionable Unassigned Agents join a Workspace"),
+            s("--spec"),
+            s("2359"),
+            s("--topic"),
+            s("workspace-materialization"),
+            s("--boundary"),
+            s("CLI and Board write path"),
+        ])
+        .expect("parse ensure");
+
+        assert_eq!(
+            parsed,
+            WorkspaceCommand::Ensure {
+                agent_session: "session-1".to_string(),
+                title_summary: "Workspace materialization".to_string(),
+                current_focus: Some(
+                    "Ensure actionable Unassigned Agents join a Workspace".to_string()
+                ),
+                spec: Some(2359),
+                issue: None,
+                topic: Some("workspace-materialization".to_string()),
+                boundary: Some("CLI and Board write path".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn workspace_update_persists_workspace_status() {
         let _guard = crate::env_test_lock().lock().unwrap();
         let gwt_home = tempfile::tempdir().expect("gwt home");
@@ -986,5 +1347,168 @@ mod tests {
         .expect_err("similar Workspace should be rejected");
 
         assert!(err.to_string().contains("similar Workspace exists"));
+    }
+
+    #[test]
+    fn workspace_ensure_joins_similar_incomplete_workspace() {
+        let _guard = crate::env_test_lock().lock().unwrap();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push(unassigned_agent("session-1"));
+        save_workspace_projection(&repo, &projection).expect("save projection");
+        let mut event = WorkspaceWorkEvent::new(
+            WorkspaceWorkEventKind::Start,
+            "workspace-existing",
+            Utc::now(),
+        );
+        event.title = Some("Workspace materialization".to_string());
+        event.intent = Some("Ensure actionable Unassigned Agents join Workspace".to_string());
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event(&repo, event).expect("record workspace");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Ensure {
+                agent_session: "session-1".to_string(),
+                title_summary: "Workspace materialization".to_string(),
+                current_focus: Some(
+                    "Ensure actionable Unassigned Agents join Workspace".to_string(),
+                ),
+                spec: Some(2359),
+                issue: None,
+                topic: Some("workspace-materialization".to_string()),
+                boundary: None,
+            },
+            &mut out,
+        )
+        .expect("ensure workspace");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("workspace ensured: workspace-existing (joined)"));
+        let saved = load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("agent");
+        assert_eq!(
+            agent.affiliation_status,
+            WorkspaceAgentAffiliationStatus::Assigned
+        );
+        assert_eq!(agent.workspace_id.as_deref(), Some("workspace-existing"));
+        let items = load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .expect("workspace history");
+        assert!(items.work_items[0]
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-1"));
+    }
+
+    #[test]
+    fn workspace_ensure_creates_workspace_when_no_candidate_matches() {
+        let _guard = crate::env_test_lock().lock().unwrap();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.agents.push(unassigned_agent("session-1"));
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Ensure {
+                agent_session: "session-1".to_string(),
+                title_summary: "Workspace materialization".to_string(),
+                current_focus: Some("Create Workspace from actionable intent".to_string()),
+                spec: Some(2359),
+                issue: None,
+                topic: Some("workspace-materialization".to_string()),
+                boundary: None,
+            },
+            &mut out,
+        )
+        .expect("ensure workspace");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("workspace ensured: workspace-"));
+        assert!(out.contains("(created)"));
+        let saved = load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let workspace_id = saved.id.clone();
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("agent");
+        assert_eq!(agent.workspace_id.as_deref(), Some(workspace_id.as_str()));
+        let items = load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .expect("workspace history");
+        assert_eq!(items.work_items.len(), 1);
+        assert_eq!(items.work_items[0].title, "Workspace materialization");
+        assert_eq!(items.work_items[0].owner.as_deref(), Some("SPEC-2359"));
+    }
+
+    #[test]
+    fn workspace_ensure_is_idempotent_for_already_assigned_agent() {
+        let _guard = crate::env_test_lock().lock().unwrap();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        let mut agent = unassigned_agent("session-1");
+        agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent.workspace_id = Some("workspace-existing".to_string());
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.id = "workspace-existing".to_string();
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save projection");
+        let mut event = WorkspaceWorkEvent::new(
+            WorkspaceWorkEventKind::Start,
+            "workspace-existing",
+            Utc::now(),
+        );
+        event.title = Some("Workspace materialization".to_string());
+        event.status_category = Some(WorkspaceStatusCategory::Active);
+        record_workspace_work_event(&repo, event).expect("record workspace");
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            WorkspaceCommand::Ensure {
+                agent_session: "session-1".to_string(),
+                title_summary: "Workspace materialization".to_string(),
+                current_focus: Some("Continue current Workspace".to_string()),
+                spec: Some(2359),
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+            &mut out,
+        )
+        .expect("ensure workspace");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("workspace ensured: workspace-existing (already-assigned)"));
+        let items = load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .expect("workspace history");
+        assert_eq!(items.work_items.len(), 1);
     }
 }

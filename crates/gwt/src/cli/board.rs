@@ -4,7 +4,7 @@ use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
         load_snapshot, load_snapshot_for_scope, normalize_board_audience, normalize_board_mentions,
-        post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardMention,
+        post_entry, AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind, BoardMention,
     },
     paths::gwt_sessions_dir,
 };
@@ -16,6 +16,8 @@ use crate::{
     },
     cli::{CliEnv, CliParseError},
 };
+
+use super::workspace::{ensure_workspace_for_agent, WorkspaceEnsureInput};
 
 /// SPEC-1942 family enum for `gwtd board ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +184,15 @@ pub(super) fn run<E: CliEnv>(
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
             }
+            let materialized_workspace = if broadcast {
+                None
+            } else {
+                materialize_actionable_unassigned_board_post(
+                    env.repo_path(),
+                    current_session.as_ref(),
+                    &entry,
+                )?
+            };
             let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
             let mentions =
                 parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?;
@@ -196,6 +207,9 @@ pub(super) fn run<E: CliEnv>(
                 )
                 .map_err(gwt_error_to_spec_ops_error)?
                 {
+                    audience.push(workspace_id);
+                }
+                if let Some(workspace_id) = materialized_workspace {
                     audience.push(workspace_id);
                 }
                 audience.extend(workspace_audience);
@@ -368,6 +382,108 @@ fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
         mentions.push(value.parse::<BoardMention>()?);
     }
     Ok(normalize_board_mentions(&mentions))
+}
+
+fn materialize_actionable_unassigned_board_post(
+    repo_path: &std::path::Path,
+    current_session: Option<&Session>,
+    entry: &BoardEntry,
+) -> Result<Option<String>, SpecOpsError> {
+    let Some(session) = current_session else {
+        return Ok(None);
+    };
+    if !board_entry_can_materialize_workspace(entry) {
+        return Ok(None);
+    }
+    let Some(projection) = gwt_core::workspace_projection::load_workspace_projection(repo_path)
+        .map_err(gwt_error_to_spec_ops_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(agent) = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session.id)
+    else {
+        return Ok(None);
+    };
+    if !agent.is_unassigned() {
+        return Ok(None);
+    }
+    let (spec, issue) = board_owner_numbers(&entry.related_owners);
+    let result = ensure_workspace_for_agent(
+        repo_path,
+        WorkspaceEnsureInput {
+            agent_session: session.id.clone(),
+            title_summary: entry
+                .title_summary
+                .as_deref()
+                .unwrap_or("Board milestone")
+                .to_string(),
+            current_focus: Some(entry.body.clone()),
+            spec,
+            issue,
+            topic: entry.related_topics.first().cloned(),
+            boundary: boundary_from_board_body(&entry.body),
+        },
+    )?;
+    Ok(Some(result.workspace_id))
+}
+
+fn board_entry_can_materialize_workspace(entry: &BoardEntry) -> bool {
+    matches!(
+        entry.kind,
+        BoardEntryKind::Claim
+            | BoardEntryKind::Status
+            | BoardEntryKind::Blocked
+            | BoardEntryKind::Handoff
+            | BoardEntryKind::Decision
+            | BoardEntryKind::Next
+    ) && entry
+        .title_summary
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+}
+
+fn board_owner_numbers(owners: &[String]) -> (Option<u64>, Option<u64>) {
+    let mut spec = None;
+    let mut issue = None;
+    for owner in owners {
+        let value = owner.trim();
+        if spec.is_none() {
+            if let Some(number) = value
+                .strip_prefix("SPEC-")
+                .or_else(|| value.strip_prefix("spec-"))
+                .and_then(|number| number.parse::<u64>().ok())
+                .or_else(|| value.parse::<u64>().ok())
+            {
+                spec = Some(number);
+                continue;
+            }
+        }
+        if issue.is_none() {
+            let issue_number = value
+                .strip_prefix("Issue #")
+                .or_else(|| value.strip_prefix("issue #"))
+                .or_else(|| value.strip_prefix("issue-"))
+                .and_then(|number| number.parse::<u64>().ok());
+            if let Some(number) = issue_number {
+                issue = Some(number);
+            }
+        }
+    }
+    (spec, issue)
+}
+
+fn boundary_from_board_body(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        line.trim_start()
+            .strip_prefix("Boundary:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// SPEC-2359 FR-096: `--mention workspace:<id>` routes to BoardEntry.audience,
@@ -1192,6 +1308,139 @@ mod tests {
         let snapshot = load_snapshot(&repo).unwrap();
         assert!(snapshot.board.entries[0].audience.is_empty());
         assert!(snapshot.board.entries[1].audience.is_empty());
+    }
+
+    #[test]
+    fn board_family_run_post_materializes_unassigned_actionable_milestone_before_audience() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&repo, "work/workspace-materialization", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                "codex",
+                None,
+                WorkspaceAgentAffiliationStatus::Unassigned,
+            )],
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "claim".into(),
+                body: Some("Materialize actionable Unassigned Agents before Board audience".into()),
+                file: None,
+                title_summary: Some("Workspace materialization".into()),
+                parent: None,
+                topics: vec!["workspace-materialization".into()],
+                owners: vec!["2359".into()],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: false,
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(&repo).unwrap();
+        let entry = &snapshot.board.entries[0];
+        assert_eq!(entry.audience.len(), 1, "{entry:?}");
+        let workspace_id = entry.audience[0].clone();
+        assert!(workspace_id.starts_with("workspace-"), "{workspace_id}");
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let agent = projection
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == session.id)
+            .expect("agent");
+        assert_eq!(
+            agent.affiliation_status,
+            WorkspaceAgentAffiliationStatus::Assigned
+        );
+        assert_eq!(agent.workspace_id.as_deref(), Some(workspace_id.as_str()));
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load workspaces")
+            .expect("workspaces");
+        assert_eq!(work_items.work_items[0].id, workspace_id);
+        assert_eq!(work_items.work_items[0].title, "Workspace materialization");
+    }
+
+    #[test]
+    fn board_family_run_post_broadcast_does_not_materialize_unassigned_actionable_milestone() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&repo, "work/workspace-materialization", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                "codex",
+                None,
+                WorkspaceAgentAffiliationStatus::Unassigned,
+            )],
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "claim".into(),
+                body: Some("Intentional broadcast for cross-workspace coordination".into()),
+                file: None,
+                title_summary: Some("Workspace materialization".into()),
+                parent: None,
+                topics: vec!["workspace-materialization".into()],
+                owners: vec!["2359".into()],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: true,
+            })),
+            &mut String::new(),
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(&repo).unwrap();
+        assert!(snapshot.board.entries[0].audience.is_empty());
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        let agent = projection
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == session.id)
+            .expect("agent");
+        assert_eq!(
+            agent.affiliation_status,
+            WorkspaceAgentAffiliationStatus::Unassigned
+        );
+        assert!(
+            gwt_core::workspace_projection::load_workspace_work_items(&repo)
+                .expect("load workspace history")
+                .is_none()
+        );
     }
 
     #[test]

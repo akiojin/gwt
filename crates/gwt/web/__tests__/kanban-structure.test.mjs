@@ -159,6 +159,37 @@ test("Kanban shell lets column bodies own vertical scrolling", () => {
   assert.match(columnBodyRule[0], /min-height:\s*0/);
 });
 
+test("Workspace Overview contains Unassigned overflow without clipping columns", () => {
+  const unassignedRule = componentsCss.match(/\.workspace-unassigned\s*\{[^}]+\}/);
+  assert.ok(
+    unassignedRule,
+    "expected .workspace-unassigned rule in components.css",
+  );
+  assert.match(
+    unassignedRule[0],
+    /max-height:/,
+    "Unassigned Agents must have a bounded height inside the Kanban list pane",
+  );
+  assert.match(
+    unassignedRule[0],
+    /overflow-y:\s*auto/,
+    "Unassigned Agents must own their scroll when many Agents are listed",
+  );
+  assert.match(
+    unassignedRule[0],
+    /flex-shrink:\s*0/,
+    "Unassigned section must not collapse the Workspace columns",
+  );
+
+  const detailRule = componentsCss.match(/\.workspace-kanban-detail-pane\s*\{[^}]+\}/);
+  assert.ok(
+    detailRule,
+    "expected .workspace-kanban-detail-pane rule in components.css",
+  );
+  assert.match(detailRule[0], /min-height:\s*0/);
+  assert.match(detailRule[0], /overflow:\s*hidden/);
+});
+
 test("components.css declares column and card classes", () => {
   // Cards and columns need their own selectors so the renderer can style
   // them independently. Without these classes the renderer can't apply
