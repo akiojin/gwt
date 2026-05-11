@@ -2092,15 +2092,10 @@ mod tests {
         // the spawned child process inherits both and command lookup is
         // corrupted. Test values use the platform-native PATH separator so
         // split_paths / join_paths round-trip on the host test runner.
-        let existing = std::env::join_paths([
-            Path::new("/usr/bin"),
-            Path::new("/bin"),
-        ])
-        .expect("join_paths existing entries");
-        let mut env_vars = HashMap::from([(
-            "Path".to_string(),
-            existing.to_string_lossy().into_owned(),
-        )]);
+        let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
+            .expect("join_paths existing entries");
+        let mut env_vars =
+            HashMap::from([("Path".to_string(), existing.to_string_lossy().into_owned())]);
         let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
         assert!(updated, "PATH must be updated for Windows-style key");
         assert!(
@@ -2122,10 +2117,8 @@ mod tests {
     fn prepend_dir_to_path_preserves_lowercase_path_key() {
         let existing = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")])
             .expect("join_paths existing entries");
-        let mut env_vars = HashMap::from([(
-            "path".to_string(),
-            existing.to_string_lossy().into_owned(),
-        )]);
+        let mut env_vars =
+            HashMap::from([("path".to_string(), existing.to_string_lossy().into_owned())]);
         let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
         assert!(updated);
         assert!(
@@ -2142,18 +2135,20 @@ mod tests {
 
     #[test]
     fn prepend_dir_to_path_dedups_case_insensitive_existing_dir() {
-        let existing = std::env::join_paths([
-            Path::new("/opt/gwt/bin"),
-            Path::new("/usr/bin"),
-        ])
-        .expect("join_paths existing entries");
+        let existing = std::env::join_paths([Path::new("/opt/gwt/bin"), Path::new("/usr/bin")])
+            .expect("join_paths existing entries");
         let original_value = existing.to_string_lossy().into_owned();
-        let mut env_vars =
-            HashMap::from([("Path".to_string(), original_value.clone())]);
+        let mut env_vars = HashMap::from([("Path".to_string(), original_value.clone())]);
         let updated = prepend_dir_to_path(&mut env_vars, Path::new("/opt/gwt/bin"));
-        assert!(!updated, "existing entry must be a no-op regardless of key case");
+        assert!(
+            !updated,
+            "existing entry must be a no-op regardless of key case"
+        );
         assert!(!env_vars.contains_key("PATH"));
-        assert_eq!(env_vars.get("Path").map(String::as_str), Some(original_value.as_str()));
+        assert_eq!(
+            env_vars.get("Path").map(String::as_str),
+            Some(original_value.as_str())
+        );
     }
 
     #[test]
