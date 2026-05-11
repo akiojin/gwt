@@ -8,43 +8,140 @@ use crate::cli::gwtd_resolver::{
     GwtdResolutionInputs,
 };
 use crate::native_app::{GUI_FRONT_DOOR_BINARY_NAME, INTERNAL_DAEMON_BINARY_NAME};
+use gwt_agent::AgentId;
 use gwt_skills::{
-    distribute_to_worktree, generate_codex_hooks, generate_hermes_hooks, generate_openclaw_hooks,
-    generate_opencode_hooks, generate_settings_local, update_git_exclude,
+    distribute_to_worktree_for_targets, generate_codex_hooks, generate_hermes_hooks,
+    generate_openclaw_hooks, generate_opencode_hooks, generate_settings_local, update_git_exclude,
+    update_git_exclude_for_targets, ManagedAssetTarget,
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
-    distribute_to_worktree(worktree).map_err(|error| {
-        io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
-    })?;
+    materialize_managed_gwt_assets_for_targets(worktree, &ManagedAssetTarget::ALL)?;
     update_git_exclude(worktree).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
     })?;
-    let _hook_bin_guard = install_hook_bin_override()?;
-    generate_settings_local(worktree).map_err(|error| {
-        io::Error::other(format!(
-            "failed to regenerate Claude hook settings: {error}"
-        ))
-    })?;
-    generate_codex_hooks(worktree).map_err(|error| {
-        io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
-    })?;
-    generate_opencode_hooks(worktree).map_err(|error| {
-        io::Error::other(format!(
-            "failed to regenerate OpenCode hook settings: {error}"
-        ))
-    })?;
-    generate_openclaw_hooks(worktree).map_err(|error| {
-        io::Error::other(format!(
-            "failed to regenerate OpenClaw hook settings: {error}"
-        ))
-    })?;
-    generate_hermes_hooks(worktree).map_err(|error| {
-        io::Error::other(format!(
-            "failed to regenerate Hermes hook settings: {error}"
-        ))
+    Ok(())
+}
+
+pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId) -> io::Result<()> {
+    let targets = managed_targets_for_agent(agent_id)
+        .into_iter()
+        .collect::<Vec<_>>();
+    materialize_managed_gwt_assets_for_targets(worktree, &targets)?;
+    let exclude_targets = detect_existing_managed_asset_targets(worktree);
+    update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
+        io::Error::other(format!("failed to update gwt managed excludes: {error}"))
     })?;
     Ok(())
+}
+
+pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
+    let targets = detect_existing_managed_asset_targets(worktree);
+    materialize_managed_gwt_assets_for_targets(worktree, &targets)?;
+    update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
+        io::Error::other(format!("failed to update gwt managed excludes: {error}"))
+    })?;
+    Ok(())
+}
+
+fn materialize_managed_gwt_assets_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+) -> io::Result<()> {
+    distribute_to_worktree_for_targets(worktree, targets).map_err(|error| {
+        io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
+    })?;
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let _hook_bin_guard = install_hook_bin_override()?;
+    if targets.contains(&ManagedAssetTarget::ClaudeCode) {
+        generate_settings_local(worktree).map_err(|error| {
+            io::Error::other(format!(
+                "failed to regenerate Claude hook settings: {error}"
+            ))
+        })?;
+    }
+    if targets.contains(&ManagedAssetTarget::Codex) {
+        generate_codex_hooks(worktree).map_err(|error| {
+            io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
+        })?;
+    }
+    if targets.contains(&ManagedAssetTarget::OpenCode) {
+        generate_opencode_hooks(worktree).map_err(|error| {
+            io::Error::other(format!(
+                "failed to regenerate OpenCode hook settings: {error}"
+            ))
+        })?;
+    }
+    if targets.contains(&ManagedAssetTarget::OpenClaw) {
+        generate_openclaw_hooks(worktree).map_err(|error| {
+            io::Error::other(format!(
+                "failed to regenerate OpenClaw hook settings: {error}"
+            ))
+        })?;
+    }
+    if targets.contains(&ManagedAssetTarget::Hermes) {
+        generate_hermes_hooks(worktree).map_err(|error| {
+            io::Error::other(format!(
+                "failed to regenerate Hermes hook settings: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
+    match agent_id {
+        AgentId::ClaudeCode => Some(ManagedAssetTarget::ClaudeCode),
+        AgentId::Codex => Some(ManagedAssetTarget::Codex),
+        AgentId::OpenCode => Some(ManagedAssetTarget::OpenCode),
+        AgentId::OpenClaw => Some(ManagedAssetTarget::OpenClaw),
+        AgentId::Hermes => Some(ManagedAssetTarget::Hermes),
+        AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
+    }
+}
+
+fn detect_existing_managed_asset_targets(worktree: &Path) -> Vec<ManagedAssetTarget> {
+    let mut targets = Vec::new();
+    push_existing_target(
+        &mut targets,
+        worktree.join(".claude/skills").exists()
+            || worktree.join(".claude/commands").exists()
+            || worktree.join(".claude/settings.local.json").exists(),
+        ManagedAssetTarget::ClaudeCode,
+    );
+    push_existing_target(
+        &mut targets,
+        worktree.join(".codex/skills").exists() || worktree.join(".codex/hooks.json").exists(),
+        ManagedAssetTarget::Codex,
+    );
+    push_existing_target(
+        &mut targets,
+        worktree.join(".gwt/opencode").exists(),
+        ManagedAssetTarget::OpenCode,
+    );
+    push_existing_target(
+        &mut targets,
+        worktree.join(".gwt/openclaw").exists(),
+        ManagedAssetTarget::OpenClaw,
+    );
+    push_existing_target(
+        &mut targets,
+        worktree.join(".gwt/hermes").exists(),
+        ManagedAssetTarget::Hermes,
+    );
+    targets
+}
+
+fn push_existing_target(
+    targets: &mut Vec<ManagedAssetTarget>,
+    exists: bool,
+    target: ManagedAssetTarget,
+) {
+    if exists && !targets.contains(&target) {
+        targets.push(target);
+    }
 }
 
 fn install_hook_bin_override() -> io::Result<EnvVarGuard> {

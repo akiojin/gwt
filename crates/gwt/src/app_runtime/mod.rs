@@ -4669,7 +4669,7 @@ impl AppRuntime {
             )?
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
-            refresh_managed_gwt_assets_for_worktree(&worktree_path)
+            refresh_managed_gwt_assets_for_agent(&worktree_path, &config.agent_id)
                 .map_err(|error| error.to_string())?;
 
             if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
