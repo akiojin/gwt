@@ -9638,6 +9638,38 @@ exit 0
     }
 
     #[test]
+    fn board_origin_agent_resume_config_supports_builtin_agent_descriptors() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+        for agent_id in [gwt_agent::AgentId::OpenClaw, gwt_agent::AgentId::Hermes] {
+            let session_id = format!("session-{}", agent_id.command());
+            let resume_id = format!("resume-{}", agent_id.command());
+            let mut session = gwt_agent::Session::new(
+                &repo,
+                format!("work/{}", agent_id.command()),
+                agent_id.clone(),
+            );
+            session.id = session_id.clone();
+            session.agent_session_id = Some(resume_id.clone());
+            session.save(&runtime.sessions_dir).expect("save session");
+
+            let config = runtime
+                .board_origin_agent_resume_config(&session_id)
+                .expect("resume config");
+
+            assert_eq!(config.agent_id, agent_id);
+            assert_eq!(
+                config.resume_session_id.as_deref(),
+                Some(resume_id.as_str())
+            );
+            assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        }
+    }
+
+    #[test]
     fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

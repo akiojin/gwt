@@ -455,20 +455,17 @@ fn board_error(client_id: &str, id: &str, message: impl Into<String>) -> Vec<Out
 }
 
 fn agent_option_matches_session(option: &gwt::AgentOption, agent_id: &AgentId) -> bool {
+    let command_matches = option.id == agent_id.command();
     match agent_id {
-        AgentId::ClaudeCode => option.id == "claude",
-        AgentId::Codex => option.id == "codex",
-        AgentId::Gemini => option.id == "gemini",
-        AgentId::OpenCode => option.id == "opencode",
-        AgentId::Copilot => option.id == "gh",
         AgentId::Custom(id) => {
-            option.id == *id
+            command_matches
                 || option
                     .custom_agent
                     .as_ref()
                     .map(|agent| agent.id == *id)
                     .unwrap_or(false)
         }
+        _ => command_matches,
     }
 }
 
