@@ -56,6 +56,13 @@ test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101
   assert.match(appSource, /state\.audienceFilter\s*===\s*"workspace"/);
 });
 
+test("Board surface wires Workspace projection's primary assigned agent into currentWorkspaceId (SPEC-2359 FR-098)", () => {
+  assert.match(appSource, /deriveCurrentProjectWorkspaceId/);
+  assert.match(appSource, /refreshBoardCurrentWorkspaceId/);
+  assert.match(appSource, /affiliation_status[\s\S]{0,60}assigned/);
+  assert.match(appSource, /currentWorkspaceId:\s*currentProjectWorkspaceId/);
+});
+
 test("Board message body preserves multiline plaintext", () => {
   assert.match(
     appSource,

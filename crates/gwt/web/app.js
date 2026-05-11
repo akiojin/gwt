@@ -972,6 +972,11 @@
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
         renderWorkspace(tab?.workspace || emptyWorkspace());
+        const nextWorkspaceId = deriveCurrentProjectWorkspaceId(tab?.workspace || {});
+        if (nextWorkspaceId !== currentProjectWorkspaceId) {
+          currentProjectWorkspaceId = nextWorkspaceId;
+          refreshBoardCurrentWorkspaceId();
+        }
         renderWindowList();
         renderActiveWorkOverview();
       }
@@ -2714,9 +2719,35 @@
             currentWorkspaceId: "",
             forYouUnread: 0,
             lastNotifiedMentionEntryId: null,
+            currentWorkspaceId: currentProjectWorkspaceId,
           });
         }
         return boardStateMap.get(windowId);
+      }
+
+      // SPEC-2359 FR-098/101: track the project's "primary" assigned
+      // workspace id for the Board Workspace filter. Picks the first
+      // assigned agent's workspace_id from the workspace state event.
+      // When no agent in the project is assigned (all Unassigned), the
+      // filter degrades to broadcast-only via FR-103. Multi-workspace
+      // selection UX is a follow-up.
+      let currentProjectWorkspaceId = null;
+      function deriveCurrentProjectWorkspaceId(workspaceState) {
+        const agents = workspaceState?.workspace?.agents
+          || workspaceState?.agents
+          || [];
+        const assigned = agents.find(
+          (agent) =>
+            String(agent?.affiliation_status || "").toLowerCase() === "assigned"
+            && typeof agent?.workspace_id === "string"
+            && agent.workspace_id.length > 0,
+        );
+        return assigned ? assigned.workspace_id : null;
+      }
+      function refreshBoardCurrentWorkspaceId() {
+        for (const state of boardStateMap.values()) {
+          state.currentWorkspaceId = currentProjectWorkspaceId;
+        }
       }
 
       function normalizeLogSeverity(severity) {
