@@ -713,6 +713,50 @@ pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkspacePro
     load_workspace_projection_from_path(&gwt_workspace_projection_path_for_repo_path(repo_path))
 }
 
+/// SPEC-2359 FR-094 / FR-097 / FR-098 / FR-099: resolve the currently
+/// assigned Workspace id for a given session. Returns `Some(id)` when
+/// the agent is assigned to a Workspace and `None` otherwise (Unassigned
+/// agent, missing agent, or load failure). Callers use this for Board
+/// audience auto-attach, reminder injection scoping, and the
+/// duplicate-work coordination gate corpus.
+pub fn resolve_workspace_id_for_session(repo_path: &Path, session_id: &str) -> Option<String> {
+    let projection = load_workspace_projection(repo_path).ok().flatten()?;
+    projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session_id)
+        .filter(|agent| !agent.is_unassigned())
+        .and_then(|agent| agent.workspace_id.clone())
+}
+
+/// SPEC-2359 FR-097: resolve the currently assigned Workspace id for a
+/// mention target. `target_kind` is `BoardMentionTargetKind::Agent` or
+/// `BoardMentionTargetKind::Session`; the target value is matched
+/// against agent display_name / agent_id (agent) or session_id (session).
+/// Returns `Some(id)` when the matched agent is assigned, `None`
+/// otherwise.
+pub fn resolve_workspace_id_for_mention(
+    repo_path: &Path,
+    target_kind: &str,
+    target_value: &str,
+) -> Option<String> {
+    let projection = load_workspace_projection(repo_path).ok().flatten()?;
+    projection
+        .agents
+        .iter()
+        .find(|agent| match target_kind {
+            "session" => agent.session_id == target_value,
+            "agent" => {
+                agent.agent_id == target_value
+                    || agent.display_name == target_value
+                    || agent.display_name.eq_ignore_ascii_case(target_value)
+            }
+            _ => false,
+        })
+        .filter(|agent| !agent.is_unassigned())
+        .and_then(|agent| agent.workspace_id.clone())
+}
+
 pub fn load_or_default_workspace_projection(repo_path: &Path) -> Result<WorkspaceProjection> {
     load_or_default_workspace_projection_from_path(
         &gwt_workspace_projection_path_for_repo_path(repo_path),
@@ -2223,5 +2267,144 @@ mod tests {
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].summary.as_deref(), Some("Second summary"));
         assert_eq!(recent[0].updated_at, second_at);
+    }
+
+    fn assigned_agent(
+        session_id: &str,
+        agent_id: &str,
+        workspace_id: &str,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            session_id: session_id.into(),
+            window_id: None,
+            agent_id: agent_id.into(),
+            display_name: agent_id.into(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: None,
+            title_summary: None,
+            worktree_path: None,
+            branch: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: Some(workspace_id.into()),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn unassigned_agent(session_id: &str, agent_id: &str) -> WorkspaceAgentSummary {
+        let mut a = assigned_agent(session_id, agent_id, "_unused");
+        a.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
+        a.workspace_id = None;
+        a
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_session_returns_assigned_workspace_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
+        projection
+            .agents
+            .push(assigned_agent("sess-A", "codex", "ws-1"));
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(
+            resolve_workspace_id_for_session(dir.path(), "sess-A"),
+            Some("ws-1".into())
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_session_returns_none_for_unassigned_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
+        projection.agents.push(unassigned_agent("sess-B", "codex"));
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(resolve_workspace_id_for_session(dir.path(), "sess-B"), None);
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_session_returns_none_when_session_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let projection = WorkspaceProjection::default_for_project(dir.path());
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(
+            resolve_workspace_id_for_session(dir.path(), "sess-missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_mention_session_matches_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
+        projection
+            .agents
+            .push(assigned_agent("sess-C", "codex", "ws-2"));
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "session", "sess-C"),
+            Some("ws-2".into())
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_mention_agent_matches_display_or_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
+        projection
+            .agents
+            .push(assigned_agent("sess-D", "codex", "ws-3"));
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "agent", "codex"),
+            Some("ws-3".into())
+        );
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "agent", "Codex"),
+            Some("ws-3".into()),
+            "case-insensitive display-name match"
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_mention_returns_none_for_unassigned_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
+        projection.agents.push(unassigned_agent("sess-E", "codex"));
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "session", "sess-E"),
+            None
+        );
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "agent", "codex"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_id_for_mention_user_or_branch_kind_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut projection = WorkspaceProjection::default_for_project(dir.path());
+        projection
+            .agents
+            .push(assigned_agent("sess-F", "codex", "ws-4"));
+        save_workspace_projection(dir.path(), &projection).unwrap();
+
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "user", "akiojin"),
+            None
+        );
+        assert_eq!(
+            resolve_workspace_id_for_mention(dir.path(), "branch", "feature/x"),
+            None
+        );
     }
 }

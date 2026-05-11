@@ -141,22 +141,54 @@ pub(super) fn run<E: CliEnv>(
             if !targets.is_empty() {
                 entry = entry.with_target_owners(targets);
             }
-            let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
+            let (mut workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
             let mentions =
                 parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?;
+            // SPEC-2359 FR-094/097: unless `--broadcast` is set, auto-attach
+            // the current Agent's assigned Workspace id and fan out the
+            // current Workspace id of each agent/session mention target.
+            // FR-103: legacy entries (Unassigned/missing) leave audience
+            // absent which round-trips as broadcast.
+            if !broadcast {
+                if let Some(session) = current_session.as_ref() {
+                    if let Some(ws_id) =
+                        gwt_core::workspace_projection::resolve_workspace_id_for_session(
+                            env.repo_path(),
+                            &session.id,
+                        )
+                    {
+                        if !workspace_audience.iter().any(|existing| existing == &ws_id) {
+                            workspace_audience.push(ws_id);
+                        }
+                    }
+                }
+                for mention in mentions.iter() {
+                    let kind = mention.target_kind.as_str();
+                    if kind == "user" || kind == "branch" {
+                        continue;
+                    }
+                    if let Some(ws_id) =
+                        gwt_core::workspace_projection::resolve_workspace_id_for_mention(
+                            env.repo_path(),
+                            kind,
+                            &mention.target,
+                        )
+                    {
+                        if !workspace_audience.iter().any(|existing| existing == &ws_id) {
+                            workspace_audience.push(ws_id);
+                        }
+                    }
+                }
+            }
             if !mentions.is_empty() {
                 entry = entry.with_mentions(mentions);
             }
-            // SPEC-2359 FR-093/094/095/096: Workspace audience comes from
-            // explicit `--mention workspace:<id>` flags. `--broadcast`
-            // suppresses any auto-attach (FR-094/097 will fan-out the
-            // current Agent's and mention targets' workspaces once the
-            // Agent affiliation field lands; until then, audience is
-            // only the explicit workspace mentions).
+            // SPEC-2359 FR-093/094/095/096/097: persist the resolved audience
+            // (explicit workspace mentions + auto-attach + fan-out). Empty
+            // serializes as absent (FR-103 broadcast fallback).
             if !workspace_audience.is_empty() {
                 entry = entry.with_audience(workspace_audience);
             }
-            let _ = broadcast;
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
             publish_board_change(env.repo_path(), snapshot.board.entries.len());

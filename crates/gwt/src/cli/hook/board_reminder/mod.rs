@@ -193,7 +193,7 @@ pub fn compute_plan(
         reminders,
         has_recent_own_status,
         language: language.clone(),
-        self_workspace_id: resolve_self_workspace_id(),
+        self_workspace_id: resolve_self_workspace_id(session),
     });
 
     plan.output = append_title_summary_required_context(
@@ -216,15 +216,13 @@ fn resolve_narrative_language() -> String {
 }
 
 /// SPEC-2359 FR-098: resolve the current Agent's assigned Workspace id
-/// for audience-aware reminder filtering. Returns `None` until the Agent
-/// affiliation field (SPEC-2359 FR-088, US-25) is populated, at which
-/// point this resolver should read `WorkspaceAgentSummary` for the
-/// current session and return its assigned `workspace_id`. Returning
-/// `None` is safe: audience-aware filtering then surfaces only
-/// broadcast-audience entries, matching legacy behavior since all
-/// pre-migration entries are broadcast (FR-103).
-fn resolve_self_workspace_id() -> Option<String> {
-    None
+/// for audience-aware reminder filtering. Returns `None` for Unassigned
+/// agents (broadcast-only visibility) and `Some(id)` for assigned agents.
+fn resolve_self_workspace_id(session: &Session) -> Option<String> {
+    gwt_core::workspace_projection::resolve_workspace_id_for_session(
+        &session.worktree_path,
+        &session.id,
+    )
 }
 
 #[cfg(test)]

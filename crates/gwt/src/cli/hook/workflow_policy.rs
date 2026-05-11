@@ -314,7 +314,8 @@ fn workspace_coordination_conflicts(
         current_intent,
         current_session_id,
     )?);
-    let current_workspace_id = resolve_current_workspace_audience();
+    let current_workspace_id = current_session_id
+        .and_then(|session_id| resolve_current_workspace_audience(worktree_root, session_id));
     conflicts.extend(board_claim_conflicts(
         worktree_root,
         current_intent,
@@ -325,13 +326,11 @@ fn workspace_coordination_conflicts(
 }
 
 /// SPEC-2359 FR-099: resolve the current Agent's assigned Workspace id for
-/// the duplicate-work coordination gate. Returns `None` until the Agent
-/// affiliation field (SPEC-2359 FR-088, US-25) lands, mirroring the
-/// reminder-injection resolver. With `None`, only broadcast (audience
-/// absent) claims gate the current Agent, matching reminder visibility
-/// for Unassigned Agents.
-fn resolve_current_workspace_audience() -> Option<String> {
-    None
+/// the duplicate-work coordination gate. Returns `None` for Unassigned
+/// agents (broadcast-only gating) and `Some(id)` for assigned agents,
+/// mirroring the reminder-injection resolver.
+fn resolve_current_workspace_audience(worktree_root: &Path, session_id: &str) -> Option<String> {
+    gwt_core::workspace_projection::resolve_workspace_id_for_session(worktree_root, session_id)
 }
 
 fn workspace_agent_conflicts(
