@@ -5167,3 +5167,59 @@ path は untouched だった。
 5. **post-action UX の SPEC 義務化**: button / link / action を SPEC に書く際は post-action
    UX (進捗・成功・失敗・確認) を必ず受け入れシナリオに含める。click 前後を分離して片方しか
    書かない SPEC を禁止する。
+
+## 2026-05-11 — Agent pane heading が `workspace update` 単独では更新されない (SPEC-2359 US-26 / Phase U-1..U-3)
+
+### 事象
+
+ユーザーから「実行中のエージェントが何をしているのか、一目でタイトルで分かるべき」という UX 観点で
+指摘を受け、本 session で `gwtd workspace update --agent-session <id> --title-summary "X"` を
+発行しても、Web UI の Agent pane heading は `agent_id` フォールバック ("CLAUDE CODE") のままで
+あることを再現確認した。projection JSON (`~/.gwt/projects/<hash>/workspace/current.json`) には
+`agents[<i>].title_summary = "X"` が確かに書かれていた。Codex も別 session で同 root cause を
+Board request `2b256bfc-...` で報告していた。
+
+### 原因
+
+1. **同じ UI 真実が 2 つの broadcast channel に分かれていた**: 
+   - Active work card / Workspace Kanban: `BackendEvent::ActiveWorkProjection` で受信。
+     `projection.agents[<i>].title_summary` を直接参照する。
+   - Agent pane heading (`windowDisplayTitle`): `BackendEvent::WorkspaceState` で受信。
+     `windowData.dynamic_title` を参照する。`dynamic_title` が空だと `agent_id` まで
+     フォールバック→ CSS uppercase で "CLAUDE CODE" 表示。
+2. **caller によって到達する broadcast surface が異なっていた**: 
+   - `gwtd workspace update --title-summary` 経路 (`handle_workspace_projection_changed_events`)
+     は `sync_agent_window_titles_from_workspace_projection` で in-memory `dynamic_title` を
+     更新するが、`ActiveWorkProjection` しか broadcast しなかった。`WorkspaceState` 不在の
+     ため、frontend の `windowData.dynamic_title` は次の hook event / window 構造変更まで
+     古いまま。Pane heading は fallback に張り付く。
+   - Board flow は `update_agent_window_dynamic_title_for_board_entry` で別経路に in-memory
+     書き込みする。やはり `WorkspaceState` 不在。
+3. **`active_agent_sessions` 未登録 session が静かに無視されていた**: launch flow が
+   track していない session (GUI 再起動後 / 外部から `claude` 直接起動など) は projection に
+   は載っていても、`sync_agent_window_titles_from_workspace_projection` の filter_map が
+   None を返し、pane heading 更新を silently drop していた。
+
+### 再発防止策
+
+1. **複数 surface に reach する write は canonical orchestration API に集約する**: 
+   SPEC-2359 US-26 で `apply_workspace_projection_title_sync` を追加し、5 surface
+   (projection JSON / journal / in-memory `dynamic_title` / `ActiveWorkProjection` /
+   `WorkspaceState`) を 1 関数で同期する契約にした。新規 caller は必ずこの API を経由する。
+2. **partial-write を構造的に不可能にする**: orchestration API が 5 surface を 1 batch で
+   触るので、caller は 4 + 1 / 3 + 2 の組合せを書けない。「うっかり broadcast を一つ
+   忘れる」が type-system + test level でブロックされる。
+3. **fallback resolution を許す**: `active_agent_sessions` 未登録でも `projection.agents[<i>]`
+   が `window_id` / `worktree_path` を持っているなら、orchestration API はそちらをフォール
+   バックして in-memory `dynamic_title` を更新する。Launch lifecycle (US-24) には触らず、
+   title sync の resolution だけ補強する。
+4. **CI green = done を疑え (再掲)**: 既存テストは「`ActiveWorkProjection` が出る」しか
+   assert していなかったため、`WorkspaceState` 欠落は test 上見えなかった。新規テスト
+   `apply_workspace_projection_title_sync_emits_workspace_state_when_dynamic_title_changed` と
+   `handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pane_heading` で
+   構造的に固定。「frontend がこの broadcast を読んでいる」surface を素 grep で確認してから
+   テスト assertion を組む。
+5. **UI surface インベントリを書く**: 同じ data field を読む UI 面が複数あるなら、どの
+   broadcast event で reach するかを表形式で残す (SPEC 7.2 の `Inventory: write path vs
+   surface` 表)。Inventory を見ながら write path を設計すれば「すべての surface を
+   touch しているか」を caller 側で必ず確認できる。
