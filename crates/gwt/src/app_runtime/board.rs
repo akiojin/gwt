@@ -22,7 +22,15 @@ use gwt_core::{
     workspace_projection,
 };
 
+use gwt::board_audience::{gui_default_board_scope, post_audience_for_gui};
+
 use super::{AppRuntime, BackendEvent, OutboundEvent, WindowPreset};
+
+pub(super) fn gui_default_board_scope_for_project(
+    project_root: &Path,
+) -> gwt_core::Result<coordination::BoardAudienceScope> {
+    gui_default_board_scope(project_root)
+}
 
 #[derive(Debug, Clone)]
 pub struct BoardPostRequest {
@@ -153,6 +161,21 @@ impl AppRuntime {
         }
         if !mentions.is_empty() {
             entry = entry.with_mentions(mentions);
+        }
+        let audience = match post_audience_for_gui(&tab.project_root, &entry.mentions) {
+            Ok(audience) => audience,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::BoardError {
+                        id,
+                        message: error.to_string(),
+                    },
+                )];
+            }
+        };
+        if let Some(audience) = audience {
+            entry = entry.with_audience(audience);
         }
         match coordination::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {

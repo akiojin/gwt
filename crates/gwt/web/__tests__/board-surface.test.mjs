@@ -39,6 +39,7 @@ test("Board surface follows external posts only when already near bottom", () =>
 
 test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /board-for-you-filter/);
+  assert.match(appSource, /board-all-filter/);
   assert.match(appSource, /board-audience-badge/);
   assert.match(appSource, /board-reply-button/);
   assert.match(appSource, /board-reply-banner/);
@@ -46,6 +47,7 @@ test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /showBoardMentionNotification/);
   assert.match(appSource, /Jump to original/);
   assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
+  assert.match(appSource, /all:\s*state\.audienceFilter\s*===\s*"all"/);
 });
 
 test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101)", () => {
@@ -113,6 +115,30 @@ test("Board reply helpers create reply mentions and filter for-you entries", () 
   assert.deepEqual(
     visibleBoardEntries(state, ["user:you"]).map((entry) => entry.id),
     ["entry-user"],
+  );
+});
+
+test("Board workspace audience filter shows current workspace plus broadcast by default", () => {
+  const state = {
+    audienceFilter: "workspace",
+    currentWorkspaceId: "workspace-a",
+    entries: [
+      { id: "broadcast", body: "legacy broadcast" },
+      { id: "workspace-a", audience: ["workspace-a"], body: "current workspace" },
+      { id: "workspace-b", audience: ["workspace-b"], body: "other workspace" },
+      { id: "empty", audience: [], body: "empty is broadcast" },
+    ],
+  };
+
+  assert.deepEqual(
+    visibleBoardEntries(state).map((entry) => entry.id),
+    ["broadcast", "workspace-a", "empty"],
+  );
+
+  state.audienceFilter = "all";
+  assert.deepEqual(
+    visibleBoardEntries(state).map((entry) => entry.id),
+    ["broadcast", "workspace-a", "workspace-b", "empty"],
   );
 });
 
