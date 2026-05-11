@@ -166,7 +166,7 @@ impl AppRuntime {
         let quick_start_entries = self
             .launch_wizard_cache
             .quick_start_entries(&quick_start_root, &normalized_branch_name);
-        let previous_profile = self.launch_wizard_cache.previous_profile(&quick_start_root);
+        let previous_profiles = self.launch_wizard_cache.previous_profiles();
         let agent_options = self.launch_wizard_cache.agent_options();
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);
@@ -174,7 +174,7 @@ impl AppRuntime {
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
-            wizard: LaunchWizardState::open_with_previous_profile(
+            wizard: LaunchWizardState::open_with_previous_profiles(
                 LaunchWizardContext {
                     selected_branch: synthetic_branch_entry(branch_name),
                     normalized_branch_name,
@@ -188,7 +188,7 @@ impl AppRuntime {
                 },
                 agent_options,
                 quick_start_entries,
-                previous_profile,
+                previous_profiles,
             ),
             workspace_resume_context,
         });
@@ -376,7 +376,7 @@ impl AppRuntime {
         let quick_start_entries = self
             .launch_wizard_cache
             .quick_start_entries(&quick_start_root, &work_branch);
-        let previous_profile = self.launch_wizard_cache.previous_profile(&quick_start_root);
+        let previous_profiles = self.launch_wizard_cache.previous_profiles();
         let agent_options = self.launch_wizard_cache.agent_options();
         let (docker_context, docker_service_status) =
             detect_wizard_docker_context_and_status(&quick_start_root);
@@ -384,7 +384,7 @@ impl AppRuntime {
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
-            wizard: LaunchWizardState::open_start_work_with_previous_profile(
+            wizard: LaunchWizardState::open_start_work_with_previous_profiles(
                 LaunchWizardContext {
                     selected_branch: synthetic_branch_entry(&base_branch),
                     normalized_branch_name: work_branch,
@@ -401,7 +401,7 @@ impl AppRuntime {
                 base_branch,
                 agent_options,
                 quick_start_entries,
-                previous_profile,
+                previous_profiles,
             ),
             workspace_resume_context,
         });
@@ -770,7 +770,7 @@ impl AppRuntime {
             docker_service_status: context.docker_service_status,
             agent_options,
             quick_start_entries,
-            previous_profile: None,
+            previous_profiles: None,
         });
     }
 }
