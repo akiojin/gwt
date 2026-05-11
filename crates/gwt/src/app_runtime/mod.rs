@@ -11384,6 +11384,9 @@ exit 0
                 last_board_entry_id: None,
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: chrono::Utc::now(),
             });
         projection
@@ -11556,6 +11559,56 @@ exit 0
                 .iter()
                 .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
             "WorkspaceState must be skipped when in-memory dynamic_title did not change: {events:?}"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_resyncs() {
+        let _env_lock = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let (mut runtime, window_id) =
+            apply_title_sync_setup_tab_and_runtime(repo.clone(), Some("tab-1"));
+        let projection = apply_title_sync_sample_projection(
+            &repo,
+            &window_id,
+            Some("Stable title"),
+            Some("Stable focus"),
+        );
+        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+            .expect("save projection");
+
+        // First sync: dynamic_title transitions from None → "Stable title".
+        let first = runtime.apply_workspace_projection_title_sync(&repo, &projection);
+        assert!(
+            first
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "first sync should broadcast WorkspaceState: {first:?}"
+        );
+
+        // Second sync with the same projection: nothing diffs, so the
+        // WorkspaceState broadcast must be suppressed to avoid forcing a
+        // full frontend re-render on busy projections (Codex review P2).
+        let second = runtime.apply_workspace_projection_title_sync(&repo, &projection);
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "second sync with identical title must not broadcast WorkspaceState: {second:?}"
+        );
+        // ActiveWorkProjection still fires (it's idempotent on the
+        // frontend; the active card snapshot is harmless to re-send).
+        assert!(
+            second
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjection { .. })),
+            "ActiveWorkProjection should still broadcast on resync: {second:?}"
         );
     }
 

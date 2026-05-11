@@ -80,6 +80,11 @@ impl WorkspaceState {
         true
     }
 
+    /// Sets `dynamic_title` for the named window. Returns `true` only when
+    /// the stored value actually changed (after normalization) so callers
+    /// can decide whether to emit a broadcast. SPEC-2359 US-26: gating on
+    /// real diff avoids forcing frontend re-renders for no-op projection
+    /// reloads (e.g. repeated `gwtd workspace update` with the same title).
     pub fn set_dynamic_title(&mut self, id: &str, title: Option<String>) -> bool {
         let Some(window) = self
             .persisted
@@ -89,10 +94,18 @@ impl WorkspaceState {
         else {
             return false;
         };
-        window.dynamic_title = title.and_then(normalize_title);
+        let new_title = title.and_then(normalize_title);
+        if window.dynamic_title == new_title {
+            return false;
+        }
+        window.dynamic_title = new_title;
         true
     }
 
+    /// Sets `dynamic_title` and `dynamic_title_detail` for the named window.
+    /// Returns `true` only when either field actually changed (after
+    /// normalization), so callers can gate broadcasts on a real value diff.
+    /// SPEC-2359 US-26.
     pub fn set_dynamic_title_with_detail(
         &mut self,
         id: &str,
@@ -107,8 +120,13 @@ impl WorkspaceState {
         else {
             return false;
         };
-        window.dynamic_title = title.and_then(normalize_title);
-        window.dynamic_title_detail = detail.and_then(normalize_title);
+        let new_title = title.and_then(normalize_title);
+        let new_detail = detail.and_then(normalize_title);
+        if window.dynamic_title == new_title && window.dynamic_title_detail == new_detail {
+            return false;
+        }
+        window.dynamic_title = new_title;
+        window.dynamic_title_detail = new_detail;
         true
     }
 
