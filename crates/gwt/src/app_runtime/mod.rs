@@ -619,26 +619,23 @@ fn active_work_projection_from_saved(
 fn active_work_projection_from_saved_with_journal(
     projection: gwt_core::workspace_projection::WorkspaceProjection,
     journal_entries: Vec<gwt::WorkspaceJournalEntryView>,
-    work_items: Vec<gwt::WorkspaceWorkItemView>,
+    workspaces: Vec<gwt::WorkspaceHistoryView>,
     cleanup_candidate: Option<gwt::ActiveWorkCleanupCandidateView>,
 ) -> gwt::ActiveWorkProjectionView {
     use gwt_core::workspace_projection::WorkspaceStatusCategory;
 
     let active_agents = projection
-        .agents
-        .iter()
+        .assigned_agents()
         .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
         .count();
     let blocked_agents = projection
-        .agents
-        .iter()
+        .assigned_agents()
         .filter(|agent| agent.status_category == WorkspaceStatusCategory::Blocked)
         .count();
     let agent_branch = projection
-        .agents
-        .iter()
+        .assigned_agents()
         .find_map(|agent| agent.branch.clone());
-    let agent_worktree = projection.agents.iter().find_map(|agent| {
+    let agent_worktree = projection.assigned_agents().find_map(|agent| {
         agent
             .worktree_path
             .as_ref()
@@ -646,32 +643,41 @@ fn active_work_projection_from_saved_with_journal(
     });
     let status_category =
         workspace_status_category_wire(projection.effective_status_category()).to_string();
-    let git_details = projection.git_details;
-    let (branch, worktree_path, pr_number, pr_url, pr_state, pr_created_at) = match git_details {
-        Some(details) => (
-            details.branch.or(agent_branch),
-            details
-                .worktree_path
-                .map(|path| path.display().to_string())
-                .or(agent_worktree),
-            details.pr_number,
-            details.pr_url,
-            details.pr_state,
-            details
-                .pr_created_at
-                .map(|created_at| created_at.to_rfc3339()),
-        ),
-        None => (agent_branch, agent_worktree, None, None, None, None),
-    };
+    let (branch, worktree_path, pr_number, pr_url, pr_state, pr_created_at) =
+        match projection.git_details.as_ref() {
+            Some(details) => (
+                details.branch.clone().or(agent_branch),
+                details
+                    .worktree_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .or(agent_worktree),
+                details.pr_number,
+                details.pr_url.clone(),
+                details.pr_state.clone(),
+                details
+                    .pr_created_at
+                    .map(|created_at| created_at.to_rfc3339()),
+            ),
+            None => (agent_branch, agent_worktree, None, None, None, None),
+        };
     let mut agents = projection
-        .agents
-        .iter()
+        .assigned_agents()
         .map(active_work_agent_view_from_summary)
         .collect::<Vec<_>>();
     agents.sort_by(|left, right| {
         active_work_agent_priority_rank(left)
             .cmp(&active_work_agent_priority_rank(right))
             .then_with(|| left.display_name.cmp(&right.display_name))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    let mut unassigned_agents = projection
+        .unassigned_agents()
+        .map(active_work_agent_view_from_summary)
+        .collect::<Vec<_>>();
+    unassigned_agents.sort_by(|left, right| {
+        left.display_name
+            .cmp(&right.display_name)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
 
@@ -693,9 +699,10 @@ fn active_work_projection_from_saved_with_journal(
         pr_created_at,
         board_refs: projection.board_refs,
         journal_entries,
-        work_items,
+        workspaces,
         cleanup_candidate,
         agents,
+        unassigned_agents,
     }
 }
 
@@ -721,9 +728,10 @@ fn empty_active_work_projection_view(
         pr_created_at: None,
         board_refs: Vec::new(),
         journal_entries: Vec::new(),
-        work_items: Vec::new(),
+        workspaces: Vec::new(),
         cleanup_candidate: None,
         agents: Vec::new(),
+        unassigned_agents: Vec::new(),
     }
 }
 
@@ -767,8 +775,8 @@ fn workspace_journal_entry_view_from_entry(
 
 fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkspaceWorkItem,
-) -> gwt::WorkspaceWorkItemView {
-    gwt::WorkspaceWorkItemView {
+) -> gwt::WorkspaceHistoryView {
+    gwt::WorkspaceHistoryView {
         id: item.id.clone(),
         title: item.title.clone(),
         intent: item.intent.clone(),
@@ -795,7 +803,7 @@ fn workspace_work_item_view_from_item(
             .map(workspace_execution_container_view_from_ref)
             .collect(),
         board_refs: item.board_refs.clone(),
-        related_work_item_ids: item.related_work_item_ids.clone(),
+        related_workspace_ids: item.related_work_item_ids.clone(),
         events: item
             .events
             .iter()
@@ -806,8 +814,8 @@ fn workspace_work_item_view_from_item(
 
 fn workspace_work_agent_view_from_ref(
     agent: &gwt_core::workspace_projection::WorkspaceWorkAgentRef,
-) -> gwt::WorkspaceWorkAgentView {
-    gwt::WorkspaceWorkAgentView {
+) -> gwt::WorkspaceHistoryAgentView {
+    gwt::WorkspaceHistoryAgentView {
         session_id: agent.session_id.clone(),
         agent_id: agent.agent_id.clone(),
         display_name: agent.display_name.clone(),
@@ -834,10 +842,10 @@ fn workspace_execution_container_view_from_ref(
 
 fn workspace_work_event_view_from_event(
     event: &gwt_core::workspace_projection::WorkspaceWorkEvent,
-) -> gwt::WorkspaceWorkEventView {
-    gwt::WorkspaceWorkEventView {
+) -> gwt::WorkspaceHistoryEventView {
+    gwt::WorkspaceHistoryEventView {
         id: event.id.clone(),
-        work_item_id: event.work_item_id.clone(),
+        workspace_id: event.work_item_id.clone(),
         kind: workspace_work_event_kind_wire(event.kind).to_string(),
         title: event.title.clone(),
         intent: event.intent.clone(),
@@ -850,7 +858,7 @@ fn workspace_work_event_view_from_event(
         next_action: event.next_action.clone(),
         agent_session_id: event.agent_session_id.clone(),
         board_entry_id: event.board_entry_id.clone(),
-        related_work_item_id: event.related_work_item_id.clone(),
+        related_workspace_id: event.related_work_item_id.clone(),
         updated_at: event
             .updated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -1026,11 +1034,17 @@ fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
 fn active_work_agent_view_from_summary(
     agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
 ) -> gwt::ActiveWorkAgentView {
+    let affiliation_status = match agent.affiliation_status {
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned => "unassigned",
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned => "assigned",
+    };
     gwt::ActiveWorkAgentView {
         session_id: agent.session_id.clone(),
         window_id: agent.window_id.clone(),
         agent_id: agent.agent_id.clone(),
         display_name: agent.display_name.clone(),
+        affiliation_status: affiliation_status.to_string(),
+        workspace_id: agent.workspace_id.clone(),
         status_category: workspace_status_category_wire(agent.status_category).to_string(),
         current_focus: agent.current_focus.clone(),
         title_summary: agent.title_summary.clone(),
@@ -1066,8 +1080,22 @@ fn active_agent_summary_from_session(
         last_board_entry_id: None,
         last_board_entry_kind: None,
         coordination_scope: None,
+        affiliation_status:
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: None,
         updated_at,
     }
+}
+
+fn unassigned_agent_summary_from_session(
+    session: &ActiveAgentSession,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
+    let mut summary = active_agent_summary_from_session(session, updated_at);
+    summary.affiliation_status =
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+    summary.workspace_id = None;
+    summary
 }
 
 fn agent_launch_purpose_title(
@@ -1163,6 +1191,11 @@ fn upsert_workspace_agent(
         if summary.coordination_scope.is_some() {
             existing.coordination_scope = summary.coordination_scope;
         }
+        if summary.title_summary.is_some() {
+            existing.title_summary = summary.title_summary;
+        }
+        existing.affiliation_status = summary.affiliation_status;
+        existing.workspace_id = summary.workspace_id;
         if summary.updated_at > existing.updated_at {
             existing.updated_at = summary.updated_at;
         }
@@ -1177,10 +1210,31 @@ fn merge_active_sessions_into_projection<'a>(
     updated_at: chrono::DateTime<chrono::Utc>,
 ) {
     for session in sessions {
-        upsert_workspace_agent(
-            &mut projection.agents,
-            active_agent_summary_from_session(session, updated_at),
-        );
+        let existing = projection
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == session.session_id)
+            .or_else(|| {
+                projection
+                    .agents
+                    .iter()
+                    .find(|agent| agent.window_id.as_deref() == Some(session.window_id.as_str()))
+            });
+        let mut summary = active_agent_summary_from_session(session, updated_at);
+        if let Some(existing) = existing {
+            summary.affiliation_status = existing.affiliation_status;
+            summary.workspace_id = existing.workspace_id.clone();
+            summary.title_summary = existing.title_summary.clone();
+            summary.current_focus = existing.current_focus.clone();
+            summary.last_board_entry_id = existing.last_board_entry_id.clone();
+            summary.last_board_entry_kind = existing.last_board_entry_kind.clone();
+            summary.coordination_scope = existing.coordination_scope.clone();
+        } else {
+            summary.affiliation_status =
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+            summary.workspace_id = None;
+        }
+        upsert_workspace_agent(&mut projection.agents, summary);
     }
 }
 
@@ -1197,11 +1251,12 @@ fn retain_live_workspace_agents(
         .agents
         .retain(|agent| live_session_ids.contains(agent.session_id.as_str()));
     if !projection.agents.iter().any(|agent| {
-        matches!(
-            agent.status_category,
-            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
-                | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
-        )
+        agent.is_assigned()
+            && matches!(
+                agent.status_category,
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+                    | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
+            )
     }) {
         projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Idle;
         projection.status_text = "No active work".to_string();
@@ -1214,11 +1269,12 @@ fn workspace_projection_has_current_agents(
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
 ) -> bool {
     projection.agents.iter().any(|agent| {
-        matches!(
-            agent.status_category,
-            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
-                | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
-        )
+        agent.is_assigned()
+            && matches!(
+                agent.status_category,
+                gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+                    | gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
+            )
     })
 }
 
@@ -1315,13 +1371,13 @@ fn save_workspace_launch_projection(
     } else if let Some(issue_number) = linked_issue_number {
         projection.owner = Some(format!("Issue #{issue_number}"));
     }
-    upsert_workspace_agent(
-        &mut projection.agents,
-        active_agent_summary_from_session(session, now),
-    );
+    let mut agent = active_agent_summary_from_session(session, now);
+    agent.affiliation_status =
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned;
+    agent.workspace_id = Some(projection.id.clone());
+    upsert_workspace_agent(&mut projection.agents, agent);
     let active_agents = projection
-        .agents
-        .iter()
+        .assigned_agents()
         .filter(|agent| agent.status_category == WorkspaceStatusCategory::Active)
         .count();
     projection.status_text = if active_agents == 1 {
@@ -1394,17 +1450,35 @@ fn workspace_work_event_from_launch_projection(
     event
 }
 
+fn save_unassigned_workspace_launch_projection(
+    project_root: &Path,
+    session: &ActiveAgentSession,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
+            .map_err(|error| error.to_string())?;
+    projection.project_root = project_root.to_path_buf();
+    projection.register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
+    projection.updated_at = now;
+    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
+        .map_err(|error| error.to_string())
+}
+
 fn save_start_work_workspace_projection(
     project_root: &Path,
     session: &ActiveAgentSession,
-    base_branch: &str,
+    _base_branch: &str,
     linked_issue_number: Option<u64>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
 ) -> Result<(), String> {
+    if workspace_resume_context.is_none() {
+        return save_unassigned_workspace_launch_projection(project_root, session);
+    }
     save_workspace_launch_projection(
         project_root,
         session,
-        Some(base_branch),
+        Some(_base_branch),
         linked_issue_number,
         workspace_resume_context,
         true,
@@ -2388,7 +2462,7 @@ impl AppRuntime {
                 .iter()
                 .map(workspace_journal_entry_view_from_entry)
                 .collect::<Vec<_>>();
-            let work_items =
+            let workspaces =
                 gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
                     &tab.project_root,
                 )
@@ -2405,7 +2479,7 @@ impl AppRuntime {
             return Some(active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
-                work_items,
+                workspaces,
                 cleanup_candidate,
             ));
         }
@@ -2447,9 +2521,10 @@ impl AppRuntime {
             pr_created_at: None,
             board_refs: Vec::new(),
             journal_entries: Vec::new(),
-            work_items: Vec::new(),
+            workspaces: Vec::new(),
             cleanup_candidate: None,
             agents,
+            unassigned_agents: Vec::new(),
         })
     }
 
@@ -3801,7 +3876,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     .iter()
     .map(workspace_journal_entry_view_from_entry)
     .collect::<Vec<_>>();
-    let work_items =
+    let workspaces =
         gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
             .unwrap_or_else(
                 |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
@@ -3818,7 +3893,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
             projection: Box::new(active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
-                work_items,
+                workspaces,
                 None,
             )),
         },
@@ -4163,25 +4238,23 @@ impl AppRuntime {
                                 }
                             }
                         } else if let Some(base_branch) = base_branch.as_deref() {
-                            if active_session.branch_name.starts_with("work/") {
-                                match save_start_work_workspace_projection(
-                                    &project_root,
-                                    active_session,
-                                    base_branch,
-                                    linked_issue_number,
-                                    None,
-                                ) {
-                                    Ok(()) => {
-                                        workspace_projection_updated = true;
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            project_root = %project_root.display(),
-                                            branch = %active_session.branch_name,
-                                            error = %error,
-                                            "workspace projection update skipped after Start Work launch"
-                                        );
-                                    }
+                            match save_start_work_workspace_projection(
+                                &project_root,
+                                active_session,
+                                base_branch,
+                                linked_issue_number,
+                                None,
+                            ) {
+                                Ok(()) => {
+                                    workspace_projection_updated = true;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        project_root = %project_root.display(),
+                                        branch = %active_session.branch_name,
+                                        error = %error,
+                                        "workspace projection update skipped after Start Work launch"
+                                    );
                                 }
                             }
                         }
@@ -5649,11 +5722,11 @@ mod tests {
 
     use super::{
         active_work_projection_from_saved, dispatch_agent_launch_success,
-        save_start_work_workspace_projection, ActiveAgentSession, AgentLaunchCompletion,
-        AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
-        KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-        WorkspaceResumeContext,
+        save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
+        AgentLaunchCompletion, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
+        KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceResumeContext,
     };
     use crate::{combined_window_id, geometry_to_pty_size, same_worktree_path, PtyWriterRegistry};
 
@@ -6101,6 +6174,19 @@ exit 0
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             tab_id: tab_id.to_string(),
         }
+    }
+
+    fn save_assigned_workspace_projection_for_test(
+        repo: &Path,
+        session: &ActiveAgentSession,
+    ) -> Result<(), String> {
+        let context = WorkspaceResumeContext {
+            title: Some("Start Work".to_string()),
+            owner: Some("SPEC-2359".to_string()),
+            summary: Some("Assigned Workspace".to_string()),
+            next_action: Some("Check Board for latest updates".to_string()),
+        };
+        save_workspace_launch_projection(repo, session, Some("develop"), None, Some(&context), true)
     }
 
     #[test]
@@ -7679,7 +7765,7 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_start_work_launch_completion_records_workspace_git_details() {
+    fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -7738,31 +7824,99 @@ exit 0
         let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
-        let details = projection.git_details.expect("git details");
         assert_eq!(
             projection.status_category,
-            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown,
+            "Start Work must not make an unassigned Agent an active Workspace"
         );
-        assert_eq!(details.branch.as_deref(), Some("work/20260504-1234"));
-        assert_eq!(details.base_branch.as_deref(), Some("origin/main"));
-        assert_eq!(details.worktree_path.as_deref(), Some(worktree.as_path()));
-        assert!(details.created_by_start_work);
+        assert!(projection.git_details.is_none());
         assert_eq!(projection.agents.len(), 1);
         assert_eq!(projection.agents[0].session_id, "session-1");
-        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-            .expect("load work items")
-            .expect("work items");
-        assert_eq!(work_items.work_items.len(), 1);
         assert_eq!(
-            work_items.work_items[0].events[0].kind,
-            gwt_core::workspace_projection::WorkspaceWorkEventKind::Start
+            projection.agents[0].affiliation_status,
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned
         );
         assert_eq!(
-            work_items.work_items[0].execution_containers[0]
-                .branch
-                .as_deref(),
+            projection.agents[0].branch.as_deref(),
             Some("work/20260504-1234")
         );
+        assert_eq!(
+            projection.agents[0].worktree_path.as_deref(),
+            Some(worktree.as_path())
+        );
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items");
+        assert!(
+            work_items.is_none(),
+            "Start Work launch must not create Workspace history before explicit assignment"
+        );
+    }
+
+    #[test]
+    fn app_runtime_non_work_launch_registers_unassigned_agent() {
+        let _env_guard = env_test_lock().lock().expect("env lock");
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let window_id = combined_window_id("tab-1", "agent-1");
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec![
+                    "/d".to_string(),
+                    "/s".to_string(),
+                    "/c".to_string(),
+                    "exit /b 0".to_string(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh".to_string(),
+                vec!["-lc".to_string(), "exit 0".to_string()],
+            )
+        };
+
+        let _events = runtime.handle_launch_complete(
+            window_id,
+            Ok((
+                ProcessLaunch {
+                    command,
+                    args,
+                    env: HashMap::new(),
+                    remove_env: Vec::new(),
+                    cwd: Some(repo.clone()),
+                },
+                "session-develop".to_string(),
+                "develop".to_string(),
+                "Codex".to_string(),
+                repo.clone(),
+                gwt_agent::AgentId::Codex,
+                None,
+                Some("origin/develop".to_string()),
+                gwt_agent::LaunchRuntimeTarget::Host,
+                repo.display().to_string(),
+            )),
+        );
+
+        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        assert_eq!(projection.agents.len(), 1);
+        assert_eq!(projection.agents[0].session_id, "session-develop");
+        assert_eq!(
+            projection.agents[0].affiliation_status,
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned
+        );
+        assert_eq!(projection.agents[0].branch.as_deref(), Some("develop"));
     }
 
     #[test]
@@ -7857,7 +8011,7 @@ exit 0
     }
 
     #[test]
-    fn app_runtime_start_work_launch_completion_merges_agents_and_broadcasts_projection() {
+    fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents() {
         let _env_guard = env_test_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -7959,13 +8113,19 @@ exit 0
         assert_eq!(projection.agents.len(), 2);
         assert!(session_ids.contains("session-1"));
         assert!(session_ids.contains("session-2"));
+        assert!(projection
+            .agents
+            .iter()
+            .all(gwt_core::workspace_projection::WorkspaceAgentSummary::is_unassigned));
         assert!(second_events.iter().any(|event| matches!(
             event,
             OutboundEvent {
                 target: DispatchTarget::Broadcast,
                 event: BackendEvent::ActiveWorkProjection { projection },
-            } if projection.active_agents == 2
-                && projection.branch.as_deref() == Some("work/20260504-1235")
+            } if projection.active_agents == 0
+                && projection.agents.is_empty()
+                && projection.unassigned_agents.len() == 2
+                && projection.branch.is_none()
         )));
     }
 
@@ -8069,6 +8229,9 @@ exit 0
                 last_board_entry_id: None,
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: chrono::Utc::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -8133,6 +8296,9 @@ exit 0
                 last_board_entry_id: Some("board-old".to_string()),
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: chrono::Utc::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -8187,6 +8353,9 @@ exit 0
                 last_board_entry_id: None,
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: chrono::Utc::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -10070,7 +10239,7 @@ exit 0
         runtime
             .active_agent_sessions
             .insert(session.window_id.clone(), session.clone());
-        save_start_work_workspace_projection(&repo, &session, "develop", None, None)
+        save_assigned_workspace_projection_for_test(&repo, &session)
             .expect("save initial projection");
         let blocked = BoardEntry::new(
             AuthorKind::Agent,
@@ -10128,6 +10297,9 @@ exit 0
             last_board_entry_id: None,
             last_board_entry_kind: None,
             coordination_scope: None,
+            affiliation_status:
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: now,
         });
         projection.agents.push(WorkspaceAgentSummary {
@@ -10143,6 +10315,9 @@ exit 0
             last_board_entry_id: Some("board-handoff".to_string()),
             last_board_entry_kind: Some(BoardEntryKind::Handoff),
             coordination_scope: Some("SPEC-2359 / workspace-ux".to_string()),
+            affiliation_status:
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: None,
             updated_at: now,
         });
 
@@ -10193,7 +10368,7 @@ exit 0
         runtime
             .active_agent_sessions
             .insert(session.window_id.clone(), session.clone());
-        save_start_work_workspace_projection(&repo, &session, "develop", None, None)
+        save_assigned_workspace_projection_for_test(&repo, &session)
             .expect("save initial projection");
         let blocked = BoardEntry::new(
             AuthorKind::Agent,
@@ -10271,7 +10446,7 @@ exit 0
         runtime
             .active_agent_sessions
             .insert(session.window_id.clone(), session.clone());
-        save_start_work_workspace_projection(&repo, &session, "develop", None, None)
+        save_assigned_workspace_projection_for_test(&repo, &session)
             .expect("save initial projection");
         let blocked = BoardEntry::new(
             AuthorKind::Agent,
@@ -10857,6 +11032,9 @@ exit 0
                 last_board_entry_id: None,
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: chrono::Utc::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)

@@ -411,6 +411,8 @@ pub struct ActiveWorkAgentView {
     pub window_id: Option<String>,
     pub agent_id: String,
     pub display_name: String,
+    pub affiliation_status: String,
+    pub workspace_id: Option<String>,
     pub status_category: String,
     pub current_focus: Option<String>,
     pub title_summary: Option<String>,
@@ -438,12 +440,14 @@ pub struct WorkspaceJournalEntryView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceWorkAgentView {
+pub struct WorkspaceHistoryAgentView {
     pub session_id: String,
     pub agent_id: Option<String>,
     pub display_name: Option<String>,
     pub updated_at: String,
 }
+
+pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceExecutionContainerView {
@@ -455,9 +459,9 @@ pub struct WorkspaceExecutionContainerView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceWorkEventView {
+pub struct WorkspaceHistoryEventView {
     pub id: String,
-    pub work_item_id: String,
+    pub workspace_id: String,
     pub kind: String,
     pub title: Option<String>,
     pub intent: Option<String>,
@@ -467,12 +471,14 @@ pub struct WorkspaceWorkEventView {
     pub next_action: Option<String>,
     pub agent_session_id: Option<String>,
     pub board_entry_id: Option<String>,
-    pub related_work_item_id: Option<String>,
+    pub related_workspace_id: Option<String>,
     pub updated_at: String,
 }
 
+pub type WorkspaceWorkEventView = WorkspaceHistoryEventView;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkspaceWorkItemView {
+pub struct WorkspaceHistoryView {
     pub id: String,
     pub title: String,
     pub intent: Option<String>,
@@ -482,12 +488,14 @@ pub struct WorkspaceWorkItemView {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
-    pub agents: Vec<WorkspaceWorkAgentView>,
+    pub agents: Vec<WorkspaceHistoryAgentView>,
     pub execution_containers: Vec<WorkspaceExecutionContainerView>,
     pub board_refs: Vec<String>,
-    pub related_work_item_ids: Vec<String>,
-    pub events: Vec<WorkspaceWorkEventView>,
+    pub related_workspace_ids: Vec<String>,
+    pub events: Vec<WorkspaceHistoryEventView>,
 }
+
+pub type WorkspaceWorkItemView = WorkspaceHistoryView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkCleanupCandidateView {
@@ -517,9 +525,12 @@ pub struct ActiveWorkProjectionView {
     pub pr_created_at: Option<String>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
-    pub work_items: Vec<WorkspaceWorkItemView>,
+    #[serde(default, alias = "work_items")]
+    pub workspaces: Vec<WorkspaceHistoryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     pub agents: Vec<ActiveWorkAgentView>,
+    #[serde(default)]
+    pub unassigned_agents: Vec<ActiveWorkAgentView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -968,7 +979,7 @@ mod tests {
                     agent_current_focus: Some("Run launch tests".to_string()),
                     agent_title_summary: Some("Launch tests".to_string()),
                 }],
-                work_items: Vec::new(),
+                workspaces: Vec::new(),
                 cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
                     branch: "work/20260504-1200".to_string(),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
@@ -981,6 +992,8 @@ mod tests {
                     window_id: Some("tab-1::agent-1".to_string()),
                     agent_id: "codex".to_string(),
                     display_name: "Codex".to_string(),
+                    affiliation_status: "assigned".to_string(),
+                    workspace_id: Some("work-1".to_string()),
                     status_category: "active".to_string(),
                     current_focus: Some("Run launch tests".to_string()),
                     title_summary: Some("Launch tests".to_string()),
@@ -991,6 +1004,7 @@ mod tests {
                     coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
                 }],
+                unassigned_agents: Vec::new(),
             }),
         };
 
