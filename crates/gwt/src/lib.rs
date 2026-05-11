@@ -99,6 +99,8 @@ pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkProjectionView, AppStateView,
     ArrangeMode, BackendEvent, BranchEntriesPhase, CustomAgentErrorCode, FocusCycleDirection,
     FrontendEvent, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    RecentProjectView, WorkspaceExecutionContainerView, WorkspaceJournalEntryView,
+    WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView, WorkspaceWorkEventView,
+    WorkspaceWorkItemView,
 };
 pub use workspace::WorkspaceState;
