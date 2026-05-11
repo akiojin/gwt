@@ -5,8 +5,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
   applyBoardMentionNotificationFocus,
+  boardEntryOriginActionLabel,
+  boardEntryOriginLabel,
+  boardEntryOriginSessionId,
   boardEntryAudienceLabels,
   boardEntryMentionsSelf,
+  entryVisibleForWorkspace,
   mentionForReplyParent,
   mentionsForBoardSubmit,
   visibleBoardEntries,
@@ -38,6 +42,7 @@ test("Board surface follows external posts only when already near bottom", () =>
 
 test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /board-for-you-filter/);
+  assert.match(appSource, /board-all-filter/);
   assert.match(appSource, /board-audience-badge/);
   assert.match(appSource, /board-reply-button/);
   assert.match(appSource, /board-reply-banner/);
@@ -45,6 +50,27 @@ test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /showBoardMentionNotification/);
   assert.match(appSource, /Jump to original/);
   assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
+  assert.match(appSource, /all:\s*state\.audienceFilter\s*===\s*"all"/);
+});
+
+test("Board surface exposes origin Agent focus and resume affordances", () => {
+  assert.match(appSource, /open_board_origin_agent/);
+  assert.match(appSource, /board-origin-badge/);
+  assert.match(appSource, /board-origin-button/);
+  assert.match(appSource, /visibleBounds\(\)/);
+});
+
+test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101)", () => {
+  assert.match(appSource, /board-workspace-filter/);
+  assert.match(appSource, /toggle-board-workspace/);
+  assert.match(appSource, /state\.audienceFilter\s*===\s*"workspace"/);
+});
+
+test("Board surface wires Workspace projection's primary assigned agent into currentWorkspaceId (SPEC-2359 FR-098)", () => {
+  assert.match(appSource, /deriveCurrentProjectWorkspaceId/);
+  assert.match(appSource, /refreshBoardCurrentWorkspaceId/);
+  assert.match(appSource, /affiliation_status[\s\S]{0,60}assigned/);
+  assert.match(appSource, /currentWorkspaceId:\s*currentProjectWorkspaceId/);
 });
 
 test("Board message body preserves multiline plaintext", () => {
@@ -109,6 +135,88 @@ test("Board reply helpers create reply mentions and filter for-you entries", () 
   );
 });
 
+test("Board workspace audience filter shows current workspace plus broadcast by default", () => {
+  const state = {
+    audienceFilter: "workspace",
+    currentWorkspaceId: "workspace-a",
+    entries: [
+      { id: "broadcast", body: "legacy broadcast" },
+      { id: "workspace-a", audience: ["workspace-a"], body: "current workspace" },
+      { id: "workspace-b", audience: ["workspace-b"], body: "other workspace" },
+      { id: "empty", audience: [], body: "empty is broadcast" },
+    ],
+  };
+
+  assert.deepEqual(
+    visibleBoardEntries(state).map((entry) => entry.id),
+    ["broadcast", "workspace-a", "empty"],
+  );
+
+  state.audienceFilter = "all";
+  assert.deepEqual(
+    visibleBoardEntries(state).map((entry) => entry.id),
+    ["broadcast", "workspace-a", "workspace-b", "empty"],
+  );
+});
+
+test("entryVisibleForWorkspace treats absent or empty audience as broadcast (FR-093/103)", () => {
+  const broadcastA = { id: "a", audience: [] };
+  const broadcastB = { id: "b" };
+  const scopedAB = { id: "ab", audience: ["ws-1", "ws-2"] };
+  const scopedOther = { id: "other", audience: ["ws-2"] };
+
+  assert.equal(entryVisibleForWorkspace(broadcastA, "ws-1"), true);
+  assert.equal(entryVisibleForWorkspace(broadcastB, "ws-1"), true);
+  assert.equal(entryVisibleForWorkspace(broadcastA, null), true);
+  assert.equal(entryVisibleForWorkspace(scopedAB, "ws-1"), true);
+  assert.equal(entryVisibleForWorkspace(scopedAB, "ws-3"), false);
+  assert.equal(entryVisibleForWorkspace(scopedOther, "ws-1"), false);
+  assert.equal(entryVisibleForWorkspace(scopedAB, null), false);
+});
+
+test("visibleBoardEntries 'workspace' filter scopes by current workspace audience plus broadcast (FR-098)", () => {
+  const broadcast = { id: "broadcast", audience: [], mentions: [] };
+  const scopedSelf = { id: "scoped-self", audience: ["ws-1"], mentions: [] };
+  const scopedOther = { id: "scoped-other", audience: ["ws-2"], mentions: [] };
+
+  const state = {
+    entries: [broadcast, scopedSelf, scopedOther],
+    audienceFilter: "workspace",
+    currentWorkspaceId: "ws-1",
+  };
+
+  const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
+  assert.deepEqual(visibleIds, ["broadcast", "scoped-self"]);
+});
+
+test("visibleBoardEntries 'workspace' filter for unassigned agent shows only broadcast", () => {
+  const broadcast = { id: "broadcast", audience: [], mentions: [] };
+  const scoped = { id: "scoped", audience: ["ws-1"], mentions: [] };
+
+  const state = {
+    entries: [broadcast, scoped],
+    audienceFilter: "workspace",
+    currentWorkspaceId: null,
+  };
+
+  const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
+  assert.deepEqual(visibleIds, ["broadcast"]);
+});
+
+test("visibleBoardEntries 'all' filter still bypasses workspace scoping", () => {
+  const broadcast = { id: "broadcast", audience: [], mentions: [] };
+  const scopedOther = { id: "scoped-other", audience: ["ws-2"], mentions: [] };
+
+  const state = {
+    entries: [broadcast, scopedOther],
+    audienceFilter: "all",
+    currentWorkspaceId: "ws-1",
+  };
+
+  const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
+  assert.deepEqual(visibleIds, ["broadcast", "scoped-other"]);
+});
+
 test("Board notification helper prepares focused state for click-through", () => {
   const state = {
     audienceFilter: "for_you",
@@ -123,4 +231,29 @@ test("Board notification helper prepares focused state for click-through", () =>
   assert.equal(state.forYouUnread, 0);
   assert.equal(state.focusEntryId, "entry-target");
   assert.equal(state.pendingFocusScroll, true);
+});
+
+test("Board origin helpers label live focus versus exact resume actions", () => {
+  const entry = {
+    author_kind: "agent",
+    author: "Codex",
+    origin_agent_id: "Codex",
+    origin_branch: "work/20260511-0327",
+    origin_session_id: "12345678-90ab-cdef-1234-567890abcdef",
+  };
+  const liveAgents = [
+    {
+      session_id: "12345678-90ab-cdef-1234-567890abcdef",
+      window_id: "tab-1::agent-1",
+    },
+  ];
+
+  assert.equal(
+    boardEntryOriginSessionId(entry),
+    "12345678-90ab-cdef-1234-567890abcdef",
+  );
+  assert.match(boardEntryOriginLabel(entry), /^From Codex · work\/20260511-0327 · 12345678$/);
+  assert.equal(boardEntryOriginActionLabel(entry, liveAgents), "Focus Agent");
+  assert.equal(boardEntryOriginActionLabel(entry, []), "Resume Agent");
+  assert.equal(boardEntryOriginActionLabel({ author_kind: "user" }, liveAgents), "");
 });

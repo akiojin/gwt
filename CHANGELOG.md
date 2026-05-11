@@ -1,6 +1,67 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.26.0] - 2026-05-11
+
+### Bug Fixes
+
+- **update:** SPEC-2041 Phase 19 CodeRabbit review fixes (PR #2630)
+- **update:** SPEC-2041 Phase 19 follow-up review fixes (PRs #2631/#2634/#2635)
+- Surface launch wizard open errors
+- Scope launch wizard open errors to client
+- **board:** Preserve all-view live updates
+- **app-runtime:** Gate WorkspaceState broadcast on real title diff
+- Stabilize hook runtime path handling
+- Harden provider hook adapters
+- **tests:** Serialize HOME-mutating gwt tests
+- Support new built-in board origin agents
+
+### Documentation
+
+- **lessons:** SPEC-2041 Phase 14 silent-failure 5回連続見逃しの教訓を追加
+- **spec-2041:** SPEC-2041 Phase 19 Gate 3 manual smoke runbook
+
+### Features
+
+- **gui:** SPEC-2041 Phase 19 post-click modal state machine を実装
+- **gui:** SPEC-2041 Phase 19 backend split で silent failure を解消
+- **update:** SPEC-2041 Phase 19 download progress callback (T-128)
+- **update:** SPEC-2041 Phase 19 pending persistence + bootstrap swap + log writer
+- **update:** GWT_UPDATE_API_BASE_URL env override で Gate 2 mock smoke を可能に
+- **scripts:** SPEC-2041 Phase 19 Gate 2 mock update server
+- **update:** SPEC-2041 Phase 19 commit_update_later_pending を explicit named function に (FR-064)
+- **workspace:** Block duplicate active workspace edits
+- **workspace:** Add work item history
+- **coordination:** SPEC-2359 Phase 20 Board Workspace audience foundation
+- **workspace:** Add unassigned agent state
+- **coordination:** SPEC-2359 wire up Workspace audience auto-attach and mention fan-out
+- **gui:** SPEC-2359 Board pane Workspace audience filter toggle
+- Focus board origin agents
+- **board:** Scope board entries by workspace
+- **gui:** SPEC-2359 wire current project workspace id into Board filter
+- **app-runtime:** Canonical orchestration for agent title sync
+- OpenCode/OpenClaw/Hermes Agent の hook 対応を追加
+
+### Miscellaneous Tasks
+
+- Merge develop into board audience branch
+- Merge latest develop into board audience branch
+- Merge latest develop into board audience UI branch
+- Merge origin develop into board follow-up
+- Merge develop for board origin pr
+- Merge develop into provider hook parity branch
+- Merge latest develop for board origin pr
+
+### Testing
+
+- **gui:** SPEC-2041 Phase 19 post-click modal の RED テストを追加
+- **gui:** SPEC-2041 Phase 19 Playwright scaffold for modal flow (T-121)
+- **gui:** SPEC-2041 Phase 19 bootstrap decision + cleanup tests (T-127)
+- **update:** SPEC-2041 Phase 19 progress callback monotonic test (T-125)
+- **update:** SPEC-2041 Phase 19 path validation を pure fn に抽出 + 5 unit tests
+- **gui:** SPEC-2041 Phase 19 ready-state error handling test
+- **coordination:** Stabilize recent post history test
+
 ## [9.25.0] - 2026-05-10
 
 ### Bug Fixes

@@ -42,6 +42,12 @@ mod runtime_support;
 mod update_front_door;
 
 #[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 pub(crate) use app_runtime::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use app_runtime::{
@@ -615,6 +621,27 @@ enum UserEvent {
     ApplyUpdate {
         state: gwt_core::update::UpdateState,
         client_id: ClientId,
+    },
+    /// SPEC-2041 Phase 19 (FR-052/056): begin downloading the prepared payload
+    /// without exiting the parent process. On completion, the worker thread
+    /// emits an `UpdatePrepared` event so the dispatcher can broadcast
+    /// `UpdateReady` to all clients.
+    ApplyUpdateStart {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
+    /// SPEC-2041 Phase 19 (FR-058): user pressed Restart now. Apply the
+    /// prepared payload via the helper subprocess and exit the parent.
+    ApplyUpdateRestartNow {
+        state: gwt_core::update::UpdateState,
+        client_id: ClientId,
+    },
+    /// SPEC-2041 Phase 19 (FR-056): worker thread completed `prepare_update`
+    /// and the prepared payload is ready on disk. Dispatcher broadcasts
+    /// `UpdateReady` to subscribed clients.
+    UpdatePrepared {
+        version: String,
+        asset_path: std::path::PathBuf,
     },
     /// SPEC-1934 FR-029: progress tick from
     /// `gwt::migration::execute_migration`. Re-broadcast as
@@ -1450,6 +1477,7 @@ mod tests {
             runtimes: HashMap::new(),
             window_details: HashMap::new(),
             window_lookup: HashMap::new(),
+            board_all_view_windows: std::collections::HashSet::new(),
             session_state_path: temp_root.join("session-state.json"),
             log_dir,
             proxy,
@@ -2215,19 +2243,22 @@ mod tests {
                 if message == "Window is not a branches list"
         ));
 
-        let wizard_missing = runtime.open_launch_wizard("missing", "feature/demo", None);
+        let wizard_missing =
+            runtime.open_launch_wizard("client-1", "missing", "feature/demo", None);
         assert_eq!(wizard_missing.len(), 1);
         assert!(matches!(
             wizard_missing[0].event,
-            BackendEvent::BranchError { ref message, .. } if message == "Window not found"
+            BackendEvent::LaunchWizardOpenError { ref title, ref message }
+                if title == "Launch Agent" && message == "Window not found"
         ));
 
-        let wizard_wrong = runtime.open_launch_wizard(&file_tree_id, "feature/demo", None);
+        let wizard_wrong =
+            runtime.open_launch_wizard("client-1", &file_tree_id, "feature/demo", None);
         assert_eq!(wizard_wrong.len(), 1);
         assert!(matches!(
             wizard_wrong[0].event,
-            BackendEvent::BranchError { ref message, .. }
-                if message == "Window is not a branches list"
+            BackendEvent::LaunchWizardOpenError { ref title, ref message }
+                if title == "Launch Agent" && message == "Window is not a branches list"
         ));
 
         let issue_missing = runtime.open_issue_launch_wizard_events("client-1", "missing", 7);
@@ -2512,7 +2543,8 @@ mod tests {
             })
         });
 
-        let wizard_events = runtime.open_launch_wizard(&branches_id, "feature/demo", Some(42));
+        let wizard_events =
+            runtime.open_launch_wizard("client-1", &branches_id, "feature/demo", Some(42));
         assert_eq!(wizard_events.len(), 1);
         assert!(matches!(
             wizard_events[0].event,
@@ -5108,6 +5140,16 @@ fn main() -> wry::Result<()> {
         }
     }
 
+    // SPEC-2041 Phase 19 (T-133): if a previous gwt session wrote a pending
+    // update manifest (via the post-click modal's Later flow, or because the
+    // user killed gwt before clicking Restart now), hand off to the helper
+    // subprocess so the new version takes over before any GUI surfaces.
+    // Returns true only when an apply was attempted and exit(0) was already
+    // called inside; false continues the regular launch.
+    if update_front_door::try_apply_pending_update_at_bootstrap() {
+        return Ok(());
+    }
+
     let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let _gui_instance_lock = match gwt::gui_single_instance::acquire_gui_instance_lock(
         &gwt_core::paths::gwt_home(),
@@ -5364,11 +5406,199 @@ fn main() -> wry::Result<()> {
             Event::UserEvent(UserEvent::ApplyUpdate { state, client_id }) => {
                 let apply_proxy = proxy.clone();
                 std::thread::spawn(move || {
+                    let log_path = gwt_core::update::update_log_path()
+                        .to_string_lossy()
+                        .to_string();
                     if let Err(message) = apply_update_state_and_exit(state) {
+                        gwt_core::update::log_update_event(
+                            "fail",
+                            &[("stage", "apply_update_legacy"), ("reason", &message)],
+                        );
                         let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
                             OutboundEvent::reply(
                                 client_id,
-                                BackendEvent::UpdateApplyError { message },
+                                BackendEvent::UpdateApplyError {
+                                    message: Some(message.clone()),
+                                    stage: Some("Apply update".to_string()),
+                                    reason: Some(message),
+                                    log_path: Some(log_path),
+                                },
+                            ),
+                        ]));
+                    }
+                });
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateStart { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                let version_for_progress = match &state {
+                    gwt_core::update::UpdateState::Available { latest, .. } => Some(latest.clone()),
+                    _ => None,
+                };
+                let asset_for_progress = match &state {
+                    gwt_core::update::UpdateState::Available {
+                        asset_url: Some(url),
+                        ..
+                    } => gwt_core::update::asset_name_from_url(url),
+                    _ => None,
+                };
+                std::thread::spawn(move || {
+                    // SPEC-2041 Phase 19 FR-065: log stage transitions so the
+                    // failure modal's [Open log] action has something to show
+                    // even when the silent path of the apply succeeds.
+                    let log_version = version_for_progress.clone().unwrap_or_default();
+                    let log_asset = asset_for_progress.clone().unwrap_or_default();
+                    gwt_core::update::log_update_event(
+                        "download_start",
+                        &[("version", &log_version), ("asset", &log_asset)],
+                    );
+                    // SPEC-2041 Phase 19 FR-054: stream chunk-level progress
+                    // back to the modal. Throttle to ~200 ms or the
+                    // completion tick (`downloaded >= total`) so the
+                    // WebSocket does not see one event per 64 KiB.
+                    let throttle_interval = std::time::Duration::from_millis(200);
+                    let progress_proxy = apply_proxy.clone();
+                    let version_for_closure = version_for_progress.clone();
+                    let asset_for_closure = asset_for_progress.clone();
+                    let mut last_emit = std::time::Instant::now();
+                    let mut emitted_first = false;
+                    let mut progress = move |downloaded: u64, total: Option<u64>| {
+                        let is_complete = total.map(|t| downloaded >= t).unwrap_or(false);
+                        let now = std::time::Instant::now();
+                        let should_emit = !emitted_first
+                            || is_complete
+                            || now.duration_since(last_emit) >= throttle_interval;
+                        if should_emit {
+                            emitted_first = true;
+                            last_emit = now;
+                            let _ = progress_proxy.send_event(UserEvent::Dispatch(vec![
+                                OutboundEvent::broadcast(BackendEvent::UpdateProgress {
+                                    downloaded,
+                                    total,
+                                    asset: asset_for_closure.clone(),
+                                    version: version_for_closure.clone(),
+                                }),
+                            ]));
+                        }
+                    };
+                    let log_path_string = gwt_core::update::update_log_path()
+                        .to_string_lossy()
+                        .to_string();
+                    match update_front_door::prepare_update_payload_with_progress(
+                        state,
+                        &mut progress,
+                    ) {
+                        Ok(prepared) => {
+                            gwt_core::update::log_update_event(
+                                "download_complete",
+                                &[("version", &prepared.latest)],
+                            );
+                            // SPEC-2041 Phase 19 (T-129): persist manifest now
+                            // so that (a) Later doesn't have to round-trip the
+                            // payload back through workspace state, and
+                            // (b) if gwt is killed before user picks
+                            // Later/Restart now, the next launch can still
+                            // apply transparently (T-133).
+                            let manifest = gwt_core::update::PendingUpdateManifest {
+                                version: prepared.latest.clone(),
+                                asset_url: prepared.asset_url.clone(),
+                                payload: prepared.payload.clone(),
+                                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                            };
+                            if let Err(message) =
+                                gwt_core::update::persist_pending_update_manifest(&manifest)
+                            {
+                                gwt_core::update::log_update_event(
+                                    "fail",
+                                    &[("stage", "persist_pending"), ("reason", &message)],
+                                );
+                                let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                                    OutboundEvent::reply(
+                                        client_id,
+                                        BackendEvent::UpdateApplyError {
+                                            message: Some(message.clone()),
+                                            stage: Some("Persist pending".to_string()),
+                                            reason: Some(message),
+                                            log_path: Some(log_path_string.clone()),
+                                        },
+                                    ),
+                                ]));
+                                return;
+                            }
+                            gwt_core::update::log_update_event(
+                                "persist_pending",
+                                &[("version", &prepared.latest)],
+                            );
+
+                            let asset_path = prepared.payload_path();
+                            let version = prepared.latest;
+                            let _ = apply_proxy.send_event(UserEvent::UpdatePrepared {
+                                version,
+                                asset_path,
+                            });
+                        }
+                        Err(message) => {
+                            gwt_core::update::log_update_event(
+                                "fail",
+                                &[("stage", "download_asset"), ("reason", &message)],
+                            );
+                            let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                                OutboundEvent::reply(
+                                    client_id,
+                                    BackendEvent::UpdateApplyError {
+                                        message: Some(message.clone()),
+                                        stage: Some("Download asset".to_string()),
+                                        reason: Some(message),
+                                        log_path: Some(log_path_string),
+                                    },
+                                ),
+                            ]));
+                        }
+                    }
+                });
+            }
+            Event::UserEvent(UserEvent::UpdatePrepared {
+                version,
+                asset_path,
+            }) => {
+                clients.dispatch(vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                    version,
+                    asset_path: asset_path.to_string_lossy().to_string(),
+                })]);
+            }
+            Event::UserEvent(UserEvent::ApplyUpdateRestartNow { state, client_id }) => {
+                let apply_proxy = proxy.clone();
+                std::thread::spawn(move || {
+                    let log_path = gwt_core::update::update_log_path()
+                        .to_string_lossy()
+                        .to_string();
+                    gwt_core::update::log_update_event("restart_now_requested", &[]);
+                    // SPEC-2041 Phase 19 (T-130/T-133): consume the persisted
+                    // manifest if it exists so we don't re-download the same
+                    // payload after the user already saw the progress modal.
+                    // Falls back to the legacy `apply_update_state_and_exit`
+                    // path when no manifest is present (e.g. user clicked
+                    // Restart now before download persisted, or manifest was
+                    // wiped by an external cleanup).
+                    let result = match gwt_core::update::load_pending_update_manifest() {
+                        Some(manifest) => {
+                            update_front_door::apply_pending_manifest_and_exit(manifest)
+                        }
+                        None => apply_update_state_and_exit(state),
+                    };
+                    if let Err(message) = result {
+                        gwt_core::update::log_update_event(
+                            "fail",
+                            &[("stage", "restart_now"), ("reason", &message)],
+                        );
+                        let _ = apply_proxy.send_event(UserEvent::Dispatch(vec![
+                            OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::UpdateApplyError {
+                                    message: Some(message.clone()),
+                                    stage: Some("Restart now".to_string()),
+                                    reason: Some(message),
+                                    log_path: Some(log_path),
+                                },
                             ),
                         ]));
                     }

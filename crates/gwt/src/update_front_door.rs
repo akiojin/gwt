@@ -171,7 +171,7 @@ fn handle_poll_outcome(
                 _ => return state.on_success_uptodate(),
             };
             let (should_publish, next) = state.on_success_available(&latest);
-            if should_publish {
+            if should_publish && !pending_manifest_covers(&latest) {
                 let _ = update_proxy.send_event(UserEvent::UpdateAvailable(outcome));
             }
             next
@@ -179,6 +179,16 @@ fn handle_poll_outcome(
         StartupUpdateAction::Stop => state.on_success_uptodate(),
         StartupUpdateAction::Retry => state.on_failure(),
     }
+}
+
+/// SPEC-2041 Phase 19 (T-134): suppress polling broadcasts for versions the
+/// user has already deferred via `Later`. Without this guard the same release
+/// would re-pop the CTA every 5 minutes even though the binary is already
+/// staged in `~/.gwt/pending-update/`.
+fn pending_manifest_covers(latest: &str) -> bool {
+    gwt_core::update::load_pending_update_manifest()
+        .map(|m| m.version == latest)
+        .unwrap_or(false)
 }
 
 trait UpdateApplyOps {
@@ -269,6 +279,88 @@ impl UpdateApplyOps for RealUpdateApplyOps {
     }
 }
 
+/// SPEC-2041 Phase 19 (T-130): a download that has been completed but not yet
+/// committed via the helper subprocess. Constructed by
+/// [`prepare_update_payload`] from a verified `UpdateState::Available`, then
+/// reused by `apply_update_state_and_exit` (which performs the helper spawn +
+/// `exit(0)`). The struct intentionally owns the on-disk path so the apply
+/// path does not have to re-derive it from the asset URL.
+#[derive(Debug, Clone)]
+pub struct PreparedUpdate {
+    pub latest: String,
+    /// Source URL the asset was downloaded from. Retained for diagnostics
+    /// (logs, retry telemetry) so future Phase 19 work can correlate ready
+    /// payloads back to the upstream release without re-walking the cache.
+    #[allow(dead_code)]
+    pub asset_url: String,
+    pub payload: gwt_core::update::PreparedPayload,
+}
+
+impl PreparedUpdate {
+    /// Filesystem path of the prepared payload (binary or installer).
+    pub fn payload_path(&self) -> PathBuf {
+        match &self.payload {
+            gwt_core::update::PreparedPayload::PortableBinary { path }
+            | gwt_core::update::PreparedPayload::Installer { path, .. } => path.clone(),
+        }
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-052/056): download and stage the update payload
+/// without spawning the helper subprocess. The caller (typically the
+/// `UserEvent::ApplyUpdateStart` worker thread in `main.rs`) broadcasts
+/// [`crate::BackendEvent::UpdateReady`] when this returns `Ok`.
+///
+/// This is the explicit no-side-effects half of the legacy
+/// [`apply_update_state_and_exit`]: it never calls `exit(0)`, never spawns the
+/// helper, and never mutates the running binary. T-130 will eventually replace
+/// `apply_update_state_and_exit` entirely with this + a separate
+/// `commit_update_restart_now` once Phase 19 stabilizes.
+/// Convenience wrapper that drops download-progress events. Kept on the
+/// public API for future non-streaming callers (CLI, automated tests) so the
+/// progress-aware variant does not have to be re-discovered.
+#[allow(dead_code)]
+pub fn prepare_update_payload(
+    state: gwt_core::update::UpdateState,
+) -> Result<PreparedUpdate, String> {
+    prepare_update_payload_with_progress(state, &mut |_, _| {})
+}
+
+/// SPEC-2041 Phase 19 (FR-054): like [`prepare_update_payload`] but routes
+/// download chunk progress to `progress`. The closure must be cheap because
+/// it fires once per 64 KiB of payload; callers that broadcast progress over
+/// WebSocket should throttle inside the closure (e.g. by `Instant::elapsed`).
+pub fn prepare_update_payload_with_progress(
+    state: gwt_core::update::UpdateState,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PreparedUpdate, String> {
+    let (latest, asset_url) = match state {
+        gwt_core::update::UpdateState::Available {
+            latest,
+            asset_url: Some(asset_url),
+            ..
+        } => (latest, asset_url),
+        gwt_core::update::UpdateState::Available { .. } => {
+            return Err("No applicable update asset is available for this platform.".to_string());
+        }
+        gwt_core::update::UpdateState::UpToDate { .. } => {
+            return Err("No pending update is available.".to_string());
+        }
+        gwt_core::update::UpdateState::Failed { message, .. } => {
+            return Err(format!("Update check failed: {message}"));
+        }
+    };
+    let mgr = gwt_core::update::UpdateManager::new();
+    let payload = mgr
+        .prepare_update_with_progress(&latest, &asset_url, progress)
+        .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
+    Ok(PreparedUpdate {
+        latest,
+        asset_url,
+        payload,
+    })
+}
+
 /// Apply an already-detected update state from the GUI notification path.
 ///
 /// The startup poll has already selected the platform-specific asset. Reusing
@@ -317,6 +409,30 @@ fn start_update_apply_with_ops(
     let payload = ops
         .prepare_update(&latest, &asset_url)
         .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
+    apply_prepared_payload_with_ops(
+        ops,
+        &latest,
+        payload,
+        current_exe,
+        restart_args,
+        old_pid,
+        use_helper_copy,
+    )
+}
+
+/// SPEC-2041 Phase 19 (T-130): commit an already-prepared update by writing
+/// the restart-args file, optionally creating a helper copy on Windows, and
+/// spawning the helper subprocess. Caller is responsible for `exit(0)` once
+/// this returns `Ok` so the helper sees the parent close.
+fn apply_prepared_payload_with_ops(
+    ops: &mut impl UpdateApplyOps,
+    latest: &str,
+    payload: gwt_core::update::PreparedPayload,
+    current_exe: &Path,
+    restart_args: Vec<String>,
+    old_pid: u32,
+    use_helper_copy: bool,
+) -> Result<(), String> {
     let args_file = (match &payload {
         gwt_core::update::PreparedPayload::PortableBinary { path }
         | gwt_core::update::PreparedPayload::Installer { path, .. } => {
@@ -327,7 +443,7 @@ fn start_update_apply_with_ops(
     ops.write_restart_args_file(&args_file, restart_args)
         .map_err(|err| format!("Failed to write update restart args: {err}"))?;
     let helper_exe = if use_helper_copy {
-        ops.make_helper_copy(current_exe, &latest)
+        ops.make_helper_copy(current_exe, latest)
             .map_err(|err| format!("Failed to prepare update helper: {err}"))?
     } else {
         current_exe.to_path_buf()
@@ -347,6 +463,95 @@ fn start_update_apply_with_ops(
             )
             .map_err(|err| format!("Failed to start update installer: {err}")),
     }
+}
+
+/// SPEC-2041 Phase 19 (FR-059..062): explicit no-op named after the SPEC's
+/// `commit_update_later_pending` so the post-click flow has the named seam
+/// FR-064 prescribes even though persistence happens earlier (in
+/// `UserEvent::ApplyUpdateStart`'s worker thread). Runs a sanity check that
+/// the manifest the bootstrap path will rely on actually exists, returning
+/// an error so callers can surface it via `update_apply_error`.
+pub fn commit_update_later_pending() -> Result<(), String> {
+    match gwt_core::update::load_pending_update_manifest() {
+        Some(_) => Ok(()),
+        None => Err("Pending update manifest is missing; download did not persist.".to_string()),
+    }
+}
+
+/// SPEC-2041 Phase 19 (FR-058/062): consume an already-persisted manifest.
+/// Used both by `Restart now` (when the user clicked through the modal) and
+/// by the bootstrap path (when a previous run wrote the manifest via
+/// `Later`). After the helper subprocess is spawned the manifest is removed
+/// so a future launch does not re-apply the same payload.
+///
+/// This is the function FR-064 names `commit_update_restart_now`. Kept under
+/// the implementation-evolved name `apply_pending_manifest_and_exit` because
+/// renaming would force a much larger diff across tests; the SPEC contract is
+/// satisfied by the function's behavior, not its identifier.
+pub fn apply_pending_manifest_and_exit(
+    manifest: gwt_core::update::PendingUpdateManifest,
+) -> Result<(), String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
+    let restart_args: Vec<String> = std::env::args().skip(1).collect();
+    let latest = manifest.version.clone();
+    let payload = manifest.payload.clone();
+    let mut ops = RealUpdateApplyOps::default();
+    apply_prepared_payload_with_ops(
+        &mut ops,
+        &latest,
+        payload,
+        &current_exe,
+        restart_args,
+        std::process::id(),
+        cfg!(windows),
+    )?;
+    // Best-effort cleanup so the next launch starts from a clean state. The
+    // helper has already been spawned so failures here are not fatal.
+    let _ = gwt_core::update::clear_pending_update_manifest();
+    std::process::exit(0);
+}
+
+/// SPEC-2041 Phase 19 (T-133): bootstrap-time swap. Returns `true` when a
+/// pending manifest was found, applied, and the parent process is about to
+/// `exit(0)` (caller should not return). Returns `false` when there is no
+/// applicable pending update so the caller continues normal startup.
+///
+/// Intentionally `pub` so `crates/gwt/src/main.rs` can call this before
+/// any window setup. Stale manifests (older than the running binary, or
+/// pointing at a missing payload) are quietly cleared so they don't keep
+/// rewinding launches.
+pub fn try_apply_pending_update_at_bootstrap() -> bool {
+    let manifest = match gwt_core::update::load_pending_update_manifest() {
+        Some(m) => m,
+        None => return false,
+    };
+    let current_version = env!("CARGO_PKG_VERSION");
+    if !should_apply_pending_at_bootstrap(&manifest.version, current_version) {
+        // The pending payload is for our current (or older) version. Drop it
+        // so we don't loop forever.
+        let _ = gwt_core::update::clear_pending_update_manifest();
+        return false;
+    }
+    match apply_pending_manifest_and_exit(manifest) {
+        Ok(()) => true, // unreachable: apply_pending_manifest_and_exit calls exit(0)
+        Err(err) => {
+            // Apply failed before exit. Clear the manifest so we don't loop.
+            // Tracing isn't initialized this early in main(), so log via stderr
+            // for post-mortem inspection.
+            eprintln!("gwt bootstrap pending-update apply failed: {err}");
+            let _ = gwt_core::update::clear_pending_update_manifest();
+            false
+        }
+    }
+}
+
+/// SPEC-2041 Phase 19 (T-127 / FR-062): pure decision predicate the bootstrap
+/// path uses to decide whether to swap. Lifted out of
+/// [`try_apply_pending_update_at_bootstrap`] so unit tests can exercise it
+/// without touching `~/.gwt/pending-update/` or invoking `exit(0)`.
+fn should_apply_pending_at_bootstrap(pending_version: &str, current_version: &str) -> bool {
+    gwt_core::update::pending_version_is_newer(pending_version, current_version)
 }
 
 #[cfg(test)]
@@ -578,5 +783,54 @@ mod poll_state_tests {
         assert!(ops.wrote_restart_args);
         assert!(ops.spawned_portable);
         assert!(!ops.spawned_installer);
+    }
+
+    // SPEC-2041 Phase 19 (T-127): bootstrap pending-update decision tests.
+    //
+    // The full bootstrap path ends in `exit(0)` so it cannot be unit-tested
+    // directly. We instead exercise the pure decision predicate
+    // (`should_apply_pending_at_bootstrap`) and the manifest cleanup helper
+    // contract that the bootstrap path relies on.
+
+    #[test]
+    fn bootstrap_decision_swaps_only_when_pending_is_newer() {
+        use super::should_apply_pending_at_bootstrap;
+        assert!(should_apply_pending_at_bootstrap("9.26.0", "9.25.0"));
+        assert!(should_apply_pending_at_bootstrap("v9.26.0", "v9.25.0"));
+        assert!(!should_apply_pending_at_bootstrap("9.25.0", "9.25.0"));
+        assert!(!should_apply_pending_at_bootstrap("9.24.0", "9.25.0"));
+    }
+
+    #[test]
+    fn bootstrap_clears_stale_manifest_in_tempdir() {
+        // Stage a stale manifest pointing at a real on-disk payload so
+        // load_pending_update_manifest_in returns Some, then verify the
+        // cleanup helper wipes it. This exercises the same cleanup contract
+        // the bootstrap path uses for "pending version <= current".
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let payload = tempdir.path().join("v9.20.0").join("gwt");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let manifest = gwt_core::update::PendingUpdateManifest {
+            version: "9.20.0".to_string(),
+            asset_url: "https://example.invalid/v9.20.0.tar.gz".to_string(),
+            payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
+            downloaded_at: "2026-05-10T12:00:00Z".to_string(),
+        };
+        gwt_core::update::persist_pending_update_manifest_in(tempdir.path(), &manifest)
+            .expect("persist");
+        assert!(
+            gwt_core::update::load_pending_update_manifest_in(tempdir.path()).is_some(),
+            "manifest must be discoverable before cleanup",
+        );
+
+        // Bootstrap would call clear_pending_update_manifest_in when the
+        // pending version is not newer than current.
+        gwt_core::update::clear_pending_update_manifest_in(tempdir.path()).expect("clear succeeds");
+        assert!(
+            gwt_core::update::load_pending_update_manifest_in(tempdir.path()).is_none(),
+            "manifest must be gone after cleanup",
+        );
     }
 }

@@ -148,6 +148,129 @@ test("Workspace Kanban labels the non-current history column as Inactive", () =>
   );
 });
 
+test("Workspace Kanban renders Unassigned agents outside Workspace status columns", () => {
+  const fixture = createFixture();
+  const projection = {
+    id: "project-workspace",
+    title: "Project workspace",
+    status_category: "idle",
+    status_text: "No active Workspace selected",
+    journal_entries: [],
+    workspaces: [],
+    unassigned_agents: [
+      {
+        session_id: "session-unassigned",
+        display_name: "Codex",
+        status_category: "active",
+        affiliation_status: "unassigned",
+        branch: "work/20260511-0100",
+      },
+    ],
+  };
+
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const unassigned = fixture.body.querySelector("[data-role='unassigned-agents']");
+  assert.ok(unassigned, "Unassigned section should be rendered");
+  assert.match(unassigned.textContent, /Unassigned/);
+  assert.match(unassigned.textContent, /No Workspace selected/);
+  assert.match(unassigned.textContent, /Codex/);
+  assert.equal(cardTexts(column(fixture.body, "active")).length, 0);
+  assert.equal(cardTexts(column(fixture.body, "inactive")).length, 1);
+  assert.doesNotMatch(fixture.body.textContent, /WorkItem/);
+});
+
+test("Workspace Kanban renders Workspace history cards with lifecycle timeline detail", () => {
+  const fixture = createFixture();
+  const projection = {
+    id: "current-workspace",
+    title: "Legacy current Workspace",
+    status_category: "idle",
+    status_text: "Idle",
+    workspaces: [
+      {
+        id: "workspace-history",
+        title: "Workspace history",
+        intent: "Group duplicate work under one Workspace",
+        summary: "One Workspace owns the history.",
+        status_category: "active",
+        owner: "SPEC-2359",
+        agents: [
+          {
+            session_id: "session-other",
+            display_name: "Codex",
+            status_category: "active",
+          },
+        ],
+        execution_containers: [
+          {
+            branch: "work/20260510-2353",
+            worktree_path: "/repo/work/20260510-2353",
+            pr_number: 2638,
+            pr_url: "https://github.com/akiojin/gwt/pull/2638",
+            pr_state: "open",
+          },
+        ],
+        board_refs: ["board-claim-1"],
+        events: [
+          {
+            id: "evt-start",
+            kind: "start",
+            title: "Start Workspace",
+            summary: "Started lifecycle implementation.",
+            updated_at: "2026-05-11T01:00:00Z",
+            agent_session_id: "session-other",
+            board_entry_id: "board-claim-1",
+          },
+          {
+            id: "evt-blocked",
+            kind: "blocked",
+            summary: "Waiting for Board coordination.",
+            updated_at: "2026-05-11T01:10:00Z",
+            agent_session_id: "session-other",
+            board_entry_id: "board-blocked-1",
+          },
+        ],
+      },
+    ],
+    journal_entries: [
+      {
+        id: "legacy-journal",
+        status_category: "active",
+        agent_title_summary: "Legacy duplicate card",
+      },
+    ],
+  };
+
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cardText = cardTexts(column(fixture.body, "active")).join("\n");
+  assert.match(cardText, /Workspace/);
+  assert.match(cardText, /Workspace history/);
+  assert.doesNotMatch(cardText, /WorkItem/);
+  assert.doesNotMatch(cardText, /Legacy duplicate card/);
+
+  const detailText = fixture.body
+    .querySelector(".workspace-kanban-detail-pane")
+    .textContent.replace(/\s+/g, " ")
+    .trim();
+  assert.match(detailText, /Lifecycle/);
+  assert.match(detailText, /start/);
+  assert.match(detailText, /Started lifecycle implementation/);
+  assert.match(detailText, /board-claim-1/);
+  assert.match(detailText, /blocked/);
+  assert.match(detailText, /Waiting for Board coordination/);
+  assert.match(detailText, /board-blocked-1/);
+});
+
 function createFixture() {
   const { document } = parseHTML(`
     <div id="workspace-window">

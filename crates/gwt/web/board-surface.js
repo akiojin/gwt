@@ -25,6 +25,10 @@ export function boardEntryMentionsSelf(entry, selfKeys = []) {
 }
 
 export function boardEntryAudienceLabels(entry, selfKeys = []) {
+  const workspaceAudience = normalizedBoardWorkspaceAudience(entry);
+  if (workspaceAudience.length > 0) {
+    return workspaceAudience.map((workspaceId) => `Workspace: ${workspaceId}`);
+  }
   const mentions = entry?.mentions || [];
   const keySet = new Set((selfKeys || []).map((key) => String(key).trim()).filter(Boolean));
   if (mentions.length > 0) {
@@ -38,6 +42,7 @@ export function boardEntryAudienceLabels(entry, selfKeys = []) {
       if (kind === "agent") return `To: ${label}`;
       if (kind === "session") return `Session: ${label}`;
       if (kind === "branch") return `Branch: ${label}`;
+      if (kind === "workspace") return `Workspace: ${label}`;
       return `To: ${label}`;
     });
   }
@@ -46,6 +51,42 @@ export function boardEntryAudienceLabels(entry, selfKeys = []) {
     return targets.map((target) => `To: ${target}`);
   }
   return ["Broadcast"];
+}
+
+export function normalizedBoardWorkspaceAudience(entry) {
+  const audience = Array.isArray(entry?.audience) ? entry.audience : [];
+  const normalized = [];
+  for (const value of audience) {
+    const workspaceId = String(value || "").trim();
+    if (!workspaceId || normalized.includes(workspaceId)) continue;
+    normalized.push(workspaceId);
+  }
+  return normalized;
+}
+
+export function boardEntryOriginSessionId(entry) {
+  const authorKind = String(entry?.author_kind || "").toLowerCase();
+  const sessionId = String(entry?.origin_session_id || "").trim();
+  return authorKind === "agent" ? sessionId : "";
+}
+
+export function boardEntryOriginLabel(entry) {
+  const sessionId = boardEntryOriginSessionId(entry);
+  if (!sessionId) return "";
+  const agent = String(entry?.origin_agent_id || entry?.author || "").trim();
+  const branch = String(entry?.origin_branch || "").trim();
+  const shortSession = sessionId.slice(0, 8);
+  const parts = [agent, branch, shortSession].filter(Boolean);
+  return parts.length > 0 ? `From ${parts.join(" · ")}` : "";
+}
+
+export function boardEntryOriginActionLabel(entry, activeAgents = []) {
+  const sessionId = boardEntryOriginSessionId(entry);
+  if (!sessionId) return "";
+  const live = (activeAgents || []).some(
+    (agent) => String(agent?.session_id || "").trim() === sessionId && agent?.window_id,
+  );
+  return live ? "Focus Agent" : "Resume Agent";
 }
 
 export function boardEntryPreview(entry) {
@@ -79,10 +120,27 @@ export function mentionsForBoardSubmit(state) {
   return mention ? [mention] : [];
 }
 
+// SPEC-2359 FR-093/098/103: mirror Rust `entry_visible_for_workspace`.
+// Broadcast entries are visible everywhere; scoped entries require the
+// current Workspace id, so unassigned agents see broadcast only.
+export function entryVisibleForWorkspace(entry, currentWorkspaceId) {
+  const audience = normalizedBoardWorkspaceAudience(entry);
+  if (audience.length === 0) return true;
+  const workspaceId = String(currentWorkspaceId || "").trim();
+  return Boolean(workspaceId) && audience.includes(workspaceId);
+}
+
+export function boardEntryVisibleForWorkspace(entry, workspaceId) {
+  return entryVisibleForWorkspace(entry, workspaceId);
+}
+
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
-  if (state?.audienceFilter !== "for_you") {
+  if (state?.audienceFilter === "all") {
     return entries;
+  }
+  if (state?.audienceFilter === "workspace") {
+    return entries.filter((entry) => entryVisibleForWorkspace(entry, state?.currentWorkspaceId));
   }
   return entries.filter((entry) => boardEntryMentionsSelf(entry, selfKeys));
 }

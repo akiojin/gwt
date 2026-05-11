@@ -176,15 +176,16 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
-    if std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
+    let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
         return Ok(());
-    }
+    };
+    let runtime_path = PathBuf::from(runtime_path);
     let hook_event = if input.trim().is_empty() {
         None
     } else {
         RawHookEvent::read_from_str(input)?
     };
-    let sessions_dir = sessions_dir_for_current_runtime();
+    let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
     let session = current_session_for_id(&sessions_dir, &gwt_session_id)?;
     let agent_session_id = validated_hook_agent_session_id(
@@ -197,19 +198,16 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
         sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)?;
     }
 
-    let Some(path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    write_for_event(&path, event)
+    let pending_discussion = session.as_ref().and_then(|session| {
+        pending_discussion_for_session(&sessions_dir, &session.id)
+            .ok()
+            .flatten()
+    });
+    write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
 }
 
-fn sessions_dir_for_current_runtime() -> PathBuf {
-    let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
-        return gwt_core::paths::gwt_sessions_dir();
-    };
-    let runtime_path = PathBuf::from(runtime_path);
-    gwt_agent::sessions_dir_from_runtime_path(&runtime_path)
+fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
+    gwt_agent::sessions_dir_from_runtime_path(runtime_path)
         .unwrap_or_else(gwt_core::paths::gwt_sessions_dir)
 }
 

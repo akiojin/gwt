@@ -5124,3 +5124,147 @@ CLI 実行を同じ quoting context に混ぜてしまった。
    を使い、Markdown 本文を shell double quote に直接埋め込まない。
 3. `gh issue close --comment` を使う場合でも、本文は単一引用符で安全に
    表現できる短文だけに限定する。複数行の検証ログは別途ファイル入力にする。
+
+## 2026-05-10 — 自動更新クリック後の silent failure を 5 回連続で見逃した
+
+### 事象
+
+`自動更新のクリックの対応` を 5 回連続で fix したが、ユーザーから「全く対応できていません」と
+強い不満を受けた。修正対象はすべて click 前 (cache / DOM / 表示) で、click 後の silent failure
+path は untouched だった。
+
+- 76be413f: 5分ポーリング + 永続更新ボタン (UI 表示のみ)
+- 293a1627 / 04d721cc / ca2b8221: toast → CTA 統一 (UI 表示のみ)
+- ffe40f46 / c5348421: asset wiring / ラベル文言 (UI 表示のみ)
+- 3a2e0628: dismiss button (UI 表示のみ)
+- 665dea8e: WebView cache 無効化 (click 検知のみ)
+
+### 原因
+
+1. `apply_update_state_and_exit` (`crates/gwt/src/update_front_door.rs:277`) が
+   `std::process::exit(0)` で親プロセスを click 直後に殺す設計のため、
+   helper subprocess の失敗が UI に surface されない silent failure path だった。
+2. テストが pass していたため done 宣言を繰り返したが、実環境では helper の失敗が見えないため
+   UX としては破綻していた。CI green = done 宣言が untested path を覆い隠した。
+3. 「click 検知が動かない」という assumption に基づいて修正対象を選んだが、根本的には
+   「click は反応しているが post-click が silent」という別問題だった。
+4. ユーザー意図 UX (modal で進捗 → 完了確認 → restart) を確認せず、SPEC は click 前領域の
+   みを規定していた。post-click UX が SPEC に書かれていない feature を「直す」ことができていなかった。
+
+### 再発防止策
+
+1. **CI green = done 禁止**: バグ修正・新機能の完了宣言には Gate 3 manual smoke
+   (実機で実 user flow を 1 往復) を必須化する。SPEC-2041 Phase 14 (FR-066) で正式化済み。
+2. **silent failure path の禁止**: 親プロセスが即時 exit する設計は許容しない。
+   download / install / replace / spawn の各 stage を必ず frontend (UI) に surface する。
+   `*_and_exit` という関数名が出てきた時点で silent failure を疑う。
+3. **修正前の前提検証**: 「動かない」報告を受けたら、表面的な仮説 (cache / DOM) で fix を
+   始める前に、ユーザーが実際に何を見ているか・どこで止まっているかを最低 1 度確認する。
+   「クリック反応するが画面出ない」と「クリック自体反応しない」は別問題。
+4. **再発カウントによる切り替え**: 同じ feature を 2 回以上 fix している場合、表面的修正
+   でなく architecture / silent failure path の review に切り替える。fix を重ねる前に
+   「過去の fix が効かなかった理由は何か」を root cause として specifically 特定する。
+5. **post-action UX の SPEC 義務化**: button / link / action を SPEC に書く際は post-action
+   UX (進捗・成功・失敗・確認) を必ず受け入れシナリオに含める。click 前後を分離して片方しか
+   書かない SPEC を禁止する。
+
+## 2026-05-11 — Agent pane heading が `workspace update` 単独では更新されない (SPEC-2359 US-26 / Phase U-1..U-3)
+
+### 事象
+
+ユーザーから「実行中のエージェントが何をしているのか、一目でタイトルで分かるべき」という UX 観点で
+指摘を受け、本 session で `gwtd workspace update --agent-session <id> --title-summary "X"` を
+発行しても、Web UI の Agent pane heading は `agent_id` フォールバック ("CLAUDE CODE") のままで
+あることを再現確認した。projection JSON (`~/.gwt/projects/<hash>/workspace/current.json`) には
+`agents[<i>].title_summary = "X"` が確かに書かれていた。Codex も別 session で同 root cause を
+Board request `2b256bfc-...` で報告していた。
+
+### 原因
+
+1. **同じ UI 真実が 2 つの broadcast channel に分かれていた**: 
+   - Active work card / Workspace Kanban: `BackendEvent::ActiveWorkProjection` で受信。
+     `projection.agents[<i>].title_summary` を直接参照する。
+   - Agent pane heading (`windowDisplayTitle`): `BackendEvent::WorkspaceState` で受信。
+     `windowData.dynamic_title` を参照する。`dynamic_title` が空だと `agent_id` まで
+     フォールバック→ CSS uppercase で "CLAUDE CODE" 表示。
+2. **caller によって到達する broadcast surface が異なっていた**: 
+   - `gwtd workspace update --title-summary` 経路 (`handle_workspace_projection_changed_events`)
+     は `sync_agent_window_titles_from_workspace_projection` で in-memory `dynamic_title` を
+     更新するが、`ActiveWorkProjection` しか broadcast しなかった。`WorkspaceState` 不在の
+     ため、frontend の `windowData.dynamic_title` は次の hook event / window 構造変更まで
+     古いまま。Pane heading は fallback に張り付く。
+   - Board flow は `update_agent_window_dynamic_title_for_board_entry` で別経路に in-memory
+     書き込みする。やはり `WorkspaceState` 不在。
+3. **`active_agent_sessions` 未登録 session が静かに無視されていた**: launch flow が
+   track していない session (GUI 再起動後 / 外部から `claude` 直接起動など) は projection に
+   は載っていても、`sync_agent_window_titles_from_workspace_projection` の filter_map が
+   None を返し、pane heading 更新を silently drop していた。
+
+### 再発防止策
+
+1. **複数 surface に reach する write は canonical orchestration API に集約する**: 
+   SPEC-2359 US-26 で `apply_workspace_projection_title_sync` を追加し、5 surface
+   (projection JSON / journal / in-memory `dynamic_title` / `ActiveWorkProjection` /
+   `WorkspaceState`) を 1 関数で同期する契約にした。新規 caller は必ずこの API を経由する。
+2. **partial-write を構造的に不可能にする**: orchestration API が 5 surface を 1 batch で
+   触るので、caller は 4 + 1 / 3 + 2 の組合せを書けない。「うっかり broadcast を一つ
+   忘れる」が type-system + test level でブロックされる。
+3. **fallback resolution を許す**: `active_agent_sessions` 未登録でも `projection.agents[<i>]`
+   が `window_id` / `worktree_path` を持っているなら、orchestration API はそちらをフォール
+   バックして in-memory `dynamic_title` を更新する。Launch lifecycle (US-24) には触らず、
+   title sync の resolution だけ補強する。
+4. **CI green = done を疑え (再掲)**: 既存テストは「`ActiveWorkProjection` が出る」しか
+   assert していなかったため、`WorkspaceState` 欠落は test 上見えなかった。新規テスト
+   `apply_workspace_projection_title_sync_emits_workspace_state_when_dynamic_title_changed` と
+   `handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pane_heading` で
+   構造的に固定。「frontend がこの broadcast を読んでいる」surface を素 grep で確認してから
+   テスト assertion を組む。
+5. **UI surface インベントリを書く**: 同じ data field を読む UI 面が複数あるなら、どの
+   broadcast event で reach するかを表形式で残す (SPEC 7.2 の `Inventory: write path vs
+   surface` 表)。Inventory を見ながら write path を設計すれば「すべての surface を
+   touch しているか」を caller 側で必ず確認できる。
+
+## 2026-05-11 — Test-only HOME mutation は crate-wide lock に統一する
+
+### 事象
+
+`cargo test -p gwt-core -p gwt` の並列実行で Board/Workspace 系テストが intermittent に失敗した。
+単独実行では通り、失敗時は `GWT_SESSION_ID` から保存済み session を読めず、current workspace
+audience が欠落していた。
+
+### 原因
+
+`app_runtime` test module と一部 helper test が `HOME` / `USERPROFILE` を module-local lock
+または lock なしで変更していた。CLI Board/Workspace tests は crate-wide `env_test_lock` を
+使っていたため、同じ process 内で別 test が HOME を差し替え、session path resolution が
+別 tempdir を参照した。
+
+### 再発防止策
+
+1. `HOME` / `USERPROFILE` / `GWT_SESSION_ID` など process-global env を触る test は、
+   module-local lock を作らず crate-wide `env_test_lock` に寄せる。
+2. 単独 test green で満足せず、env mutation を伴う修正後は default parallelism の
+   `cargo test -p gwt-core -p gwt` を必ず 1 回通す。
+
+## 2026-05-11 — Built-in AgentId を consumer 側の個別表で持たない
+
+### 事象
+
+develop 取り込み後、Board origin focus の `agent_option_matches_session` が `AgentId::OpenClaw`
+と `AgentId::Hermes` を網羅しておらず、`cargo test -p gwt-core -p gwt` が compile error で
+停止した。
+
+### 原因
+
+`gwt-agent` は built-in agent descriptor (`command`, `display_name`, `color` など) を持っているが、
+Board 側で `AgentId` variant ごとの `option.id` 対応表を別途 match していた。新しい built-in
+agent が追加されたとき、descriptor は更新されても Board 側の表が同期されなかった。
+
+### 再発防止策
+
+1. built-in `AgentId` の表示名・command・色・cache key は `AgentId` / descriptor API を使い、
+   consumer 側に variant 別の重複表を作らない。
+2. custom agent だけは `custom_agent.id` の互換判定が必要なので、built-in と custom の差分だけを
+   consumer 側に残す。
+3. 新規 AgentId 追加後は、Agent 起動だけでなく Board / Workspace / UI projection の resume 経路も
+   focused test で通す。

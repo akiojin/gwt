@@ -100,6 +100,8 @@ pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
         AgentId::ClaudeCode
         | AgentId::Gemini
         | AgentId::OpenCode
+        | AgentId::OpenClaw
+        | AgentId::Hermes
         | AgentId::Copilot
         | AgentId::Custom(_) => Vec::new(),
     }
@@ -493,7 +495,13 @@ impl AgentLaunchBuilder {
                 self.build_gemini_args(&mut args);
             }
             AgentId::OpenCode => {
-                self.build_opencode_args(&mut args);
+                self.build_opencode_args(&mut args, &mut env_vars);
+            }
+            AgentId::OpenClaw => {
+                self.build_openclaw_args(&mut args, &mut env_vars);
+            }
+            AgentId::Hermes => {
+                self.build_hermes_args(&mut args, &mut env_vars);
             }
             AgentId::Copilot => {
                 self.build_copilot_args(&mut args);
@@ -720,8 +728,92 @@ impl AgentLaunchBuilder {
         }
     }
 
-    fn build_opencode_args(&self, _args: &mut Vec<String>) {
-        // OpenCode has minimal CLI flags
+    fn build_opencode_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
+        if let Some(ref dir) = self.working_dir {
+            env_vars.insert(
+                "OPENCODE_CONFIG_DIR".to_string(),
+                dir.join(".gwt/opencode").to_string_lossy().into_owned(),
+            );
+        }
+        match self.session_mode {
+            SessionMode::Continue => args.push("--continue".to_string()),
+            SessionMode::Resume => {
+                if let Some(ref id) = self.resume_session_id {
+                    args.push("--session".to_string());
+                    args.push(id.clone());
+                } else {
+                    args.push("--continue".to_string());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+        if let Some(ref model) = self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+    }
+
+    fn build_openclaw_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
+        args.push("tui".to_string());
+        args.push("--local".to_string());
+        if let Some(ref dir) = self.working_dir {
+            env_vars.insert(
+                "OPENCLAW_CONFIG_PATH".to_string(),
+                dir.join(".gwt/openclaw/openclaw.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            env_vars.insert(
+                "OPENCLAW_INCLUDE_ROOTS".to_string(),
+                dir.join(".gwt/openclaw").to_string_lossy().into_owned(),
+            );
+        }
+        match self.session_mode {
+            SessionMode::Continue => {}
+            SessionMode::Resume => {
+                if let Some(ref id) = self.resume_session_id {
+                    args.push("--session".to_string());
+                    args.push(id.clone());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+        if let Some(ref level) = self.reasoning_level {
+            if level != "auto" {
+                args.push("--thinking".to_string());
+                args.push(level.clone());
+            }
+        }
+    }
+
+    fn build_hermes_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
+        args.push("chat".to_string());
+        args.push("--accept-hooks".to_string());
+        args.push("--pass-session-id".to_string());
+        if let Some(ref dir) = self.working_dir {
+            env_vars.insert(
+                "HERMES_HOME".to_string(),
+                dir.join(".gwt/hermes").to_string_lossy().into_owned(),
+            );
+        }
+        env_vars.insert("HERMES_ACCEPT_HOOKS".to_string(), "1".to_string());
+        match self.session_mode {
+            SessionMode::Continue => args.push("--continue".to_string()),
+            SessionMode::Resume => {
+                args.push("--resume".to_string());
+                if let Some(ref id) = self.resume_session_id {
+                    args.push(id.clone());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+        if let Some(ref model) = self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+        if self.skip_permissions {
+            args.push("--yolo".to_string());
+        }
     }
 
     fn build_copilot_args(&self, args: &mut Vec<String>) {
@@ -763,6 +855,8 @@ mod tests {
         assert!(canonical_launch_args(&AgentId::ClaudeCode).is_empty());
         assert!(canonical_launch_args(&AgentId::Gemini).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenCode).is_empty());
+        assert!(canonical_launch_args(&AgentId::OpenClaw).is_empty());
+        assert!(canonical_launch_args(&AgentId::Hermes).is_empty());
         assert!(canonical_launch_args(&AgentId::Copilot).is_empty());
         assert!(canonical_launch_args(&AgentId::Custom("aider".into())).is_empty());
     }
@@ -1099,6 +1193,8 @@ mod tests {
             AgentId::ClaudeCode,
             AgentId::Gemini,
             AgentId::OpenCode,
+            AgentId::OpenClaw,
+            AgentId::Hermes,
             AgentId::Copilot,
             AgentId::Custom("custom".into()),
         ] {
@@ -1304,6 +1400,81 @@ mod tests {
         let runner = resolve_runner(&AgentId::OpenCode, "latest");
         assert_eq!(runner.executable, "opencode");
         assert!(runner.base_args.is_empty());
+    }
+
+    #[test]
+    fn build_opencode_sets_model_and_project_config_dir() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .working_dir("/tmp/project")
+            .model("anthropic/claude-sonnet-4-5")
+            .build();
+
+        assert_eq!(config.command, "opencode");
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "anthropic/claude-sonnet-4-5"));
+        assert_eq!(
+            config.env_vars.get("OPENCODE_CONFIG_DIR"),
+            Some(&"/tmp/project/.gwt/opencode".to_string())
+        );
+    }
+
+    #[test]
+    fn build_openclaw_uses_local_tui_and_gwt_config_path() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenClaw)
+            .working_dir("/tmp/project")
+            .reasoning_level("high")
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("session-123")
+            .build();
+
+        assert_eq!(config.command, "openclaw");
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "tui" && pair[1] == "--local"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--session" && pair[1] == "session-123"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--thinking" && pair[1] == "high"));
+        assert_eq!(
+            config.env_vars.get("OPENCLAW_CONFIG_PATH"),
+            Some(&"/tmp/project/.gwt/openclaw/openclaw.json".to_string())
+        );
+    }
+
+    #[test]
+    fn build_hermes_accepts_hooks_and_maps_launch_controls() {
+        let config = AgentLaunchBuilder::new(AgentId::Hermes)
+            .working_dir("/tmp/project")
+            .model("openrouter/anthropic/claude-sonnet-4")
+            .skip_permissions(true)
+            .session_mode(SessionMode::Continue)
+            .build();
+
+        assert_eq!(config.command, "hermes");
+        assert!(config.args.contains(&"chat".to_string()));
+        assert!(config.args.contains(&"--accept-hooks".to_string()));
+        assert!(config.args.contains(&"--pass-session-id".to_string()));
+        assert!(config.args.contains(&"--continue".to_string()));
+        assert!(config.args.contains(&"--yolo".to_string()));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "openrouter/anthropic/claude-sonnet-4"));
+        assert_eq!(
+            config.env_vars.get("HERMES_HOME"),
+            Some(&"/tmp/project/.gwt/hermes".to_string())
+        );
+        assert_eq!(
+            config.env_vars.get("HERMES_ACCEPT_HOOKS"),
+            Some(&"1".to_string())
+        );
     }
 
     #[cfg(windows)]

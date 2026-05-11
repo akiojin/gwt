@@ -130,12 +130,16 @@ pub enum FrontendEvent {
     },
     LoadBoard {
         id: String,
+        #[serde(default)]
+        all: bool,
     },
     LoadBoardHistory {
         id: String,
         before_entry_id: Option<String>,
         #[serde(default = "default_board_history_limit")]
         limit: usize,
+        #[serde(default)]
+        all: bool,
     },
     LoadProfile {
         id: String,
@@ -210,6 +214,11 @@ pub enum FrontendEvent {
         #[serde(default)]
         mentions: Vec<gwt_core::coordination::BoardMention>,
     },
+    OpenBoardOriginAgent {
+        id: String,
+        origin_session_id: String,
+        bounds: Option<WindowGeometry>,
+    },
     SelectProfile {
         id: String,
         profile_name: String,
@@ -257,7 +266,33 @@ pub enum FrontendEvent {
         action: LaunchWizardAction,
         bounds: Option<WindowGeometry>,
     },
+    /// Legacy Phase 14 entry point. Frontend now sends
+    /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
+    /// instead. Kept so older clients and unit tests that still drive
+    /// `apply_update` continue to work; routes to the same backend behavior as
+    /// `ApplyUpdateRestartNow` (download → spawn helper → exit).
     ApplyUpdate,
+    /// SPEC-2041 Phase 19 (FR-052..057): user clicked the update CTA. Backend
+    /// downloads/prepares the asset and emits [`BackendEvent::UpdateProgress`]
+    /// during the transfer plus [`BackendEvent::UpdateReady`] on completion,
+    /// without exiting the parent process.
+    ApplyUpdateStart,
+    /// SPEC-2041 Phase 19 (FR-055): user pressed Cancel on the downloading
+    /// modal. Backend aborts the in-flight download and removes any partial
+    /// payload. Currently a best-effort no-op until async download lands.
+    CancelUpdateDownload,
+    /// SPEC-2041 Phase 19 (FR-059..061): user pressed `Later`. Binary stays
+    /// preserved; backend emits [`BackendEvent::UpdateApplyPendingPersisted`]
+    /// so the CTA morphs to ready state and same-session polling stops.
+    ApplyUpdateLater,
+    /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
+    /// the prepared binary via the helper subprocess and exits the parent.
+    ApplyUpdateRestartNow,
+    /// SPEC-2041 Phase 19 (FR-065): user pressed `Open log` on the failed
+    /// modal. Backend opens the log file in the OS default application.
+    OpenUpdateLog {
+        log_path: Option<String>,
+    },
     /// Settings > Custom Agents: list every stored custom agent. Response is
     /// [`BackendEvent::CustomAgentList`].
     ListCustomAgents,
@@ -385,6 +420,8 @@ pub struct ActiveWorkAgentView {
     pub window_id: Option<String>,
     pub agent_id: String,
     pub display_name: String,
+    pub affiliation_status: String,
+    pub workspace_id: Option<String>,
     pub status_category: String,
     pub current_focus: Option<String>,
     pub title_summary: Option<String>,
@@ -410,6 +447,64 @@ pub struct WorkspaceJournalEntryView {
     pub agent_current_focus: Option<String>,
     pub agent_title_summary: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHistoryAgentView {
+    pub session_id: String,
+    pub agent_id: Option<String>,
+    pub display_name: Option<String>,
+    pub updated_at: String,
+}
+
+pub type WorkspaceWorkAgentView = WorkspaceHistoryAgentView;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceExecutionContainerView {
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub pr_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHistoryEventView {
+    pub id: String,
+    pub workspace_id: String,
+    pub kind: String,
+    pub title: Option<String>,
+    pub intent: Option<String>,
+    pub summary: Option<String>,
+    pub status_category: Option<String>,
+    pub owner: Option<String>,
+    pub next_action: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub board_entry_id: Option<String>,
+    pub related_workspace_id: Option<String>,
+    pub updated_at: String,
+}
+
+pub type WorkspaceWorkEventView = WorkspaceHistoryEventView;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceHistoryView {
+    pub id: String,
+    pub title: String,
+    pub intent: Option<String>,
+    pub summary: Option<String>,
+    pub status_category: String,
+    pub owner: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub agents: Vec<WorkspaceHistoryAgentView>,
+    pub execution_containers: Vec<WorkspaceExecutionContainerView>,
+    pub board_refs: Vec<String>,
+    pub related_workspace_ids: Vec<String>,
+    pub events: Vec<WorkspaceHistoryEventView>,
+}
+
+pub type WorkspaceWorkItemView = WorkspaceHistoryView;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkCleanupCandidateView {
@@ -439,8 +534,12 @@ pub struct ActiveWorkProjectionView {
     pub pr_created_at: Option<String>,
     pub board_refs: Vec<String>,
     pub journal_entries: Vec<WorkspaceJournalEntryView>,
+    #[serde(default, alias = "work_items")]
+    pub workspaces: Vec<WorkspaceHistoryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
     pub agents: Vec<ActiveWorkAgentView>,
+    #[serde(default)]
+    pub unassigned_agents: Vec<ActiveWorkAgentView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -579,6 +678,10 @@ pub enum BackendEvent {
     ProjectOpenError {
         message: String,
     },
+    LaunchWizardOpenError {
+        title: String,
+        message: String,
+    },
     LaunchWizardState {
         wizard: Option<Box<LaunchWizardView>>,
     },
@@ -594,8 +697,47 @@ pub enum BackendEvent {
         event: RuntimeHookEvent,
     },
     UpdateState(gwt_core::update::UpdateState),
+    /// SPEC-2041 Phase 19 (FR-054): download progress for the current update.
+    /// Emitted from `Backend` while a download is active; the `#update-modal`
+    /// uses these to drive the progress bar and byte counter.
+    UpdateProgress {
+        /// Bytes already received.
+        downloaded: u64,
+        /// Expected total bytes (when the server advertises Content-Length).
+        total: Option<u64>,
+        /// Asset filename (e.g. `gwt-macos-arm64.tar.gz`).
+        asset: Option<String>,
+        /// Target version (without the `v` prefix).
+        version: Option<String>,
+    },
+    /// SPEC-2041 Phase 19 (FR-056): download completed and the prepared payload
+    /// lives on disk. Frontend transitions the modal to the `ready` state.
+    UpdateReady {
+        version: String,
+        /// On-disk path to the prepared payload (extracted binary or installer).
+        asset_path: String,
+    },
+    /// SPEC-2041 Phase 19 (FR-059): `Later` was confirmed. The downloaded
+    /// binary is preserved (in-memory today; persistent across restarts once
+    /// the bootstrap path lands in T-133). Frontend morphs the CTA to ready.
+    UpdateApplyPendingPersisted {
+        version: String,
+    },
     UpdateApplyError {
-        message: String,
+        /// Phase 14 free-form message. Still emitted for backward compat.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Phase 19 (FR-063): structured failure stage
+        /// (e.g. `"Download asset"`, `"Replace binary"`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
+        /// Phase 19 (FR-063): human-readable reason.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Phase 19 (FR-065): path to the per-day update log so the modal can
+        /// surface `[Open log]`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        log_path: Option<String>,
     },
     /// Response to [`FrontendEvent::ListCustomAgents`].
     CustomAgentList {
@@ -850,6 +992,7 @@ mod tests {
                     agent_current_focus: Some("Run launch tests".to_string()),
                     agent_title_summary: Some("Launch tests".to_string()),
                 }],
+                workspaces: Vec::new(),
                 cleanup_candidate: Some(super::ActiveWorkCleanupCandidateView {
                     branch: "work/20260504-1200".to_string(),
                     worktree_path: Some("/tmp/repo/work/20260504-1200".to_string()),
@@ -862,6 +1005,8 @@ mod tests {
                     window_id: Some("tab-1::agent-1".to_string()),
                     agent_id: "codex".to_string(),
                     display_name: "Codex".to_string(),
+                    affiliation_status: "assigned".to_string(),
+                    workspace_id: Some("work-1".to_string()),
                     status_category: "active".to_string(),
                     current_focus: Some("Run launch tests".to_string()),
                     title_summary: Some("Launch tests".to_string()),
@@ -872,6 +1017,7 @@ mod tests {
                     coordination_scope: Some("SPEC-2359 / start-work".to_string()),
                     updated_at: "2026-05-04T12:00:00Z".to_string(),
                 }],
+                unassigned_agents: Vec::new(),
             }),
         };
 
@@ -942,6 +1088,29 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn launch_wizard_open_error_serializes_modal_error_contract() {
+        let event = BackendEvent::LaunchWizardOpenError {
+            title: "Start Work".to_string(),
+            message: "Default base branch not found".to_string(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize launch wizard open error");
+
+        assert_eq!(
+            value.get("kind"),
+            Some(&Value::String("launch_wizard_open_error".to_string()))
+        );
+        assert_eq!(
+            value.get("title"),
+            Some(&Value::String("Start Work".to_string()))
+        );
+        assert_eq!(
+            value.get("message"),
+            Some(&Value::String("Default base branch not found".to_string()))
         );
     }
 
@@ -1105,6 +1274,33 @@ mod tests {
     }
 
     #[test]
+    fn open_board_origin_agent_deserializes_frontend_event_contract() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "open_board_origin_agent",
+            "id": "tab-1::board-1",
+            "origin_session_id": "session-origin",
+            "bounds": {
+                "x": 0.0,
+                "y": 0.0,
+                "width": 1200.0,
+                "height": 800.0
+            }
+        }))
+        .expect("deserialize open board origin agent event");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::OpenBoardOriginAgent {
+                id,
+                origin_session_id,
+                bounds,
+            } if id == "tab-1::board-1"
+                && origin_session_id == "session-origin"
+                && bounds.as_ref().is_some_and(|bounds| bounds.width == 1200.0)
+        ));
+    }
+
+    #[test]
     fn post_board_entry_deserializes_typed_mentions() {
         let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "post_board_entry",
@@ -1133,6 +1329,21 @@ mod tests {
     }
 
     #[test]
+    fn load_board_deserializes_all_view_opt_in() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_board",
+            "id": "board-1",
+            "all": true
+        }))
+        .expect("deserialize load board all");
+
+        assert!(matches!(
+            frontend,
+            FrontendEvent::LoadBoard { id, all } if id == "board-1" && all
+        ));
+    }
+
+    #[test]
     fn board_history_page_serializes_cursor_contract() {
         let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "load_board_history",
@@ -1146,8 +1357,9 @@ mod tests {
             FrontendEvent::LoadBoardHistory {
                 id,
                 before_entry_id: Some(before_entry_id),
-                limit
-            } if id == "board-1" && before_entry_id == "entry-3" && limit == 50
+                limit,
+                all
+            } if id == "board-1" && before_entry_id == "entry-3" && limit == 50 && !all
         ));
 
         let backend = BackendEvent::BoardHistoryPage {

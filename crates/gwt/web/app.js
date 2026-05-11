@@ -15,6 +15,9 @@
         applyBoardMentionNotificationFocus,
         boardEntryAudienceLabels,
         boardEntryMentionsSelf,
+        boardEntryOriginActionLabel,
+        boardEntryOriginLabel,
+        boardEntryOriginSessionId,
         boardEntryPreview,
         findBoardEntry,
         mentionsForBoardSubmit,
@@ -205,12 +208,14 @@
           owner: "launch-wizard-surface",
           state: Object.freeze([
             "launchWizard",
+            "launchWizardOpenError",
             "wizardWasOpen",
             "wizardBranchDraft",
             "wizardBranchBackendValue",
           ]),
           mutatedBy: Object.freeze([
             "openIssueLaunchWizard",
+            "closeLaunchWizardLocal",
             "sendWizardAction",
             "renderLaunchWizard",
             "flushWizardBranchDraft",
@@ -261,6 +266,7 @@
       let viewport = { x: 0, y: 0, zoom: 1 };
       let viewportRasterTimer = null;
       let launchWizard = null;
+      let launchWizardOpenError = null;
       let activeWorkProjection = null;
       let pendingBoardEntryFocusId = null;
       let wizardWasOpen = false;
@@ -969,6 +975,11 @@
         const tab = activeProjectTab();
         renderProjectOnboarding(tab);
         renderWorkspace(tab?.workspace || emptyWorkspace());
+        const nextWorkspaceId = deriveCurrentProjectWorkspaceId(tab?.workspace || {});
+        if (nextWorkspaceId !== currentProjectWorkspaceId) {
+          currentProjectWorkspaceId = nextWorkspaceId;
+          refreshBoardCurrentWorkspaceId();
+        }
         renderWindowList();
         renderActiveWorkOverview();
       }
@@ -2707,12 +2718,39 @@
             newEntriesAvailable: false,
             focusEntryId: null,
             pendingFocusScroll: false,
-            audienceFilter: "all",
+            audienceFilter: "workspace",
+            currentWorkspaceId: "",
             forYouUnread: 0,
             lastNotifiedMentionEntryId: null,
+            currentWorkspaceId: currentProjectWorkspaceId,
           });
         }
         return boardStateMap.get(windowId);
+      }
+
+      // SPEC-2359 FR-098/101: track the project's "primary" assigned
+      // workspace id for the Board Workspace filter. Picks the first
+      // assigned agent's workspace_id from the workspace state event.
+      // When no agent in the project is assigned (all Unassigned), the
+      // filter degrades to broadcast-only via FR-103. Multi-workspace
+      // selection UX is a follow-up.
+      let currentProjectWorkspaceId = null;
+      function deriveCurrentProjectWorkspaceId(workspaceState) {
+        const agents = workspaceState?.workspace?.agents
+          || workspaceState?.agents
+          || [];
+        const assigned = agents.find(
+          (agent) =>
+            String(agent?.affiliation_status || "").toLowerCase() === "assigned"
+            && typeof agent?.workspace_id === "string"
+            && agent.workspace_id.length > 0,
+        );
+        return assigned ? assigned.workspace_id : null;
+      }
+      function refreshBoardCurrentWorkspaceId() {
+        for (const state of boardStateMap.values()) {
+          state.currentWorkspaceId = currentProjectWorkspaceId;
+        }
       }
 
       function normalizeLogSeverity(severity) {
@@ -2776,6 +2814,7 @@
         send({
           kind: "load_board",
           id: windowId,
+          all: state.audienceFilter === "all",
         });
       }
 
@@ -2795,6 +2834,7 @@
           id: windowId,
           before_entry_id: beforeEntryId,
           limit: 50,
+          all: state.audienceFilter === "all",
         });
       }
 
@@ -3034,6 +3074,29 @@
           day: "numeric",
           hour: "2-digit",
           minute: "2-digit",
+        });
+      }
+
+      function boardOriginActiveAgents() {
+        const assigned = Array.isArray(activeWorkProjection?.agents)
+          ? activeWorkProjection.agents
+          : [];
+        const unassigned = Array.isArray(activeWorkProjection?.unassigned_agents)
+          ? activeWorkProjection.unassigned_agents
+          : [];
+        return assigned.concat(unassigned);
+      }
+
+      function openBoardOriginAgent(windowId, entry) {
+        const originSessionId = boardEntryOriginSessionId(entry);
+        if (!originSessionId) {
+          return;
+        }
+        send({
+          kind: "open_board_origin_agent",
+          id: windowId,
+          origin_session_id: originSessionId,
+          bounds: visibleBounds(),
         });
       }
 
@@ -3856,7 +3919,9 @@
         const status = body.querySelector(".board-status");
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
+        const allFilter = body.querySelector("[data-action='toggle-board-all']");
         const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
+        const workspaceFilter = body.querySelector("[data-action='toggle-board-workspace']");
         if (!status || !timeline || !composer) {
           return;
         }
@@ -3864,6 +3929,10 @@
           state.focusEntryId = pendingBoardEntryFocusId;
           state.pendingFocusScroll = true;
         }
+        state.currentWorkspaceId =
+          activeWorkProjection && (activeWorkProjection.agents || []).length > 0
+            ? activeWorkProjection.id || ""
+            : "";
 
         const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
@@ -3883,6 +3952,13 @@
         } else if (state.loading) {
           status.classList.add("info");
         }
+        if (allFilter) {
+          allFilter.setAttribute(
+            "aria-pressed",
+            state.audienceFilter === "all" ? "true" : "false",
+          );
+          allFilter.classList.toggle("active", state.audienceFilter === "all");
+        }
         if (forYouFilter) {
           forYouFilter.setAttribute(
             "aria-pressed",
@@ -3891,6 +3967,11 @@
           forYouFilter.classList.toggle("active", state.audienceFilter === "for_you");
           forYouFilter.textContent =
             state.forYouUnread > 0 ? `For you (${state.forYouUnread})` : "For you";
+        }
+        if (workspaceFilter) {
+          const workspaceActive = state.audienceFilter === "workspace";
+          workspaceFilter.setAttribute("aria-pressed", workspaceActive ? "true" : "false");
+          workspaceFilter.classList.toggle("active", workspaceActive);
         }
 
         // The actual scroll viewport is `.board-timeline-scroll`, the
@@ -3946,6 +4027,8 @@
               "board-empty workspace-empty-state",
               state.audienceFilter === "for_you"
                 ? "No posts addressed to you."
+                : state.audienceFilter === "workspace"
+                  ? "No posts in this Workspace."
                 : "No coordination entries yet.",
             ),
           );
@@ -3995,6 +4078,10 @@
             }
             meta.appendChild(badge);
           }
+          const originLabel = boardEntryOriginLabel(entry);
+          if (originLabel) {
+            meta.appendChild(createNode("span", "board-origin-badge", originLabel));
+          }
           card.appendChild(meta);
           if (entry.parent_id) {
             const parent = findBoardEntry(state, entry.parent_id);
@@ -4020,6 +4107,16 @@
             input?.focus();
           });
           messageActions.appendChild(replyButton);
+          const originActionLabel = boardEntryOriginActionLabel(
+            entry,
+            boardOriginActiveAgents(),
+          );
+          if (originActionLabel) {
+            const originButton = createNode("button", "board-origin-button", originActionLabel);
+            originButton.type = "button";
+            originButton.addEventListener("click", () => openBoardOriginAgent(windowId, entry));
+            messageActions.appendChild(originButton);
+          }
           card.appendChild(messageActions);
           timeline.appendChild(card);
         }
@@ -4304,8 +4401,22 @@
       let wizardFocusReturn = null;
       let wizardFocusTrapRelease = null;
 
+      function closeLaunchWizardLocal() {
+        launchWizard = null;
+        launchWizardOpenError = null;
+        renderLaunchWizard();
+      }
+
+      function closeLaunchWizardFromChrome() {
+        if (launchWizardOpenError) {
+          closeLaunchWizardLocal();
+          return;
+        }
+        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+      }
+
       function renderLaunchWizard() {
-        if (!launchWizard) {
+        if (!launchWizard && !launchWizardOpenError) {
           const wasOpenBeforeClose = wizardModal.classList.contains("open");
           wizardModal.classList.remove("open");
           // SPEC-2356 — keep aria-hidden in lockstep with .open so screen
@@ -4333,13 +4444,17 @@
           if (wizardTitle) wizardTitle.textContent = "Launch Agent";
           wizardSubmitButton.textContent = "Launch";
           wizardSubmitButton.disabled = false;
+          wizardSubmitButton.hidden = false;
+          wizardCancelButton.textContent = "Cancel";
           syncWizardDraftState();
           return;
         }
 
         syncWizardDraftState();
         closeModal();
-        const isStartWorkMode = launchWizard.show_branch_controls === false;
+        const isStartWorkMode =
+          launchWizard?.show_branch_controls === false ||
+          launchWizardOpenError?.title === "Start Work";
         wizardModal.classList.toggle("is-drawer", isStartWorkMode);
         wizardDialog?.classList.toggle("is-drawer-shell", isStartWorkMode);
         const wasOpenWizard = wizardModal.classList.contains("open");
@@ -4361,6 +4476,28 @@
           // keyboard users can't escape into background content.
           wizardFocusTrapRelease = createFocusTrap(wizardDialog, { document });
         }
+
+        if (launchWizardOpenError) {
+          if (wizardTitle) {
+            wizardTitle.textContent = launchWizardOpenError.title || "Launch Agent";
+          }
+          wizardMeta.textContent =
+            launchWizardOpenError.title === "Start Work"
+              ? "Workspace launch"
+              : "Launch Agent";
+          wizardSubmitButton.hidden = true;
+          wizardSubmitButton.disabled = true;
+          wizardCancelButton.textContent = "Close";
+          wizardError.hidden = false;
+          wizardError.textContent =
+            launchWizardOpenError.message || "Unable to open Launch Wizard";
+          wizardSummary.innerHTML = "";
+          wizardBody.innerHTML = "";
+          return;
+        }
+
+        wizardSubmitButton.hidden = false;
+        wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Workspace launch"
@@ -5136,6 +5273,7 @@
         syncBranchSelectionState(state);
         const list = element.querySelector(".branch-list");
         const notice = element.querySelector(".branch-notice");
+        const launchButton = element.querySelector("[data-action='open-branch-launch']");
         const cleanupButton = element.querySelector("[data-action='open-branch-cleanup']");
         if (!list) {
           return;
@@ -5143,6 +5281,9 @@
 
         for (const button of element.querySelectorAll("[data-branch-filter]")) {
           button.classList.toggle("active", button.dataset.branchFilter === state.filter);
+        }
+        if (launchButton) {
+          launchButton.disabled = !state.selectedBranchName;
         }
         if (cleanupButton) {
           const selectedCount = selectedBranchCleanupEntries(windowId).length;
@@ -6063,6 +6204,7 @@
                   </div>
                 </div>
                 <div class="branch-toolbar-actions workspace-toolbar-actions">
+                  <button class="wizard-button primary branch-launch-trigger" type="button" data-action="open-branch-launch" disabled>Launch Agent</button>
                   <button class="wizard-button branch-cleanup-trigger" type="button" data-action="open-branch-cleanup">Clean Up</button>
                   <button class="icon-button" data-action="refresh-branches" aria-label="Refresh branches">↻</button>
                 </div>
@@ -6099,6 +6241,22 @@
               frontendUnits.branchesFileTreeSurface.renderBranches(windowData.id);
             });
           }
+          body
+            .querySelector("[data-action='open-branch-launch']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
+                windowData.id,
+              );
+              if (!state.selectedBranchName) {
+                return;
+              }
+              send({
+                kind: "open_launch_wizard",
+                id: windowData.id,
+                branch_name: state.selectedBranchName,
+              });
+            });
           body
             .querySelector("[data-action='open-branch-cleanup']")
             .addEventListener("click", (event) => {
@@ -6174,7 +6332,9 @@
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
+                  <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Workspace</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -6206,10 +6366,37 @@
             .addEventListener("click", (event) => {
               event.stopPropagation();
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
-              state.audienceFilter = state.audienceFilter === "for_you" ? "all" : "for_you";
+              state.audienceFilter =
+                state.audienceFilter === "for_you" ? "workspace" : "for_you";
               if (state.audienceFilter === "for_you") {
                 state.forYouUnread = 0;
               }
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-all']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter = state.audienceFilter === "all" ? "workspace" : "all";
+              state.error = "";
+              frontendUnits.boardSurface.requestBoard(windowData.id);
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          // SPEC-2359 FR-101: toggle the Workspace audience filter. The
+          // entry visibility itself is driven by `state.audienceFilter ===
+          // "workspace"` plus `state.currentWorkspaceId` via
+          // `visibleBoardEntries`; the projection wires up the workspace
+          // id separately so unassigned agents see only broadcast.
+          body
+            .querySelector("[data-action='toggle-board-workspace']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter =
+                state.audienceFilter === "workspace" ? "all" : "workspace";
+              state.error = "";
+              frontendUnits.boardSurface.requestBoard(windowData.id);
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
@@ -7789,8 +7976,17 @@
               frontendUnits.projectWorkspaceShell.activeProjectTab(),
             );
             break;
+          case "launch_wizard_open_error":
+            launchWizard = null;
+            launchWizardOpenError = {
+              title: event.title || "Launch Agent",
+              message: event.message || "Unable to open Launch Wizard",
+            };
+            frontendUnits.launchWizardSurface.render();
+            break;
           case "launch_wizard_state":
             launchWizard = event.wizard;
+            launchWizardOpenError = null;
             frontendUnits.launchWizardSurface.render();
             break;
           case "runtime_hook_event":
@@ -7801,8 +7997,31 @@
               updateCtaController.handleUpdateState(event);
             }
             break;
+          case "update_progress":
+            updateCtaController.handleUpdateProgress({
+              downloaded: event.downloaded,
+              total: event.total,
+              asset: event.asset,
+              version: event.version,
+            });
+            break;
+          case "update_ready":
+            updateCtaController.handleUpdateReady({
+              version: event.version,
+              asset_path: event.asset_path,
+            });
+            break;
           case "update_apply_error":
-            updateCtaController.showError(event.message || "Failed to start the update.");
+            updateCtaController.handleUpdateApplyError({
+              stage: event.stage,
+              reason: event.reason || event.message,
+              log_path: event.log_path,
+            });
+            break;
+          case "update_apply_pending_persisted":
+            updateCtaController.handleUpdateApplyPendingPersisted({
+              version: event.version,
+            });
             break;
           case "custom_agent_list":
             customAgentsState.agents = event.agents || [];
@@ -8189,19 +8408,18 @@
           closeModal();
         }
       });
-      wizardCloseButton.addEventListener("click", () => {
-        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
-      });
-      wizardCancelButton.addEventListener("click", () => {
-        frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
-      });
+      wizardCloseButton.addEventListener("click", closeLaunchWizardFromChrome);
+      wizardCancelButton.addEventListener("click", closeLaunchWizardFromChrome);
       wizardSubmitButton.addEventListener("click", () => {
+        if (launchWizardOpenError) {
+          return;
+        }
         frontendUnits.launchWizardSurface.flushBranchDraft();
         frontendUnits.launchWizardSurface.sendAction({ kind: "submit" });
       });
       wizardModal.addEventListener("click", (event) => {
         if (event.target === wizardModal) {
-          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          closeLaunchWizardFromChrome();
         }
       });
       branchCleanupModal.addEventListener("click", (event) => {
@@ -8245,7 +8463,11 @@
         if (wizardModal.classList.contains("open")) {
           // Wizard cancel is the explicit cancellation path; map Esc to
           // the same action so the modal isn't a keyboard trap.
-          frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          if (launchWizardOpenError) {
+            closeLaunchWizardLocal();
+          } else {
+            frontendUnits.launchWizardSurface.sendAction({ kind: "cancel" });
+          }
           event.preventDefault();
           return;
         }
