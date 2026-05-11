@@ -736,6 +736,53 @@ fn blocks_mutation_when_active_board_claim_matches_current_title() {
 }
 
 #[test]
+fn allows_mutation_when_active_board_claim_is_scoped_to_other_workspace() {
+    with_temp_home(|home| {
+        let repo_path = init_repo(home);
+        let session_id = save_session(&repo_path, "work/current", None);
+        std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
+        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        projection.agents.push(workspace_agent(
+            &session_id,
+            "Implement Workspace semantic coordination gate",
+            "Workspace semantic coordination gate",
+        ));
+        save_workspace_projection(&repo_path, &projection).expect("save workspace projection");
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Other Codex",
+            BoardEntryKind::Claim,
+            "Implement Workspace semantic coordination duplicate guard for active agents.",
+            None,
+            None,
+            vec!["workspace-semantic-coordination".to_string()],
+            vec!["2359".to_string()],
+        )
+        .with_origin_session_id("session-other")
+        .with_audience(vec!["workspace-other"]);
+        post_entry(&repo_path, entry).expect("post other-workspace claim");
+
+        let event = event(
+            "Write",
+            json!({ "file_path": "crates/gwt/src/cli/hook/workflow_policy.rs", "content": "x" }),
+        );
+
+        let decision = workflow_policy::evaluate_with_context(
+            &event,
+            &repo_path,
+            &workflow_policy::WorkflowContext::unknown(),
+        )
+        .expect("workflow evaluation succeeds");
+
+        assert!(
+            matches!(decision, HookOutput::Silent),
+            "other-Workspace Board claims must not block this Workspace"
+        );
+    });
+}
+
+#[test]
 fn unassigned_agent_without_title_summary_is_not_title_blocked() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);

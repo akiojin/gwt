@@ -25,6 +25,10 @@ export function boardEntryMentionsSelf(entry, selfKeys = []) {
 }
 
 export function boardEntryAudienceLabels(entry, selfKeys = []) {
+  const workspaceAudience = normalizedBoardWorkspaceAudience(entry);
+  if (workspaceAudience.length > 0) {
+    return workspaceAudience.map((workspaceId) => `Workspace: ${workspaceId}`);
+  }
   const mentions = entry?.mentions || [];
   const keySet = new Set((selfKeys || []).map((key) => String(key).trim()).filter(Boolean));
   if (mentions.length > 0) {
@@ -38,6 +42,7 @@ export function boardEntryAudienceLabels(entry, selfKeys = []) {
       if (kind === "agent") return `To: ${label}`;
       if (kind === "session") return `Session: ${label}`;
       if (kind === "branch") return `Branch: ${label}`;
+      if (kind === "workspace") return `Workspace: ${label}`;
       return `To: ${label}`;
     });
   }
@@ -46,6 +51,24 @@ export function boardEntryAudienceLabels(entry, selfKeys = []) {
     return targets.map((target) => `To: ${target}`);
   }
   return ["Broadcast"];
+}
+
+export function normalizedBoardWorkspaceAudience(entry) {
+  const audience = Array.isArray(entry?.audience) ? entry.audience : [];
+  const normalized = [];
+  for (const value of audience) {
+    const workspaceId = String(value || "").trim();
+    if (!workspaceId || normalized.includes(workspaceId)) continue;
+    normalized.push(workspaceId);
+  }
+  return normalized;
+}
+
+export function boardEntryVisibleForWorkspace(entry, workspaceId) {
+  const audience = normalizedBoardWorkspaceAudience(entry);
+  if (audience.length === 0) return true;
+  const current = String(workspaceId || "").trim();
+  return Boolean(current) && audience.includes(current);
 }
 
 export function boardEntryPreview(entry) {
@@ -81,8 +104,13 @@ export function mentionsForBoardSubmit(state) {
 
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
-  if (state?.audienceFilter !== "for_you") {
+  if (state?.audienceFilter === "all") {
     return entries;
+  }
+  if (state?.audienceFilter === "workspace") {
+    return entries.filter((entry) =>
+      boardEntryVisibleForWorkspace(entry, state?.currentWorkspaceId),
+    );
   }
   return entries.filter((entry) => boardEntryMentionsSelf(entry, selfKeys));
 }

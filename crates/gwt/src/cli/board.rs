@@ -3,26 +3,76 @@ use std::io;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
-        load_snapshot, normalize_board_mentions, post_entry, AuthorKind, BoardEntry, BoardMention,
+        load_snapshot, load_snapshot_for_scope, normalize_board_mentions, post_entry, AuthorKind,
+        BoardAudienceScope, BoardEntry, BoardMention,
     },
     paths::gwt_sessions_dir,
 };
 use gwt_github::SpecOpsError;
 
-use crate::cli::{BoardCommand, BoardPostCommand, CliEnv, CliParseError};
+use crate::{
+    board_audience::{current_session_board_scope, post_audience_for_session},
+    cli::{CliEnv, CliParseError},
+};
+
+/// SPEC-1942 family enum for `gwtd board ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardCommand {
+    /// `gwtd board show [--json] [--workspace <id>|--all]`.
+    Show {
+        json: bool,
+        workspace: Option<String>,
+        all: bool,
+    },
+    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
+    /// [--title-summary <text>] [--parent <id>] [--topic <t>]*
+    /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
+    Post(Box<BoardPostCommand>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardPostCommand {
+    pub kind: String,
+    pub body: Option<String>,
+    pub file: Option<String>,
+    pub title_summary: Option<String>,
+    pub parent: Option<String>,
+    pub topics: Vec<String>,
+    pub owners: Vec<String>,
+    pub targets: Vec<String>,
+    pub mentions: Vec<String>,
+    pub broadcast: bool,
+}
 
 pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
         Some("show") => {
             let mut json = false;
-            for arg in it {
-                match arg.as_str() {
+            let mut workspace = None;
+            let mut all = false;
+            let args = it.collect::<Vec<_>>();
+            let mut i = 0;
+            while i < args.len() {
+                match args[i].as_str() {
                     "--json" => json = true,
+                    "--workspace" => {
+                        i += 1;
+                        if i >= args.len() {
+                            return Err(CliParseError::MissingFlag("--workspace"));
+                        }
+                        workspace = Some(args[i].clone());
+                    }
+                    "--all" => all = true,
                     other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
                 }
+                i += 1;
             }
-            Ok(BoardCommand::Show { json })
+            Ok(BoardCommand::Show {
+                json,
+                workspace,
+                all,
+            })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -36,8 +86,29 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
-        BoardCommand::Show { json } => {
-            let snapshot = load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?;
+        BoardCommand::Show {
+            json,
+            workspace,
+            all,
+        } => {
+            let current_session = current_session_from_env().ok().flatten();
+            let scope = if all {
+                BoardAudienceScope::All
+            } else if let Some(workspace_id) = workspace {
+                BoardAudienceScope::Workspace(workspace_id)
+            } else {
+                current_session_board_scope(
+                    env.repo_path(),
+                    current_session.as_ref().map(|session| session.id.as_str()),
+                )
+                .map_err(gwt_error_to_spec_ops_error)?
+            };
+            let snapshot = if matches!(scope, BoardAudienceScope::All) {
+                load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?
+            } else {
+                load_snapshot_for_scope(env.repo_path(), &scope)
+                    .map_err(gwt_error_to_spec_ops_error)?
+            };
             if json {
                 let rendered = serde_json::to_string_pretty(&snapshot)
                     .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
@@ -59,6 +130,7 @@ pub(super) fn run<E: CliEnv>(
                 owners,
                 targets,
                 mentions,
+                broadcast,
             } = *command;
             let body = match (body, file) {
                 (Some(body), None) => body,
@@ -110,6 +182,16 @@ pub(super) fn run<E: CliEnv>(
             let mentions = parse_mentions(&mentions).map_err(gwt_error_to_spec_ops_error)?;
             if !mentions.is_empty() {
                 entry = entry.with_mentions(mentions);
+            }
+            let audience = post_audience_for_session(
+                env.repo_path(),
+                current_session.as_ref().map(|session| session.id.as_str()),
+                &entry.mentions,
+                broadcast,
+            )
+            .map_err(gwt_error_to_spec_ops_error)?;
+            if let Some(audience) = audience {
+                entry = entry.with_audience(audience);
             }
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
@@ -171,6 +253,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut owners = Vec::new();
     let mut targets = Vec::new();
     let mut mentions = Vec::new();
+    let mut broadcast = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -238,6 +321,9 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
                 }
                 mentions.push(args[i].clone());
             }
+            "--broadcast" => {
+                broadcast = true;
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -256,6 +342,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         owners,
         targets,
         mentions,
+        broadcast,
     })))
 }
 
@@ -339,7 +426,13 @@ fn gwt_error_to_spec_ops_error(err: gwt_core::GwtError) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
-    use gwt_core::coordination::BoardEntryKind;
+    use gwt_core::{
+        coordination::BoardEntryKind,
+        workspace_projection::{
+            save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+            WorkspaceProjection, WorkspaceStatusCategory,
+        },
+    };
 
     use crate::cli::test_support::{fake_gh_test_lock, ScopedEnvVar};
 
@@ -349,10 +442,49 @@ mod tests {
         value.to_string()
     }
 
+    fn workspace_agent(
+        session_id: &str,
+        agent_id: &str,
+        workspace_id: Option<&str>,
+        affiliation_status: WorkspaceAgentAffiliationStatus,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: agent_id.to_string(),
+            display_name: agent_id.to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("Board audience".to_string()),
+            title_summary: Some("Board audience".to_string()),
+            worktree_path: None,
+            branch: Some("work/board-audience".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status,
+            workspace_id: workspace_id.map(str::to_string),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn save_projection(repo: &std::path::Path, agents: Vec<WorkspaceAgentSummary>) {
+        let mut projection = WorkspaceProjection::default_for_project(repo);
+        projection.id = "workspace-current".to_string();
+        projection.agents = agents;
+        save_workspace_projection(repo, &projection).expect("save workspace projection");
+    }
+
     #[test]
     fn board_family_parse_show_json() {
         let cmd = parse(&[s("show"), s("--json")]).unwrap();
-        assert_eq!(cmd, BoardCommand::Show { json: true });
+        assert_eq!(
+            cmd,
+            BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: false,
+            }
+        );
     }
 
     #[test]
@@ -379,6 +511,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             }))
         );
     }
@@ -409,6 +542,7 @@ mod tests {
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/foo".into()],
                 mentions: vec![],
+                broadcast: false,
             }))
         );
     }
@@ -440,6 +574,66 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+                broadcast: false,
+            }))
+        );
+    }
+
+    #[test]
+    fn board_family_parse_show_workspace_and_all() {
+        let workspace = parse(&[s("show"), s("--workspace"), s("workspace-a")]).unwrap();
+        assert_eq!(
+            workspace,
+            BoardCommand::Show {
+                json: false,
+                workspace: Some("workspace-a".into()),
+                all: false,
+            }
+        );
+
+        let all = parse(&[s("show"), s("--all"), s("--json")]).unwrap();
+        assert_eq!(
+            all,
+            BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+            }
+        );
+    }
+
+    #[test]
+    fn board_family_parse_post_collects_workspace_mentions_and_broadcast() {
+        let cmd = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("cross-workspace update"),
+            s("--mention"),
+            s("workspace:workspace-a"),
+            s("--mention"),
+            s("workspace:workspace-b"),
+            s("--broadcast"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cmd,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("cross-workspace update".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![
+                    "workspace:workspace-a".into(),
+                    "workspace:workspace-b".into()
+                ],
+                broadcast: true,
             }))
         );
     }
@@ -471,6 +665,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             }))
         );
     }
@@ -512,6 +707,7 @@ mod tests {
                 owners: vec![],
                 targets: vec!["sess-a3f2".into(), "feature/x".into()],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -544,6 +740,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec!["user:akiojin".into(), "agent:codex".into()],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -565,7 +762,7 @@ mod tests {
 
     #[test]
     fn board_family_run_post_attaches_current_session_origin_metadata() {
-        let _env_lock = fake_gh_test_lock()
+        let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
@@ -590,6 +787,7 @@ mod tests {
                 owners: vec!["2359".into()],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -610,6 +808,214 @@ mod tests {
         );
         assert_eq!(entry.origin_branch.as_deref(), Some("work/20260506-1706"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+    }
+
+    #[test]
+    fn board_family_run_post_auto_attaches_current_assigned_workspace() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&repo, "work/board-audience", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                "codex",
+                Some("workspace-current"),
+                WorkspaceAgentAffiliationStatus::Assigned,
+            )],
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("current workspace update".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: false,
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(&repo).unwrap();
+        assert_eq!(
+            snapshot.board.entries[0].audience,
+            Some(vec!["workspace-current".to_string()])
+        );
+    }
+
+    #[test]
+    fn board_family_run_post_leaves_unassigned_and_broadcast_posts_unscoped() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&repo, "work/board-audience", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                "codex",
+                None,
+                WorkspaceAgentAffiliationStatus::Unassigned,
+            )],
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("unassigned broadcast".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: false,
+            })),
+            &mut String::new(),
+        )
+        .unwrap();
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                "codex",
+                Some("workspace-current"),
+                WorkspaceAgentAffiliationStatus::Assigned,
+            )],
+        );
+        run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("forced broadcast".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![],
+                broadcast: true,
+            })),
+            &mut String::new(),
+        )
+        .unwrap();
+
+        let snapshot = load_snapshot(&repo).unwrap();
+        assert_eq!(snapshot.board.entries[0].audience, None);
+        assert_eq!(snapshot.board.entries[1].audience, None);
+    }
+
+    #[test]
+    fn board_family_run_post_fans_out_workspace_audience_from_mentions() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&repo, "work/board-audience", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        save_projection(
+            &repo,
+            vec![
+                workspace_agent(
+                    &session.id,
+                    "codex",
+                    Some("workspace-current"),
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                ),
+                workspace_agent(
+                    "session-target",
+                    "reviewer",
+                    Some("workspace-target"),
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                ),
+                workspace_agent(
+                    "session-unassigned",
+                    "observer",
+                    None,
+                    WorkspaceAgentAffiliationStatus::Unassigned,
+                ),
+            ],
+        );
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+
+        run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "handoff".into(),
+                body: Some("handoff across workspaces".into()),
+                file: None,
+                title_summary: None,
+                parent: None,
+                topics: vec![],
+                owners: vec![],
+                targets: vec![],
+                mentions: vec![
+                    "workspace:workspace-explicit".into(),
+                    "session:session-target".into(),
+                    "agent:reviewer".into(),
+                    "agent:observer".into(),
+                    "user:akiojin".into(),
+                ],
+                broadcast: false,
+            })),
+            &mut String::new(),
+        )
+        .unwrap();
+
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                "session-target",
+                "reviewer",
+                Some("workspace-later"),
+                WorkspaceAgentAffiliationStatus::Assigned,
+            )],
+        );
+        let snapshot = load_snapshot(&repo).unwrap();
+        assert_eq!(
+            snapshot.board.entries[0].audience,
+            Some(vec![
+                "workspace-current".to_string(),
+                "workspace-explicit".to_string(),
+                "workspace-target".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -646,6 +1052,7 @@ mod tests {
                 owners: vec![],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -691,6 +1098,7 @@ mod tests {
                 owners: vec!["1974".into()],
                 targets: vec![],
                 mentions: vec![],
+                broadcast: false,
             })),
             &mut out,
         )
@@ -701,6 +1109,163 @@ mod tests {
         assert_eq!(snapshot.board.entries.len(), 1);
         assert_eq!(snapshot.board.entries[0].body, "Need a board");
         assert!(out.contains("board entries: 1"));
+    }
+
+    #[test]
+    fn board_family_run_show_scopes_workspace_and_all_timelines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                "broadcast entry",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                "workspace a entry",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec!["workspace-a"]),
+        )
+        .unwrap();
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                "workspace b entry",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec!["workspace-b"]),
+        )
+        .unwrap();
+
+        let mut workspace_out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: Some("workspace-a".into()),
+                all: false,
+            },
+            &mut workspace_out,
+        )
+        .unwrap();
+        assert!(workspace_out.contains("broadcast entry"), "{workspace_out}");
+        assert!(
+            workspace_out.contains("workspace a entry"),
+            "{workspace_out}"
+        );
+        assert!(
+            !workspace_out.contains("workspace b entry"),
+            "{workspace_out}"
+        );
+
+        let mut all_out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: true,
+            },
+            &mut all_out,
+        )
+        .unwrap();
+        assert!(all_out.contains("workspace b entry"), "{all_out}");
+    }
+
+    #[test]
+    fn board_family_run_show_defaults_to_current_workspace_when_session_is_assigned() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", tmp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = Session::new(&repo, "work/board-audience", AgentId::Codex);
+        session.save(&sessions_dir).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        save_projection(
+            &repo,
+            vec![workspace_agent(
+                &session.id,
+                "codex",
+                Some("workspace-current"),
+                WorkspaceAgentAffiliationStatus::Assigned,
+            )],
+        );
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                "current entry",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec!["workspace-current"]),
+        )
+        .unwrap();
+        post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                "other entry",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec!["workspace-other"]),
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(out.contains("current entry"), "{out}");
+        assert!(!out.contains("other entry"), "{out}");
     }
 
     #[test]
@@ -725,7 +1290,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(
@@ -754,7 +1328,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(out.contains("- [request] user ("));
@@ -783,7 +1366,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(out.contains("== Chat =="));
@@ -814,7 +1406,16 @@ mod tests {
         .unwrap();
 
         let mut out = String::new();
-        let code = run(&mut env, BoardCommand::Show { json: false }, &mut out).unwrap();
+        let code = run(
+            &mut env,
+            BoardCommand::Show {
+                json: false,
+                workspace: None,
+                all: false,
+            },
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(code, 0);
         assert!(

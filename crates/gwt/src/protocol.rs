@@ -130,12 +130,16 @@ pub enum FrontendEvent {
     },
     LoadBoard {
         id: String,
+        #[serde(default)]
+        all: bool,
     },
     LoadBoardHistory {
         id: String,
         before_entry_id: Option<String>,
         #[serde(default = "default_board_history_limit")]
         limit: usize,
+        #[serde(default)]
+        all: bool,
     },
     LoadProfile {
         id: String,
@@ -1293,6 +1297,21 @@ mod tests {
     }
 
     #[test]
+    fn load_board_deserializes_all_view_opt_in() {
+        let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_board",
+            "id": "board-1",
+            "all": true
+        }))
+        .expect("deserialize load board all");
+
+        assert!(matches!(
+            frontend,
+            FrontendEvent::LoadBoard { id, all } if id == "board-1" && all
+        ));
+    }
+
+    #[test]
     fn board_history_page_serializes_cursor_contract() {
         let frontend: FrontendEvent = serde_json::from_value(serde_json::json!({
             "kind": "load_board_history",
@@ -1306,8 +1325,9 @@ mod tests {
             FrontendEvent::LoadBoardHistory {
                 id,
                 before_entry_id: Some(before_entry_id),
-                limit
-            } if id == "board-1" && before_entry_id == "entry-3" && limit == 50
+                limit,
+                all
+            } if id == "board-1" && before_entry_id == "entry-3" && limit == 50 && !all
         ));
 
         let backend = BackendEvent::BoardHistoryPage {

@@ -2710,7 +2710,8 @@
             newEntriesAvailable: false,
             focusEntryId: null,
             pendingFocusScroll: false,
-            audienceFilter: "all",
+            audienceFilter: "workspace",
+            currentWorkspaceId: "",
             forYouUnread: 0,
             lastNotifiedMentionEntryId: null,
           });
@@ -2779,6 +2780,7 @@
         send({
           kind: "load_board",
           id: windowId,
+          all: state.audienceFilter === "all",
         });
       }
 
@@ -2798,6 +2800,7 @@
           id: windowId,
           before_entry_id: beforeEntryId,
           limit: 50,
+          all: state.audienceFilter === "all",
         });
       }
 
@@ -3859,6 +3862,7 @@
         const status = body.querySelector(".board-status");
         const timeline = body.querySelector(".board-timeline");
         const composer = body.querySelector(".board-composer-pane");
+        const allFilter = body.querySelector("[data-action='toggle-board-all']");
         const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
         if (!status || !timeline || !composer) {
           return;
@@ -3867,6 +3871,10 @@
           state.focusEntryId = pendingBoardEntryFocusId;
           state.pendingFocusScroll = true;
         }
+        state.currentWorkspaceId =
+          activeWorkProjection && (activeWorkProjection.agents || []).length > 0
+            ? activeWorkProjection.id || ""
+            : "";
 
         const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
         status.textContent = state.error
@@ -3885,6 +3893,13 @@
           status.classList.add("error");
         } else if (state.loading) {
           status.classList.add("info");
+        }
+        if (allFilter) {
+          allFilter.setAttribute(
+            "aria-pressed",
+            state.audienceFilter === "all" ? "true" : "false",
+          );
+          allFilter.classList.toggle("active", state.audienceFilter === "all");
         }
         if (forYouFilter) {
           forYouFilter.setAttribute(
@@ -3949,6 +3964,8 @@
               "board-empty workspace-empty-state",
               state.audienceFilter === "for_you"
                 ? "No posts addressed to you."
+                : state.audienceFilter === "workspace"
+                  ? "No posts in this Workspace."
                 : "No coordination entries yet.",
             ),
           );
@@ -6238,6 +6255,7 @@
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
@@ -6270,10 +6288,21 @@
             .addEventListener("click", (event) => {
               event.stopPropagation();
               const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
-              state.audienceFilter = state.audienceFilter === "for_you" ? "all" : "for_you";
+              state.audienceFilter =
+                state.audienceFilter === "for_you" ? "workspace" : "for_you";
               if (state.audienceFilter === "for_you") {
                 state.forYouUnread = 0;
               }
+              frontendUnits.boardSurface.renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-all']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);
+              state.audienceFilter = state.audienceFilter === "all" ? "workspace" : "all";
+              state.error = "";
+              frontendUnits.boardSurface.requestBoard(windowData.id);
               frontendUnits.boardSurface.renderBoard(windowData.id);
             });
           const state = frontendUnits.boardSurface.ensureBoardState(windowData.id);

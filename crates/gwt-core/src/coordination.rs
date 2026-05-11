@@ -90,6 +90,7 @@ pub enum BoardMentionTargetKind {
     Agent,
     Session,
     Branch,
+    Workspace,
 }
 
 impl std::str::FromStr for BoardMentionTargetKind {
@@ -101,6 +102,7 @@ impl std::str::FromStr for BoardMentionTargetKind {
             "agent" => Ok(Self::Agent),
             "session" => Ok(Self::Session),
             "branch" => Ok(Self::Branch),
+            "workspace" => Ok(Self::Workspace),
             other => Err(GwtError::Other(format!(
                 "unknown board mention target kind: {other}"
             ))),
@@ -115,6 +117,7 @@ impl BoardMentionTargetKind {
             Self::Agent => "agent",
             Self::Session => "session",
             Self::Branch => "branch",
+            Self::Workspace => "workspace",
         }
     }
 }
@@ -192,6 +195,69 @@ pub fn normalize_board_mentions(values: &[BoardMention]) -> Vec<BoardMention> {
     normalized
 }
 
+pub fn normalize_board_audience(values: Option<Vec<String>>) -> Option<Vec<String>> {
+    let mut normalized = Vec::new();
+    for value in values.unwrap_or_default() {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if normalized.iter().any(|item| item == value) {
+            continue;
+        }
+        normalized.push(value.to_string());
+    }
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn board_audience_is_absent(value: &Option<Vec<String>>) -> bool {
+    value
+        .as_ref()
+        .map(|items| items.iter().all(|item| item.trim().is_empty()))
+        .unwrap_or(true)
+}
+
+fn deserialize_board_audience<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(normalize_board_audience(value))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardAudienceScope {
+    All,
+    Broadcast,
+    Workspace(String),
+}
+
+pub fn board_entry_visible_for_scope(entry: &BoardEntry, scope: &BoardAudienceScope) -> bool {
+    let Some(audience) = normalize_board_audience(entry.audience.clone()) else {
+        return true;
+    };
+    match scope {
+        BoardAudienceScope::All => true,
+        BoardAudienceScope::Broadcast => false,
+        BoardAudienceScope::Workspace(workspace_id) => {
+            let workspace_id = workspace_id.trim();
+            !workspace_id.is_empty() && audience.iter().any(|item| item == workspace_id)
+        }
+    }
+}
+
+pub fn filter_board_entries_for_scope(
+    entries: Vec<BoardEntry>,
+    scope: &BoardAudienceScope,
+) -> Vec<BoardEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| board_entry_visible_for_scope(entry, scope))
+        .collect()
+}
+
 pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bool {
     entry
         .target_owners
@@ -232,6 +298,12 @@ pub struct BoardEntry {
     pub target_owners: Vec<String>,
     #[serde(default)]
     pub mentions: Vec<BoardMention>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_board_audience",
+        skip_serializing_if = "board_audience_is_absent"
+    )]
+    pub audience: Option<Vec<String>>,
 }
 
 impl BoardEntry {
@@ -276,6 +348,16 @@ impl BoardEntry {
         self
     }
 
+    pub fn with_audience(mut self, values: Vec<impl Into<String>>) -> Self {
+        self.audience =
+            normalize_board_audience(Some(values.into_iter().map(Into::into).collect::<Vec<_>>()));
+        self
+    }
+
+    pub fn normalize_audience(&mut self) {
+        self.audience = normalize_board_audience(self.audience.take());
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         author_kind: AuthorKind,
@@ -306,6 +388,7 @@ impl BoardEntry {
             origin_agent_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
+            audience: None,
         }
     }
 }
@@ -440,8 +523,9 @@ pub fn ensure_repo_local_files(worktree_root: &Path) -> Result<()> {
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
     ensure_repo_local_files(worktree_root)?;
     let coordination_root = coordination_dir(worktree_root);
-    let projection: BoardProjection =
+    let mut projection: BoardProjection =
         load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+    normalize_board_projection(&mut projection);
     let manifest = load_event_manifest_from_dir(&coordination_root)?;
     if legacy_event_log_needs_import(&coordination_root)?
         || projection_needs_rebuild(&projection, &manifest)
@@ -452,6 +536,8 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
+    let mut entry = entry;
+    entry.normalize_audience();
     append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
 }
 
@@ -572,6 +658,9 @@ fn build_hot_projection(
     mut entries: Vec<BoardEntry>,
     updated_at: DateTime<Utc>,
 ) -> BoardProjection {
+    for entry in &mut entries {
+        entry.normalize_audience();
+    }
     entries.sort_by_key(|entry| entry.created_at);
     let total_entries = entries.len();
     let has_more_before = total_entries > HOT_PROJECTION_ENTRY_LIMIT;
@@ -589,6 +678,26 @@ fn build_hot_projection(
         total_entries,
         updated_at,
     }
+}
+
+fn normalize_board_projection(projection: &mut BoardProjection) {
+    for entry in &mut projection.entries {
+        entry.normalize_audience();
+    }
+}
+
+pub fn load_snapshot_for_scope(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+) -> Result<CoordinationSnapshot> {
+    if *scope == BoardAudienceScope::All {
+        return load_snapshot(worktree_root);
+    }
+    ensure_repo_local_files(worktree_root)?;
+    let entries = load_board_entries_from_segments_root(&coordination_dir(worktree_root))?;
+    Ok(CoordinationSnapshot {
+        board: build_hot_projection(filter_board_entries_for_scope(entries, scope), Utc::now()),
+    })
 }
 
 fn load_json_or_default<T>(path: &Path) -> Result<T>
@@ -1121,7 +1230,9 @@ fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
         if trimmed.is_empty() {
             continue;
         }
-        events.push(serde_json::from_str(trimmed).map_err(json_error)?);
+        let mut event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
+        normalize_coordination_event(&mut event);
+        events.push(event);
     }
     Ok(events)
 }
@@ -1146,12 +1257,21 @@ fn load_legacy_board_events_from_path(path: &Path) -> Result<Vec<CoordinationEve
             .unwrap_or_default();
         match event_type {
             "message_appended" | "board_post" => {
-                events.push(serde_json::from_value(value).map_err(json_error)?);
+                let mut event: CoordinationEvent =
+                    serde_json::from_value(value).map_err(json_error)?;
+                normalize_coordination_event(&mut event);
+                events.push(event);
             }
             _ => continue,
         }
     }
     Ok(events)
+}
+
+fn normalize_coordination_event(event: &mut CoordinationEvent) {
+    match event {
+        CoordinationEvent::MessageAppended { entry } => entry.normalize_audience(),
+    }
 }
 
 fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()> {
@@ -1335,6 +1455,15 @@ pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<
     Ok(entries)
 }
 
+pub fn load_entries_since_for_scope(
+    worktree_root: &Path,
+    since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+) -> Result<Vec<BoardEntry>> {
+    let entries = load_entries_since(worktree_root, since)?;
+    Ok(filter_board_entries_for_scope(entries, scope))
+}
+
 /// Check whether `author` has posted a message of the given `kind` within the
 /// trailing `within` duration. Used by `board-reminder` for redundancy
 /// suppression.
@@ -1395,6 +1524,36 @@ pub fn load_entries_before(
     })
 }
 
+pub fn load_entries_before_for_scope(
+    worktree_root: &Path,
+    before_entry_id: Option<&str>,
+    limit: usize,
+    scope: &BoardAudienceScope,
+) -> Result<BoardHistoryPage> {
+    if *scope == BoardAudienceScope::All {
+        return load_entries_before(worktree_root, before_entry_id, limit);
+    }
+    ensure_repo_local_files(worktree_root)?;
+    if limit == 0 {
+        return Ok(BoardHistoryPage::default());
+    }
+
+    let entries = filter_board_entries_for_scope(
+        load_board_entries_from_segments_root(&coordination_dir(worktree_root))?,
+        scope,
+    );
+    let cutoff = before_entry_id
+        .and_then(|id| entries.iter().position(|entry| entry.id == id))
+        .unwrap_or(entries.len());
+    let older = &entries[..cutoff];
+    let has_more_before = older.len() > limit;
+    let start = older.len().saturating_sub(limit);
+    Ok(BoardHistoryPage {
+        entries: older[start..].to_vec(),
+        has_more_before,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{str::FromStr, sync::Arc, thread};
@@ -1435,6 +1594,179 @@ mod tests {
         let entry: BoardEntry = serde_json::from_value(legacy).unwrap();
 
         assert!(entry.mentions.is_empty());
+    }
+
+    #[test]
+    fn board_entry_audience_round_trips_and_legacy_absence_is_broadcast() {
+        let legacy = serde_json::json!({
+            "id": "entry-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "legacy entry",
+            "created_at": "2026-05-07T00:00:00Z",
+            "updated_at": "2026-05-07T00:00:00Z"
+        });
+
+        let legacy_entry: BoardEntry = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy_entry.audience, None);
+        assert!(board_entry_visible_for_scope(
+            &legacy_entry,
+            &BoardAudienceScope::Workspace("workspace-a".to_string())
+        ));
+        assert!(board_entry_visible_for_scope(
+            &legacy_entry,
+            &BoardAudienceScope::Broadcast
+        ));
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Question,
+            "Can workspace-a see this?",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec![" workspace-a ", "workspace-a", "workspace-b"]);
+
+        let encoded = serde_json::to_value(&entry).unwrap();
+        assert_eq!(encoded["audience"][0], "workspace-a");
+        assert_eq!(encoded["audience"][1], "workspace-b");
+
+        let decoded: BoardEntry = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.audience,
+            Some(vec!["workspace-a".to_string(), "workspace-b".to_string()])
+        );
+        assert!(board_entry_visible_for_scope(
+            &decoded,
+            &BoardAudienceScope::Workspace("workspace-a".to_string())
+        ));
+        assert!(!board_entry_visible_for_scope(
+            &decoded,
+            &BoardAudienceScope::Workspace("workspace-c".to_string())
+        ));
+        assert!(!board_entry_visible_for_scope(
+            &decoded,
+            &BoardAudienceScope::Broadcast
+        ));
+        assert!(board_entry_visible_for_scope(
+            &decoded,
+            &BoardAudienceScope::All
+        ));
+    }
+
+    #[test]
+    fn board_entry_empty_audience_normalizes_to_absent() {
+        let empty_audience = serde_json::json!({
+            "id": "entry-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "empty audience",
+            "audience": [],
+            "created_at": "2026-05-07T00:00:00Z",
+            "updated_at": "2026-05-07T00:00:00Z"
+        });
+
+        let entry: BoardEntry = serde_json::from_value(empty_audience).unwrap();
+        assert_eq!(entry.audience, None);
+
+        let mut explicit_empty = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "explicit empty",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        explicit_empty.audience = Some(Vec::new());
+        let encoded = serde_json::to_value(&explicit_empty).unwrap();
+        assert!(encoded.get("audience").is_none());
+    }
+
+    #[test]
+    fn board_audience_round_trips_through_hot_projection_and_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let scoped = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Claim,
+            "workspace scoped",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["workspace-a"]);
+        let broadcast = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "broadcast",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let empty = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "empty audience",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(Vec::<String>::new());
+
+        post_entry(dir.path(), scoped).unwrap();
+        post_entry(dir.path(), broadcast).unwrap();
+        post_entry(dir.path(), empty).unwrap();
+
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 3);
+        assert_eq!(
+            snapshot.board.entries[0].audience,
+            Some(vec!["workspace-a".to_string()])
+        );
+        assert_eq!(snapshot.board.entries[1].audience, None);
+        assert_eq!(snapshot.board.entries[2].audience, None);
+
+        let scoped_snapshot = load_snapshot_for_scope(
+            dir.path(),
+            &BoardAudienceScope::Workspace("workspace-a".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            scoped_snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["workspace scoped", "broadcast", "empty audience"]
+        );
+
+        let other_snapshot = load_snapshot_for_scope(
+            dir.path(),
+            &BoardAudienceScope::Workspace("workspace-b".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            other_snapshot
+                .board
+                .entries
+                .iter()
+                .map(|entry| entry.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["broadcast", "empty audience"]
+        );
     }
 
     #[test]
