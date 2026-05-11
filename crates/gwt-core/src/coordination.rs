@@ -3185,7 +3185,7 @@ mod tests {
     fn has_recent_post_by_checks_segment_history_beyond_hot_projection() {
         let dir = tempfile::tempdir().unwrap();
 
-        let base = chrono::Utc::now() - chrono::Duration::minutes(9);
+        let base = chrono::Utc::now() - chrono::Duration::minutes(1);
         let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
         let mut target = BoardEntry::new(
             AuthorKind::Agent,
