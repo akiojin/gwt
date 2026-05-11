@@ -6,8 +6,8 @@ use gwt_core::{
     repo_hash::compute_repo_hash,
     workspace_projection::{
         load_or_default_workspace_projection_from_path, load_workspace_projection_from_path,
-        save_workspace_projection_to_path, GitDetails, WorkspaceAgentSummary, WorkspaceProjection,
-        WorkspaceStatusCategory,
+        save_workspace_projection_to_path, GitDetails, WorkspaceAgentAffiliationStatus,
+        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory,
     },
 };
 
@@ -34,6 +34,8 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
             last_board_entry_id: Some("board-1".to_string()),
             last_board_entry_kind: Some(gwt_core::coordination::BoardEntryKind::Status),
             coordination_scope: Some("SPEC-2359 / start-work".to_string()),
+            affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: Some("work-1".to_string()),
             updated_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
         }],
         git_details: Some(GitDetails {

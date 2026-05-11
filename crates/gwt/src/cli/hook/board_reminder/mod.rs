@@ -107,15 +107,18 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
     let Some(projection) =
         gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)?
     else {
-        return Ok(true);
+        return Ok(false);
     };
     let Some(agent) = projection
         .agents
         .iter()
         .find(|agent| agent.session_id == session.id)
     else {
-        return Ok(true);
+        return Ok(false);
     };
+    if agent.is_unassigned() {
+        return Ok(false);
+    }
     Ok(agent
         .title_summary
         .as_deref()
@@ -304,8 +307,8 @@ mod tests {
         let session = make_session(&repo, "work/title", "Codex");
 
         assert!(
-            agent_title_summary_missing(&session).expect("missing title check"),
-            "new sessions without a saved title_summary must require an update"
+            !agent_title_summary_missing(&session).expect("missing title check"),
+            "sessions without a Workspace projection are Unassigned and must not require a title update"
         );
 
         let mut projection =
@@ -325,6 +328,9 @@ mod tests {
                 last_board_entry_id: None,
                 last_board_entry_kind: None,
                 coordination_scope: None,
+                affiliation_status:
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                workspace_id: None,
                 updated_at: Utc::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
