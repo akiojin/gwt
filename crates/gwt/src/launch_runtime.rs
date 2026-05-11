@@ -598,6 +598,11 @@ pub fn install_launch_gwt_bin_env_with_lookup(
                 .or_insert(gwt_bin);
         }
     }
+    if let Some(resolved) = env_vars.get(gwt_agent::session::GWT_BIN_PATH_ENV).cloned() {
+        if let Some(parent) = Path::new(&resolved).parent() {
+            gwt_agent::prepare::prepend_dir_to_path(env_vars, parent);
+        }
+    }
     Ok(())
 }
 
@@ -633,6 +638,151 @@ mod tests {
         assert_eq!(
             interactive_windows_shell_args(gwt_agent::WindowsShellKind::PowerShell7),
             vec!["-NoLogo"]
+        );
+    }
+
+    // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):
+    // launch_runtime mirror of install_launch_gwt_bin_env_with_lookup must
+    // prepend dirname(GWT_BIN_PATH) to env_vars["PATH"] with dedup + empty
+    // guard. Mirrors crates/gwt-agent/src/prepare.rs::tests::install_launch_gwt_bin_env_*.
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_prepends_gwtd_dir_to_path() {
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        assert_eq!(
+            env_vars
+                .get(gwt_agent::session::GWT_BIN_PATH_ENV)
+                .map(String::as_str),
+            Some("/Applications/GWT.app/Contents/MacOS/gwtd"),
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/Applications/GWT.app/Contents/MacOS")),
+        );
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
+        assert!(entries.contains(&PathBuf::from("/bin")));
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_dedups_existing_path_entry() {
+        let mut env_vars = HashMap::from([(
+            "PATH".to_string(),
+            "/Applications/GWT.app/Contents/MacOS:/usr/bin".to_string(),
+        )]);
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/Applications/GWT.app/Contents/MacOS"),
+                PathBuf::from("/usr/bin"),
+            ],
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_skips_path_update_when_parent_is_empty() {
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let current_exe = PathBuf::from("/opt/gwt/bin/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("gwtd")),
+        )
+        .expect("install");
+
+        // GWT_BIN_PATH may end up as a sibling/managed_assets resolution; we
+        // assert only that PATH is untouched when the resolved binary has no
+        // meaningful parent dir.
+        assert_eq!(
+            env_vars.get("PATH").map(String::as_str),
+            Some("/usr/bin:/bin"),
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_host_creates_path_when_absent() {
+        let mut env_vars: HashMap<String, String> = HashMap::new();
+        let current_exe = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwt");
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Host,
+            &current_exe,
+            |_command| Some(PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd")),
+        )
+        .expect("install");
+
+        let path = env_vars.get("PATH").expect("PATH should be created");
+        let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+        assert_eq!(
+            entries,
+            vec![PathBuf::from("/Applications/GWT.app/Contents/MacOS")],
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_docker_prepends_when_dir_missing_from_path() {
+        let mut env_vars = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            Path::new("/never/used/in/docker"),
+            |_command| None,
+        )
+        .expect("install");
+
+        assert_eq!(
+            env_vars
+                .get(gwt_agent::session::GWT_BIN_PATH_ENV)
+                .map(String::as_str),
+            Some("/usr/local/bin/gwtd"),
+        );
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries.first().map(|p| p.as_path()),
+            Some(Path::new("/usr/local/bin")),
+        );
+    }
+
+    #[test]
+    fn install_launch_gwt_bin_env_docker_dedups_when_dir_already_on_path() {
+        let mut env_vars =
+            HashMap::from([("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string())]);
+        install_launch_gwt_bin_env_with_lookup(
+            &mut env_vars,
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            Path::new("/never/used/in/docker"),
+            |_command| None,
+        )
+        .expect("install");
+
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env_vars.get("PATH").expect("PATH")).collect();
+        assert_eq!(
+            entries,
+            vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"),],
         );
     }
 }
