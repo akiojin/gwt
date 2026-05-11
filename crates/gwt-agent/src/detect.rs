@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use tracing::debug;
 
-use crate::types::AgentId;
+use crate::types::{builtin_agent_descriptor_for_command, builtin_agent_descriptors, AgentId};
 
 /// Result of detecting a single agent on the system.
 #[derive(Debug, Clone)]
@@ -25,50 +25,15 @@ struct AgentProbe {
 
 /// All builtin agents we attempt to detect.
 fn builtin_probes() -> Vec<AgentProbe> {
-    vec![
-        AgentProbe {
-            id: AgentId::ClaudeCode,
-            command: "claude",
-            version_flag: "--version",
-            prefix_args: &[],
-        },
-        AgentProbe {
-            id: AgentId::Codex,
-            command: "codex",
-            version_flag: "--version",
-            prefix_args: &[],
-        },
-        AgentProbe {
-            id: AgentId::Gemini,
-            command: "gemini",
-            version_flag: "--version",
-            prefix_args: &[],
-        },
-        AgentProbe {
-            id: AgentId::OpenCode,
-            command: "opencode",
-            version_flag: "--version",
-            prefix_args: &[],
-        },
-        AgentProbe {
-            id: AgentId::OpenClaw,
-            command: "openclaw",
-            version_flag: "--version",
-            prefix_args: &[],
-        },
-        AgentProbe {
-            id: AgentId::Hermes,
-            command: "hermes",
-            version_flag: "--version",
-            prefix_args: &[],
-        },
-        AgentProbe {
-            id: AgentId::Copilot,
-            command: "gh",
-            version_flag: "--version",
-            prefix_args: &["copilot"],
-        },
-    ]
+    builtin_agent_descriptors()
+        .iter()
+        .map(|descriptor| AgentProbe {
+            id: descriptor.id.clone(),
+            command: descriptor.command,
+            version_flag: descriptor.version_flag,
+            prefix_args: descriptor.version_prefix_args,
+        })
+        .collect()
 }
 
 /// Detects installed coding agents.
@@ -89,18 +54,19 @@ impl AgentDetector {
     /// Detect a single agent by its command name.
     pub fn detect_by_command(command: &str) -> Option<DetectedAgent> {
         let path = which::which(command).ok()?;
-        let version = Self::fetch_version(command, "--version", &[]);
-        // Map known commands to AgentIds, fall back to Custom
-        let agent_id = match command {
-            "claude" => AgentId::ClaudeCode,
-            "codex" => AgentId::Codex,
-            "gemini" => AgentId::Gemini,
-            "opencode" => AgentId::OpenCode,
-            "openclaw" => AgentId::OpenClaw,
-            "hermes" => AgentId::Hermes,
-            "gh" => AgentId::Copilot,
-            other => AgentId::Custom(other.to_string()),
+        let descriptor = builtin_agent_descriptor_for_command(command);
+        let version = match descriptor {
+            Some(descriptor) => Self::fetch_version(
+                command,
+                descriptor.version_flag,
+                descriptor.version_prefix_args,
+            ),
+            None => Self::fetch_version(command, "--version", &[]),
         };
+        // Map known commands to AgentIds, fall back to Custom
+        let agent_id = descriptor
+            .map(|descriptor| descriptor.id.clone())
+            .unwrap_or_else(|| AgentId::Custom(command.to_string()));
         Some(DetectedAgent {
             agent_id,
             version,

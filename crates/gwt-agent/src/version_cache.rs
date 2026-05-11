@@ -217,15 +217,13 @@ impl VersionCache {
     }
 
     fn agent_key(agent_id: &AgentId) -> String {
-        match agent_id {
-            AgentId::ClaudeCode => "claude-code".to_string(),
-            AgentId::Codex => "codex".to_string(),
-            AgentId::Gemini => "gemini".to_string(),
-            AgentId::OpenCode => "opencode".to_string(),
-            AgentId::OpenClaw => "openclaw".to_string(),
-            AgentId::Hermes => "hermes".to_string(),
-            AgentId::Copilot => "copilot".to_string(),
-            AgentId::Custom(name) => format!("custom-{name}"),
+        if let Some(descriptor) = agent_id.builtin_descriptor() {
+            descriptor.cache_key.to_string()
+        } else {
+            match agent_id {
+                AgentId::Custom(name) => format!("custom-{name}"),
+                _ => unreachable!("all non-custom agents must have descriptors"),
+            }
         }
     }
 

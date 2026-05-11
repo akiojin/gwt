@@ -4,6 +4,7 @@ pub mod assets;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
+pub mod provider_hooks;
 pub mod registry;
 pub mod settings_local;
 pub mod validate;
@@ -14,11 +15,9 @@ pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
+pub use provider_hooks::{generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks};
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
-pub use settings_local::{
-    generate_codex_hooks, generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
-    generate_settings_local,
-};
+pub use settings_local::{generate_codex_hooks, generate_settings_local};
 
 #[cfg(test)]
 mod tests {

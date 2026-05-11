@@ -19,58 +19,41 @@ pub enum AgentId {
 impl AgentId {
     /// Canonical command name used to invoke this agent.
     pub fn command(&self) -> &str {
-        match self {
-            Self::ClaudeCode => "claude",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::OpenCode => "opencode",
-            Self::OpenClaw => "openclaw",
-            Self::Hermes => "hermes",
-            Self::Copilot => "gh",
-            Self::Custom(name) => name,
-        }
+        self.builtin_descriptor()
+            .map(|descriptor| descriptor.command)
+            .unwrap_or_else(|| match self {
+                Self::Custom(name) => name,
+                _ => unreachable!("all non-custom agents must have descriptors"),
+            })
     }
 
     /// Human-readable display name.
     pub fn display_name(&self) -> &str {
-        match self {
-            Self::ClaudeCode => "Claude Code",
-            Self::Codex => "Codex",
-            Self::Gemini => "Gemini CLI",
-            Self::OpenCode => "OpenCode",
-            Self::OpenClaw => "OpenClaw",
-            Self::Hermes => "Hermes Agent",
-            Self::Copilot => "GitHub Copilot",
-            Self::Custom(name) => name,
-        }
+        self.builtin_descriptor()
+            .map(|descriptor| descriptor.display_name)
+            .unwrap_or_else(|| match self {
+                Self::Custom(name) => name,
+                _ => unreachable!("all non-custom agents must have descriptors"),
+            })
     }
 
     /// npm package name (if distributed via npm).
     pub fn package_name(&self) -> Option<&str> {
-        match self {
-            Self::ClaudeCode => Some("@anthropic-ai/claude-code"),
-            Self::Codex => Some("@openai/codex"),
-            Self::Gemini => Some("@anthropic-ai/gemini-cli"),
-            Self::OpenCode => None,
-            Self::OpenClaw => None,
-            Self::Hermes => None,
-            Self::Copilot => None,
-            Self::Custom(_) => None,
-        }
+        self.builtin_descriptor()
+            .and_then(|descriptor| descriptor.package_name)
     }
 
     /// Default UI color for this agent.
     pub fn default_color(&self) -> AgentColor {
-        match self {
-            Self::ClaudeCode => AgentColor::Yellow,
-            Self::Codex => AgentColor::Cyan,
-            Self::Gemini => AgentColor::Magenta,
-            Self::OpenCode => AgentColor::Green,
-            Self::OpenClaw => AgentColor::Blue,
-            Self::Hermes => AgentColor::Magenta,
-            Self::Copilot => AgentColor::Blue,
-            Self::Custom(_) => AgentColor::Gray,
-        }
+        self.builtin_descriptor()
+            .map(|descriptor| descriptor.color)
+            .unwrap_or(AgentColor::Gray)
+    }
+
+    pub fn builtin_descriptor(&self) -> Option<&'static BuiltinAgentDescriptor> {
+        builtin_agent_descriptors()
+            .iter()
+            .find(|descriptor| descriptor.id == *self)
     }
 }
 
@@ -78,6 +61,116 @@ impl std::fmt::Display for AgentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display_name())
     }
+}
+
+/// Metadata for a built-in coding agent.
+///
+/// Keep agent identity, presentation, detection, and cache keys in this
+/// descriptor so new built-ins do not require synchronized table edits across
+/// every consumer.
+#[derive(Debug, Clone)]
+pub struct BuiltinAgentDescriptor {
+    pub id: AgentId,
+    pub command: &'static str,
+    pub display_name: &'static str,
+    pub package_name: Option<&'static str>,
+    pub color: AgentColor,
+    pub aliases: &'static [&'static str],
+    pub cache_key: &'static str,
+    pub version_flag: &'static str,
+    pub version_prefix_args: &'static [&'static str],
+}
+
+const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
+    BuiltinAgentDescriptor {
+        id: AgentId::ClaudeCode,
+        command: "claude",
+        display_name: "Claude Code",
+        package_name: Some("@anthropic-ai/claude-code"),
+        color: AgentColor::Yellow,
+        aliases: &["claude", "claudecode", "claude-code", "claude code"],
+        cache_key: "claude-code",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::Codex,
+        command: "codex",
+        display_name: "Codex",
+        package_name: Some("@openai/codex"),
+        color: AgentColor::Cyan,
+        aliases: &["codex"],
+        cache_key: "codex",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::Gemini,
+        command: "gemini",
+        display_name: "Gemini CLI",
+        package_name: Some("@anthropic-ai/gemini-cli"),
+        color: AgentColor::Magenta,
+        aliases: &["gemini", "gemini cli", "gemini-cli"],
+        cache_key: "gemini",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::OpenCode,
+        command: "opencode",
+        display_name: "OpenCode",
+        package_name: None,
+        color: AgentColor::Green,
+        aliases: &["opencode", "open-code"],
+        cache_key: "opencode",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::OpenClaw,
+        command: "openclaw",
+        display_name: "OpenClaw",
+        package_name: None,
+        color: AgentColor::Blue,
+        aliases: &["openclaw", "open-claw"],
+        cache_key: "openclaw",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::Hermes,
+        command: "hermes",
+        display_name: "Hermes Agent",
+        package_name: None,
+        color: AgentColor::Magenta,
+        aliases: &["hermes", "hermes agent", "hermes-agent"],
+        cache_key: "hermes",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
+        id: AgentId::Copilot,
+        command: "gh",
+        display_name: "GitHub Copilot",
+        package_name: None,
+        color: AgentColor::Blue,
+        aliases: &["gh", "copilot", "github copilot", "github-copilot"],
+        cache_key: "copilot",
+        version_flag: "--version",
+        version_prefix_args: &["copilot"],
+    },
+];
+
+pub fn builtin_agent_descriptors() -> &'static [BuiltinAgentDescriptor] {
+    BUILTIN_AGENT_DESCRIPTORS
+}
+
+pub fn builtin_agent_descriptor_for_command(
+    command: &str,
+) -> Option<&'static BuiltinAgentDescriptor> {
+    builtin_agent_descriptors()
+        .iter()
+        .find(|descriptor| descriptor.command == command)
 }
 
 /// Normalize a raw agent identifier string (command name, display name, or
@@ -95,15 +188,14 @@ pub fn resolve_agent_id(raw: &str) -> Option<AgentId> {
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    match lower.as_str() {
-        "claude" | "claudecode" | "claude-code" | "claude code" => Some(AgentId::ClaudeCode),
-        "codex" => Some(AgentId::Codex),
-        "gemini" | "gemini cli" | "gemini-cli" => Some(AgentId::Gemini),
-        "opencode" | "open-code" => Some(AgentId::OpenCode),
-        "openclaw" | "open-claw" => Some(AgentId::OpenClaw),
-        "hermes" | "hermes agent" | "hermes-agent" => Some(AgentId::Hermes),
-        "gh" | "copilot" | "github copilot" | "github-copilot" => Some(AgentId::Copilot),
-        _ => Some(AgentId::Custom(trimmed.to_string())),
+    if let Some(descriptor) = builtin_agent_descriptors().iter().find(|descriptor| {
+        descriptor.aliases.iter().any(|alias| *alias == lower)
+            || descriptor.command == lower
+            || descriptor.display_name.eq_ignore_ascii_case(trimmed)
+    }) {
+        Some(descriptor.id.clone())
+    } else {
+        Some(AgentId::Custom(trimmed.to_string()))
     }
 }
 
@@ -270,6 +362,30 @@ mod tests {
         assert_eq!(info.command, "claude");
         assert_eq!(info.color, AgentColor::Yellow);
         assert_eq!(info.package_name, Some("@anthropic-ai/claude-code".into()));
+    }
+
+    #[test]
+    fn builtin_agent_descriptors_drive_agent_info_contract() {
+        let descriptors = builtin_agent_descriptors();
+        assert_eq!(descriptors.len(), 7);
+
+        for descriptor in descriptors {
+            let info = AgentInfo::from_id(descriptor.id.clone());
+            assert_eq!(info.command, descriptor.command, "{:?}", descriptor.id);
+            assert_eq!(
+                info.display_name, descriptor.display_name,
+                "{:?}",
+                descriptor.id
+            );
+            assert_eq!(info.package_name.as_deref(), descriptor.package_name);
+            assert_eq!(info.color, descriptor.color);
+            assert_eq!(
+                resolve_agent_id(descriptor.command),
+                Some(descriptor.id.clone()),
+                "{} must resolve through the same descriptor registry",
+                descriptor.command
+            );
+        }
     }
 
     #[test]

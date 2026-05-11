@@ -3095,20 +3095,13 @@ fn is_explicit_model_selection(model: &str) -> bool {
 }
 
 fn agent_has_npm_package(agent_id: &str) -> bool {
-    matches!(agent_id, "claude" | "codex" | "gemini")
+    agent_id_from_key(agent_id).package_name().is_some()
 }
 
 fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
-    match agent_id {
-        "claude" => gwt_agent::AgentId::ClaudeCode,
-        "codex" => gwt_agent::AgentId::Codex,
-        "gemini" => gwt_agent::AgentId::Gemini,
-        "opencode" => gwt_agent::AgentId::OpenCode,
-        "openclaw" => gwt_agent::AgentId::OpenClaw,
-        "hermes" => gwt_agent::AgentId::Hermes,
-        "gh" => gwt_agent::AgentId::Copilot,
-        other => gwt_agent::AgentId::Custom(other.to_string()),
-    }
+    gwt_agent::builtin_agent_descriptor_for_command(agent_id)
+        .map(|descriptor| descriptor.id.clone())
+        .unwrap_or_else(|| gwt_agent::AgentId::Custom(agent_id.to_string()))
 }
 
 fn agent_description(agent: &AgentOption) -> String {
@@ -3163,19 +3156,10 @@ pub fn build_builtin_agent_options(
     detected_agents: Vec<gwt_agent::DetectedAgent>,
     cache: &gwt_agent::VersionCache,
 ) -> Vec<AgentOption> {
-    const BUILTIN: [gwt_agent::AgentId; 7] = [
-        gwt_agent::AgentId::ClaudeCode,
-        gwt_agent::AgentId::Codex,
-        gwt_agent::AgentId::Gemini,
-        gwt_agent::AgentId::OpenCode,
-        gwt_agent::AgentId::OpenClaw,
-        gwt_agent::AgentId::Hermes,
-        gwt_agent::AgentId::Copilot,
-    ];
-
-    BUILTIN
-        .into_iter()
-        .map(|agent_id| {
+    gwt_agent::builtin_agent_descriptors()
+        .iter()
+        .map(|descriptor| {
+            let agent_id = descriptor.id.clone();
             let detected = detected_agents
                 .iter()
                 .find(|detected| detected.agent_id == agent_id);
