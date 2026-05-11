@@ -608,12 +608,18 @@ fn active_work_projection_from_saved(
     let cleanup_candidate = projection
         .cleanup_candidate(false)
         .map(active_work_cleanup_candidate_view_from_candidate);
-    active_work_projection_from_saved_with_journal(projection, Vec::new(), cleanup_candidate)
+    active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        Vec::new(),
+        cleanup_candidate,
+    )
 }
 
 fn active_work_projection_from_saved_with_journal(
     projection: gwt_core::workspace_projection::WorkspaceProjection,
     journal_entries: Vec<gwt::WorkspaceJournalEntryView>,
+    work_items: Vec<gwt::WorkspaceWorkItemView>,
     cleanup_candidate: Option<gwt::ActiveWorkCleanupCandidateView>,
 ) -> gwt::ActiveWorkProjectionView {
     use gwt_core::workspace_projection::WorkspaceStatusCategory;
@@ -687,6 +693,7 @@ fn active_work_projection_from_saved_with_journal(
         pr_created_at,
         board_refs: projection.board_refs,
         journal_entries,
+        work_items,
         cleanup_candidate,
         agents,
     }
@@ -714,6 +721,7 @@ fn empty_active_work_projection_view(
         pr_created_at: None,
         board_refs: Vec::new(),
         journal_entries: Vec::new(),
+        work_items: Vec::new(),
         cleanup_candidate: None,
         agents: Vec::new(),
     }
@@ -754,6 +762,117 @@ fn workspace_journal_entry_view_from_entry(
         agent_session_id: entry.agent_session_id.clone(),
         agent_current_focus: entry.agent_current_focus.clone(),
         agent_title_summary: entry.agent_title_summary.clone(),
+    }
+}
+
+fn workspace_work_item_view_from_item(
+    item: &gwt_core::workspace_projection::WorkspaceWorkItem,
+) -> gwt::WorkspaceWorkItemView {
+    gwt::WorkspaceWorkItemView {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        intent: item.intent.clone(),
+        summary: item.summary.clone(),
+        status_category: workspace_status_category_wire(item.status_category).to_string(),
+        owner: item.owner.clone(),
+        created_at: item
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        updated_at: item
+            .updated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        completed_at: item
+            .completed_at
+            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        agents: item
+            .agents
+            .iter()
+            .map(workspace_work_agent_view_from_ref)
+            .collect(),
+        execution_containers: item
+            .execution_containers
+            .iter()
+            .map(workspace_execution_container_view_from_ref)
+            .collect(),
+        board_refs: item.board_refs.clone(),
+        related_work_item_ids: item.related_work_item_ids.clone(),
+        events: item
+            .events
+            .iter()
+            .map(workspace_work_event_view_from_event)
+            .collect(),
+    }
+}
+
+fn workspace_work_agent_view_from_ref(
+    agent: &gwt_core::workspace_projection::WorkspaceWorkAgentRef,
+) -> gwt::WorkspaceWorkAgentView {
+    gwt::WorkspaceWorkAgentView {
+        session_id: agent.session_id.clone(),
+        agent_id: agent.agent_id.clone(),
+        display_name: agent.display_name.clone(),
+        updated_at: agent
+            .updated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }
+}
+
+fn workspace_execution_container_view_from_ref(
+    container: &gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
+) -> gwt::WorkspaceExecutionContainerView {
+    gwt::WorkspaceExecutionContainerView {
+        branch: container.branch.clone(),
+        worktree_path: container
+            .worktree_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        pr_number: container.pr_number,
+        pr_url: container.pr_url.clone(),
+        pr_state: container.pr_state.clone(),
+    }
+}
+
+fn workspace_work_event_view_from_event(
+    event: &gwt_core::workspace_projection::WorkspaceWorkEvent,
+) -> gwt::WorkspaceWorkEventView {
+    gwt::WorkspaceWorkEventView {
+        id: event.id.clone(),
+        work_item_id: event.work_item_id.clone(),
+        kind: workspace_work_event_kind_wire(event.kind).to_string(),
+        title: event.title.clone(),
+        intent: event.intent.clone(),
+        summary: event.summary.clone(),
+        status_category: event
+            .status_category
+            .map(workspace_status_category_wire)
+            .map(str::to_string),
+        owner: event.owner.clone(),
+        next_action: event.next_action.clone(),
+        agent_session_id: event.agent_session_id.clone(),
+        board_entry_id: event.board_entry_id.clone(),
+        related_work_item_id: event.related_work_item_id.clone(),
+        updated_at: event
+            .updated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    }
+}
+
+fn workspace_work_event_kind_wire(
+    kind: gwt_core::workspace_projection::WorkspaceWorkEventKind,
+) -> &'static str {
+    use gwt_core::workspace_projection::WorkspaceWorkEventKind;
+
+    match kind {
+        WorkspaceWorkEventKind::Start => "start",
+        WorkspaceWorkEventKind::Claim => "claim",
+        WorkspaceWorkEventKind::Update => "update",
+        WorkspaceWorkEventKind::Blocked => "blocked",
+        WorkspaceWorkEventKind::Handoff => "handoff",
+        WorkspaceWorkEventKind::Resume => "resume",
+        WorkspaceWorkEventKind::Split => "split",
+        WorkspaceWorkEventKind::Merge => "merge",
+        WorkspaceWorkEventKind::Pr => "pr",
+        WorkspaceWorkEventKind::Done => "done",
     }
 }
 
@@ -1228,7 +1347,51 @@ fn save_workspace_launch_projection(
     projection.updated_at = now;
 
     gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
+        .map_err(|error| error.to_string())?;
+    let work_event_kind = if workspace_resume_context.is_some() {
+        gwt_core::workspace_projection::WorkspaceWorkEventKind::Resume
+    } else {
+        gwt_core::workspace_projection::WorkspaceWorkEventKind::Start
+    };
+    let work_event =
+        workspace_work_event_from_launch_projection(&projection, session, work_event_kind, now);
+    gwt_core::workspace_projection::record_workspace_work_event(project_root, work_event)
         .map_err(|error| error.to_string())
+}
+
+fn workspace_work_event_from_launch_projection(
+    projection: &gwt_core::workspace_projection::WorkspaceProjection,
+    session: &ActiveAgentSession,
+    kind: gwt_core::workspace_projection::WorkspaceWorkEventKind,
+    updated_at: chrono::DateTime<chrono::Utc>,
+) -> gwt_core::workspace_projection::WorkspaceWorkEvent {
+    let mut event = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
+        kind,
+        projection.id.clone(),
+        updated_at,
+    );
+    event.title = Some(projection.title.clone());
+    event.intent = projection
+        .summary
+        .clone()
+        .or_else(|| projection.next_action.clone());
+    event.summary = Some(projection.status_text.clone());
+    event.status_category = Some(projection.status_category);
+    event.owner = projection.owner.clone();
+    event.next_action = projection.next_action.clone();
+    event.agent_session_id = Some(session.session_id.clone());
+    event.agent_id = Some(session.agent_id.to_string());
+    event.display_name = Some(session.display_name.clone());
+    event.execution_container = projection.git_details.as_ref().map(|details| {
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: details.branch.clone(),
+            worktree_path: details.worktree_path.clone(),
+            pr_number: details.pr_number,
+            pr_url: details.pr_url.clone(),
+            pr_state: details.pr_state.clone(),
+        }
+    });
+    event
 }
 
 fn save_start_work_workspace_projection(
@@ -2225,9 +2388,24 @@ impl AppRuntime {
                 .iter()
                 .map(workspace_journal_entry_view_from_entry)
                 .collect::<Vec<_>>();
+            let work_items =
+                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+                    &tab.project_root,
+                )
+                .unwrap_or_else(
+                    |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
+                        updated_at,
+                        work_items: Vec::new(),
+                    },
+                )
+                .work_items
+                .iter()
+                .map(workspace_work_item_view_from_item)
+                .collect::<Vec<_>>();
             return Some(active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
+                work_items,
                 cleanup_candidate,
             ));
         }
@@ -2269,6 +2447,7 @@ impl AppRuntime {
             pr_created_at: None,
             board_refs: Vec::new(),
             journal_entries: Vec::new(),
+            work_items: Vec::new(),
             cleanup_candidate: None,
             agents,
         })
@@ -3622,11 +3801,24 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     .iter()
     .map(workspace_journal_entry_view_from_entry)
     .collect::<Vec<_>>();
+    let work_items =
+        gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
+            .unwrap_or_else(
+                |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
+                    updated_at: projection.updated_at,
+                    work_items: Vec::new(),
+                },
+            )
+            .work_items
+            .iter()
+            .map(workspace_work_item_view_from_item)
+            .collect::<Vec<_>>();
     Some(OutboundEvent::broadcast(
         BackendEvent::ActiveWorkProjection {
             projection: Box::new(active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
+                work_items,
                 None,
             )),
         },
@@ -7611,6 +7803,20 @@ exit 0
         assert!(details.created_by_start_work);
         assert_eq!(projection.agents.len(), 1);
         assert_eq!(projection.agents[0].session_id, "session-1");
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(work_items.work_items.len(), 1);
+        assert_eq!(
+            work_items.work_items[0].events[0].kind,
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Start
+        );
+        assert_eq!(
+            work_items.work_items[0].execution_containers[0]
+                .branch
+                .as_deref(),
+            Some("work/20260504-1234")
+        );
     }
 
     #[test]
@@ -7695,6 +7901,13 @@ exit 0
         assert!(details.created_by_start_work);
         assert_eq!(projection.agents.len(), 1);
         assert_eq!(projection.agents[0].session_id, "session-1");
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(
+            work_items.work_items[0].events[0].kind,
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Resume
+        );
     }
 
     #[test]
@@ -9850,6 +10063,17 @@ exit 0
         );
         assert_eq!(projection.owner.as_deref(), Some("SPEC-2359"));
         assert_eq!(projection.board_refs.len(), 1);
+        let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("load work items")
+            .expect("work items");
+        assert_eq!(
+            work_items.work_items[0].board_refs,
+            vec![board_entry_id.clone()]
+        );
+        assert_eq!(
+            work_items.work_items[0].events[0].kind,
+            gwt_core::workspace_projection::WorkspaceWorkEventKind::Update
+        );
         let projected_event = events
             .iter()
             .find_map(|event| match event {

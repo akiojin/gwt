@@ -148,6 +148,92 @@ test("Workspace Kanban labels the non-current history column as Inactive", () =>
   );
 });
 
+test("Workspace Kanban renders WorkItem cards with lifecycle timeline detail", () => {
+  const fixture = createFixture();
+  const projection = {
+    id: "current-workspace",
+    title: "Legacy current Workspace",
+    status_category: "idle",
+    status_text: "Idle",
+    work_items: [
+      {
+        id: "workitem-history",
+        title: "Workspace WorkItem history",
+        intent: "Group duplicate Workspace work under one WorkItem",
+        summary: "One WorkItem owns the history.",
+        status_category: "active",
+        owner: "SPEC-2359",
+        agents: [
+          {
+            session_id: "session-other",
+            display_name: "Codex",
+            status_category: "active",
+          },
+        ],
+        execution_containers: [
+          {
+            branch: "work/20260510-2353",
+            worktree_path: "/repo/work/20260510-2353",
+            pr_number: 2638,
+            pr_url: "https://github.com/akiojin/gwt/pull/2638",
+            pr_state: "open",
+          },
+        ],
+        board_refs: ["board-claim-1"],
+        events: [
+          {
+            id: "evt-start",
+            kind: "start",
+            title: "Start WorkItem",
+            summary: "Started lifecycle implementation.",
+            updated_at: "2026-05-11T01:00:00Z",
+            agent_session_id: "session-other",
+            board_entry_id: "board-claim-1",
+          },
+          {
+            id: "evt-blocked",
+            kind: "blocked",
+            summary: "Waiting for Board coordination.",
+            updated_at: "2026-05-11T01:10:00Z",
+            agent_session_id: "session-other",
+            board_entry_id: "board-blocked-1",
+          },
+        ],
+      },
+    ],
+    journal_entries: [
+      {
+        id: "legacy-journal",
+        status_category: "active",
+        agent_title_summary: "Legacy duplicate card",
+      },
+    ],
+  };
+
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cardText = cardTexts(column(fixture.body, "active")).join("\n");
+  assert.match(cardText, /WorkItem/);
+  assert.match(cardText, /Workspace WorkItem history/);
+  assert.doesNotMatch(cardText, /Legacy duplicate card/);
+
+  const detailText = fixture.body
+    .querySelector(".workspace-kanban-detail-pane")
+    .textContent.replace(/\s+/g, " ")
+    .trim();
+  assert.match(detailText, /Lifecycle/);
+  assert.match(detailText, /start/);
+  assert.match(detailText, /Started lifecycle implementation/);
+  assert.match(detailText, /board-claim-1/);
+  assert.match(detailText, /blocked/);
+  assert.match(detailText, /Waiting for Board coordination/);
+  assert.match(detailText, /board-blocked-1/);
+});
+
 function createFixture() {
   const { document } = parseHTML(`
     <div id="workspace-window">

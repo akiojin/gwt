@@ -73,10 +73,48 @@ export function createWorkspaceKanbanSurface({
     const title = projection.title || `${activeWorkspace().title || "Project"} workspace`;
     const branch = projection.branch || "";
     const worktreePath = projection.worktree_path || "";
+    const workItems = Array.isArray(projection.work_items)
+      ? projection.work_items
+      : [];
+    if (workItems.length > 0) {
+      return workItems.map((item) => {
+        const containers = Array.isArray(item.execution_containers)
+          ? item.execution_containers
+          : [];
+        const container = containers[0] || {};
+        return {
+          id: item.id || `workitem-${item.title || "workspace"}`,
+          kind: "work_item",
+          label: "WorkItem",
+          title: item.title || item.intent || "Workspace WorkItem",
+          intent: item.intent || "",
+          status_category: item.status_category || "idle",
+          status_text: item.summary || item.intent || "",
+          summary: item.summary || item.intent || "",
+          owner: item.owner || "",
+          next_action: "",
+          branch: container.branch || "",
+          worktree_path: container.worktree_path || "",
+          pr_number: container.pr_number || null,
+          pr_url: container.pr_url || "",
+          pr_state: container.pr_state || "",
+          board_refs: Array.isArray(item.board_refs) ? item.board_refs : [],
+          agents: Array.isArray(item.agents) ? item.agents : [],
+          execution_containers: containers,
+          cleanup_candidate: null,
+          updated_at: item.updated_at || "",
+          resume_source: "current",
+          journal_id: null,
+          events: Array.isArray(item.events) ? item.events : [],
+          column: workspaceColumnForCurrentStatus(item.status_category),
+        };
+      });
+    }
     const cards = [
       {
         id: projection.id || "__current_workspace__",
         kind: "current",
+        label: "Current",
         title,
         status_category: projection.status_category || "idle",
         status_text: projection.status_text || "No active work",
@@ -94,6 +132,7 @@ export function createWorkspaceKanbanSurface({
         updated_at: projection.updated_at || "",
         resume_source: "current",
         journal_id: null,
+        events: [],
         column: workspaceColumnForCurrentStatus(projection.status_category),
       },
     ];
@@ -129,6 +168,7 @@ export function createWorkspaceKanbanSurface({
         updated_at: entry.updated_at || "",
         resume_source: "journal",
         journal_id: entry.id || "",
+        events: [],
         column: workspaceColumnForJournalStatus(statusCategory),
       });
     }
@@ -168,7 +208,11 @@ export function createWorkspaceKanbanSurface({
 
     const head = createNode("div", "kanban-card-head");
     head.appendChild(
-      createNode("span", "kanban-card-number", cardData.kind === "current" ? "Current" : "Update"),
+      createNode(
+        "span",
+        "kanban-card-number",
+        cardData.label || (cardData.kind === "current" ? "Current" : "Update"),
+      ),
     );
     head.appendChild(
       createNode(
@@ -279,6 +323,32 @@ export function createWorkspaceKanbanSurface({
       context.appendChild(createNode("div", "knowledge-section-title", "Workspace Context"));
       context.appendChild(createNode("pre", "knowledge-section-body", cardData.worktree_path));
       scroll.appendChild(context);
+    }
+
+    if (cardData.events.length > 0) {
+      const lifecycle = createNode("section", "knowledge-section");
+      lifecycle.appendChild(createNode("div", "knowledge-section-title", "Lifecycle"));
+      lifecycle.appendChild(
+        createNode(
+          "pre",
+          "knowledge-section-body",
+          cardData.events
+            .map((event) =>
+              [
+                event.updated_at || "",
+                event.kind || "update",
+                event.title || event.intent || "",
+                event.summary || "",
+                event.board_entry_id ? `board:${event.board_entry_id}` : "",
+                event.agent_session_id ? `session:${event.agent_session_id}` : "",
+              ]
+                .filter(Boolean)
+                .join(" · "),
+            )
+            .join("\n"),
+        ),
+      );
+      scroll.appendChild(lifecycle);
     }
 
     if (cardData.agents.length > 0) {
